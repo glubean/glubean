@@ -1,0 +1,7 @@
+{
+  "name": "@glubean/mcp",
+  "version": "0.10.0",
+  "exports": "./mod.ts",
+  "license": "MIT",
+  "description": "Glubean MCP server - run checks and fetch facts for AI agents"
+}

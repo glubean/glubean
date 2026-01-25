@@ -1,0 +1,1565 @@
+import { TestExecutor, type ExecutionEvent } from "@glubean/runner";
+import { basename, relative, resolve, toFileUrl } from "@std/path";
+import { loadConfig, mergeRunOptions } from "../lib/config.ts";
+import { walk } from "@std/fs/walk";
+import { expandGlob } from "@std/fs/expand-glob";
+
+// ANSI color codes for pretty output
+const colors = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+  yellow: "\x1b[33m",
+  blue: "\x1b[34m",
+  cyan: "\x1b[36m",
+  gray: "\x1b[90m",
+};
+
+/**
+ * Cloud runner memory limits by plan (V8 heap in MB).
+ * Used to warn users during local development when their tests
+ * may exceed cloud runner limits. Self-hosted runners have no limit.
+ */
+const CLOUD_MEMORY_LIMITS = {
+  free: 300, // 512MB pod → ~300MB V8 heap
+  pro: 700, // 1GB pod → ~700MB V8 heap
+};
+
+/** Threshold ratio to trigger memory warning (67% of free tier limit) */
+const MEMORY_WARNING_THRESHOLD_MB = CLOUD_MEMORY_LIMITS.free * 0.67; // ~200MB
+
+interface RunOptions {
+  filter?: string;
+  /** Select specific test.pick example(s) by key (comma-separated) */
+  pick?: string;
+  /** Exact-match tags (repeatable, OR logic by default) */
+  tags?: string[];
+  /** Tag match logic: "or" matches any tag, "and" requires all tags */
+  tagMode?: "or" | "and";
+  envFile?: string;
+  /** Write logs to <testfile>.log */
+  logFile?: boolean;
+  /** Pretty-print JSON in log file */
+  pretty?: boolean;
+  /** Show all output (traces, assertions) in console */
+  verbose?: boolean;
+  /** Stop on first test failure */
+  failFast?: boolean;
+  /** Stop after N test failures */
+  failAfter?: number;
+  /** Write structured results to <testfile>.result.json for visualization */
+  resultJson?: boolean;
+  /** Emit full HTTP request/response headers and bodies in trace events */
+  emitFullTrace?: boolean;
+  /** Config file paths from --config (undefined = auto-read deno.json) */
+  configFiles?: string[];
+  /** Enable V8 Inspector for debugging (port number or true for default 9229) */
+  inspectBrk?: number | boolean;
+  /** Output reporter format: "junit" writes JUnit XML */
+  reporter?: string;
+}
+
+/** Collected events for a single test, used for result JSON and summary. */
+interface CollectedTestRun {
+  testId: string;
+  testName: string;
+  tags?: string[];
+  filePath: string;
+  events: ExecutionEvent[];
+  success: boolean;
+  durationMs: number;
+}
+
+/** Aggregated run-level summary data from all summary events. */
+interface RunSummaryStats {
+  httpRequestTotal: number;
+  httpErrorTotal: number;
+  assertionTotal: number;
+  assertionFailed: number;
+  warningTotal: number;
+  warningTriggered: number;
+  stepTotal: number;
+  stepPassed: number;
+  stepFailed: number;
+}
+
+/** Log entry for file output */
+interface LogEntry {
+  timestamp: string;
+  testId: string;
+  testName: string;
+  type: "log" | "trace" | "assertion" | "metric" | "error" | "result";
+  message: string;
+  data?: unknown;
+}
+
+/**
+ * Find project config by walking up from startDir looking for deno.json/deno.jsonc.
+ * Returns the directory containing the config and the config path.
+ */
+async function findProjectConfig(
+  startDir: string,
+): Promise<{ rootDir: string; configPath?: string }> {
+  let dir = startDir;
+  while (dir !== "/") {
+    try {
+      const denoJson = resolve(dir, "deno.json");
+      await Deno.stat(denoJson);
+      return { rootDir: dir, configPath: denoJson };
+    } catch {
+      // Not found, try deno.jsonc
+    }
+    try {
+      const denoJsonc = resolve(dir, "deno.jsonc");
+      await Deno.stat(denoJsonc);
+      return { rootDir: dir, configPath: denoJsonc };
+    } catch {
+      // Not found, go up one level
+      dir = resolve(dir, "..");
+    }
+  }
+  // No deno.json found, use the start directory
+  return { rootDir: startDir };
+}
+
+/**
+ * Load environment variables from a .env file.
+ */
+async function loadEnvFile(envPath: string): Promise<Record<string, string>> {
+  const vars: Record<string, string> = {};
+  try {
+    const content = await Deno.readTextFile(envPath);
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIndex = trimmed.indexOf("=");
+      if (eqIndex === -1) continue;
+      const key = trimmed.slice(0, eqIndex).trim();
+      let value = trimmed.slice(eqIndex + 1).trim();
+      // Remove surrounding quotes if present
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      vars[key] = value;
+    }
+  } catch {
+    // File doesn't exist, return empty
+  }
+  return vars;
+}
+
+// ── SDK import patterns (mirrors @glubean/scanner) ──────────────────────────
+
+const SDK_IMPORT_PATTERNS = [
+  /import\s+.*from\s+["']jsr:@glubean\/sdk["']/,
+  /import\s+.*from\s+["']@glubean\/sdk["']/,
+  /import\s+.*\{[^}]*test[^}]*\}/,
+];
+
+const DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build", ".deno"];
+const DEFAULT_EXTENSIONS = ["ts"];
+
+/**
+ * Check if a path contains glob characters.
+ */
+function isGlob(target: string): boolean {
+  return /[*?{[]/.test(target);
+}
+
+/**
+ * Check if a file looks like a Glubean test file (contains SDK import).
+ */
+async function isGlubeanTestFile(filePath: string): Promise<boolean> {
+  try {
+    const content = await Deno.readTextFile(filePath);
+    return SDK_IMPORT_PATTERNS.some((pattern) => pattern.test(content));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a target (file, directory, or glob) into an array of test file paths.
+ *
+ * - Single file: returns [file] as-is (no SDK check — user explicitly chose it).
+ * - Directory: walks recursively, filters to .ts files with SDK import.
+ * - Glob: expands pattern, filters to files with SDK import.
+ */
+async function resolveTestFiles(target: string): Promise<string[]> {
+  const abs = resolve(target);
+
+  // 1. Check if it's an existing file
+  try {
+    const stat = await Deno.stat(abs);
+    if (stat.isFile) {
+      return [abs];
+    }
+
+    // 2. Directory: walk and filter (only *.test.ts files)
+    if (stat.isDirectory) {
+      const skipPatterns = DEFAULT_SKIP_DIRS.map(
+        (d) => new RegExp(`(^|/)${d}(/|$)`),
+      );
+      const files: string[] = [];
+      for await (const entry of walk(abs, {
+        exts: DEFAULT_EXTENSIONS,
+        skip: skipPatterns,
+      })) {
+        // Only consider *.test.ts files in auto-scan
+        if (!entry.path.endsWith(".test.ts")) continue;
+        if (entry.isFile && (await isGlubeanTestFile(entry.path))) {
+          files.push(entry.path);
+        }
+      }
+      files.sort();
+      return files;
+    }
+  } catch {
+    // stat failed — might be a glob pattern
+  }
+
+  // 3. Glob pattern (only *.test.ts files)
+  if (isGlob(target)) {
+    const files: string[] = [];
+    for await (const entry of expandGlob(target, {
+      root: Deno.cwd(),
+      extended: true,
+      globstar: true,
+    })) {
+      // Only consider *.test.ts files in auto-scan
+      if (!entry.path.endsWith(".test.ts")) continue;
+      if (entry.isFile && (await isGlubeanTestFile(entry.path))) {
+        files.push(entry.path);
+      }
+    }
+    files.sort();
+    return files;
+  }
+
+  // Fallback: treat as a file path (will error at discovery time)
+  return [abs];
+}
+
+/**
+ * Type guard to check if an object is a TestCase
+ */
+interface DiscoveredTestMeta {
+  id: string;
+  name?: string;
+  tags?: string[];
+  skip?: boolean;
+  only?: boolean;
+}
+
+interface DiscoveredTest {
+  exportName: string;
+  meta: DiscoveredTestMeta;
+}
+
+/**
+ * Discover tests from a module by scanning exports in a subprocess.
+ * Uses deno.json import map if present.
+ */
+async function discoverTests(
+  fileUrl: string,
+  configPath?: string,
+): Promise<Map<string, DiscoveredTest>> {
+  const script = `
+const targetPath = ${JSON.stringify(fileUrl)};
+const testModule = await import(targetPath);
+
+function isTest(value) {
+  return value && typeof value === "object" && value.meta && value.meta.id;
+}
+
+function isBuilder(value) {
+  return value && typeof value === "object" && value.__glubean_type === "builder";
+}
+
+function isEachBuilder(value) {
+  return value && typeof value === "object" && value.__glubean_type === "each-builder";
+}
+
+function extractMeta(value) {
+  return {
+    id: value.meta.id,
+    name: value.meta.name,
+    tags: value.meta.tags,
+    skip: value.meta.skip,
+    only: value.meta.only,
+  };
+}
+
+/** Read builder metadata without calling .build() (which would consume it). */
+function extractBuilderMeta(builder) {
+  // Access the internal _meta property (private but accessible at runtime)
+  const m = builder._meta;
+  if (!m) return null;
+  return { id: m.id, name: m.name || m.id, tags: m.tags, skip: m.skip, only: m.only };
+}
+
+const tests = [];
+
+// Wait for microtask to allow builders to auto-finalize / register
+await new Promise((r) => setTimeout(r, 0));
+
+for (const [name, value] of Object.entries(testModule)) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (isTest(item)) {
+        tests.push({ exportName: name, meta: extractMeta(item) });
+      }
+    }
+  } else if (isTest(value)) {
+    tests.push({ exportName: name, meta: extractMeta(value) });
+  } else if (isBuilder(value)) {
+    const meta = extractBuilderMeta(value);
+    if (meta) tests.push({ exportName: name, meta });
+  } else if (isEachBuilder(value)) {
+    // EachBuilder: read the internal table and generate meta for each row
+    const baseMeta = value._baseMeta;
+    const table = value._table || [];
+    if (baseMeta && table.length > 0) {
+      for (let i = 0; i < table.length; i++) {
+        const row = table[i];
+        const id = baseMeta.id.replace(/\\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (_, k) => row[k] ?? i);
+        const testName = baseMeta.name
+          ? baseMeta.name.replace(/\\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (_, k) => row[k] ?? i)
+          : id;
+        tests.push({ exportName: name, meta: { id, name: testName, tags: baseMeta.tags } });
+      }
+    } else if (baseMeta) {
+      tests.push({ exportName: name, meta: { id: baseMeta.id, name: baseMeta.name || baseMeta.id, tags: baseMeta.tags } });
+    }
+  }
+}
+
+console.log(JSON.stringify(tests));
+`;
+
+  const tempFile = await Deno.makeTempFile({ suffix: ".ts" });
+  try {
+    await Deno.writeTextFile(tempFile, script);
+
+    const args = ["run", "--allow-read", "--allow-env", "--no-check"];
+    if (configPath) {
+      args.push(`--config=${configPath}`);
+    }
+    args.push(tempFile);
+
+    const command = new Deno.Command(Deno.execPath(), {
+      args,
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { code, stdout, stderr } = await command.output();
+    if (code !== 0) {
+      const errorText = new TextDecoder().decode(stderr);
+      throw new Error(errorText.trim());
+    }
+
+    const output = new TextDecoder().decode(stdout).trim();
+    const parsed = output ? (JSON.parse(output) as DiscoveredTest[]) : [];
+    const map = new Map<string, DiscoveredTest>();
+    for (const test of parsed) {
+      if (test.meta?.id) {
+        map.set(test.exportName, test);
+      }
+    }
+    return map;
+  } finally {
+    try {
+      await Deno.remove(tempFile);
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
+
+/**
+ * Check if a test matches the --filter pattern (substring on name/id).
+ */
+function matchesFilter(testItem: DiscoveredTest, filter: string): boolean {
+  const lowerFilter = filter.toLowerCase();
+  // Match by ID (substring)
+  if (testItem.meta.id.toLowerCase().includes(lowerFilter)) return true;
+  // Match by name (substring)
+  if (testItem.meta.name?.toLowerCase().includes(lowerFilter)) return true;
+  return false;
+}
+
+/**
+ * Check if a test matches the --tag values (exact, case-insensitive).
+ * In "or" mode (default), matches if the test has ANY of the given tags.
+ * In "and" mode, matches only if the test has ALL of the given tags.
+ */
+function matchesTags(
+  testItem: DiscoveredTest,
+  tags: string[],
+  mode: "or" | "and" = "or",
+): boolean {
+  if (!testItem.meta.tags?.length) return false;
+  const lowerTestTags = testItem.meta.tags.map((t) => t.toLowerCase());
+  const match = (t: string) => lowerTestTags.includes(t.toLowerCase());
+  return mode === "and" ? tags.every(match) : tags.some(match);
+}
+
+/**
+ * Generate log file path from test file path.
+ * auth.test.ts -> auth.test.log
+ */
+function getLogFilePath(testFilePath: string): string {
+  // Replace extension with .log
+  const lastDot = testFilePath.lastIndexOf(".");
+  if (lastDot === -1) return testFilePath + ".log";
+  return testFilePath.slice(0, lastDot) + ".log";
+}
+
+/** A discovered test with its source file path attached. */
+interface FileTest {
+  filePath: string;
+  exportName: string;
+  test: DiscoveredTest;
+}
+
+/**
+ * Run tests from a file, directory, or glob pattern with pretty output.
+ */
+export async function runCommand(
+  target: string,
+  options: RunOptions = {},
+): Promise<void> {
+  const logEntries: LogEntry[] = [];
+  const runStartTime = new Date().toISOString();
+
+  // Collect traces for .glubean/traces.json (used by `glubean coverage`)
+  const traceCollector: Array<{
+    testId: string;
+    method: string;
+    url: string;
+    status: number;
+  }> = [];
+
+  console.log(
+    `\n${colors.bold}${colors.blue}🧪 Glubean Test Runner${colors.reset}\n`,
+  );
+
+  // ── Resolve target into test files ──────────────────────────────────────
+  const testFiles = await resolveTestFiles(target);
+  const isMultiFile = testFiles.length > 1;
+
+  if (testFiles.length === 0) {
+    console.error(
+      `\n${colors.red}❌ No test files found for target: ${target}${colors.reset}`,
+    );
+    console.error(
+      `${colors.dim}Make sure *.test.ts files import from @glubean/sdk${colors.reset}\n`,
+    );
+    Deno.exit(1);
+  }
+
+  if (isMultiFile) {
+    console.log(`${colors.dim}Target: ${resolve(target)}${colors.reset}`);
+    console.log(
+      `${colors.dim}Files:  ${testFiles.length} test file(s)${colors.reset}\n`,
+    );
+  } else {
+    console.log(`${colors.dim}File: ${testFiles[0]}${colors.reset}\n`);
+  }
+
+  // Load .env file (from project root - directory containing deno.json)
+  // Use the first test file's directory to find the project root
+  const startDir = testFiles[0].substring(0, testFiles[0].lastIndexOf("/"));
+  const { rootDir, configPath } = await findProjectConfig(startDir);
+
+  // ── Load unified config and merge with CLI flags ──────────────────────
+  const glubeanConfig = await loadConfig(rootDir, options.configFiles);
+  const effectiveRun = mergeRunOptions(glubeanConfig.run, {
+    verbose: options.verbose,
+    pretty: options.pretty,
+    logFile: options.logFile,
+    emitFullTrace: options.emitFullTrace,
+    envFile: options.envFile,
+    failFast: options.failFast,
+    failAfter: options.failAfter,
+  });
+
+  if (effectiveRun.logFile && !isMultiFile) {
+    const logPath = getLogFilePath(testFiles[0]);
+    console.log(`${colors.dim}Log file: ${logPath}${colors.reset}`);
+  }
+
+  const envFileName = effectiveRun.envFile || ".env";
+  const envPath = resolve(rootDir, envFileName);
+  const envVars = await loadEnvFile(envPath);
+  // Secrets file follows the env file: .env → .env.secrets, .env.staging → .env.staging.secrets
+  const secretsPath = resolve(rootDir, `${envFileName}.secrets`);
+  const secrets = await loadEnvFile(secretsPath);
+
+  if (Object.keys(envVars).length > 0) {
+    console.log(
+      `${colors.dim}Loaded ${Object.keys(envVars).length} vars from ${envFileName}${
+        colors.reset
+      }`,
+    );
+  }
+
+  // ── Discover tests across all files ─────────────────────────────────────
+  console.log(`${colors.dim}Discovering tests...${colors.reset}`);
+  const allFileTests: FileTest[] = [];
+  let totalDiscovered = 0;
+
+  for (const filePath of testFiles) {
+    const fileUrl = toFileUrl(filePath).toString();
+    try {
+      const tests = await discoverTests(fileUrl, configPath);
+      for (const [exportName, test] of tests) {
+        allFileTests.push({ filePath, exportName, test });
+      }
+      totalDiscovered += tests.size;
+    } catch (error) {
+      if (isMultiFile) {
+        const relPath = relative(Deno.cwd(), filePath);
+        console.error(
+          `  ${colors.red}✗${colors.reset} ${relPath}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      } else {
+        console.error(
+          `\n${colors.red}❌ Failed to load test file${colors.reset}`,
+        );
+        console.error(
+          `${colors.dim}${
+            error instanceof Error ? error.message : String(error)
+          }${colors.reset}`,
+        );
+        Deno.exit(1);
+      }
+    }
+  }
+
+  if (allFileTests.length === 0) {
+    console.log(
+      `\n${colors.yellow}⚠️  No test cases found${
+        isMultiFile ? ` in ${testFiles.length} file(s)` : " in file"
+      }${colors.reset}`,
+    );
+    console.log(
+      `${colors.dim}Make sure to export tests using test()${colors.reset}\n`,
+    );
+    return;
+  }
+
+  if (isMultiFile) {
+    // Show per-file discovery counts
+    const fileCounts = new Map<string, number>();
+    for (const ft of allFileTests) {
+      fileCounts.set(ft.filePath, (fileCounts.get(ft.filePath) || 0) + 1);
+    }
+    for (const [fp, count] of fileCounts) {
+      const relPath = relative(Deno.cwd(), fp);
+      console.log(
+        `  ${colors.dim}${relPath} (${count} test${count === 1 ? "" : "s"})${
+          colors.reset
+        }`,
+      );
+    }
+  }
+
+  // Check for .only flag
+  const hasOnly = allFileTests.some((ft) => ft.test.meta.only);
+  if (hasOnly) {
+    console.log(
+      `${colors.yellow}ℹ️  Running only tests marked with .only${colors.reset}`,
+    );
+  }
+
+  // Apply filter and flags
+  const hasTags = options.tags && options.tags.length > 0;
+  let testsToRun = allFileTests.filter((ft) => {
+    const tc = ft.test;
+    // 1. Skip flag
+    if (tc.meta.skip) return false;
+
+    // 2. Only flag
+    if (hasOnly && !tc.meta.only) return false;
+
+    // 3. CLI --filter (substring on name/id)
+    if (options.filter && !matchesFilter(tc, options.filter)) return false;
+
+    // 4. CLI --tag (exact match, OR or AND mode)
+    if (hasTags && !matchesTags(tc, options.tags!, options.tagMode))
+      return false;
+
+    return true;
+  });
+
+  if (testsToRun.length === 0) {
+    if (options.filter || hasTags) {
+      const parts: string[] = [];
+      if (options.filter) parts.push(`filter: "${options.filter}"`);
+      if (hasTags) {
+        const joiner = options.tagMode === "and" ? " AND " : " OR ";
+        parts.push(`tag: ${options.tags!.join(joiner)}`);
+      }
+      console.log(
+        `\n${colors.yellow}⚠️  No tests match ${parts.join(" + ")}${
+          colors.reset
+        }\n`,
+      );
+    } else {
+      console.log(`\n${colors.yellow}⚠️  All tests skipped${colors.reset}\n`);
+    }
+    return;
+  }
+
+  if (options.filter || hasTags) {
+    const parts: string[] = [];
+    if (options.filter) parts.push(`filter: "${options.filter}"`);
+    if (hasTags) {
+      const joiner = options.tagMode === "and" ? " AND " : " OR ";
+      parts.push(`tag: ${options.tags!.join(joiner)}`);
+    }
+    console.log(
+      `${colors.dim}${parts.join(" + ")} (${
+        testsToRun.length
+      }/${totalDiscovered} tests)${colors.reset}`,
+    );
+  }
+
+  console.log(
+    `\n${colors.bold}Running ${testsToRun.length} test(s)...${colors.reset}\n`,
+  );
+
+  // Set GLUBEAN_PICK env var so test.pick() in the SDK selects specific examples.
+  // The harness subprocess inherits parent env, so this flows through automatically.
+  if (options.pick) {
+    Deno.env.set("GLUBEAN_PICK", options.pick);
+    console.log(`${colors.dim}  pick: ${options.pick}${colors.reset}`);
+  } else {
+    // Ensure previous runs don't leak
+    try {
+      Deno.env.delete("GLUBEAN_PICK");
+    } catch {
+      // env var may not exist
+    }
+  }
+
+  // Execute tests
+  const executor = new TestExecutor({
+    configPath,
+    cwd: rootDir,
+    emitFullTrace: effectiveRun.emitFullTrace,
+    ...(options.inspectBrk && { inspectBrk: options.inspectBrk }),
+  });
+  let passed = 0;
+  let failed = 0;
+  let skipped = 0;
+  let overallPeakMemoryMB = 0;
+  const totalStartTime = Date.now();
+
+  // Collect all events per test (for result JSON and rich summary)
+  const collectedRuns: CollectedTestRun[] = [];
+
+  // Aggregate summary stats across all tests
+  const runStats: RunSummaryStats = {
+    httpRequestTotal: 0,
+    httpErrorTotal: 0,
+    assertionTotal: 0,
+    assertionFailed: 0,
+    warningTotal: 0,
+    warningTriggered: 0,
+    stepTotal: 0,
+    stepPassed: 0,
+    stepFailed: 0,
+  };
+
+  // Determine fail-fast threshold
+  const failureLimit =
+    effectiveRun.failAfter ?? (effectiveRun.failFast ? 1 : undefined);
+
+  // Track current file for per-file grouping headers in multi-file mode
+  let currentFile = "";
+
+  for (const {
+    filePath: testFilePath,
+    exportName,
+    test: testItem,
+  } of testsToRun) {
+    // Print per-file grouping header in multi-file mode
+    if (isMultiFile && testFilePath !== currentFile) {
+      currentFile = testFilePath;
+      const relPath = relative(Deno.cwd(), testFilePath);
+      console.log(`${colors.bold}📁 ${relPath}${colors.reset}`);
+    }
+
+    // Check if we should stop early
+    if (failureLimit !== undefined && failed >= failureLimit) {
+      skipped++;
+      const testName = testItem.meta.name || testItem.meta.id;
+      console.log(
+        `  ${colors.yellow}○${colors.reset} ${testName} ${colors.dim}(skipped — fail-fast)${colors.reset}`,
+      );
+      continue;
+    }
+    const testId = testItem.meta.id;
+    const testName = testItem.meta.name || testItem.meta.id;
+    const tags = testItem.meta.tags?.length
+      ? ` ${colors.dim}[${testItem.meta.tags.join(", ")}]${colors.reset}`
+      : "";
+
+    console.log(`  ${colors.cyan}●${colors.reset} ${testName}${tags}`);
+
+    const startTime = Date.now();
+    const testEvents: ExecutionEvent[] = [];
+    const assertions: Array<{
+      passed: boolean;
+      message: string;
+      actual?: unknown;
+      expected?: unknown;
+    }> = [];
+    let success = false;
+    let errorMsg: string | undefined;
+    let peakMemoryMB: string | undefined;
+
+    // Per-step tracking for compact output
+    let currentStepName = "";
+    let currentStepIndex = 0;
+    let currentStepTotal = 0;
+    let stepAssertionCount = 0;
+    let stepTraceLines: string[] = [];
+
+    // Helper to add log entry for file output
+    const addLogEntry = (
+      type: LogEntry["type"],
+      message: string,
+      data?: unknown,
+    ) => {
+      if (effectiveRun.logFile) {
+        logEntries.push({
+          timestamp: new Date().toISOString(),
+          testId,
+          testName,
+          type,
+          message,
+          data,
+        });
+      }
+    };
+
+    /**
+     * Format a URL for compact display:
+     * - strip protocol + host, show only pathname (if long)
+     * - keep full if short enough
+     */
+    const compactUrl = (url: string): string => {
+      try {
+        const u = new URL(url);
+        // Show pathname only (e.g. /auth/login) for compact display
+        return u.pathname + (u.search || "");
+      } catch {
+        return url;
+      }
+    };
+
+    /** Color a status code: 2xx green, 4xx yellow, 5xx red */
+    const colorStatus = (status: number): string => {
+      if (status >= 500) return `${colors.red}${status}${colors.reset}`;
+      if (status >= 400) return `${colors.yellow}${status}${colors.reset}`;
+      return `${colors.green}${status}${colors.reset}`;
+    };
+
+    // Stream events — pass meta.id so the harness can find builder tests.
+    // Also pass exportName as fallback for non-deterministic tests (test.pick)
+    // where the testId from discovery may not match the harness re-import.
+    const testFileUrl = toFileUrl(testFilePath).toString();
+    for await (const event of executor.run(
+      testFileUrl,
+      testId,
+      {
+        vars: envVars,
+        secrets,
+      },
+      { exportName },
+    )) {
+      // Collect every event for result JSON and summary
+      testEvents.push(event);
+
+      switch (event.type) {
+        case "log":
+          addLogEntry("log", event.message);
+          // Filter out internal harness messages from console display
+          if (event.message.startsWith("Loading test module:")) break;
+          // Always print ctx.log to console
+          console.log(`      ${colors.dim}${event.message}${colors.reset}`);
+          break;
+
+        case "assertion":
+          assertions.push({
+            passed: event.passed,
+            message: event.message,
+            actual: event.actual,
+            expected: event.expected,
+          });
+          stepAssertionCount++;
+          addLogEntry("assertion", event.message, {
+            passed: event.passed,
+            actual: event.actual,
+            expected: event.expected,
+          });
+          // Verbose: show each assertion inline
+          if (effectiveRun.verbose) {
+            const icon = event.passed
+              ? `${colors.green}✓${colors.reset}`
+              : `${colors.red}✗${colors.reset}`;
+            console.log(
+              `        ${icon} ${colors.dim}${event.message}${colors.reset}`,
+            );
+          }
+          break;
+
+        case "trace": {
+          const traceMsg = `${event.data.method} ${event.data.url} → ${event.data.status} (${event.data.duration}ms)`;
+          addLogEntry("trace", traceMsg, event.data);
+          // Collect for .glubean/traces.json
+          traceCollector.push({
+            testId,
+            method: event.data.method,
+            url: event.data.url,
+            status: event.data.status,
+          });
+          // Default: compact trace line (shown under step)
+          const compactTrace = `${colors.dim}${event.data.method}${
+            colors.reset
+          } ${compactUrl(event.data.url)} ${colors.dim}→${
+            colors.reset
+          } ${colorStatus(event.data.status)} ${colors.dim}${
+            event.data.duration
+          }ms${colors.reset}`;
+          stepTraceLines.push(compactTrace);
+          // Print immediately (always visible, not just verbose)
+          console.log(`      ${colors.dim}↳${colors.reset} ${compactTrace}`);
+          // Verbose: also show request/response bodies
+          if (effectiveRun.verbose && event.data.requestBody) {
+            console.log(
+              `        ${colors.dim}req: ${JSON.stringify(
+                event.data.requestBody,
+              ).slice(0, 120)}${colors.reset}`,
+            );
+          }
+          if (effectiveRun.verbose && event.data.responseBody) {
+            const body = JSON.stringify(event.data.responseBody);
+            console.log(
+              `        ${colors.dim}res: ${body.slice(0, 120)}${
+                body.length > 120 ? "…" : ""
+              }${colors.reset}`,
+            );
+          }
+          break;
+        }
+
+        case "metric": {
+          const unit = event.unit ? ` ${event.unit}` : "";
+          const tagStr = event.tags
+            ? ` ${colors.dim}{${Object.entries(event.tags)
+                .map(([k, v]) => `${k}=${v}`)
+                .join(", ")}}${colors.reset}`
+            : "";
+          const metricMsg = `${event.name} = ${event.value}${unit}`;
+          addLogEntry("metric", metricMsg, {
+            name: event.name,
+            value: event.value,
+            unit: event.unit,
+            tags: event.tags,
+          });
+          // Only show non-auto metrics by default, all in verbose
+          if (effectiveRun.verbose) {
+            console.log(
+              `      ${colors.blue}📊 ${metricMsg}${colors.reset}${tagStr}`,
+            );
+          }
+          break;
+        }
+
+        case "step_start":
+          // Reset per-step counters
+          currentStepName = event.name;
+          currentStepIndex = event.index;
+          currentStepTotal = event.total;
+          stepAssertionCount = 0;
+          stepTraceLines = [];
+          // Always show step start (compact)
+          console.log(
+            `    ${colors.cyan}┌${colors.reset} ${colors.dim}step ${
+              event.index + 1
+            }/${event.total}${colors.reset} ${colors.bold}${event.name}${
+              colors.reset
+            }`,
+          );
+          break;
+
+        case "step_end": {
+          const stepIcon =
+            event.status === "passed"
+              ? `${colors.green}✓${colors.reset}`
+              : event.status === "failed"
+                ? `${colors.red}✗${colors.reset}`
+                : `${colors.yellow}○${colors.reset}`;
+          // Compact step summary line
+          const stepParts: string[] = [];
+          if (event.durationMs !== undefined)
+            stepParts.push(`${event.durationMs}ms`);
+          if (event.assertions > 0)
+            stepParts.push(`${event.assertions} assertions`);
+          const httpInStep = stepTraceLines.length;
+          if (httpInStep > 0)
+            stepParts.push(
+              `${httpInStep} API call${httpInStep > 1 ? "s" : ""}`,
+            );
+          console.log(
+            `    ${colors.cyan}└${colors.reset} ${stepIcon} ${
+              colors.dim
+            }${stepParts.join(" · ")}${colors.reset}`,
+          );
+          break;
+        }
+
+        case "summary":
+          // Aggregate per-test summary into run-level stats
+          runStats.httpRequestTotal += event.data.httpRequestTotal;
+          runStats.httpErrorTotal += event.data.httpErrorTotal;
+          runStats.assertionTotal += event.data.assertionTotal;
+          runStats.assertionFailed += event.data.assertionFailed;
+          runStats.warningTotal += event.data.warningTotal;
+          runStats.warningTriggered += event.data.warningTriggered;
+          runStats.stepTotal += event.data.stepTotal;
+          runStats.stepPassed += event.data.stepPassed;
+          runStats.stepFailed += event.data.stepFailed;
+          break;
+
+        case "warning": {
+          // Always show warnings (they are important)
+          const warnIcon = event.condition
+            ? `${colors.green}✓${colors.reset}`
+            : `${colors.yellow}⚠${colors.reset}`;
+          console.log(
+            `      ${warnIcon} ${colors.yellow}${event.message}${colors.reset}`,
+          );
+          break;
+        }
+
+        case "schema_validation":
+          if (effectiveRun.verbose) {
+            const icon = event.success
+              ? `${colors.green}✓${colors.reset}`
+              : `${colors.red}✗${colors.reset}`;
+            console.log(
+              `      ${icon} ${colors.dim}schema: ${event.label}${colors.reset}`,
+            );
+          }
+          break;
+
+        case "status":
+          success = event.status === "completed";
+          if (event.error) {
+            errorMsg = event.error;
+            addLogEntry("error", event.error);
+          }
+          if (event.peakMemoryMB) peakMemoryMB = event.peakMemoryMB;
+          break;
+
+        case "error":
+          success = false;
+          // Only set errorMsg if not already set by a "status" event
+          // (avoid overwriting the real error with a generic "Process exited with code N")
+          if (!errorMsg) {
+            errorMsg = event.message;
+          }
+          addLogEntry("error", event.message);
+          break;
+      }
+    }
+
+    const duration = Date.now() - startTime;
+
+    // Check if all assertions passed
+    const allAssertionsPassed = assertions.every((a) => a.passed);
+    const finalSuccess = success && allAssertionsPassed;
+
+    // Collect for result JSON output
+    collectedRuns.push({
+      testId,
+      testName,
+      tags: testItem.meta.tags,
+      filePath: testFilePath,
+      events: testEvents,
+      success: finalSuccess,
+      durationMs: duration,
+    });
+
+    // Add result entry for file output
+    addLogEntry("result", finalSuccess ? "PASSED" : "FAILED", {
+      duration,
+      success: finalSuccess,
+      peakMemoryMB,
+    });
+
+    // Track overall peak memory
+    const peakMB = peakMemoryMB ? parseFloat(peakMemoryMB) : 0;
+    if (peakMB > overallPeakMemoryMB) {
+      overallPeakMemoryMB = peakMB;
+    }
+
+    // Build per-test mini-stats
+    const testAssertions = assertions.length;
+    const testTraces =
+      traceCollector.filter((t) => t.testId === testId).length -
+      (traceCollector.filter((t) => t.testId === testId).length -
+        stepTraceLines.length);
+    const testHttpCalls = testEvents.filter((e) => e.type === "trace").length;
+    const testSteps = testEvents.filter((e) => e.type === "step_end").length;
+
+    const miniStats: string[] = [];
+    miniStats.push(`${duration}ms`);
+    if (testHttpCalls > 0) miniStats.push(`${testHttpCalls} calls`);
+    if (testAssertions > 0) miniStats.push(`${testAssertions} checks`);
+    if (testSteps > 0) miniStats.push(`${testSteps} steps`);
+
+    if (finalSuccess) {
+      console.log(
+        `    ${colors.green}✓ PASSED${colors.reset} ${
+          colors.dim
+        }(${miniStats.join(", ")})${colors.reset}`,
+      );
+      passed++;
+    } else {
+      console.log(
+        `    ${colors.red}✗ FAILED${colors.reset} ${
+          colors.dim
+        }(${miniStats.join(", ")})${colors.reset}`,
+      );
+      failed++;
+    }
+
+    // Warn if memory usage is approaching cloud runner limits
+    if (peakMB > MEMORY_WARNING_THRESHOLD_MB) {
+      if (peakMB > CLOUD_MEMORY_LIMITS.free) {
+        console.log(
+          `      ${colors.yellow}⚠ Memory (${peakMemoryMB} MB) exceeds Free cloud runner limit (${CLOUD_MEMORY_LIMITS.free} MB).${colors.reset}`,
+        );
+        console.log(
+          `      ${colors.dim}  This test will OOM on Free runners. Use Pro runners or self-hosted workers.${colors.reset}`,
+        );
+      } else {
+        console.log(
+          `      ${colors.yellow}⚠ Memory (${peakMemoryMB} MB) is approaching Free cloud runner limit (${CLOUD_MEMORY_LIMITS.free} MB).${colors.reset}`,
+        );
+        console.log(
+          `      ${colors.dim}  Consider optimizing or using self-hosted workers for headroom.${colors.reset}`,
+        );
+      }
+    }
+
+    // Show failed assertions
+    for (const assertion of assertions) {
+      if (!assertion.passed) {
+        console.log(`      ${colors.red}✗ ${assertion.message}${colors.reset}`);
+        if (
+          assertion.expected !== undefined ||
+          assertion.actual !== undefined
+        ) {
+          if (assertion.expected !== undefined) {
+            console.log(
+              `        ${colors.dim}Expected: ${JSON.stringify(
+                assertion.expected,
+              )}${colors.reset}`,
+            );
+          }
+          if (assertion.actual !== undefined) {
+            console.log(
+              `        ${colors.dim}Actual:   ${JSON.stringify(
+                assertion.actual,
+              )}${colors.reset}`,
+            );
+          }
+        }
+      }
+    }
+
+    // Show error if any
+    if (errorMsg) {
+      console.log(`      ${colors.red}Error: ${errorMsg}${colors.reset}`);
+    }
+  }
+
+  const totalDurationMs = Date.now() - totalStartTime;
+
+  // ── Summary ──────────────────────────────────────────────────────────────
+  console.log(
+    `\n${colors.bold}─────────────────────────────────────${colors.reset}`,
+  );
+  const summaryParts = [];
+  if (passed > 0) {
+    summaryParts.push(`${colors.green}${passed} passed${colors.reset}`);
+  }
+  if (failed > 0)
+    summaryParts.push(`${colors.red}${failed} failed${colors.reset}`);
+  if (skipped > 0) {
+    summaryParts.push(`${colors.yellow}${skipped} skipped${colors.reset}`);
+  }
+  console.log(
+    `${colors.bold}Tests:${colors.reset}  ${summaryParts.join(", ")}`,
+  );
+  console.log(
+    `${colors.bold}Total:${colors.reset}  ${passed + failed + skipped}`,
+  );
+  if (overallPeakMemoryMB > 0) {
+    const memColor =
+      overallPeakMemoryMB > MEMORY_WARNING_THRESHOLD_MB
+        ? colors.yellow
+        : colors.dim;
+    console.log(
+      `${colors.bold}Memory:${
+        colors.reset
+      } ${memColor}${overallPeakMemoryMB.toFixed(2)} MB peak${colors.reset} ${
+        colors.dim
+      }(cloud: ${CLOUD_MEMORY_LIMITS.free} MB Free / ${
+        CLOUD_MEMORY_LIMITS.pro
+      } MB Pro / unlimited self-hosted)${colors.reset}`,
+    );
+  }
+
+  // Rich summary from collected events
+  const hasStats =
+    runStats.httpRequestTotal > 0 ||
+    runStats.assertionTotal > 0 ||
+    runStats.stepTotal > 0;
+  if (hasStats) {
+    const parts: string[] = [];
+    if (runStats.httpRequestTotal > 0) {
+      const errPart =
+        runStats.httpErrorTotal > 0
+          ? ` ${colors.red}(${runStats.httpErrorTotal} errors)${colors.reset}`
+          : "";
+      parts.push(`${runStats.httpRequestTotal} API calls${errPart}`);
+    }
+    if (runStats.assertionTotal > 0) {
+      const failPart =
+        runStats.assertionFailed > 0
+          ? ` ${colors.red}(${runStats.assertionFailed} failed)${colors.reset}`
+          : "";
+      parts.push(`${runStats.assertionTotal} assertions${failPart}`);
+    }
+    if (runStats.stepTotal > 0) {
+      parts.push(`${runStats.stepTotal} steps`);
+    }
+    if (runStats.warningTriggered > 0) {
+      parts.push(
+        `${colors.yellow}${runStats.warningTriggered} warnings${colors.reset}`,
+      );
+    }
+    console.log(
+      `${colors.bold}Stats:${colors.reset}  ${colors.dim}${parts.join(
+        "  ·  ",
+      )}${colors.reset}`,
+    );
+  }
+
+  console.log();
+
+  // Write log file if enabled (single-file: <file>.log, multi-file: glubean-run.log in cwd)
+  if (effectiveRun.logFile && logEntries.length > 0) {
+    const logPath = isMultiFile
+      ? resolve(Deno.cwd(), "glubean-run.log")
+      : getLogFilePath(testFiles[0]);
+
+    // Helper for JSON stringify with optional pretty-print
+    const stringify = (value: unknown): string => {
+      if (effectiveRun.pretty) {
+        // Pretty-print with 2-space indent, then indent each line for log format
+        const pretty = JSON.stringify(value, null, 2);
+        return pretty.split("\n").join("\n    ");
+      }
+      return JSON.stringify(value);
+    };
+
+    const logContent = [
+      `# Glubean Test Log`,
+      `# Target: ${isMultiFile ? resolve(target) : testFiles[0]}`,
+      `# Run at: ${runStartTime}`,
+      `# Tests: ${passed} passed, ${failed} failed`,
+      ``,
+      ...logEntries.map((entry) => {
+        const prefix = `[${entry.timestamp}] [${entry.testId}]`;
+        if (entry.type === "result") {
+          return `${prefix} ${entry.message} (${
+            (entry.data as { duration: number }).duration
+          }ms)`;
+        }
+        if (entry.type === "assertion") {
+          const data = entry.data as {
+            passed: boolean;
+            actual?: unknown;
+            expected?: unknown;
+          };
+          const status = data.passed ? "✓" : "✗";
+          let line = `${prefix} [ASSERT ${status}] ${entry.message}`;
+          // Always show expected/actual if available
+          if (data.expected !== undefined || data.actual !== undefined) {
+            if (data.expected !== undefined) {
+              line += `\n    Expected: ${stringify(data.expected)}`;
+            }
+            if (data.actual !== undefined) {
+              line += `\n    Actual:   ${stringify(data.actual)}`;
+            }
+          }
+          return line;
+        }
+        if (entry.type === "trace") {
+          const data = entry.data as {
+            method?: string;
+            url?: string;
+            status?: number;
+            duration?: number;
+            requestBody?: unknown;
+            responseBody?: unknown;
+          };
+          let line = `${prefix} [TRACE] ${entry.message}`;
+          if (data.requestBody !== undefined) {
+            line += `\n    Request Body: ${stringify(data.requestBody)}`;
+          }
+          if (data.responseBody !== undefined) {
+            line += `\n    Response Body: ${stringify(data.responseBody)}`;
+          }
+          return line;
+        }
+        if (entry.type === "metric") {
+          const data = entry.data as {
+            name?: string;
+            value?: number;
+            unit?: string;
+            tags?: Record<string, string>;
+          };
+          let line = `${prefix} [METRIC] ${entry.message}`;
+          if (data.tags && Object.keys(data.tags).length > 0) {
+            line += `\n    Tags: ${stringify(data.tags)}`;
+          }
+          return line;
+        }
+        if (entry.type === "error") {
+          return `${prefix} [ERROR] ${entry.message}`;
+        }
+        return `${prefix} [LOG] ${entry.message}`;
+      }),
+      ``,
+    ].join("\n");
+
+    await Deno.writeTextFile(logPath, logContent);
+    console.log(`${colors.dim}Log written to: ${logPath}${colors.reset}\n`);
+  }
+
+  // Write .glubean/traces.json for `glubean coverage`
+  if (traceCollector.length > 0) {
+    try {
+      const glubeanDir = resolve(rootDir, ".glubean");
+      await Deno.mkdir(glubeanDir, { recursive: true });
+      const tracesPath = resolve(glubeanDir, "traces.json");
+      const traceSummary = {
+        runAt: runStartTime,
+        target,
+        files: testFiles.map((f) => relative(Deno.cwd(), f)),
+        traces: traceCollector,
+      };
+      await Deno.writeTextFile(
+        tracesPath,
+        JSON.stringify(traceSummary, null, 2),
+      );
+    } catch {
+      // Non-critical: silently skip if trace file cannot be written
+    }
+  }
+
+  // ── Result JSON output (hidden flag) ────────────────────────────────────
+  if (options.resultJson) {
+    // resultJson stays as a direct CLI flag (not in config)
+    const resultPath = isMultiFile
+      ? resolve(Deno.cwd(), "glubean-run.result.json")
+      : getLogFilePath(testFiles[0]).replace(/\.log$/, ".result.json");
+    const result = {
+      target,
+      files: testFiles.map((f) => relative(Deno.cwd(), f)),
+      runAt: runStartTime,
+      summary: {
+        total: passed + failed + skipped,
+        passed,
+        failed,
+        skipped,
+        durationMs: totalDurationMs,
+        stats: runStats,
+      },
+      tests: collectedRuns.map((r) => ({
+        testId: r.testId,
+        testName: r.testName,
+        tags: r.tags,
+        success: r.success,
+        durationMs: r.durationMs,
+        events: r.events,
+      })),
+    };
+    await Deno.writeTextFile(resultPath, JSON.stringify(result, null, 2));
+    console.log(`${colors.dim}Result written to: ${resultPath}${colors.reset}`);
+    console.log(
+      `${colors.dim}Open ${colors.reset}${colors.cyan}https://glubean.com/viewer${colors.reset}${colors.dim} to visualize it${colors.reset}\n`,
+    );
+  }
+
+  // ── JUnit XML output ───────────────────────────────────────────────────
+  if (options.reporter === "junit") {
+    const junitPath = isMultiFile
+      ? resolve(Deno.cwd(), "glubean-run.junit.xml")
+      : getLogFilePath(testFiles[0]).replace(/\.log$/, ".junit.xml");
+    const summaryData = {
+      total: passed + failed + skipped,
+      passed,
+      failed,
+      skipped,
+      durationMs: totalDurationMs,
+    };
+    const xml = toJunitXml(collectedRuns, target, summaryData);
+    await Deno.writeTextFile(junitPath, xml);
+    console.log(
+      `${colors.dim}JUnit XML written to: ${junitPath}${colors.reset}\n`,
+    );
+  }
+
+  // ── Write .trace.jsonc files (human-readable HTTP request/response pairs) ──
+  if (effectiveRun.emitFullTrace) {
+    try {
+      await writeTraceFiles(
+        collectedRuns,
+        rootDir,
+        runStartTime,
+        effectiveRun.envFile,
+      );
+    } catch {
+      // Non-critical: silently skip if trace files cannot be written
+    }
+  }
+
+  if (failed > 0) {
+    Deno.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// JUnit XML generation
+// ---------------------------------------------------------------------------
+
+/** Escape special XML characters in text content and attributes. */
+function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Convert collected test runs into JUnit XML format.
+ *
+ * Produces a single `<testsuite>` element compatible with GitHub Actions,
+ * GitLab CI, Jenkins, and other CI systems that consume JUnit XML.
+ */
+function toJunitXml(
+  collectedRuns: CollectedTestRun[],
+  target: string,
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+    durationMs: number;
+  },
+): string {
+  const lines: string[] = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuite name="${escapeXml(target)}" tests="${summary.total}" failures="${summary.failed}" skipped="${summary.skipped}" time="${(summary.durationMs / 1000).toFixed(3)}">`,
+  ];
+
+  for (const run of collectedRuns) {
+    const classname = run.filePath
+      ? escapeXml(relative(Deno.cwd(), run.filePath).replace(/\\/g, "/"))
+      : "glubean";
+    const name = escapeXml(run.testName);
+    const time = (run.durationMs / 1000).toFixed(3);
+
+    if (run.success) {
+      lines.push(
+        `  <testcase classname="${classname}" name="${name}" time="${time}" />`,
+      );
+    } else {
+      // Extract error message from status event
+      const statusEvent = run.events.find(
+        (e) => e.type === "status" && "error" in e,
+      ) as { type: "status"; error?: string } | undefined;
+
+      // Collect failed assertions for detail
+      const failedAssertions = run.events
+        .filter(
+          (e) =>
+            e.type === "assertion" &&
+            !("passed" in e && (e as { passed: boolean }).passed),
+        )
+        .map((e) => ("message" in e ? (e as { message: string }).message : ""))
+        .filter(Boolean);
+
+      const message =
+        statusEvent?.error || failedAssertions[0] || "Test failed";
+      const detail =
+        failedAssertions.length > 0 ? failedAssertions.join("\n") : message;
+
+      lines.push(
+        `  <testcase classname="${classname}" name="${name}" time="${time}">`,
+      );
+      lines.push(
+        `    <failure message="${escapeXml(message)}">${escapeXml(detail)}</failure>`,
+      );
+      lines.push(`  </testcase>`);
+    }
+  }
+
+  lines.push("</testsuite>");
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Trace file generation
+// ---------------------------------------------------------------------------
+
+/** Maximum number of trace files to keep per source file subdirectory. */
+const TRACE_HISTORY_LIMIT = 20;
+
+/**
+ * Write `.trace.jsonc` files — human-readable {request, response} pairs.
+ *
+ * For each test file, extracts trace events, reshapes them into
+ * request/response pairs, and writes to `.glubean/traces/{name}/{timestamp}.trace.jsonc`.
+ * Automatically cleans up old files beyond TRACE_HISTORY_LIMIT.
+ */
+async function writeTraceFiles(
+  collectedRuns: CollectedTestRun[],
+  rootDir: string,
+  runAt: string,
+  envFile?: string,
+): Promise<void> {
+  // Group collected runs by source file path
+  const byFile = new Map<string, CollectedTestRun[]>();
+  for (const run of collectedRuns) {
+    const existing = byFile.get(run.filePath) ?? [];
+    existing.push(run);
+    byFile.set(run.filePath, existing);
+  }
+
+  for (const [filePath, runs] of byFile) {
+    // Extract trace events and reshape into {request, response} pairs
+    const pairs: Array<{
+      request: {
+        method: string;
+        url: string;
+        headers?: Record<string, string>;
+        body?: unknown;
+      };
+      response: {
+        status: number;
+        statusText?: string;
+        durationMs: number;
+        headers?: Record<string, string>;
+        body?: unknown;
+      };
+    }> = [];
+
+    for (const run of runs) {
+      for (const event of run.events) {
+        if (event.type !== "trace") continue;
+        const d = event.data;
+        pairs.push({
+          request: {
+            method: d.method,
+            url: d.url,
+            ...(d.requestHeaders && Object.keys(d.requestHeaders).length > 0
+              ? { headers: d.requestHeaders }
+              : {}),
+            ...(d.requestBody !== undefined ? { body: d.requestBody } : {}),
+          },
+          response: {
+            status: d.status,
+            durationMs: d.duration,
+            ...(d.responseHeaders && Object.keys(d.responseHeaders).length > 0
+              ? { headers: d.responseHeaders }
+              : {}),
+            ...(d.responseBody !== undefined ? { body: d.responseBody } : {}),
+          },
+        });
+      }
+    }
+
+    if (pairs.length === 0) continue;
+
+    // Build directory and file paths
+    const fileName = basename(filePath).replace(/\.ts$/, "");
+    const tracesDir = resolve(rootDir, ".glubean", "traces", fileName);
+    await Deno.mkdir(tracesDir, { recursive: true });
+
+    // Timestamp: 20260211T1530 (compact, minute precision, sortable)
+    const ts = new Date().toISOString().replace(/[-:]/g, "").slice(0, 13);
+    const traceFilePath = resolve(tracesDir, `${ts}.trace.jsonc`);
+
+    // Build JSONC content with comment header
+    const envLabel = envFile || ".env";
+    const relFile = relative(rootDir, filePath);
+    const header = [
+      `// ${relFile} — ${pairs.length} HTTP call${pairs.length > 1 ? "s" : ""}`,
+      `// Run at: ${runAt}`,
+      `// Environment: ${envLabel}`,
+      "",
+    ].join("\n");
+
+    const content = header + JSON.stringify(pairs, null, 2) + "\n";
+    await Deno.writeTextFile(traceFilePath, content);
+
+    console.log(`${colors.dim}Trace: ${colors.reset}${traceFilePath}`);
+
+    // Auto-cleanup: keep only the most recent N files
+    await cleanupTraceDir(tracesDir, TRACE_HISTORY_LIMIT);
+  }
+}
+
+/**
+ * Remove old trace files from a directory, keeping only the most recent `limit`.
+ */
+async function cleanupTraceDir(dir: string, limit: number): Promise<void> {
+  try {
+    const entries: string[] = [];
+    for await (const entry of Deno.readDir(dir)) {
+      if (entry.isFile && entry.name.endsWith(".trace.jsonc")) {
+        entries.push(entry.name);
+      }
+    }
+    // Sort descending (newest first — filenames are timestamps)
+    entries.sort().reverse();
+    // Delete anything beyond the limit
+    for (const name of entries.slice(limit)) {
+      await Deno.remove(resolve(dir, name));
+    }
+  } catch {
+    // Cleanup is best-effort
+  }
+}

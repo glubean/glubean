@@ -1,0 +1,11 @@
+.vscode/**
+src/**
+node_modules/**
+tsconfig.json
+*.ts
+!dist/**
+TODO.md
+PUBLISH_READINESS.md
+package-lock.json
+.gitignore
+.cursor/**

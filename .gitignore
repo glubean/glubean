@@ -1,0 +1,37 @@
+# Environment files
+.env
+.env.local
+.env.secrets
+.env.*.secrets
+.env.*.local
+
+# Test logs
+*.log
+
+# Runtime output
+.glubean/
+*.result.json
+
+# Build output
+dist/
+node_modules/
+
+# Deno
+.deno/
+deno.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local dev scripts and internal docs (kept on disk, not in repo)
+glubean-dev
+MEMORY_PROFILING_SUMMARY.md
+packages/runner/IMPROVEMENTS.md
+packages/worker/REVIEW.md

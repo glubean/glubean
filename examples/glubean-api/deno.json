@@ -1,0 +1,11 @@
+{
+  "name": "@glubean/e2e-tests",
+  "version": "0.0.0",
+  "exports": "./auth.test.ts",
+  "tasks": {
+    "test:auth": "deno run -A ../../packages/cli/mod.ts run ./auth.test.ts",
+    "test:project": "deno run -A ../../packages/cli/mod.ts run ./project.test.ts",
+    "test:auth:log": "deno run -A ../../packages/cli/mod.ts run ./auth.test.ts --log-file --pretty",
+    "test:project:log": "deno run -A ../../packages/cli/mod.ts run ./project.test.ts --log-file --pretty"
+  }
+}

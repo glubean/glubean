@@ -1,0 +1,132 @@
+{
+  "name": "glubean",
+  "displayName": "Glubean",
+  "description": "Code-first API testing and exploration in VS Code. Write TypeScript, click play, see every request and response. Debug with breakpoints. Compare runs with diff. A Postman alternative that lives in your editor.",
+  "version": "0.1.0",
+  "publisher": "glubean",
+  "license": "MIT",
+  "icon": "icon.png",
+  "preview": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glubean/oss",
+    "directory": "packages/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/glubean/oss/issues"
+  },
+  "homepage": "https://github.com/glubean/oss/tree/main/packages/vscode#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "keywords": [
+    "glubean",
+    "api-testing",
+    "test-runner",
+    "deno",
+    "typescript",
+    "rest-api",
+    "http",
+    "api-explorer",
+    "api-client",
+    "integration-testing"
+  ],
+  "galleryBanner": {
+    "color": "#1a1a1a",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "workspaceContains:**/*.test.ts"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Glubean",
+      "properties": {
+        "glubean.glubeanPath": {
+          "type": "string",
+          "default": "glubean",
+          "description": "Path to the glubean CLI executable"
+        },
+        "glubean.envFile": {
+          "type": "string",
+          "default": ".env",
+          "description": "Path to the .env file (relative to workspace root)"
+        },
+        "glubean.verbose": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pass --verbose flag when running tests"
+        },
+        "glubean.autoDiscover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically discover tests when files are opened or changed"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "glubean.runFile",
+        "title": "Glubean: Run All Tests in File"
+      },
+      {
+        "command": "glubean.runWorkspace",
+        "title": "Glubean: Run All Tests in Workspace"
+      },
+      {
+        "command": "glubean.openLastResult",
+        "title": "Glubean: Open Last Result JSON"
+      },
+      {
+        "command": "glubean.checkDependencies",
+        "title": "Glubean: Setup"
+      },
+      {
+        "command": "glubean.selectEnv",
+        "title": "Glubean: Select Environment"
+      },
+      {
+        "command": "glubean.rerunLast",
+        "title": "Glubean: Re-run Last Request"
+      },
+      {
+        "command": "glubean.diffPrevious",
+        "title": "Glubean: Diff with Previous Run"
+      },
+      {
+        "command": "glubean.copyAsCurl",
+        "title": "Glubean: Copy as cURL"
+      },
+      {
+        "command": "glubean.runPick",
+        "title": "Glubean: Run Pick Example"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "glubean.rerunLast",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "watch": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch",
+    "lint": "tsc --noEmit",
+    "package": "npx @vscode/vsce package",
+    "publish": "npx @vscode/vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.3.0"
+  }
+}

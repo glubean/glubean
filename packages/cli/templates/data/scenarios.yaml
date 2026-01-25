@@ -1,0 +1,19 @@
+# Scenarios for data-driven API tests
+# Each entry describes one test case
+- id: get-first-product
+  method: GET
+  path: /products/1
+  expected: 200
+  description: Fetch first product
+
+- id: get-missing-product
+  method: GET
+  path: /products/99999
+  expected: 404
+  description: Non-existent product returns 404
+
+- id: get-product-categories
+  method: GET
+  path: /products/categories
+  expected: 200
+  description: Product categories should be accessible

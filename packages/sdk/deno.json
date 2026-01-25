@@ -1,0 +1,20 @@
+{
+  "name": "@glubean/sdk",
+  "version": "0.10.0",
+  "exports": {
+    ".": "./mod.ts",
+    "./data": "./data.ts",
+    "./expect": "./expect.ts",
+    "./graphql": "./graphql.ts",
+    "./internal": "./internal.ts"
+  },
+  "license": "MIT",
+  "description": "Glubean SDK - Type definitions and helpers for writing API tests",
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "@std/yaml": "jsr:@std/yaml@^1.0.0"
+  },
+  "publish": {
+    "exclude": ["*_test.ts", "testdata/"]
+  }
+}
