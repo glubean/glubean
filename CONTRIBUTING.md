@@ -29,7 +29,7 @@ If you have an idea for a bigger change, please open an issue first so we can di
 
 ```bash
 # Clone the repo
-git clone https://github.com/glubean/oss.git
+git clone https://github.com/glubean/glubean.git
 cd oss
 
 # Run tests

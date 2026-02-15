@@ -1,4 +1,4 @@
-# Glubean — API collections, as code.
+# Glubean — API collections, as real code.
 
 Open-source, code-first API testing toolkit. Write TypeScript, click play, see every request and response.
 
@@ -21,7 +21,7 @@ Open-source, code-first API testing toolkit. Write TypeScript, click play, see e
 
 ```bash
 # One-line install (macOS / Linux)
-curl -fsSL https://glubean.dev/install.sh | sh
+curl -fsSL https://glubean.com/install.sh | sh
 
 # Or install directly if you have Deno
 deno install -Agf jsr:@glubean/cli

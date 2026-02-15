@@ -34,7 +34,7 @@ For a generic stdio MCP host, the command/args are:
 - args:
   - `run`
   - `-A`
-  - `/ABSOLUTE/PATH/TO/glubean/oss/packages/mcp/mod.ts`
+  - `/ABSOLUTE/PATH/TO/glubean/packages/mcp/mod.ts`
 
 ## Tool usage guidance (for AI agents)
 

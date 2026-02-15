@@ -32,7 +32,7 @@ By the end of this playground, you will know how to:
 ### 1. Navigate to the repo root
 
 ```bash
-cd /path/to/glubean/oss
+cd /path/to/glubean
 ```
 
 ### 2. Verify it works

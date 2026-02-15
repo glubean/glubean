@@ -5,7 +5,7 @@ This document provides an overview of all packages in the Glubean OSS monorepo a
 ## Package Overview
 
 ```
-glubean/oss/
+glubean/
 ├── packages/
 │   ├── sdk/        # Test authoring SDK (end-user facing)
 │   ├── scanner/    # Test discovery and metadata extraction

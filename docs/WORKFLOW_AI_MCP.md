@@ -95,7 +95,7 @@ Add to Cursor's MCP settings (`~/.cursor/mcp.json` or via UI):
   "mcpServers": {
     "glubean": {
       "command": "deno",
-      "args": ["run", "-A", "/path/to/glubean/oss/packages/mcp/mod.ts"]
+      "args": ["run", "-A", "/path/to/glubean/packages/mcp/mod.ts"]
     }
   }
 }

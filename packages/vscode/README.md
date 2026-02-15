@@ -1,8 +1,8 @@
 # Glubean for VS Code
 
-API collections, as code — right inside your editor.
+API collections, as real code — right inside your editor.
 
-Run [Glubean](https://github.com/glubean/oss) API tests with inline play buttons, structured trace output, environment switching, and native diff. No context switching, no extra app.
+Built on top of the [Glubean](https://github.com/glubean/glubean) open-source SDK and CLI. This extension brings the full runtime into VS Code — inline play buttons, auto-traced HTTP output, environment switching, and native diff. No browser tabs, no context switching.
 
 ## Features
 
@@ -98,7 +98,7 @@ You can also install the CLI manually:
 
 ```bash
 # macOS / Linux
-curl -fsSL https://glubean.dev/install.sh | sh
+curl -fsSL https://glubean.com/install.sh | sh
 
 # Or with Deno
 deno install -Agf jsr:@glubean/cli

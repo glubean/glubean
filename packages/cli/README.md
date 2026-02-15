@@ -9,7 +9,7 @@ Most users start with the [VS Code extension](https://marketplace.visualstudio.c
 ```bash
 # Recommended: install the VS Code extension (auto-installs Deno + CLI)
 # Manual install:
-curl -fsSL https://glubean.dev/install.sh | sh
+curl -fsSL https://glubean.com/install.sh | sh
 
 # Or with Deno directly:
 deno install -Agf -n glubean jsr:@glubean/cli
@@ -249,7 +249,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Glubean
-        run: curl -fsSL https://glubean.dev/install.sh | sh
+        run: curl -fsSL https://glubean.com/install.sh | sh
 
       - name: Write secrets
         run: echo "API_KEY=${{ secrets.API_KEY }}" > .env.ci.secrets
@@ -279,7 +279,7 @@ api-tests:
   image: ubuntu:latest
   script:
     - apt-get update && apt-get install -y curl unzip
-    - curl -fsSL https://glubean.dev/install.sh | sh
+    - curl -fsSL https://glubean.com/install.sh | sh
     - export PATH="$HOME/.deno/bin:$PATH"
     - echo "API_KEY=$API_KEY" > .env.ci.secrets
     - glubean run --env-file .env.ci --fail-fast --reporter junit --result-json

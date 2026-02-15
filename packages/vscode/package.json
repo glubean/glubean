@@ -9,13 +9,12 @@
   "preview": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/glubean/oss",
-    "directory": "packages/vscode"
+    "url": "https://github.com/glubean/vscode"
   },
   "bugs": {
-    "url": "https://github.com/glubean/oss/issues"
+    "url": "https://github.com/glubean/vscode/issues"
   },
-  "homepage": "https://github.com/glubean/oss/tree/main/packages/vscode#readme",
+  "homepage": "https://github.com/glubean/vscode#readme",
   "engines": {
     "vscode": "^1.85.0"
   },

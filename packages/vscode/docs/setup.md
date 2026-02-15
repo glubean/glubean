@@ -28,7 +28,7 @@ with Electron directly.
   are modified, no `sudo` required.
 - Glubean CLI is installed from [JSR](https://jsr.io/@glubean/cli), the
   JavaScript/TypeScript package registry by the Deno team. The source is
-  fully open at [github.com/glubean/oss](https://github.com/glubean/oss).
+  fully open at [github.com/glubean/glubean](https://github.com/glubean/glubean).
 
 ## Can I uninstall?
 
