@@ -2,20 +2,19 @@
 
 Open-source, code-first API testing toolkit. Write TypeScript, click play, see every request and response.
 
-## Packages
+## Packages (v0.10.0)
 
-| Package | Version | Description |
-|---------|---------|-------------|
-| [`@glubean/sdk`](packages/sdk/) | 0.5.1 | User-facing SDK — `test()`, `ctx.http`, assertions, structured logging |
-| [`@glubean/runner`](packages/runner/) | 0.2.4 | Sandboxed test execution engine (Deno subprocess) |
-| [`@glubean/cli`](packages/cli/) | 0.2.25 | CLI for running, scanning, and managing test projects |
-| [`@glubean/scanner`](packages/scanner/) | 0.2.4 | Static analysis for test file discovery and metadata extraction |
-| [`@glubean/redaction`](packages/redaction/) | 0.1.1 | Sensitive data redaction for logs and traces |
-| [`@glubean/mcp`](packages/mcp/) | 0.1.2 | Model Context Protocol server for AI agent integration |
-| [`@glubean/worker`](packages/worker/) | 0.1.8 | Cloud worker for remote test execution |
+| Package | Description |
+|---------|-------------|
+| [`@glubean/sdk`](packages/sdk/) | User-facing SDK — `test()`, `ctx.http`, assertions, structured logging |
+| [`@glubean/runner`](packages/runner/) | Sandboxed test execution engine (Deno subprocess) |
+| [`@glubean/cli`](packages/cli/) | CLI for running, scanning, and managing test projects |
+| [`@glubean/scanner`](packages/scanner/) | Static analysis for test file discovery and metadata extraction |
+| [`@glubean/redaction`](packages/redaction/) | Sensitive data redaction for logs and traces |
+| [`@glubean/mcp`](packages/mcp/) | Model Context Protocol server for AI agent integration |
+| [`@glubean/worker`](packages/worker/) | Cloud worker for remote test execution |
 
-> **VS Code Extension** — The editor extension lives in [`packages/vscode`](packages/vscode/).
-> Install from the Marketplace for inline play buttons, trace viewing, and diff.
+> **VS Code Extension** — The editor extension lives in a [separate repo](https://github.com/glubean/vscode). Install from the Marketplace for inline play buttons, trace viewing, and diff.
 
 ## Install
 
