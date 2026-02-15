@@ -1,6 +1,10 @@
-# Glubean — API collections, as real code.
+<p align="center">
+  <img src=".github/logo.png" width="120" alt="Glubean" />
+</p>
 
-Open-source, code-first API testing toolkit. Write TypeScript, click play, see every request and response.
+<h1 align="center">Glubean</h1>
+<p align="center">API collections, as real code.</p>
+<p align="center">Open-source, code-first API testing toolkit. Write TypeScript, click play, see every request and response.</p>
 
 ## Packages (v0.10.0)
 

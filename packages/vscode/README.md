@@ -1,8 +1,10 @@
-# Glubean for VS Code
+<p align="center">
+  <img src="icon.png" width="120" alt="Glubean" />
+</p>
 
-API collections, as real code — right inside your editor.
-
-Built on top of the [Glubean](https://github.com/glubean/glubean) open-source SDK and CLI. This extension brings the full runtime into VS Code — inline play buttons, auto-traced HTTP output, environment switching, and native diff. No browser tabs, no context switching.
+<h1 align="center">Glubean for VS Code</h1>
+<p align="center">API collections, as real code — right inside your editor.</p>
+<p align="center">Built on top of the <a href="https://github.com/glubean/glubean">Glubean</a> open-source SDK and CLI.<br/>This extension brings the full runtime into VS Code — inline play buttons, auto-traced HTTP output, environment switching, and native diff. No browser tabs, no context switching.</p>
 
 ## Features
 
