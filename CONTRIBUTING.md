@@ -79,6 +79,10 @@ test: test additions or fixes
 - Update documentation if behavior changes
 - PRs with tests are reviewed faster
 
+## Contact
+
+Questions or ideas? Reach out at **peisong@glubean.com**.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
