@@ -28,10 +28,15 @@ import { getRegistry } from "jsr:@glubean/sdk/internal";
 ```typescript
 import { test } from "@glubean/sdk";
 
-// Simple test - just export it
 export const healthCheck = test("health-check", async (ctx) => {
-  const res = await fetch(ctx.vars.require("BASE_URL") + "/health");
-  ctx.assert(res.ok, "API should be healthy");
+  const baseUrl = ctx.vars.require("BASE_URL");
+
+  // ctx.http gives you auto-tracing and HTTP duration metrics by default.
+  const res = await ctx.http.get(`${baseUrl}/health`);
+  ctx.expect(res.status).toBe(200).orFail();
+
+  const body = await res.json<{ status: string }>();
+  ctx.expect(body.status).toBe("ok");
 });
 ```
 
@@ -41,7 +46,7 @@ Run locally:
 glubean run ./api.test.ts
 ```
 
-Output includes automatic memory profiling:
+Output includes pass/fail result, duration, and memory usage:
 
 ```
   ● health-check
@@ -55,32 +60,106 @@ import { test } from "@glubean/sdk";
 
 // Quick mode - single function
 export const login = test("login", async (ctx) => {
-  const res = await fetch(ctx.vars.require("BASE_URL") + "/login");
-  ctx.assert(res.ok, "Login should succeed");
+  const res = await ctx.http.post(`${ctx.vars.require("BASE_URL")}/login`, {
+    json: { username: "demo", password: "demo" },
+    throwHttpErrors: false,
+  });
+  ctx.expect(res.status).toBe(200);
 });
 
 // Builder mode - multi-step with lifecycle
-export const checkout = test<{ cartId: string }>("checkout-flow")
+export const checkout = test("checkout-flow")
   .meta({ tags: ["e2e", "critical"] })
   .setup(async (ctx) => {
-    const cart = await createCart(ctx.vars.require("API_KEY"));
-    return { cartId: cart.id };
+    const baseUrl = ctx.vars.require("BASE_URL");
+    const cart = await ctx.http.post(`${baseUrl}/carts`, { json: {} }).json<{ id: string }>();
+    return { baseUrl, cartId: cart.id };
   })
-  .step("Add item", async (ctx, state) => {
-    await addItem(state.cartId, "product-123");
-    return state;
+  .step("Add item", async (ctx, { baseUrl, cartId }) => {
+    await ctx.http.post(`${baseUrl}/carts/${cartId}/items`, {
+      json: { productId: "product-123" },
+    });
+    return { baseUrl, cartId };
   })
-  .step("Apply discount", async (ctx, state) => {
-    await applyDiscount(state.cartId, "SAVE10");
-    return state;
+  .step("Complete checkout", async (ctx, { baseUrl, cartId }) => {
+    const order = await ctx.http
+      .post(`${baseUrl}/carts/${cartId}/checkout`)
+      .json<{ status: string }>();
+    ctx.expect(order.status).toBe("completed");
+    return { baseUrl, cartId };
   })
-  .step("Complete checkout", async (ctx, state) => {
-    const order = await checkout(state.cartId);
-    ctx.assert(order.status === "completed", "Order should complete");
-  })
-  .teardown(async (ctx, state) => {
-    await deleteCart(state.cartId);
+  .teardown(async (ctx, { baseUrl, cartId }) => {
+    await ctx.http.delete(`${baseUrl}/carts/${cartId}`);
   });
+```
+
+## Data-Driven and AI-Friendly Workflows
+
+### `test.each()` — one row = one test
+
+```typescript
+import { test } from "@glubean/sdk";
+
+export const statusChecks = test.each([
+  { id: 1, expected: 200 },
+  { id: 999, expected: 404 },
+])("get-user-$id", async (ctx, { id, expected }) => {
+  const res = await ctx.http.get(`${ctx.vars.require("BASE_URL")}/users/${id}`);
+  ctx.expect(res.status).toBe(expected);
+});
+```
+
+### `test.pick()` — run one named example (random by default)
+
+```typescript
+import { test } from "@glubean/sdk";
+
+export const createUser = test.pick({
+  normal: { body: { name: "Alice" }, expected: 201 },
+  edge:   { body: { name: "" },      expected: 400 },
+})("create-user-$_pick", async (ctx, { body, expected }) => {
+  const res = await ctx.http.post(`${ctx.vars.require("BASE_URL")}/users`, {
+    json: body,
+    throwHttpErrors: false,
+  });
+  ctx.expect(res.status).toBe(expected);
+});
+```
+
+For deterministic CI runs, pin examples explicitly:
+
+```bash
+# Run only specific named examples
+glubean run ./users.test.ts --pick normal,edge
+```
+
+### `configure()` — file-level shared setup
+
+```typescript
+import { configure } from "@glubean/sdk";
+
+export const { http, vars, secrets } = configure({
+  vars: { baseUrl: "BASE_URL" },
+  secrets: { apiKey: "API_KEY" },
+  http: {
+    prefixUrl: "BASE_URL",
+    headers: { Authorization: "Bearer {{API_KEY}}" },
+  },
+});
+```
+
+All configured values are lazy and resolved at runtime, so they are safe at module top-level and safe for scanner imports.
+
+Then use them in any test file:
+
+```typescript
+import { test } from "@glubean/sdk";
+import { http } from "./configure.ts";
+
+export const listUsers = test("list-users", async (ctx) => {
+  const data = await http.get("users?limit=5").json();
+  ctx.expect(data.users.length).toBe(5);
+});
 ```
 
 ## Features
@@ -149,6 +228,59 @@ ctx.assert(
   },
   "Should have items"
 );
+```
+
+#### Fluent Assertions (`ctx.expect`)
+
+```typescript
+// Soft by default: failure is recorded, test continues
+ctx.expect(res.status).toBe(200);
+ctx.expect(body.roles).toContain("admin");
+ctx.expect(body).toMatchObject({ active: true });
+
+// Guard when later code depends on this condition
+ctx.expect(res.status).toBe(200).orFail();
+const data = await res.json(); // safe after guard
+
+// Negation
+ctx.expect(data.deleted).not.toBe(true);
+```
+
+#### Warnings (`ctx.warn`)
+
+```typescript
+// Warning is recorded but does not fail the test
+ctx.warn(durationMs < 500, "Response should be under 500ms");
+ctx.warn(res.headers.has("cache-control"), "Should include cache headers");
+```
+
+#### Schema Validation (`ctx.validate`)
+
+Works with any schema library that implements `safeParse` or `parse` (Zod, Valibot, ArkType, etc.):
+
+```typescript
+// Given a Zod schema defined elsewhere:
+// const UserSchema = z.object({ id: z.number(), email: z.string().email() });
+
+const user = ctx.validate(await res.json(), UserSchema, "response body");
+ctx.expect(user?.id).toBeDefined();
+
+// Severity controls behavior on failure:
+ctx.validate(body, StrictSchema, "strict check", { severity: "warn" });  // warning only
+ctx.validate(body, UserSchema, "user", { severity: "fatal" });           // abort test
+```
+
+#### HTTP Request/Response Schema Validation
+
+```typescript
+const res = await ctx.http.post(`${baseUrl}/users`, {
+  json: payload,
+  schema: {
+    request: CreateUserSchema,
+    response: UserSchema,
+    query: { schema: OrgQuerySchema, severity: "warn" },
+  },
+});
 ```
 
 #### API Tracing
@@ -233,8 +365,10 @@ export const resilientTest = test("resilient").step(
   { retries: 3, timeout: 10000 },
   async (ctx, state) => {
     // This step will retry up to 3 times on failure
-    const res = await fetch("/flaky-endpoint");
-    ctx.assert(res.ok, "Should eventually succeed");
+    const res = await ctx.http.get("/flaky-endpoint", {
+      throwHttpErrors: false,
+    });
+    ctx.expect(res.status).toBe(200);
   }
 );
 ```
@@ -508,51 +642,64 @@ const { data } = await graphql.query(dynamicQuery, {
 
 ### Functions
 
-| Function       | Description                            |
-| -------------- | -------------------------------------- |
-| `test(id, fn)` | Quick mode - creates a simple test     |
-| `test(id)`     | Builder mode - returns a `TestBuilder` |
+| Function | Description |
+| --- | --- |
+| `test(id, fn)` | Quick mode: creates a single-function test |
+| `test(id)` | Builder mode: returns a `TestBuilder` |
+| `test.each(table)` | Data-driven tests (simple or builder mode) |
+| `test.pick(examples, count?)` | Select named examples (random by default) and delegate to `test.each` |
+| `configure(options)` | Declare file-level vars/secrets/http/graphql config (lazy at runtime) |
+| `fromCsv/fromYaml/fromJsonl/fromDir` | Load data for `test.each` |
+| `fromGql(path)` | Load GraphQL queries from `.gql` / `.graphql` files |
 
 ### TestBuilder Methods
 
-| Method                  | Description                                       |
-| ----------------------- | ------------------------------------------------- |
-| `.meta(opts)`           | Set test metadata (tags, timeout, etc.)           |
-| `.setup(fn)`            | Set setup function, returns state                 |
-| `.step(name, fn)`       | Add a test step                                   |
-| `.step(name, opts, fn)` | Add a step with options (retries, timeout)        |
-| `.use(fn)`              | Apply a builder transform for step composition    |
-| `.group(id, fn)`        | Same as `.use()` but tags steps with a group ID   |
-| `.teardown(fn)`         | Set teardown function (runs even on failure)      |
-| `.build()`              | Build and register (optional — auto-finalized)    |
+| Method | Description |
+| --- | --- |
+| `.meta(opts)` | Set test metadata (tags, timeout, etc.) |
+| `.setup(fn)` | Set setup function, returns state |
+| `.step(name, fn)` | Add a test step |
+| `.step(name, opts, fn)` | Add a step with options (retries, timeout) |
+| `.use(fn)` | Apply a builder transform for step composition |
+| `.group(id, fn)` | Same as `.use()` but tags steps with a group ID |
+| `.teardown(fn)` | Set teardown function (runs even on failure) |
+| `.build()` | Build and register (optional - auto-finalized) |
 
 ### TestContext Properties
 
-| Property          | Type              | Description                               |
-| ----------------- | ----------------- | ----------------------------------------- |
-| `vars`            | `VarsAccessor`    | Environment variables                     |
-| `secrets`         | `SecretsAccessor` | Secure secrets                            |
-| `log(msg, data?)` | `function`        | Log message with optional data            |
-| `assert(...)`     | `function`        | Record an assertion                       |
-| `trace(req)`      | `function`        | Record an API call                        |
-| `skip(reason?)`   | `function`        | Dynamically skip current test             |
-| `setTimeout(ms)`  | `function`        | Dynamically set timeout                   |
-| `retryCount`      | `number`          | Current retry count (0 for first attempt) |
+| Property | Type | Description |
+| --- | --- | --- |
+| `vars` | `VarsAccessor` | Environment variables |
+| `secrets` | `SecretsAccessor` | Secure secrets |
+| `http` | `HttpClient` | HTTP client with auto-tracing and auto-metrics |
+| `log(msg, data?)` | `function` | Log message with optional data |
+| `assert(...)` | `function` | Record a hard assertion |
+| `expect(value)` | `function` | Fluent assertions (soft by default, `.orFail()` for guards) |
+| `warn(condition, message)` | `function` | Record non-failing warnings |
+| `validate(data, schema, ...)` | `function` | Validate data via schema libraries |
+| `trace(req)` | `function` | Record an API trace manually |
+| `metric(name, value, options?)` | `function` | Record numeric metrics |
+| `skip(reason?)` | `function` | Dynamically skip current test |
+| `fail(message)` | `function` | Fail fast and abort test execution |
+| `pollUntil(options, fn)` | `function` | Poll until condition becomes truthy |
+| `setTimeout(ms)` | `function` | Dynamically set timeout |
+| `retryCount` | `number` | Current retry count (0 for first attempt) |
+| `getMemoryUsage()` | `function` | Read memory usage stats when available |
 
 ### VarsAccessor Methods
 
-| Method         | Description                  |
-| -------------- | ---------------------------- |
-| `get(key)`     | Returns value or `undefined` |
-| `require(key)` | Returns value or throws      |
-| `all()`        | Returns all variables        |
+| Method | Description |
+| --- | --- |
+| `get(key)` | Returns value or `undefined` |
+| `require(key, validate?)` | Returns value or throws; optional validator function |
+| `all()` | Returns all variables |
 
 ### SecretsAccessor Methods
 
-| Method         | Description                   |
-| -------------- | ----------------------------- |
-| `get(key)`     | Returns secret or `undefined` |
-| `require(key)` | Returns secret or throws      |
+| Method | Description |
+| --- | --- |
+| `get(key)` | Returns secret or `undefined` |
+| `require(key, validate?)` | Returns secret or throws; optional validator function |
 
 ## Best Practices
 
@@ -571,16 +718,25 @@ const baseUrl = ctx.vars.get("BASE_URL") || "";
 Each test should be able to run in isolation:
 
 ```typescript
-// Good - creates its own data
-export const updateUser = test("update-user", async (ctx) => {
-  const user = await createUser(); // Create test data
-  try {
-    await updateUser(user.id, { name: "New" });
-    ctx.assert(true, "Updated");
-  } finally {
-    await deleteUser(user.id); // Clean up
-  }
-});
+// Good - creates and cleans up its own data
+export const updateUser = test("update-user")
+  .setup(async (ctx) => {
+    const user = await ctx.http
+      .post(`${ctx.vars.require("BASE_URL")}/users`, { json: { name: "Test" } })
+      .json<{ id: string }>();
+    return { userId: user.id };
+  })
+  .step("Update name", async (ctx, { userId }) => {
+    const res = await ctx.http.patch(
+      `${ctx.vars.require("BASE_URL")}/users/${userId}`,
+      { json: { name: "New" } },
+    );
+    ctx.expect(res.status).toBe(200);
+    return { userId };
+  })
+  .teardown(async (ctx, { userId }) => {
+    await ctx.http.delete(`${ctx.vars.require("BASE_URL")}/users/${userId}`);
+  });
 ```
 
 ### 3. Use Tags for Organization
@@ -643,6 +799,19 @@ export const dbTests = test<{ conn: Connection }>("db-cleanup")
       ctx.log("Cleanup failed:", err.message);
     }
   });
+```
+
+### 7. Keep `test.pick()` Deterministic in CI
+
+`test.pick()` defaults to random selection, which is great for local exploration.
+For CI pipelines, pin explicit examples so failures are reproducible.
+
+```bash
+# Good (deterministic)
+glubean run ./users.test.ts --pick normal,edge
+
+# Local exploration (random)
+glubean run ./users.test.ts
 ```
 
 ## Version
