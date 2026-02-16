@@ -23,11 +23,18 @@
 ## Install
 
 ```bash
-# One-line install (macOS / Linux)
+# macOS / Linux
 curl -fsSL https://glubean.com/install.sh | sh
+```
 
-# Or install directly if you have Deno
-deno install -Agf jsr:@glubean/cli
+```powershell
+# Windows (PowerShell)
+irm https://glubean.com/install.ps1 | iex
+```
+
+```bash
+# Or install directly if you already have Deno
+deno install -Agf -n glubean jsr:@glubean/cli
 ```
 
 ## Quick Start
@@ -200,10 +207,11 @@ Both files use standard `KEY=VALUE` format. Secrets files should be in `.gitigno
 
 ## VS Code Extension
 
-Install from the [Marketplace](https://marketplace.visualstudio.com/items?itemName=glubean.glubean), or build from source in [`packages/vscode`](packages/vscode/).
+Install from the [Marketplace](https://marketplace.visualstudio.com/items?itemName=glubean.glubean). Source code lives in a [separate repo](https://github.com/glubean/vscode).
 
 The extension handles setup automatically — if Deno or the CLI aren't installed,
 it offers a one-click setup that installs everything silently in the background.
+If that fails, see the [Setup Guide](https://github.com/glubean/vscode/blob/main/docs/setup.md).
 
 Key features: inline ▶ play buttons, Test Explorer sidebar, auto-traced
 `.trace.jsonc` viewer, environment switcher, breakpoint debugging, diff with
