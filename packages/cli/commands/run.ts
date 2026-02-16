@@ -436,7 +436,9 @@ export async function runCommand(
   options: RunOptions = {},
 ): Promise<void> {
   const logEntries: LogEntry[] = [];
-  const runStartTime = new Date().toISOString();
+  const runStartDate = new Date();
+  const runStartTime = runStartDate.toISOString();
+  const runStartLocal = localTimeString(runStartDate);
 
   // Collect traces for .glubean/traces.json (used by `glubean coverage`)
   const traceCollector: Array<{
@@ -1295,7 +1297,7 @@ export async function runCommand(
     const result = {
       target,
       files: testFiles.map((f) => relative(Deno.cwd(), f)),
-      runAt: runStartTime,
+      runAt: runStartLocal,
       summary: {
         total: passed + failed + skipped,
         passed,
@@ -1345,7 +1347,6 @@ export async function runCommand(
       await writeTraceFiles(
         collectedRuns,
         rootDir,
-        runStartTime,
         effectiveRun.envFile,
       );
     } catch {
@@ -1447,28 +1448,41 @@ function toJunitXml(
 /** Maximum number of trace files to keep per source file subdirectory. */
 const TRACE_HISTORY_LIMIT = 20;
 
+/** Zero-pad a number to 2 digits. */
+function p2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** Format a Date as a human-readable local time string. */
+function localTimeString(d: Date): string {
+  return (
+    `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+    `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+  );
+}
+
 /**
  * Write `.trace.jsonc` files — human-readable {request, response} pairs.
  *
- * For each test file, extracts trace events, reshapes them into
- * request/response pairs, and writes to `.glubean/traces/{name}/{timestamp}.trace.jsonc`.
+ * Each test gets its own subdirectory under the file-level folder:
+ * `.glubean/traces/{fileName}/{testId}/{timestamp}.trace.jsonc`
+ *
+ * This keeps per-test history clean for diffing and browsing.
  * Automatically cleans up old files beyond TRACE_HISTORY_LIMIT.
  */
 async function writeTraceFiles(
   collectedRuns: CollectedTestRun[],
   rootDir: string,
-  runAt: string,
   envFile?: string,
 ): Promise<void> {
-  // Group collected runs by source file path
-  const byFile = new Map<string, CollectedTestRun[]>();
-  for (const run of collectedRuns) {
-    const existing = byFile.get(run.filePath) ?? [];
-    existing.push(run);
-    byFile.set(run.filePath, existing);
-  }
+  // Timestamp in local time (compact, minute precision, sortable)
+  const now = new Date();
+  const ts =
+    `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}` +
+    `T${p2(now.getHours())}${p2(now.getMinutes())}`;
+  const envLabel = envFile || ".env";
 
-  for (const [filePath, runs] of byFile) {
+  for (const run of collectedRuns) {
     // Extract trace events and reshape into {request, response} pairs
     const pairs: Array<{
       request: {
@@ -1486,48 +1500,49 @@ async function writeTraceFiles(
       };
     }> = [];
 
-    for (const run of runs) {
-      for (const event of run.events) {
-        if (event.type !== "trace") continue;
-        const d = event.data;
-        pairs.push({
-          request: {
-            method: d.method,
-            url: d.url,
-            ...(d.requestHeaders && Object.keys(d.requestHeaders).length > 0
-              ? { headers: d.requestHeaders }
-              : {}),
-            ...(d.requestBody !== undefined ? { body: d.requestBody } : {}),
-          },
-          response: {
-            status: d.status,
-            durationMs: d.duration,
-            ...(d.responseHeaders && Object.keys(d.responseHeaders).length > 0
-              ? { headers: d.responseHeaders }
-              : {}),
-            ...(d.responseBody !== undefined ? { body: d.responseBody } : {}),
-          },
-        });
-      }
+    for (const event of run.events) {
+      if (event.type !== "trace") continue;
+      const d = event.data;
+      pairs.push({
+        request: {
+          method: d.method,
+          url: d.url,
+          ...(d.requestHeaders && Object.keys(d.requestHeaders).length > 0
+            ? { headers: d.requestHeaders }
+            : {}),
+          ...(d.requestBody !== undefined ? { body: d.requestBody } : {}),
+        },
+        response: {
+          status: d.status,
+          durationMs: d.duration,
+          ...(d.responseHeaders && Object.keys(d.responseHeaders).length > 0
+            ? { headers: d.responseHeaders }
+            : {}),
+          ...(d.responseBody !== undefined ? { body: d.responseBody } : {}),
+        },
+      });
     }
 
     if (pairs.length === 0) continue;
 
-    // Build directory and file paths
-    const fileName = basename(filePath).replace(/\.ts$/, "");
-    const tracesDir = resolve(rootDir, ".glubean", "traces", fileName);
+    // .glubean/traces/{fileName}/{testId}/{timestamp}.trace.jsonc
+    const fileName = basename(run.filePath).replace(/\.ts$/, "");
+    const tracesDir = resolve(
+      rootDir,
+      ".glubean",
+      "traces",
+      fileName,
+      run.testId,
+    );
     await Deno.mkdir(tracesDir, { recursive: true });
 
-    // Timestamp: 20260211T1530 (compact, minute precision, sortable)
-    const ts = new Date().toISOString().replace(/[-:]/g, "").slice(0, 13);
     const traceFilePath = resolve(tracesDir, `${ts}.trace.jsonc`);
 
     // Build JSONC content with comment header
-    const envLabel = envFile || ".env";
-    const relFile = relative(rootDir, filePath);
+    const relFile = relative(rootDir, run.filePath);
     const header = [
-      `// ${relFile} — ${pairs.length} HTTP call${pairs.length > 1 ? "s" : ""}`,
-      `// Run at: ${runAt}`,
+      `// ${relFile} → ${run.testId} — ${pairs.length} HTTP call${pairs.length > 1 ? "s" : ""}`,
+      `// Run at: ${localTimeString(now)}`,
       `// Environment: ${envLabel}`,
       "",
     ].join("\n");

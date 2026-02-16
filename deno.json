@@ -27,6 +27,7 @@
     "test": "deno test -A",
     "fmt": "deno fmt",
     "lint": "deno lint",
+    "version": "deno run -A ./scripts/bump-version.ts",
     "cli": "deno run -A ./packages/cli/mod.ts",
     "mcp": "deno run -A ./packages/mcp/mod.ts",
     "example": "deno run -A ./packages/cli/mod.ts run ./examples/hello.ts",
