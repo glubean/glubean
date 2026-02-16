@@ -1,6 +1,6 @@
 {
   "name": "@glubean/worker",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "exports": {
     ".": "./mod.ts",
     "./cli": "./cli.ts"
