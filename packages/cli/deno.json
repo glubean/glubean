@@ -9,8 +9,8 @@
   },
   "imports": {
     "@glubean/sdk": "jsr:@glubean/sdk@^0.10.0",
-    "@glubean/runner": "jsr:@glubean/runner@^0.10.0",
-    "@glubean/scanner": "jsr:@glubean/scanner@^0.10.0",
+    "@glubean/runner": "jsr:@glubean/runner@^0.11.0",
+    "@glubean/scanner": "jsr:@glubean/scanner@^0.11.0",
     "@glubean/redaction": "jsr:@glubean/redaction@^0.10.0",
     "@cliffy/command": "jsr:@cliffy/command@^1.0.0-rc.8",
     "@std/cli": "jsr:@std/cli@^1.0.0",

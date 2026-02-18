@@ -1,6 +1,11 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { TestExecutor } from "./executor.ts";
-import type { ExecutionEvent, TimelineEvent } from "./executor.ts";
+import type { ExecutionEvent, ExecutorOptions, TimelineEvent } from "./executor.ts";
+import {
+  LOCAL_RUN_DEFAULTS,
+  SHARED_RUN_DEFAULTS,
+  WORKER_RUN_DEFAULTS,
+} from "./config.ts";
 
 // Helper to filter assertions from events
 function getAssertions(events: TimelineEvent[]) {
@@ -2379,3 +2384,72 @@ Deno.test(
     await Deno.remove(testFile, { recursive: true });
   },
 );
+
+// --- fromSharedConfig tests ---
+
+Deno.test("fromSharedConfig: uses allowNet for network permission", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    allowNet: "api.example.com",
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.permissions?.includes("--allow-net=api.example.com"), true);
+  assertEquals(opts.permissions?.includes("--allow-read"), true);
+});
+
+Deno.test("fromSharedConfig: strips --allow-net from permissions array", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    permissions: ["--allow-read", "--allow-net=evil.com"],
+    allowNet: "safe.com",
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.permissions?.includes("--allow-net=evil.com"), false);
+  assertEquals(opts.permissions?.includes("--allow-net=safe.com"), true);
+});
+
+Deno.test("fromSharedConfig: preserves --allow-env from permissions", () => {
+  const executor = TestExecutor.fromSharedConfig(LOCAL_RUN_DEFAULTS);
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.permissions?.includes("--allow-env"), true);
+});
+
+Deno.test("fromSharedConfig: WORKER_RUN_DEFAULTS has no --allow-env", () => {
+  const executor = TestExecutor.fromSharedConfig(WORKER_RUN_DEFAULTS);
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(
+    opts.permissions?.some((p) => p.startsWith("--allow-env")),
+    false,
+  );
+});
+
+Deno.test("fromSharedConfig: empty allowNet omits --allow-net", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    allowNet: "",
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(
+    opts.permissions?.some((p) => p.startsWith("--allow-net")),
+    false,
+  );
+});
+
+Deno.test("fromSharedConfig: passes overrides through", () => {
+  const executor = TestExecutor.fromSharedConfig(SHARED_RUN_DEFAULTS, {
+    cwd: "/test/dir",
+    maskEnvPrefixes: ["SECRET_"],
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.cwd, "/test/dir");
+  assertEquals(opts.maskEnvPrefixes, ["SECRET_"]);
+});
+
+Deno.test("fromSharedConfig: wires emitFullTrace", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    emitFullTrace: true,
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.emitFullTrace, true);
+});

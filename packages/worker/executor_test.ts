@@ -4,9 +4,9 @@ import { ensureDir } from "@std/fs";
 import { executeBundle } from "./executor.ts";
 import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
+import { WORKER_RUN_DEFAULTS } from "@glubean/runner";
 import { createNoopLogger } from "./logger.ts";
 
-// Helper to create a minimal config
 function createTestConfig(): WorkerConfig {
   return {
     controlPlaneUrl: "https://test.glubean.com",
@@ -20,10 +20,11 @@ function createTestConfig(): WorkerConfig {
     logLevel: "error",
     workDir: Deno.makeTempDirSync({ prefix: "glubean-test-" }),
     downloadTimeoutMs: 30000,
-    allowNet: "*",
-    executionTimeoutMs: 30000,
-    executionConcurrency: 1,
-    stopOnFailure: false,
+    run: {
+      ...WORKER_RUN_DEFAULTS,
+      allowNet: "*",
+    },
+    taskTimeoutMs: 30000,
     eventFlushIntervalMs: 1000,
     eventFlushMaxBuffer: 50,
     eventMaxBuffer: 1000,
