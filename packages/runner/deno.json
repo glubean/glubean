@@ -5,7 +5,7 @@
   "license": "MIT",
   "description": "Glubean Runner - Test executor with sandboxed Deno subprocess",
   "imports": {
-    "@glubean/sdk": "jsr:@glubean/sdk@^0.10.0",
+    "@glubean/sdk": "jsr:@glubean/sdk@^0.11.0",
     "@std/cli": "jsr:@std/cli@^1.0.0",
     "@std/assert": "jsr:@std/assert@^1.0.0",
     "ky": "npm:ky@^1.14.0"
