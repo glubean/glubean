@@ -4,7 +4,7 @@ import { ensureDir } from "@std/fs";
 import { executeBundle } from "./executor.ts";
 import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
-import { WORKER_RUN_DEFAULTS } from "@glubean/runner";
+import { TestExecutor, WORKER_RUN_DEFAULTS } from "@glubean/runner";
 import { createNoopLogger } from "./logger.ts";
 
 function createTestConfig(): WorkerConfig {
@@ -174,6 +174,20 @@ export const simpleTest = test({ id: "simpleTest", name: "Simple Test" }, async 
     await shutdown();
     await Deno.remove(config.workDir, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test("executeBundle - configures maskEnvPrefixes for GLUBEAN_WORKER_TOKEN", () => {
+  // Regression guard: the worker must always mask its own token so that
+  // untrusted test code cannot exfiltrate it via --allow-env.
+  // This verifies the hardcoded value in executeBundle's call to
+  // TestExecutor.fromSharedConfig(..., { maskEnvPrefixes: [...] }).
+  const config = createTestConfig();
+  const executor = TestExecutor.fromSharedConfig(config.run, {
+    maskEnvPrefixes: ["GLUBEAN_WORKER_TOKEN"],
+  });
+  // deno-lint-ignore no-explicit-any
+  const opts = (executor as any).options;
+  assertEquals(opts.maskEnvPrefixes, ["GLUBEAN_WORKER_TOKEN"]);
 });
 
 Deno.test("executeBundle - detects checksum mismatch", async () => {

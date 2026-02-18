@@ -40,8 +40,15 @@ export interface SharedRunConfig {
    * Base Deno permission flags for the sandboxed subprocess.
    * Default: ["--allow-read"]
    *
-   * SECURITY: This default is intentionally minimal. Consumers add
-   * context-appropriate permissions on top:
+   * SECURITY: Read access is intentionally unrestricted because:
+   * - Deno needs to read its module cache (~/.cache/deno)
+   * - Test code may import from parent directories (../shared/)
+   * - Data files (fromCsv/fromYaml) may use absolute paths
+   * - In local dev, tests are user-authored (trusted)
+   * - In Cloud Worker, the real security boundary is --allow-env
+   *   exclusion + maskEnvPrefixes (credentials live in env, not files)
+   *
+   * Consumers add context-appropriate permissions on top:
    * - CLI/MCP add "--allow-env" (local dev, user's own machine)
    * - Cloud Worker does NOT add "--allow-env" (multi-tenant, holds credentials)
    * - Self-hosted Worker may add "--allow-env" (safe when maskEnvPrefixes is set)
@@ -90,8 +97,11 @@ export const WORKER_RUN_DEFAULTS: SharedRunConfig = {
 /**
  * Resolve the `allowNet` policy string into a Deno permission flag.
  *
- * @returns `"--allow-net"` for unrestricted, `"--allow-net=host1,host2"`
- *          for an allowlist, or `null` for no network access.
+ * Fail-closed: if the input contains only commas/whitespace (no valid hosts),
+ * returns `null` (no network) rather than granting unrestricted access.
+ *
+ * @returns `"--allow-net"` for `"*"`, `"--allow-net=host1,host2"`
+ *          for a valid allowlist, or `null` for no network access.
  */
 export function resolveAllowNetFlag(allowNet: string): string | null {
   const raw = allowNet.trim();
@@ -100,7 +110,7 @@ export function resolveAllowNetFlag(allowNet: string): string | null {
   const normalized = raw.split(",").map((h) => h.trim()).filter(Boolean).join(
     ",",
   );
-  return normalized ? `--allow-net=${normalized}` : "--allow-net";
+  return normalized ? `--allow-net=${normalized}` : null;
 }
 
 /**

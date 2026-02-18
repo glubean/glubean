@@ -40,8 +40,8 @@ Deno.test("resolveAllowNetFlag: single host", () => {
   );
 });
 
-Deno.test("resolveAllowNetFlag: only whitespace/commas returns unrestricted", () => {
-  assertEquals(resolveAllowNetFlag("  ,  , "), "--allow-net");
+Deno.test("resolveAllowNetFlag: only whitespace/commas returns null (fail-closed)", () => {
+  assertEquals(resolveAllowNetFlag("  ,  , "), null);
 });
 
 // --- Presets ---
