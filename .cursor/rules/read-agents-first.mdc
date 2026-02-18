@@ -1,0 +1,15 @@
+---
+description: Always read AGENTS.md before making any changes
+alwaysApply: true
+---
+
+# Read AGENTS.md First
+
+Before doing ANY work in this repository, you MUST read `/AGENTS.md` at the project root.
+
+This file contains:
+- Coding standards and conventions
+- Git workflow rules (strict GitHub Flow)
+- Permission requirements for git operations
+
+Do not skip this step. Do not assume you know the contents. Read it every time.
