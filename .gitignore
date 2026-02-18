@@ -31,6 +31,10 @@ Thumbs.db
 *.swp
 *.swo
 
+# Cursor (track rules, ignore workspace state)
+.cursor/*
+!.cursor/rules/
+
 # Local dev scripts and internal docs (kept on disk, not in repo)
 bin/
 glubean-dev
