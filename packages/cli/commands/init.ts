@@ -127,12 +127,14 @@ async function resolveContent(
 // Templates — Standard project
 // ---------------------------------------------------------------------------
 
+const SDK_VERSION = "^0.11.0";
+
 function makeDenoJson(_baseUrl: string): string {
   return (
     JSON.stringify(
       {
         imports: {
-          "@glubean/sdk": "jsr:@glubean/sdk@^0.10.0",
+          "@glubean/sdk": `jsr:@glubean/sdk@${SDK_VERSION}`,
         },
         tasks: {
           test: "deno run -A jsr:@glubean/cli run",
@@ -257,7 +259,7 @@ jobs:
 
 const PLAYGROUND_DENO_JSON = `{
   "imports": {
-    "@glubean/sdk": "jsr:@glubean/sdk@^0.10.0"
+    "@glubean/sdk": "jsr:@glubean/sdk@${SDK_VERSION}"
   },
   "tasks": {
     "test": "deno run -A jsr:@glubean/cli run",

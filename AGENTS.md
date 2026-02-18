@@ -84,7 +84,7 @@ The CLI `init` command (`packages/cli/commands/init.ts`) generates starter proje
 **When bumping versions or changing conventions, always check:**
 
 - `packages/cli/commands/init.ts` — SDK version in `makeDenoJson()` and `PLAYGROUND_DENO_JSON` (e.g.
-  `jsr:@glubean/sdk@^0.10.0`)
+  `jsr:@glubean/sdk@^0.11.0`)
 - `packages/cli/templates/*.test.ts` — import paths, API usage, assertion methods must reflect the current SDK
 - `packages/cli/templates/AGENTS.md` — the assertion method list and API examples must match the current SDK surface
 - `packages/cli/commands/init_test.ts` — version assertion in the test that verifies generated `deno.json`

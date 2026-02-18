@@ -104,6 +104,36 @@ Deno.test("deepEqual - Map and Set", () => {
   assertEquals(deepEqual(new Set([1, 2]), new Set([1, 3])), false);
 });
 
+Deno.test("deepEqual - circular references do not cause stack overflow", () => {
+  // deno-lint-ignore no-explicit-any
+  const a: any = { x: 1 };
+  a.self = a;
+  // deno-lint-ignore no-explicit-any
+  const b: any = { x: 1 };
+  b.self = b;
+  assertEquals(deepEqual(a, b), true);
+
+  // deno-lint-ignore no-explicit-any
+  const c: any = { x: 2 };
+  c.self = c;
+  assertEquals(deepEqual(a, c), false);
+
+  // Mutual circular references
+  // deno-lint-ignore no-explicit-any
+  const d: any = { val: "d" };
+  // deno-lint-ignore no-explicit-any
+  const e: any = { val: "d" };
+  d.ref = e;
+  e.ref = d;
+  // deno-lint-ignore no-explicit-any
+  const f: any = { val: "d" };
+  // deno-lint-ignore no-explicit-any
+  const g: any = { val: "d" };
+  f.ref = g;
+  g.ref = f;
+  assertEquals(deepEqual(d, f), true);
+});
+
 // =============================================================================
 // toBe — strict equality
 // =============================================================================

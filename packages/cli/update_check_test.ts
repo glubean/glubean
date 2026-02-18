@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { checkForUpdates } from "./update_check.ts";
+import { checkForUpdates, isNewer } from "./update_check.ts";
 
 async function createTempDir(): Promise<string> {
   return await Deno.makeTempDir({ prefix: "glubean-update-check-" });
@@ -75,4 +75,42 @@ Deno.test("checkForUpdates fetches again after interval", async () => {
   } finally {
     await cleanupDir(dir);
   }
+});
+
+// =============================================================================
+// isNewer — semver comparison
+// =============================================================================
+
+Deno.test("isNewer - basic version comparison", () => {
+  assertEquals(isNewer("2.0.0", "1.0.0"), true);
+  assertEquals(isNewer("1.1.0", "1.0.0"), true);
+  assertEquals(isNewer("1.0.1", "1.0.0"), true);
+  assertEquals(isNewer("1.0.0", "1.0.0"), false);
+  assertEquals(isNewer("1.0.0", "2.0.0"), false);
+});
+
+Deno.test("isNewer - stable release beats pre-release", () => {
+  assertEquals(isNewer("1.0.0", "1.0.0-rc.9"), true);
+  assertEquals(isNewer("1.0.0", "1.0.0-alpha.1"), true);
+});
+
+Deno.test("isNewer - pre-release does not beat stable", () => {
+  assertEquals(isNewer("1.0.0-rc.1", "1.0.0"), false);
+});
+
+Deno.test("isNewer - pre-release ordering (rc.2 > rc.1)", () => {
+  assertEquals(isNewer("1.0.0-rc.2", "1.0.0-rc.1"), true);
+  assertEquals(isNewer("1.0.0-rc.1", "1.0.0-rc.2"), false);
+  assertEquals(isNewer("1.0.0-rc.1", "1.0.0-rc.1"), false);
+  assertEquals(isNewer("1.0.0-beta.1", "1.0.0-alpha.1"), true);
+});
+
+Deno.test("isNewer - build metadata is ignored", () => {
+  assertEquals(isNewer("1.0.1+build.123", "1.0.0"), true);
+  assertEquals(isNewer("1.0.0+build.999", "1.0.0+build.1"), false);
+});
+
+Deno.test("isNewer - numeric pre-release ids compared as integers", () => {
+  assertEquals(isNewer("1.0.0-rc.10", "1.0.0-rc.9"), true);
+  assertEquals(isNewer("1.0.0-rc.9", "1.0.0-rc.10"), false);
 });

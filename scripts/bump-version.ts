@@ -5,7 +5,7 @@
  *
  * Updates:
  * - Every packages/x/deno.json version field
- * - Cross-references like @glubean/sdk: jsr:@glubean/sdk@^0.10.0
+ * - Cross-references like @glubean/sdk: jsr:@glubean/sdk@^0.11.0
  *
  * Usage:
  *   deno task version 0.10.1
@@ -95,7 +95,7 @@ for (const pkgPath of packagePaths) {
   );
 
   // Update @glubean/* cross-references in imports
-  // e.g. "jsr:@glubean/sdk@^0.10.0" → "jsr:@glubean/sdk@^0.11.0"
+  // e.g. "jsr:@glubean/sdk@^0.11.0" → "jsr:@glubean/sdk@^0.12.0"
   content = content.replace(
     /("jsr:@glubean\/[^@]+@)\^?\d+\.\d+\.\d+"/g,
     `$1${caretRange}"`,
@@ -103,6 +103,34 @@ for (const pkgPath of packagePaths) {
 
   await Deno.writeTextFile(pkgPath, content);
   console.log(`  ✓ ${name} (packages/${pkgDir}/deno.json)`);
+}
+
+// Update SDK_VERSION constant in CLI init template
+const initTsPath = resolve(PACKAGES_DIR, "cli", "commands", "init.ts");
+try {
+  let initContent = await Deno.readTextFile(initTsPath);
+  initContent = initContent.replace(
+    /const SDK_VERSION = "[^"]+"/,
+    `const SDK_VERSION = "${caretRange}"`,
+  );
+  await Deno.writeTextFile(initTsPath, initContent);
+  console.log(`  ✓ packages/cli/commands/init.ts (SDK_VERSION)`);
+} catch {
+  console.error(`  ✗ Failed to update init.ts`);
+}
+
+// Update scanner testdata sample import
+const testdataPath = resolve(PACKAGES_DIR, "scanner", "testdata", "sample-project", "api.test.ts");
+try {
+  let tdContent = await Deno.readTextFile(testdataPath);
+  tdContent = tdContent.replace(
+    /jsr:@glubean\/sdk@\^[\d.]+/g,
+    `jsr:@glubean/sdk@${caretRange}`,
+  );
+  await Deno.writeTextFile(testdataPath, tdContent);
+  console.log(`  ✓ packages/scanner/testdata/sample-project/api.test.ts`);
+} catch {
+  console.error(`  ✗ Failed to update scanner testdata`);
 }
 
 console.log(`\nDone. All packages bumped to ${newVersion}`);
