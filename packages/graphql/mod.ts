@@ -345,8 +345,7 @@ export function createGraphQLClient(
     query: string,
     requestOptions?: GraphQLRequestOptions,
   ): Promise<GraphQLResponse<T>> {
-    const opName =
-      requestOptions?.operationName ?? parseOperationName(query) ?? "anonymous";
+    const opName = requestOptions?.operationName ?? parseOperationName(query) ?? "anonymous";
 
     const mergedHeaders: Record<string, string> = {
       ...defaultHeaders,
@@ -378,10 +377,8 @@ export function createGraphQLClient(
   }
 
   return {
-    query: <T>(query: string, options?: GraphQLRequestOptions) =>
-      execute<T>(query, options),
-    mutate: <T>(mutation: string, options?: GraphQLRequestOptions) =>
-      execute<T>(mutation, options),
+    query: <T>(query: string, options?: GraphQLRequestOptions) => execute<T>(query, options),
+    mutate: <T>(mutation: string, options?: GraphQLRequestOptions) => execute<T>(mutation, options),
   };
 }
 

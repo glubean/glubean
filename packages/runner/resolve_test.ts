@@ -7,11 +7,7 @@
  * and MCP tests for cross-package semantic consistency.
  */
 import { assertEquals, assertExists } from "@std/assert";
-import {
-  findTestByExport,
-  findTestById,
-  resolveModuleTests,
-} from "./resolve.ts";
+import { findTestByExport, findTestById, resolveModuleTests } from "./resolve.ts";
 
 // Import the fixture module that contains every test shape
 const mod = await import("./testdata/all-shapes.test.ts") as Record<

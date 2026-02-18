@@ -1124,11 +1124,11 @@ export interface SchemaLike<T> {
   safeParse?: (data: unknown) =>
     | { success: true; data: T }
     | {
-        success: false;
-        error: {
-          issues: Array<{ message: string; path?: Array<string | number> }>;
-        };
+      success: false;
+      error: {
+        issues: Array<{ message: string; path?: Array<string | number> }>;
       };
+    };
   /** Fallback — throws on failure, returns parsed value on success. */
   parse?: (data: unknown) => T;
 }
@@ -1510,13 +1510,10 @@ export type ExtensionFn<T> =
 export type ResolveExtension<F> = F extends (
   ctx: TestContext,
   use: (instance: infer T) => Promise<void>,
-) => Promise<void>
-  ? T
-  : F extends (ctx: TestContext) => Promise<infer T>
-    ? T
-    : F extends (ctx: TestContext) => infer T
-      ? T
-      : never;
+) => Promise<void> ? T
+  : F extends (ctx: TestContext) => Promise<infer T> ? T
+  : F extends (ctx: TestContext) => infer T ? T
+  : never;
 
 /**
  * Map of extension factory functions to their resolved instance types.

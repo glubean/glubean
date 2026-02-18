@@ -116,11 +116,9 @@ function createClientCredentialsOptions(
           }
 
           // Extract resolved values from marker headers
-          const resolvedTokenUrl =
-            request.headers.get(TOKEN_URL_HEADER) ?? tokenUrl;
+          const resolvedTokenUrl = request.headers.get(TOKEN_URL_HEADER) ?? tokenUrl;
           const resolvedClientId = request.headers.get(CLIENT_ID_HEADER) ?? "";
-          const resolvedClientSecret =
-            request.headers.get(CLIENT_SECRET_HEADER) ?? "";
+          const resolvedClientSecret = request.headers.get(CLIENT_SECRET_HEADER) ?? "";
 
           // Fetch new token
           const body = new URLSearchParams({
@@ -211,11 +209,9 @@ function createRefreshTokenOptions(
 
   async function fetchToken(request: Request): Promise<string> {
     const resolvedTokenUrl = request.headers.get(TOKEN_URL_HEADER) ?? tokenUrl;
-    const resolvedRefreshToken =
-      request.headers.get(REFRESH_TOKEN_HEADER) ?? "";
+    const resolvedRefreshToken = request.headers.get(REFRESH_TOKEN_HEADER) ?? "";
     const resolvedClientId = request.headers.get(CLIENT_ID_HEADER) ?? "";
-    const resolvedClientSecret =
-      request.headers.get(CLIENT_SECRET_HEADER) ?? "";
+    const resolvedClientSecret = request.headers.get(CLIENT_SECRET_HEADER) ?? "";
 
     const body = new URLSearchParams({
       grant_type: "refresh_token",

@@ -343,8 +343,7 @@ function buildLazyPluginDescriptors(
           http: runtime.http,
           requireVar,
           requireSecret,
-          resolveTemplate: (template: string) =>
-            resolveTemplate(template, runtime.vars, runtime.secrets),
+          resolveTemplate: (template: string) => resolveTemplate(template, runtime.vars, runtime.secrets),
         };
 
         const instance = factory.create(augmented);
@@ -422,10 +421,12 @@ export function configure<
     secrets?: { [K in keyof S]: string };
     plugins?: P & { [K in ReservedConfigureKeys]?: never };
   },
-): ConfigureResult<
-  { [K in keyof V]: string },
-  { [K in keyof S]: string }
-> & ResolvePlugins<P> {
+):
+  & ConfigureResult<
+    { [K in keyof V]: string },
+    { [K in keyof S]: string }
+  >
+  & ResolvePlugins<P> {
   const vars = options.vars
     ? buildLazyVars<{ [K in keyof V]: string }>(options.vars)
     : ({} as Readonly<{ [K in keyof V]: string }>);
@@ -445,10 +446,12 @@ export function configure<
     Object.defineProperties(base, pluginDescriptors);
   }
 
-  return base as ConfigureResult<
-    { [K in keyof V]: string },
-    { [K in keyof S]: string }
-  > & ResolvePlugins<P>;
+  return base as
+    & ConfigureResult<
+      { [K in keyof V]: string },
+      { [K in keyof S]: string }
+    >
+    & ResolvePlugins<P>;
 }
 
 /**

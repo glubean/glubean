@@ -6,11 +6,7 @@
  */
 
 import type { WorkerConfig } from "./config.ts";
-import {
-  createBuiltinPlugins,
-  DEFAULT_CONFIG,
-  RedactionEngine,
-} from "@glubean/redaction";
+import { createBuiltinPlugins, DEFAULT_CONFIG, RedactionEngine } from "@glubean/redaction";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 

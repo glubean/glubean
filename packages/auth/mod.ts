@@ -30,9 +30,6 @@ export { bearer } from "./bearer.ts";
 export { basicAuth } from "./basic.ts";
 export { apiKey } from "./api_key.ts";
 export { oauth2 } from "./oauth2.ts";
-export type {
-  OAuth2ClientCredentialsOptions,
-  OAuth2RefreshTokenOptions,
-} from "./oauth2.ts";
+export type { OAuth2ClientCredentialsOptions, OAuth2RefreshTokenOptions } from "./oauth2.ts";
 export { withLogin } from "./with_login.ts";
 export type { WithLoginOptions } from "./with_login.ts";

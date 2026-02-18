@@ -5,18 +5,8 @@
  * metadata from the SDK's global registry instead of static analysis.
  */
 
-import {
-  isSpecVersionSupported,
-  SPEC_VERSION,
-  SUPPORTED_SPEC_VERSIONS,
-} from "./spec.ts";
-import type {
-  ExportMeta,
-  FileMeta,
-  ScanOptions,
-  ScanResult,
-  ValidationResult,
-} from "./types.ts";
+import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.ts";
+import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.ts";
 
 /** File system interface for runtime abstraction */
 export interface FileSystem {
@@ -83,9 +73,11 @@ export class Scanner {
   ) {
     if (!isSpecVersionSupported(specVersion)) {
       throw new Error(
-        `Unsupported spec version: ${specVersion}. Supported: ${SUPPORTED_SPEC_VERSIONS.join(
-          ", ",
-        )}`,
+        `Unsupported spec version: ${specVersion}. Supported: ${
+          SUPPORTED_SPEC_VERSIONS.join(
+            ", ",
+          )
+        }`,
       );
     }
     this.fs = fs;
@@ -118,8 +110,7 @@ export class Scanner {
 
         // Check imports or dependencies for @glubean/sdk
         const imports = json.imports || {};
-        const sdkImport =
-          imports["@glubean/sdk"] || imports["jsr:@glubean/sdk"];
+        const sdkImport = imports["@glubean/sdk"] || imports["jsr:@glubean/sdk"];
 
         if (sdkImport) {
           // Extract version from import like "jsr:@glubean/sdk@0.1.0"
@@ -139,10 +130,12 @@ export class Scanner {
     let foundSdkImport = false;
 
     try {
-      for await (const filePath of this.fs.walk(dir, {
-        extensions: DEFAULT_EXTENSIONS,
-        skipDirs: DEFAULT_SKIP_DIRS,
-      })) {
+      for await (
+        const filePath of this.fs.walk(dir, {
+          extensions: DEFAULT_EXTENSIONS,
+          skipDirs: DEFAULT_SKIP_DIRS,
+        })
+      ) {
         // Only consider *.test.ts files
         if (!filePath.endsWith(".test.ts")) continue;
 

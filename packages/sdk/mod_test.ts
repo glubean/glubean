@@ -3,12 +3,7 @@ import { assertEquals, assertExists, assertThrows } from "@std/assert";
 import { EachBuilder, SPEC_VERSION, test, TestBuilder } from "./mod.ts";
 import { clearRegistry, getRegistry } from "./internal.ts";
 import { Expectation } from "./expect.ts";
-import type {
-  SecretsAccessor,
-  TestContext,
-  ValidatorFn,
-  VarsAccessor,
-} from "./types.ts";
+import type { SecretsAccessor, TestContext, ValidatorFn, VarsAccessor } from "./types.ts";
 
 function runValidator(
   result: boolean | string | void | null,
@@ -233,9 +228,7 @@ Deno.test("test() - builder mode with setup and teardown", () => {
 Deno.test("test() - builder with step options", () => {
   clearRegistry();
   const result = test("with-options")
-    .step("Retry step", { retries: 3, timeout: 5000 }, (_ctx, _state) =>
-      Promise.resolve(),
-    )
+    .step("Retry step", { retries: 3, timeout: 5000 }, (_ctx, _state) => Promise.resolve())
     .build();
 
   assertEquals(result.steps?.[0].meta.name, "Retry step");
@@ -1015,8 +1008,7 @@ Deno.test("test.pick - mixed exact and glob in GLUBEAN_PICK", () => {
 
 Deno.test("TestBuilder.use() - applies transform function", () => {
   clearRegistry();
-  const withLogin = (b: TestBuilder<unknown>) =>
-    b.step("login", async (_ctx) => ({ token: "abc" }));
+  const withLogin = (b: TestBuilder<unknown>) => b.step("login", async (_ctx) => ({ token: "abc" }));
 
   const result = test("use-test").use(withLogin).build();
 
@@ -1026,8 +1018,7 @@ Deno.test("TestBuilder.use() - applies transform function", () => {
 
 Deno.test("TestBuilder.use() - chains multiple transforms", () => {
   clearRegistry();
-  const withAuth = (b: TestBuilder<unknown>) =>
-    b.step("login", async (_ctx) => ({ token: "abc" }));
+  const withAuth = (b: TestBuilder<unknown>) => b.step("login", async (_ctx) => ({ token: "abc" }));
   const withCart = (b: TestBuilder<{ token: string }>) =>
     b.step("create cart", async (_ctx, { token }) => ({
       token,
@@ -1050,8 +1041,7 @@ Deno.test("TestBuilder.use() - state flows through transform", async () => {
   clearRegistry();
   const ctx = createMockContext();
 
-  const withSetup = (b: TestBuilder<unknown>) =>
-    b.step("init", async (_ctx) => ({ value: 42 }));
+  const withSetup = (b: TestBuilder<unknown>) => b.step("init", async (_ctx) => ({ value: 42 }));
 
   const t = test("use-state")
     .use(withSetup)
@@ -1074,8 +1064,7 @@ Deno.test("TestBuilder.group() - marks steps with group id", () => {
         .step("create user", async (_ctx, { dbId }) => ({
           dbId,
           userId: "u1",
-        })),
-    )
+        })))
     .step("verify", async (_ctx, _state) => {})
     .build();
 
@@ -1110,9 +1099,7 @@ Deno.test("TestBuilder.group() - multiple groups", () => {
   clearRegistry();
   const result = test("multi-group")
     .group("phase-1", (b) => b.step("a", async (_ctx) => ({ v: 1 })))
-    .group("phase-2", (b) =>
-      b.step("b", async (_ctx, state) => ({ ...state, w: 2 })),
-    )
+    .group("phase-2", (b) => b.step("b", async (_ctx, state) => ({ ...state, w: 2 })))
     .step("final", async (_ctx, _state) => {})
     .build();
 
@@ -1143,8 +1130,7 @@ Deno.test("TestBuilder.group() - steps appear in registry", async () => {
 
 Deno.test("EachBuilder.use() - applies transform", () => {
   clearRegistry();
-  const withStep = (b: EachBuilder<unknown, { n: number }>) =>
-    b.step("check", async (_ctx, _state, _row) => {});
+  const withStep = (b: EachBuilder<unknown, { n: number }>) => b.step("check", async (_ctx, _state, _row) => {});
 
   const tests = test
     .each([{ n: 1 }])("each-use-$n")

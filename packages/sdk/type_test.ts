@@ -185,8 +185,7 @@ function _configureTypeTest() {
   // Each plugin value should be accessible with correct type
   const _gql: { query: (doc: string) => Promise<object> } = result.gql;
   const _cache: Map<string, unknown> = result.cache;
-  const _metrics: { count: (name: string) => void; gauge: (name: string, value: number) => void } =
-    result.metrics;
+  const _metrics: { count: (name: string) => void; gauge: (name: string, value: number) => void } = result.metrics;
 
   // Core fields still available
   const _vars = result.vars;

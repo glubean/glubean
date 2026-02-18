@@ -1,17 +1,12 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { TestExecutor } from "./executor.ts";
 import type { ExecutionEvent, ExecutorOptions, TimelineEvent } from "./executor.ts";
-import {
-  LOCAL_RUN_DEFAULTS,
-  SHARED_RUN_DEFAULTS,
-  WORKER_RUN_DEFAULTS,
-} from "./config.ts";
+import { LOCAL_RUN_DEFAULTS, SHARED_RUN_DEFAULTS, WORKER_RUN_DEFAULTS } from "./config.ts";
 
 // Helper to filter assertions from events
 function getAssertions(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "assertion" }> =>
-      e.type === "assertion",
+    (e): e is Extract<TimelineEvent, { type: "assertion" }> => e.type === "assertion",
   );
 }
 
@@ -141,10 +136,12 @@ Deno.test("TestExecutor - streaming run yields events", async () => {
   const executor = new TestExecutor();
 
   const events: ExecutionEvent[] = [];
-  for await (const event of executor.run(`file://${testFile}`, "passingTest", {
-    vars: {},
-    secrets: {},
-  })) {
+  for await (
+    const event of executor.run(`file://${testFile}`, "passingTest", {
+      vars: {},
+      secrets: {},
+    })
+  ) {
     events.push(event);
   }
 
@@ -388,9 +385,11 @@ Deno.test("ctx.fail - can be caught in try/catch (user choice)", async () => {
   assertEquals(
     result.success,
     true,
-    `Test should pass when ctx.fail is caught. Events: ${JSON.stringify(
-      result.events,
-    )}`,
+    `Test should pass when ctx.fail is caught. Events: ${
+      JSON.stringify(
+        result.events,
+      )
+    }`,
   );
 
   // Should have the assertion from after the catch
@@ -746,15 +745,13 @@ Deno.test("builder with .build() still works as before", async () => {
 
 function getStepStarts(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "step_start" }> =>
-      e.type === "step_start",
+    (e): e is Extract<TimelineEvent, { type: "step_start" }> => e.type === "step_start",
   );
 }
 
 function getStepEnds(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "step_end" }> =>
-      e.type === "step_end",
+    (e): e is Extract<TimelineEvent, { type: "step_end" }> => e.type === "step_end",
   );
 }
 
@@ -1084,8 +1081,7 @@ Deno.test("summary event - includes assertion and step counts", async () => {
   );
 
   const summaries = result.events.filter(
-    (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-      e.type === "summary",
+    (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
   );
   assertEquals(summaries.length, 1, "Should have exactly one summary event");
 
@@ -1111,8 +1107,7 @@ Deno.test("summary event - step failure counts", async () => {
   );
 
   const summaries = result.events.filter(
-    (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-      e.type === "summary",
+    (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
   );
   assertEquals(summaries.length, 1);
 
@@ -1133,8 +1128,7 @@ Deno.test("summary event - step failure counts", async () => {
 
 function getWarnings(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "warning" }> =>
-      e.type === "warning",
+    (e): e is Extract<TimelineEvent, { type: "warning" }> => e.type === "warning",
   );
 }
 
@@ -1211,8 +1205,7 @@ Deno.test("ctx.warn - summary includes warning counters", async () => {
   });
 
   const summaries = result.events.filter(
-    (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-      e.type === "summary",
+    (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
   );
   assertEquals(summaries.length, 1);
 
@@ -1323,8 +1316,7 @@ async function createValidateTestFile(): Promise<string> {
 
 function getSchemaValidations(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "schema_validation" }> =>
-      e.type === "schema_validation",
+    (e): e is Extract<TimelineEvent, { type: "schema_validation" }> => e.type === "schema_validation",
   );
 }
 
@@ -1428,8 +1420,7 @@ Deno.test("ctx.validate - fatal severity aborts test", async () => {
 
   // "after fatal" log should not appear
   const logs = result.events.filter(
-    (e) =>
-      e.type === "log" && "message" in e && e.message.includes("after fatal"),
+    (e) => e.type === "log" && "message" in e && e.message.includes("after fatal"),
   );
   assertEquals(logs.length, 0, "Code after fatal should not execute");
 
@@ -1471,8 +1462,7 @@ Deno.test(
     );
 
     const summaries = result.events.filter(
-      (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-        e.type === "summary",
+      (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
     );
     assertEquals(summaries.length, 1);
 
