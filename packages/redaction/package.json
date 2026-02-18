@@ -1,0 +1,13 @@
+{
+  "name": "@glubean/redaction",
+  "version": "0.10.0",
+  "private": true,
+  "main": "./mod.ts",
+  "types": "./mod.ts",
+  "exports": {
+    ".": {
+      "types": "./mod.ts",
+      "default": "./mod.ts"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+method,path,expected
+GET,/products/1,200
+GET,/products/99999,404
+GET,/users/1,200
+GET,/carts/1,200

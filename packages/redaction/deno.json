@@ -1,0 +1,7 @@
+{
+  "name": "@glubean/redaction",
+  "version": "0.10.1",
+  "exports": "./mod.ts",
+  "license": "MIT",
+  "description": "Glubean Redaction Engine - Plugin-based secrets/PII detection and masking"
+}

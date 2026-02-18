@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "expected": 200,
+    "role": "admin"
+  },
+  {
+    "id": 2,
+    "expected": 200,
+    "role": "user"
+  },
+  {
+    "id": 99999,
+    "expected": 404,
+    "role": "unknown"
+  }
+]

@@ -1,0 +1,44 @@
+{
+  "unstable": [
+    "sloppy-imports"
+  ],
+  "test": {
+    "exclude": [
+      "packages/cli/templates/"
+    ]
+  },
+  "workspace": [
+    "./packages/sdk",
+    "./packages/graphql",
+    "./packages/auth",
+    "./packages/scanner",
+    "./packages/runner",
+    "./packages/cli",
+    "./packages/mcp",
+    "./packages/worker",
+    "./packages/redaction"
+  ],
+  "imports": {
+    "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.18.0",
+    "zod": "npm:zod@3.25.1",
+    "@std/path": "jsr:@std/path@^1.0.0",
+    "@std/cli": "jsr:@std/cli@^1.0.0",
+    "@std/fs": "jsr:@std/fs@^1.0.0",
+    "@std/crypto": "jsr:@std/crypto@^1.0.0",
+    "@std/encoding": "jsr:@std/encoding@^1.0.0",
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "@std/tar": "jsr:@std/tar@^0.1.0",
+    "@std/io": "jsr:@std/io@^0.225.0"
+  },
+  "fmt": {
+    "lineWidth": 120
+  },
+  "tasks": {
+    "test": "deno test -A",
+    "fmt": "deno fmt",
+    "lint": "deno lint",
+    "version": "deno run -A ./scripts/bump-version.ts",
+    "cli": "deno run -A ./packages/cli/mod.ts",
+    "mcp": "deno run -A ./packages/mcp/mod.ts"
+  }
+}

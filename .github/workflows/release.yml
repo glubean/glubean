@@ -1,0 +1,109 @@
+name: Release to JSR
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.10.1). Leave empty to read from deno.json."
+        required: false
+        type: string
+      dry_run:
+        description: "Dry run only (no actual publish)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # Required for JSR provenance
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno test -A --no-check
+
+  check-versions:
+    name: Verify version consistency
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Extract and verify versions
+        id: version
+        run: |
+          # Get expected version from input, release tag, or root package
+          if [ -n "${{ inputs.version }}" ]; then
+            EXPECTED="${{ inputs.version }}"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            # Strip leading 'v' from tag if present
+            EXPECTED="${{ github.event.release.tag_name }}"
+            EXPECTED="${EXPECTED#v}"
+          else
+            EXPECTED=$(deno eval "const c = JSON.parse(Deno.readTextFileSync('packages/sdk/deno.json')); console.log(c.version)")
+          fi
+
+          echo "Expected version: $EXPECTED"
+          echo "version=$EXPECTED" >> "$GITHUB_OUTPUT"
+
+          # Check every package has the same version
+          MISMATCH=0
+          for pkg in packages/*/deno.json; do
+            PKG_VERSION=$(deno eval "const c = JSON.parse(Deno.readTextFileSync('$pkg')); console.log(c.version)")
+            PKG_NAME=$(deno eval "const c = JSON.parse(Deno.readTextFileSync('$pkg')); console.log(c.name)")
+            if [ "$PKG_VERSION" != "$EXPECTED" ]; then
+              echo "::error::$PKG_NAME has version $PKG_VERSION, expected $EXPECTED"
+              MISMATCH=1
+            else
+              echo "✓ $PKG_NAME @ $PKG_VERSION"
+            fi
+          done
+
+          if [ "$MISMATCH" -eq 1 ]; then
+            echo "::error::Version mismatch detected. Run: deno task version $EXPECTED"
+            exit 1
+          fi
+
+  publish:
+    name: Publish to JSR
+    needs: [test, check-versions]
+    runs-on: ubuntu-latest
+    environment: jsr
+    env:
+      JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Dry run
+        run: |
+          echo "Publishing version ${{ needs.check-versions.outputs.version }}"
+          deno publish --dry-run
+
+      - name: Publish to JSR
+        if: ${{ !inputs.dry_run }}
+        run: deno publish --token "$JSR_TOKEN"
+
+      - name: Verify installation
+        if: ${{ !inputs.dry_run }}
+        run: |
+          VERSION="${{ needs.check-versions.outputs.version }}"
+          echo "Waiting for JSR to propagate..."
+          sleep 10
+          deno install -g --name glubean-smoke -A --force "jsr:@glubean/cli@$VERSION"
+          glubean-smoke --version || echo "Version check not available"
+          deno install -g --name glubean-smoke -A --force --global-uninstall || true

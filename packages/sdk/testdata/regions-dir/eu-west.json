@@ -1,0 +1,4 @@
+{
+  "eu-west-1": { "endpoint": "https://eu-west-1.example.com", "currency": "EUR" },
+  "eu-west-2": { "endpoint": "https://eu-west-2.example.com", "currency": "GBP" }
+}

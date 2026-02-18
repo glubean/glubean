@@ -1,0 +1,14 @@
+{
+  "normal": {
+    "body": { "firstName": "Alice", "lastName": "Smith", "age": 28 },
+    "query": { "org": "acme" }
+  },
+  "young": {
+    "body": { "firstName": "Bob", "lastName": "Junior", "age": 18 },
+    "query": { "org": "acme" }
+  },
+  "edge-case": {
+    "body": { "firstName": "", "lastName": "", "age": -1 },
+    "query": { "org": "test" }
+  }
+}

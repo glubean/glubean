@@ -1,0 +1,19 @@
+{
+  "name": "@glubean/graphql",
+  "version": "0.10.1",
+  "exports": {
+    ".": "./mod.ts",
+    "./data": "./data.ts"
+  },
+  "license": "MIT",
+  "description": "GraphQL plugin for Glubean — wraps ctx.http with query/mutation helpers and auto-tracing",
+  "imports": {
+    "@glubean/sdk": "jsr:@glubean/sdk@^0.10.0"
+  },
+  "publish": {
+    "exclude": [
+      "*_test.ts",
+      "testdata/"
+    ]
+  }
+}

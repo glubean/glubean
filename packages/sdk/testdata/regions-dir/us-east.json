@@ -1,0 +1,4 @@
+{
+  "us-east-1": { "endpoint": "https://us-east-1.example.com", "currency": "USD" },
+  "us-east-2": { "endpoint": "https://us-east-2.example.com", "currency": "USD" }
+}
