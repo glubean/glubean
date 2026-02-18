@@ -1,0 +1,14 @@
+{
+  "by-name": {
+    "q": "phone",
+    "expected": { "minResults": 1, "titleContains": "phone" }
+  },
+  "by-category": {
+    "q": "laptops",
+    "expected": { "minResults": 1, "titleContains": "laptop" }
+  },
+  "no-results": {
+    "q": "zzzznotreal",
+    "expected": { "minResults": 0 }
+  }
+}

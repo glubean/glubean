@@ -376,43 +376,72 @@ Deno.test("init interactive - decline git init skips hooks", async () => {
   }
 });
 
-Deno.test("init --playground creates playground files", async () => {
+Deno.test("init --minimal creates minimal files", async () => {
   const dir = await createTempDir();
   try {
     const { code } = await runInitCommand(dir, [
-      "--playground",
+      "--minimal",
       "--no-interactive",
     ]);
     assertEquals(code, 0, "init command should succeed");
 
+    // Minimal files should exist
     assertEquals(await fileExists(join(dir, "deno.json")), true);
     assertEquals(await fileExists(join(dir, ".env")), true);
-    assertEquals(await fileExists(join(dir, "tests/smoke.test.ts")), true);
+    assertEquals(await fileExists(join(dir, ".env.secrets")), true);
+    assertEquals(await fileExists(join(dir, ".gitignore")), true);
     assertEquals(await fileExists(join(dir, "README.md")), true);
-    assertEquals(await fileExists(join(dir, "AGENTS.md")), true);
+    assertEquals(await fileExists(join(dir, "explore/api.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/search.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/auth.test.ts")), true);
+    assertEquals(
+      await fileExists(join(dir, "data/search-examples.json")),
+      true,
+    );
 
-    // Playground should not create standard test file
+    // Standard test files should NOT exist
     assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), false);
+    assertEquals(await fileExists(join(dir, "AGENTS.md")), false);
 
-    // Verify playground content
+    // Verify deno.json has explore task but not test tasks
+    const denoJson = JSON.parse(
+      await Deno.readTextFile(join(dir, "deno.json")),
+    );
+    assertEquals(typeof denoJson.tasks?.explore, "string");
+    assertEquals(denoJson.tasks?.test, undefined);
+
+    // Verify .env has DummyJSON
     const envContent = await Deno.readTextFile(join(dir, ".env"));
     assertEquals(envContent.includes("dummyjson.com"), true);
+
+    // Verify README contains upgrade prompt
+    const readme = await Deno.readTextFile(join(dir, "README.md"));
+    assertEquals(readme.includes("glubean init"), true);
+    assertEquals(readme.includes("Best Practice"), true);
   } finally {
     await cleanupDir(dir);
   }
 });
 
-Deno.test("init interactive - choose playground", async () => {
+Deno.test("init interactive - choose minimal", async () => {
   const dir = await createTempDir();
   try {
-    // Step 1: "2" (Playground)
+    // Step 1: "2" (Minimal)
     const { code } = await runInitCommand(dir, [], "2\n", {
       GLUBEAN_FORCE_INTERACTIVE: "1",
     });
     assertEquals(code, 0, "init command should succeed");
 
-    // Playground files
-    assertEquals(await fileExists(join(dir, "tests/smoke.test.ts")), true);
+    // Minimal files
+    assertEquals(await fileExists(join(dir, "explore/api.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/search.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/auth.test.ts")), true);
+    assertEquals(
+      await fileExists(join(dir, "data/search-examples.json")),
+      true,
+    );
+
+    // Standard test files should NOT exist
     assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), false);
 
     const envContent = await Deno.readTextFile(join(dir, ".env"));

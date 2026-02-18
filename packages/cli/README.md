@@ -51,20 +51,20 @@ Interactive wizard that scaffolds a project with sample tests, `.env` template, 
 
 ```bash
 glubean init                                    # Interactive wizard
-glubean init --playground                       # Include DummyJSON learning playground
+glubean init --minimal                          # Minimal explore-only project (GET, POST, pick)
 glubean init --github-actions                   # Scaffold GitHub Actions workflow
 glubean init --hooks                            # Install git hooks (pre-commit, pre-push)
 glubean init --no-interactive --base-url https://api.example.com   # Non-interactive (CI)
 ```
 
-| Flag               | Description                                |
-| ------------------ | ------------------------------------------ |
-| `--playground`     | Scaffold DummyJSON playground for learning |
-| `--hooks`          | Install git hooks (pre-commit, pre-push)   |
-| `--github-actions` | Scaffold GitHub Actions workflow           |
-| `--base-url <url>` | API base URL for `.env`                    |
-| `--no-interactive` | Disable prompts (use with flags for CI)    |
-| `--overwrite`      | Overwrite existing files (dangerous)       |
+| Flag               | Description                                             |
+| ------------------ | ------------------------------------------------------- |
+| `--minimal`        | Scaffold minimal explore-only project (GET, POST, pick) |
+| `--hooks`          | Install git hooks (pre-commit, pre-push)                |
+| `--github-actions` | Scaffold GitHub Actions workflow                        |
+| `--base-url <url>` | API base URL for `.env`                                 |
+| `--no-interactive` | Disable prompts (use with flags for CI)                 |
+| `--overwrite`      | Overwrite existing files (dangerous)                    |
 
 ### `glubean run [target]`
 
