@@ -156,7 +156,9 @@ export const simpleTest = test({ id: "simpleTest", name: "Simple Test" }, async 
       context,
       config,
       logger,
-      (event) => { events.push(event); },
+      (event) => {
+        events.push(event);
+      },
     );
 
     assertEquals(result.success, true);
@@ -222,7 +224,9 @@ Deno.test("executeBundle - detects checksum mismatch", async () => {
       context,
       config,
       logger,
-      (event) => { events.push(event); },
+      (event) => {
+        events.push(event);
+      },
     );
 
     assertEquals(result.success, false);
@@ -288,7 +292,9 @@ export const failingTest = test({ id: "fail-1" }, async (ctx) => {
       context,
       config,
       logger,
-      (event) => { events.push(event); },
+      (event) => {
+        events.push(event);
+      },
     );
 
     // executeBundle returns success=false when a test fails

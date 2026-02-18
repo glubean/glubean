@@ -188,11 +188,7 @@ function toResolvedTest(exportName: string, test: Test<unknown>): ResolvedTest {
     exportName,
     id: meta.id,
     name: meta.name,
-    tags: Array.isArray(meta.tags)
-      ? meta.tags
-      : typeof meta.tags === "string"
-      ? [meta.tags]
-      : undefined,
+    tags: Array.isArray(meta.tags) ? meta.tags : typeof meta.tags === "string" ? [meta.tags] : undefined,
     type: test.type,
     only: meta.only ?? undefined,
     skip: meta.skip ?? undefined,

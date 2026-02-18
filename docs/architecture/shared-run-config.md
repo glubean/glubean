@@ -1,13 +1,12 @@
 # Design: Unified SharedRunConfig
 
-**Issue**: [glubean/glubean#1](https://github.com/glubean/glubean/issues/1)
-**Status**: Proposed
-**Author**: AI (reviewed by team)
+**Issue**: [glubean/glubean#1](https://github.com/glubean/glubean/issues/1) **Status**: Proposed **Author**: AI
+(reviewed by team)
 
 ## Problem
 
-CLI, Worker, and MCP independently consume `@glubean/runner` but define overlapping execution config in separate schemas.
-This leads to:
+CLI, Worker, and MCP independently consume `@glubean/runner` but define overlapping execution config in separate
+schemas. This leads to:
 
 - **Divergent names** for the same concept (`failFast` vs `stopOnFailure`)
 - **Missing features**: new run options must be added in 3 places
@@ -25,12 +24,12 @@ The runner defines two option interfaces consumed by callers:
 interface SingleExecutionOptions {
   onEvent?: EventHandler;
   includeTestId?: boolean;
-  timeout?: number;             // default: 30_000
+  timeout?: number; // default: 30_000
 }
 
 // Batch options
 interface ExecutionOptions {
-  concurrency?: number;         // default: 1
+  concurrency?: number; // default: 1
   stopOnFailure?: boolean;
   failAfter?: number;
   onEvent?: EventHandler;
@@ -40,7 +39,7 @@ interface ExecutionOptions {
 interface ExecutorOptions {
   maxHeapSizeMb?: number;
   v8Flags?: string[];
-  permissions?: string[];       // default: ["--allow-net", "--allow-read", "--allow-env"]
+  permissions?: string[]; // default: ["--allow-net", "--allow-read", "--allow-env"]
   configPath?: string;
   cwd?: string;
   emitFullTrace?: boolean;
@@ -55,72 +54,80 @@ interface GlubeanRunConfig {
   verbose: boolean;
   pretty: boolean;
   logFile: boolean;
-  emitFullTrace: boolean;       // ← also in ExecutorOptions
+  emitFullTrace: boolean; // ← also in ExecutorOptions
   envFile: string;
-  failFast: boolean;            // ← maps to stopOnFailure
-  failAfter: number | null;     // ← same as ExecutionOptions.failAfter
+  failFast: boolean; // ← maps to stopOnFailure
+  failAfter: number | null; // ← same as ExecutionOptions.failAfter
   testDir: string;
   exploreDir: string;
 }
 ```
 
-CLI translates `failFast` → `stopOnFailure: true` at call site in `run.ts`.
-No `timeout`, `concurrency`, or `permissions` in config — hardcoded or absent.
+CLI translates `failFast` → `stopOnFailure: true` at call site in `run.ts`. No `timeout`, `concurrency`, or
+`permissions` in config — hardcoded or absent.
 
 ### Worker (`packages/worker/config.ts`)
 
 ```typescript
 interface WorkerConfig {
   // ... infrastructure fields ...
-  allowNet: string;                // ← used to build permissions[]
-  executionTimeoutMs: number;      // 300_000  — different name from runner
-  executionConcurrency: number;    // 1
-  stopOnFailure: boolean;          // ← different name from CLI's failFast
+  allowNet: string; // ← used to build permissions[]
+  executionTimeoutMs: number; // 300_000  — different name from runner
+  executionConcurrency: number; // 1
+  stopOnFailure: boolean; // ← different name from CLI's failFast
   // No failAfter
   // No emitFullTrace
 }
 ```
 
-Worker manually constructs `permissions` array with `--allow-net` and `--allow-read` only.
-**`--allow-env` is intentionally omitted** — see Security section below.
+Worker manually constructs `permissions` array with `--allow-net` and `--allow-read` only. **`--allow-env` is
+intentionally omitted** — see Security section below.
 
 ### MCP (`packages/mcp/mod.ts`)
 
-MCP's `runLocalTestsFromFile` accepts `stopOnFailure` and `concurrency` inline. It creates a bare `new TestExecutor()` with no permissions/config, relying entirely on defaults.
+MCP's `runLocalTestsFromFile` accepts `stopOnFailure` and `concurrency` inline. It creates a bare `new TestExecutor()`
+with no permissions/config, relying entirely on defaults.
 
 ## Security: `--allow-env` and Credential Isolation
 
 ### Why Worker omits `--allow-env`
 
-The Worker process holds sensitive env vars (`GLUBEAN_WORKER_TOKEN`, `GLUBEAN_CONTROL_PLANE_URL`, etc.). Deno's `Command` spawns subprocesses that inherit the parent's environment. If `--allow-env` is granted, user test code can read these credentials:
+The Worker process holds sensitive env vars (`GLUBEAN_WORKER_TOKEN`, `GLUBEAN_CONTROL_PLANE_URL`, etc.). Deno's
+`Command` spawns subprocesses that inherit the parent's environment. If `--allow-env` is granted, user test code can
+read these credentials:
 
 ```typescript
 // User test code could do this:
 const token = Deno.env.get("GLUBEAN_WORKER_TOKEN"); // ← credential leak
 ```
 
-The harness has an env fallback path (`harness.ts:349-358`) where `ctx.vars.require("KEY")` falls back to `Deno.env.get("KEY")`. This is designed for the CLI scenario (local dev, user's own machine). In Worker, all context is passed explicitly via stdin — the fallback silently returns undefined, which is the correct and safe behavior.
+The harness has an env fallback path (`harness.ts:349-358`) where `ctx.vars.require("KEY")` falls back to
+`Deno.env.get("KEY")`. This is designed for the CLI scenario (local dev, user's own machine). In Worker, all context is
+passed explicitly via stdin — the fallback silently returns undefined, which is the correct and safe behavior.
 
 ### Permission model by context
 
-| Context | `--allow-env` | `maskEnvPrefixes` | Rationale |
-|---|---|---|---|
-| CLI | Yes | Not needed | Local dev, user's own machine |
-| MCP | Yes | Not needed | Same as CLI — runs locally |
-| Worker (cloud, multi-tenant) | No | `["GLUBEAN_WORKER_TOKEN"]` | Double barrier: no env API + secrets masked |
-| Worker (self-hosted) | Yes | `["GLUBEAN_WORKER_TOKEN"]` | Needs CI env; masking keeps secrets safe |
+| Context                      | `--allow-env` | `maskEnvPrefixes`          | Rationale                                   |
+| ---------------------------- | ------------- | -------------------------- | ------------------------------------------- |
+| CLI                          | Yes           | Not needed                 | Local dev, user's own machine               |
+| MCP                          | Yes           | Not needed                 | Same as CLI — runs locally                  |
+| Worker (cloud, multi-tenant) | No            | `["GLUBEAN_WORKER_TOKEN"]` | Double barrier: no env API + secrets masked |
+| Worker (self-hosted)         | Yes           | `["GLUBEAN_WORKER_TOKEN"]` | Needs CI env; masking keeps secrets safe    |
 
-**Decision rule**: `maskEnvPrefixes` is the **primary** security boundary. `--allow-env` is a **secondary** barrier. The rule for each context is:
+**Decision rule**: `maskEnvPrefixes` is the **primary** security boundary. `--allow-env` is a **secondary** barrier. The
+rule for each context is:
 
 1. Always set `maskEnvPrefixes` when worker credentials exist in the process env.
-2. Add `--allow-env` only when user test code legitimately needs `Deno.env.get()` (CLI, MCP, self-hosted workers with CI vars).
+2. Add `--allow-env` only when user test code legitimately needs `Deno.env.get()` (CLI, MCP, self-hosted workers with CI
+   vars).
 3. Omit `--allow-env` as an extra safety layer when there is no user need for it (cloud multi-tenant workers).
 
-This means `permissions` **cannot have a single shared default**. The shared config provides a base that each consumer augments:
+This means `permissions` **cannot have a single shared default**. The shared config provides a base that each consumer
+augments:
 
 ```typescript
 // SharedRunConfig provides only the universally safe permissions
-permissions: ["--allow-read"]
+permissions: ["--allow-read"];
 
 // CLI/MCP add --allow-env at their layer (LOCAL_RUN_DEFAULTS)
 // Cloud Worker does NOT add --allow-env (WORKER_RUN_DEFAULTS)
@@ -129,9 +136,12 @@ permissions: ["--allow-read"]
 
 ### Defense in depth: env masking at the process level
 
-`maskEnvPrefixes` is the mechanism that makes all Worker scenarios safe regardless of `--allow-env`. It overwrites matching env vars with `"***"` in the subprocess, so even if `--allow-env` is present, `Deno.env.get("GLUBEAN_WORKER_TOKEN")` returns `"***"`.
+`maskEnvPrefixes` is the mechanism that makes all Worker scenarios safe regardless of `--allow-env`. It overwrites
+matching env vars with `"***"` in the subprocess, so even if `--allow-env` is present,
+`Deno.env.get("GLUBEAN_WORKER_TOKEN")` returns `"***"`.
 
-Currently the runner creates subprocesses without an explicit `env` field (`executor.ts:477`), which means the child inherits the full parent environment. We add a `maskEnvPrefixes` option to `ExecutorOptions`:
+Currently the runner creates subprocesses without an explicit `env` field (`executor.ts:477`), which means the child
+inherits the full parent environment. We add a `maskEnvPrefixes` option to `ExecutorOptions`:
 
 ```typescript
 interface ExecutorOptions {
@@ -176,7 +186,7 @@ The overlay is passed to `Deno.Command`:
 const command = new Deno.Command(Deno.execPath(), {
   args,
   cwd: this.options.cwd,
-  env: this.buildEnvOverlay(),  // masks sensitive vars with "***"
+  env: this.buildEnvOverlay(), // masks sensitive vars with "***"
   stdin: "piped",
   stdout: "piped",
   stderr: "piped",
@@ -185,10 +195,10 @@ const command = new Deno.Command(Deno.execPath(), {
 
 This gives two independent layers of protection (cloud Worker uses both; self-hosted Worker relies on masking):
 
-| Layer | Mechanism | Who uses it |
-|---|---|---|
-| Env masking (primary) | Sensitive vars overwritten with `"***"` before subprocess starts | All Workers (cloud + self-hosted) |
-| Permission (secondary) | No `--allow-env` in subprocess | Cloud Worker only (self-hosted may include `--allow-env`) |
+| Layer                  | Mechanism                                                        | Who uses it                                               |
+| ---------------------- | ---------------------------------------------------------------- | --------------------------------------------------------- |
+| Env masking (primary)  | Sensitive vars overwritten with `"***"` before subprocess starts | All Workers (cloud + self-hosted)                         |
+| Permission (secondary) | No `--allow-env` in subprocess                                   | Cloud Worker only (self-hosted may include `--allow-env`) |
 
 ### How masking works in practice
 
@@ -207,9 +217,12 @@ Subprocess env (what user code sees):
   DATABASE_URL=postgres://...         ← preserved ✓
 ```
 
-`GLUBEAN_CONTROL_PLANE_URL` is not a credential — it's a public endpoint URL. Only actual secrets (like `GLUBEAN_WORKER_TOKEN`) need masking.
+`GLUBEAN_CONTROL_PLANE_URL` is not a credential — it's a public endpoint URL. Only actual secrets (like
+`GLUBEAN_WORKER_TOKEN`) need masking.
 
-With masking in place, `--allow-env` controls only whether user code has the *API* to call `Deno.env.get()` — but `GLUBEAN_WORKER_TOKEN` already holds `"***"` in the subprocess. This is why cloud Worker omits `--allow-env` (extra barrier, no user need) while self-hosted Worker can safely include it (user needs CI vars, secrets are masked).
+With masking in place, `--allow-env` controls only whether user code has the _API_ to call `Deno.env.get()` — but
+`GLUBEAN_WORKER_TOKEN` already holds `"***"` in the subprocess. This is why cloud Worker omits `--allow-env` (extra
+barrier, no user need) while self-hosted Worker can safely include it (user needs CI vars, secrets are masked).
 
 ## Proposed Design
 
@@ -280,7 +293,7 @@ export const SHARED_RUN_DEFAULTS: SharedRunConfig = {
   failFast: false,
   perTestTimeoutMs: 30_000,
   concurrency: 1,
-  permissions: ["--allow-read"],   // minimal safe default
+  permissions: ["--allow-read"], // minimal safe default
   allowNet: "*",
   emitFullTrace: false,
 };
@@ -375,7 +388,8 @@ function resolveAllowNetFlag(allowNet: string): string | null {
 
 #### CLI
 
-The CLI config file format (`deno.json` `glubean` field) stays **flat** to avoid breaking existing configs. The internal `GlubeanRunConfig` type absorbs the shared fields directly:
+The CLI config file format (`deno.json` `glubean` field) stays **flat** to avoid breaking existing configs. The internal
+`GlubeanRunConfig` type absorbs the shared fields directly:
 
 ```typescript
 // Internal type — NOT the file format
@@ -426,15 +440,19 @@ const executor = TestExecutor.fromSharedConfig(shared, {
 });
 
 // Per-test execution uses perTestTimeoutMs from config
-for await (const event of executor.run(testFileUrl, testId, context, {
-  ...toSingleExecutionOptions(shared),  // ← wires perTestTimeoutMs
-  exportName,
-})) {
+for await (
+  const event of executor.run(testFileUrl, testId, context, {
+    ...toSingleExecutionOptions(shared), // ← wires perTestTimeoutMs
+    exportName,
+  })
+) {
   // ...
 }
 ```
 
-**Config file compatibility**: The `deno.json` `glubean.run` object stays flat. New fields (`perTestTimeoutMs`, `concurrency`, `permissions`, `allowNet`) are simply added — old configs without them get defaults. No nesting change, no breaking change.
+**Config file compatibility**: The `deno.json` `glubean.run` object stays flat. New fields (`perTestTimeoutMs`,
+`concurrency`, `permissions`, `allowNet`) are simply added — old configs without them get defaults. No nesting change,
+no breaking change.
 
 #### Worker
 
@@ -467,7 +485,8 @@ interface WorkerConfig {
 }
 ```
 
-`allowNet` moves into `run: SharedRunConfig` — there is only one source. Worker's `loadConfig` populates `run.allowNet` from `GLUBEAN_ALLOW_NET`.
+`allowNet` moves into `run: SharedRunConfig` — there is only one source. Worker's `loadConfig` populates `run.allowNet`
+from `GLUBEAN_ALLOW_NET`.
 
 Worker's `executor.ts` becomes:
 
@@ -498,11 +517,11 @@ const result = await executor.execute(testUrl, test.exportName, context, {
 
 **Env var compatibility**: `loadConfig` accepts both old and new names during transition:
 
-| Old env var | New env var | Behavior |
-|---|---|---|
-| `GLUBEAN_STOP_ON_FAILURE` | `GLUBEAN_FAIL_FAST` | Accept both, prefer new |
-| `GLUBEAN_EXECUTION_TIMEOUT_MS` | `GLUBEAN_TASK_TIMEOUT_MS` | Accept both, prefer new |
-| `GLUBEAN_EXECUTION_CONCURRENCY` | `GLUBEAN_CONCURRENCY` | Accept both, prefer new |
+| Old env var                     | New env var               | Behavior                |
+| ------------------------------- | ------------------------- | ----------------------- |
+| `GLUBEAN_STOP_ON_FAILURE`       | `GLUBEAN_FAIL_FAST`       | Accept both, prefer new |
+| `GLUBEAN_EXECUTION_TIMEOUT_MS`  | `GLUBEAN_TASK_TIMEOUT_MS` | Accept both, prefer new |
+| `GLUBEAN_EXECUTION_CONCURRENCY` | `GLUBEAN_CONCURRENCY`     | Accept both, prefer new |
 
 Old names are removed in a future major version.
 
@@ -510,7 +529,7 @@ Old names are removed in a future major version.
 
 ```typescript
 const shared: SharedRunConfig = {
-  ...LOCAL_RUN_DEFAULTS,   // includes --allow-env
+  ...LOCAL_RUN_DEFAULTS, // includes --allow-env
   failFast: Boolean(args.stopOnFailure),
   concurrency: Math.max(1, args.concurrency ?? 1),
 };
@@ -518,34 +537,39 @@ const shared: SharedRunConfig = {
 const executor = TestExecutor.fromSharedConfig(shared);
 
 // Per-test execution wires timeout
-for await (const event of executor.run(fileUrl, test.id, context, {
-  ...toSingleExecutionOptions(shared),  // ← wires perTestTimeoutMs
-  exportName: test.exportName,
-})) {
+for await (
+  const event of executor.run(fileUrl, test.id, context, {
+    ...toSingleExecutionOptions(shared), // ← wires perTestTimeoutMs
+    exportName: test.exportName,
+  })
+) {
   // ...
 }
 ```
 
 ### 4. Naming unification
 
-| Concept | Old (CLI) | Old (Worker) | New (SharedRunConfig) |
-|---|---|---|---|
-| Fail-fast | `failFast` | `stopOnFailure` | `failFast` |
-| Fail after N | `failAfter` | — | `failAfter` |
-| Per-test timeout | runner default 30s | derived from `executionTimeoutMs` | `perTestTimeoutMs` |
-| Task/batch timeout | — | `executionTimeoutMs` | Worker-only: `taskTimeoutMs` |
-| Concurrency | — | `executionConcurrency` | `concurrency` |
-| Full trace | `emitFullTrace` | — | `emitFullTrace` |
-| Network access | — | `allowNet` (host list) | `allowNet` (host list) |
-| Base permissions | runner default | hardcoded array | `permissions` (no `--allow-net`) |
+| Concept            | Old (CLI)          | Old (Worker)                      | New (SharedRunConfig)            |
+| ------------------ | ------------------ | --------------------------------- | -------------------------------- |
+| Fail-fast          | `failFast`         | `stopOnFailure`                   | `failFast`                       |
+| Fail after N       | `failAfter`        | —                                 | `failAfter`                      |
+| Per-test timeout   | runner default 30s | derived from `executionTimeoutMs` | `perTestTimeoutMs`               |
+| Task/batch timeout | —                  | `executionTimeoutMs`              | Worker-only: `taskTimeoutMs`     |
+| Concurrency        | —                  | `executionConcurrency`            | `concurrency`                    |
+| Full trace         | `emitFullTrace`    | —                                 | `emitFullTrace`                  |
+| Network access     | —                  | `allowNet` (host list)            | `allowNet` (host list)           |
+| Base permissions   | runner default     | hardcoded array                   | `permissions` (no `--allow-net`) |
 
 ### 5. Timeout semantics
 
 Two distinct timeout concepts exist:
 
-1. **`perTestTimeoutMs`** (SharedRunConfig): How long a single test can run before being killed. Passed to `SingleExecutionOptions.timeout`. Default: 30s (CLI/MCP), 300s (Worker preset).
+1. **`perTestTimeoutMs`** (SharedRunConfig): How long a single test can run before being killed. Passed to
+   `SingleExecutionOptions.timeout`. Default: 30s (CLI/MCP), 300s (Worker preset).
 
-2. **`taskTimeoutMs`** (Worker-only): Overall deadline for the entire task (download + extract + run all tests). Worker derives per-test timeout from this: `floor(taskTimeoutMs * 0.9 / testCount)`, overriding `perTestTimeoutMs` when the derived value is smaller.
+2. **`taskTimeoutMs`** (Worker-only): Overall deadline for the entire task (download + extract + run all tests). Worker
+   derives per-test timeout from this: `floor(taskTimeoutMs * 0.9 / testCount)`, overriding `perTestTimeoutMs` when the
+   derived value is smaller.
 
 CLI does not have a batch timeout — tests run sequentially or with concurrency but no overall deadline.
 
@@ -563,15 +587,18 @@ No ambiguity, no conflict.
 
 ### Phase 1: Non-breaking (first PR)
 
-1. Add `SharedRunConfig`, presets, `fromSharedConfig`, `toExecutionOptions`, `toSingleExecutionOptions` to `@glubean/runner`
+1. Add `SharedRunConfig`, presets, `fromSharedConfig`, `toExecutionOptions`, `toSingleExecutionOptions` to
+   `@glubean/runner`
 2. Export `resolveAllowNetFlag` for consumers that need custom permission assembly
 3. Keep existing interfaces intact — no breaking changes
 4. Add deprecation JSDoc to `stopOnFailure` in `ExecutionOptions`
 
 ### Phase 2: Consumer migration (separate PRs per consumer)
 
-5. **CLI**: Add new fields to `GlubeanRunConfig` (flat, backward-compatible), use `toSharedRunConfig` + `fromSharedConfig` in `run.ts`. Config file format stays flat — new fields are optional with defaults.
-6. **Worker**: Replace execution fields with `run: SharedRunConfig`, add `taskTimeoutMs`. `loadConfig` accepts both old and new env var names.
+5. **CLI**: Add new fields to `GlubeanRunConfig` (flat, backward-compatible), use `toSharedRunConfig` +
+   `fromSharedConfig` in `run.ts`. Config file format stays flat — new fields are optional with defaults.
+6. **Worker**: Replace execution fields with `run: SharedRunConfig`, add `taskTimeoutMs`. `loadConfig` accepts both old
+   and new env var names.
 7. **MCP**: Use `LOCAL_RUN_DEFAULTS` + `fromSharedConfig`.
 8. Update all tests in each consumer PR.
 
@@ -583,35 +610,37 @@ No ambiguity, no conflict.
 
 ## Risks
 
-| Risk | Severity | Mitigation |
-|---|---|---|
-| Worker env var rename (`GLUBEAN_STOP_ON_FAILURE` → `GLUBEAN_FAIL_FAST`) | Medium | Accept both during transition, prefer new name, remove old in next major |
-| Worker config file key rename (`stopOnFailure` → `failFast`) | Medium | Same dual-read strategy |
-| CLI config file format | **Low** | Format stays flat — only adds optional fields with defaults. No nesting change. |
-| `maskEnvPrefixes` misconfigured or omitted in Worker | **High** | `maskEnvPrefixes` is the primary credential isolation barrier. Worker must always set it. Enforce via: (1) test that verifies Worker passes `maskEnvPrefixes` to `fromSharedConfig`, (2) code review checklist. `--allow-env` absence is a secondary barrier, not the primary one. |
-| Version coordination (runner published before consumers) | Low | Already the normal flow — runner is a JSR dependency |
+| Risk                                                                    | Severity | Mitigation                                                                                                                                                                                                                                                                         |
+| ----------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worker env var rename (`GLUBEAN_STOP_ON_FAILURE` → `GLUBEAN_FAIL_FAST`) | Medium   | Accept both during transition, prefer new name, remove old in next major                                                                                                                                                                                                           |
+| Worker config file key rename (`stopOnFailure` → `failFast`)            | Medium   | Same dual-read strategy                                                                                                                                                                                                                                                            |
+| CLI config file format                                                  | **Low**  | Format stays flat — only adds optional fields with defaults. No nesting change.                                                                                                                                                                                                    |
+| `maskEnvPrefixes` misconfigured or omitted in Worker                    | **High** | `maskEnvPrefixes` is the primary credential isolation barrier. Worker must always set it. Enforce via: (1) test that verifies Worker passes `maskEnvPrefixes` to `fromSharedConfig`, (2) code review checklist. `--allow-env` absence is a secondary barrier, not the primary one. |
+| Version coordination (runner published before consumers)                | Low      | Already the normal flow — runner is a JSR dependency                                                                                                                                                                                                                               |
 
 ## Files Changed
 
-| Package | File | Change |
-|---|---|---|
-| `runner` | new `config.ts` | Add `SharedRunConfig`, presets, factory, helpers |
-| `runner` | `executor.ts` | Add `fromSharedConfig`, `maskEnvPrefixes`, `buildEnvOverlay` |
-| `runner` | `executor_test.ts` | Tests for `fromSharedConfig`, permission sanitization, env masking, `resolveAllowNetFlag` |
-| `cli` | `lib/config.ts` | Add shared fields to `GlubeanRunConfig`, `toSharedRunConfig` helper |
-| `cli` | `lib/config_test.ts` | Update tests for new fields + backward compat |
-| `cli` | `commands/run.ts` | Use `fromSharedConfig` + `toSingleExecutionOptions`. (`toExecutionOptions` is provided for future batch paths like `executeMany`, not used in CLI's current per-test loop.) |
-| `cli` | `commands/init.ts` | Check if generated `deno.json` glubean section needs new fields |
-| `cli` | `templates/AGENTS.md` | Update if config examples change |
-| `cli` | `commands/init_test.ts` | Verify generated config matches expectations |
-| `worker` | `config.ts` | Replace execution fields with `run: SharedRunConfig` + `taskTimeoutMs` |
-| `worker` | `config_test.ts` | Update tests, verify dual env var name support |
-| `worker` | `executor.ts` | Use `fromSharedConfig`, remove manual permission assembly |
-| `worker` | `executor_test.ts` | Update tests |
-| `mcp` | `mod.ts` | Use `LOCAL_RUN_DEFAULTS` + `fromSharedConfig` |
+| Package  | File                    | Change                                                                                                                                                                      |
+| -------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runner` | new `config.ts`         | Add `SharedRunConfig`, presets, factory, helpers                                                                                                                            |
+| `runner` | `executor.ts`           | Add `fromSharedConfig`, `maskEnvPrefixes`, `buildEnvOverlay`                                                                                                                |
+| `runner` | `executor_test.ts`      | Tests for `fromSharedConfig`, permission sanitization, env masking, `resolveAllowNetFlag`                                                                                   |
+| `cli`    | `lib/config.ts`         | Add shared fields to `GlubeanRunConfig`, `toSharedRunConfig` helper                                                                                                         |
+| `cli`    | `lib/config_test.ts`    | Update tests for new fields + backward compat                                                                                                                               |
+| `cli`    | `commands/run.ts`       | Use `fromSharedConfig` + `toSingleExecutionOptions`. (`toExecutionOptions` is provided for future batch paths like `executeMany`, not used in CLI's current per-test loop.) |
+| `cli`    | `commands/init.ts`      | Check if generated `deno.json` glubean section needs new fields                                                                                                             |
+| `cli`    | `templates/AGENTS.md`   | Update if config examples change                                                                                                                                            |
+| `cli`    | `commands/init_test.ts` | Verify generated config matches expectations                                                                                                                                |
+| `worker` | `config.ts`             | Replace execution fields with `run: SharedRunConfig` + `taskTimeoutMs`                                                                                                      |
+| `worker` | `config_test.ts`        | Update tests, verify dual env var name support                                                                                                                              |
+| `worker` | `executor.ts`           | Use `fromSharedConfig`, remove manual permission assembly                                                                                                                   |
+| `worker` | `executor_test.ts`      | Update tests                                                                                                                                                                |
+| `mcp`    | `mod.ts`                | Use `LOCAL_RUN_DEFAULTS` + `fromSharedConfig`                                                                                                                               |
 
 ## Open Questions
 
-1. Should `perTestTimeoutMs` be configurable in the CLI's `deno.json` glubean section? Currently CLI has no timeout config — it relies on the runner default (30s) or per-test `ctx.setTimeout()`.
+1. Should `perTestTimeoutMs` be configurable in the CLI's `deno.json` glubean section? Currently CLI has no timeout
+   config — it relies on the runner default (30s) or per-test `ctx.setTimeout()`.
 2. Should we add a `--timeout` CLI flag in this round, or defer?
-3. Worker's `taskTimeoutMs` can also come from `context.limits?.timeoutMs` (per-job override from control plane). Should `SharedRunConfig.perTestTimeoutMs` be overridable at the job level too?
+3. Worker's `taskTimeoutMs` can also come from `context.limits?.timeoutMs` (per-job override from control plane). Should
+   `SharedRunConfig.perTestTimeoutMs` be overridable at the job level too?

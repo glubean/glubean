@@ -1,8 +1,4 @@
-import {
-  type ExecutionEvent,
-  TestExecutor,
-  toSingleExecutionOptions,
-} from "@glubean/runner";
+import { type ExecutionEvent, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import { basename, relative, resolve, toFileUrl } from "@std/path";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.ts";
 import { walk } from "@std/fs/walk";

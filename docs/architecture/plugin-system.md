@@ -1,55 +1,48 @@
 # Plugin Architecture
 
-> Status: **Design** — This document describes the target architecture for
-> Glubean's plugin system. No code changes have been made yet.
+> Status: **Design** — This document describes the target architecture for Glubean's plugin system. No code changes have
+> been made yet.
 
 ## Motivation
 
-Glubean's SDK currently bundles protocol-specific features (GraphQL) and has no
-formal extension points for community packages. As the surface area grows
-(auth, gRPC, WebSocket, database assertions, custom reporters), every new
-capability requires changes to the core SDK. This doesn't scale.
+Glubean's SDK currently bundles protocol-specific features (GraphQL) and has no formal extension points for community
+packages. As the surface area grows (auth, gRPC, WebSocket, database assertions, custom reporters), every new capability
+requires changes to the core SDK. This doesn't scale.
 
-The goal is to make the SDK **small, stable, and extensible** — like Rollup's
-core is just a bundler, but the plugin ecosystem handles everything else.
+The goal is to make the SDK **small, stable, and extensible** — like Rollup's core is just a bundler, but the plugin
+ecosystem handles everything else.
 
 ### Why Now
 
-- The SDK hasn't shipped to production users yet. This is the cheapest
-  possible moment to get the architecture right — no migration burden, no
-  deprecation windows, no backward compatibility constraints.
-- The GraphQL client is the only protocol-specific module in the SDK.
-  Extracting it now sets the precedent that protocol clients are plugins.
-- Users are asking for auth support. Building it as a plugin from day one
-  validates the architecture with a real use case.
-- The SDK's type system already supports most of the patterns needed
-  (lazy proxy in `configure()`, builder generics in `TestBuilder`). The gap
-  is API surface, not infrastructure.
+- The SDK hasn't shipped to production users yet. This is the cheapest possible moment to get the architecture right —
+  no migration burden, no deprecation windows, no backward compatibility constraints.
+- The GraphQL client is the only protocol-specific module in the SDK. Extracting it now sets the precedent that protocol
+  clients are plugins.
+- Users are asking for auth support. Building it as a plugin from day one validates the architecture with a real use
+  case.
+- The SDK's type system already supports most of the patterns needed (lazy proxy in `configure()`, builder generics in
+  `TestBuilder`). The gap is API surface, not infrastructure.
 
 ### Design Principles
 
-1. **Plugins are just functions.** No registry, no lifecycle framework, no
-   magic. A plugin is a JSR/npm package that exports functions compatible with
-   existing SDK extension points.
+1. **Plugins are just functions.** No registry, no lifecycle framework, no magic. A plugin is a JSR/npm package that
+   exports functions compatible with existing SDK extension points.
 
-2. **The module system is the plugin system.** `deno add @glubean/auth` and
-   import. That's it.
+2. **The module system is the plugin system.** `deno add @glubean/auth` and import. That's it.
 
-3. **Type safety is free.** TypeScript generics infer plugin types at the call
-   site. No `declare module` boilerplate for the common case.
+3. **Type safety is free.** TypeScript generics infer plugin types at the call site. No `declare module` boilerplate for
+   the common case.
 
-4. **Composition over configuration.** Plugins compose via function
-   composition, not configuration files.
+4. **Composition over configuration.** Plugins compose via function composition, not configuration files.
 
-5. **No harness changes for Phase 1.** All initial plugin hooks operate at the
-   SDK layer. The runner/harness doesn't need to know about plugins.
+5. **No harness changes for Phase 1.** All initial plugin hooks operate at the SDK layer. The runner/harness doesn't
+   need to know about plugins.
 
 ---
 
 ## The Pipeline
 
-Glubean's test execution has six stages, plus a Cloud-side visualization
-layer. Each stage maps to a plugin hook:
+Glubean's test execution has six stages, plus a Cloud-side visualization layer. Each stage maps to a plugin hook:
 
 ```
 ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐   ┌───────────┐
@@ -68,8 +61,8 @@ layer. Each stage maps to a plugin hook:
 | 6    | Report    | `onEvent` callback (already exists)            | Slack, Datadog, GitHub PR comments            |
 | —    | Visualize | `RenderHint` on `RunEvent` (Cloud viewer)      | GraphQL query card, DB fixture summary        |
 
-Hooks 1–6 run in the SDK/runner (OSS). The visualize layer runs in Cloud
-only and is described in [Plugin Event Visualization](#plugin-event-visualization-cloud).
+Hooks 1–6 run in the SDK/runner (OSS). The visualize layer runs in Cloud only and is described in
+[Plugin Event Visualization](#plugin-event-visualization-cloud).
 
 ---
 
@@ -77,9 +70,8 @@ only and is described in [Plugin Event Visualization](#plugin-event-visualizatio
 
 **Status:** Already open — no SDK changes needed.
 
-Any function that returns `T[]` or `Promise<T[]>` works with `test.each()`.
-The SDK re-exports built-in loaders (`fromCsv`, `fromYaml`, `fromJsonl`,
-`fromDir`) as conveniences, but they have no special status.
+Any function that returns `T[]` or `Promise<T[]>` works with `test.each()`. The SDK re-exports built-in loaders
+(`fromCsv`, `fromYaml`, `fromJsonl`, `fromDir`) as conveniences, but they have no special status.
 
 ```typescript
 // Community plugin — zero SDK changes needed
@@ -91,8 +83,7 @@ export const tests = test.each(await fromExcel("./data/cases.xlsx"))(
 );
 ```
 
-**Action:** Documentation only. Publicize that `test.each()` accepts any
-`T[]`.
+**Action:** Documentation only. Publicize that `test.each()` accepts any `T[]`.
 
 ---
 
@@ -143,8 +134,8 @@ export interface GlubeanRuntime {
 
 ### `definePlugin()` Helper
 
-Plugin authors should never need to understand the `PluginFactory` phantom
-field trick. The SDK provides a helper that handles it:
+Plugin authors should never need to understand the `PluginFactory` phantom field trick. The SDK provides a helper that
+handles it:
 
 ```typescript
 // packages/sdk/plugin.ts
@@ -163,9 +154,8 @@ export function definePlugin<T>(
 }
 ```
 
-This is ~5 lines in the SDK but eliminates the `__type` confusion for every
-plugin author. All first-party plugins (`@glubean/graphql`, `@glubean/auth`)
-use `definePlugin()` in their implementation.
+This is ~5 lines in the SDK but eliminates the `__type` confusion for every plugin author. All first-party plugins
+(`@glubean/graphql`, `@glubean/auth`) use `definePlugin()` in their implementation.
 
 ### `configure()` Signature
 
@@ -187,14 +177,13 @@ type ResolvePlugins<P> = {
 };
 ```
 
-The old `graphql` option is removed entirely (not deprecated — the SDK hasn't
-shipped yet). GraphQL is now a plugin like any other.
+The old `graphql` option is removed entirely (not deprecated — the SDK hasn't shipped yet). GraphQL is now a plugin like
+any other.
 
 ### Implementation
 
-`buildLazyPlugins()` follows the same lazy proxy pattern as `buildLazyVars()`
-and `buildLazyHttp()`: a `WeakMap` cache keyed on the runtime identity, with
-`Object.defineProperty` getters that resolve on first access.
+`buildLazyPlugins()` follows the same lazy proxy pattern as `buildLazyVars()` and `buildLazyHttp()`: a `WeakMap` cache
+keyed on the runtime identity, with `Object.defineProperty` getters that resolve on first access.
 
 ### Usage
 
@@ -221,8 +210,8 @@ const { http, graphql: gql } = configure({
 
 **Status:** Requires SDK changes (~120 lines code + ~20 type signature updates).
 
-Inspired by Playwright's `test.extend()`. Creates a new `test` function where
-the context type is augmented with plugin-provided properties.
+Inspired by Playwright's `test.extend()`. Creates a new `test` function where the context type is augmented with
+plugin-provided properties.
 
 ### API
 
@@ -255,8 +244,8 @@ export const myTest = test("my-test", async (ctx) => {
 
 ### Chained Extend
 
-`test.extend()` returns a new test function that itself has `.extend()`,
-enabling layered fixtures (same pattern as Playwright):
+`test.extend()` returns a new test function that itself has `.extend()`, enabling layered fixtures (same pattern as
+Playwright):
 
 ```typescript
 // tests/fixtures/auth.ts
@@ -279,8 +268,7 @@ export const test = withAuth.extend({
 import { test } from "./fixtures/db.ts";
 ```
 
-This avoids the anti-pattern of one massive `.extend()` call with all
-fixtures declared in a single file.
+This avoids the anti-pattern of one massive `.extend()` call with all fixtures declared in a single file.
 
 ### Type Inference
 
@@ -294,9 +282,8 @@ type ResolveExtensions<E> = {
 };
 ```
 
-When a user writes `base.extend({ auth: fn, db: fn })`, TypeScript infers the
-return types and produces `TestContext & { auth: AuthClient; db: DbClient }`.
-Chained extends accumulate: `withAuth.extend({ db })` produces
+When a user writes `base.extend({ auth: fn, db: fn })`, TypeScript infers the return types and produces
+`TestContext & { auth: AuthClient; db: DbClient }`. Chained extends accumulate: `withAuth.extend({ db })` produces
 `TestContext & { auth: AuthClient } & { db: DbClient }`.
 
 ### Builder Support
@@ -312,9 +299,8 @@ class TestBuilder<S = unknown, Ctx extends TestContext = TestContext> {
 }
 ```
 
-`Ctx` defaults to `TestContext`, so `test("name").step(...)` works without
-any generic annotations. When using an extended test, `Ctx` is inferred
-automatically from the extensions.
+`Ctx` defaults to `TestContext`, so `test("name").step(...)` works without any generic annotations. When using an
+extended test, `Ctx` is inferred automatically from the extensions.
 
 ---
 
@@ -322,9 +308,8 @@ automatically from the extensions.
 
 **Status:** Requires ~5 lines of SDK changes.
 
-The `HttpHooks` interface already exists in `types.ts`, and `HttpRequestOptions`
-already supports hooks. The only gap: `ConfigureHttpOptions` doesn't expose
-hooks.
+The `HttpHooks` interface already exists in `types.ts`, and `HttpRequestOptions` already supports hooks. The only gap:
+`ConfigureHttpOptions` doesn't expose hooks.
 
 ### Change
 
@@ -372,8 +357,8 @@ const { http } = configure({
 
 ### Current State
 
-`Expectation` uses TypeScript `private` (not `#private`), so prototype
-extension works at runtime today. But there's no official API for it.
+`Expectation` uses TypeScript `private` (not `#private`), so prototype extension works at runtime today. But there's no
+official API for it.
 
 ### API
 
@@ -403,12 +388,10 @@ class Expectation<T> {
 
 ### Isolation Guarantee
 
-A common concern with prototype mutation: can `Expectation.extend()` in one
-test file leak matchers into another? In Glubean's runner, **no** — each test
-file runs in its own Deno subprocess. Prototype mutations in file A cannot
-affect file B. This is a stronger guarantee than Jest/Vitest (which share a
-process). Call `Expectation.extend()` once at file scope (import side effect)
-and it's scoped to that subprocess.
+A common concern with prototype mutation: can `Expectation.extend()` in one test file leak matchers into another? In
+Glubean's runner, **no** — each test file runs in its own Deno subprocess. Prototype mutations in file A cannot affect
+file B. This is a stronger guarantee than Jest/Vitest (which share a process). Call `Expectation.extend()` once at file
+scope (import side effect) and it's scoped to that subprocess.
 
 ### Plugin Author Experience
 
@@ -442,8 +425,7 @@ declare module "@glubean/sdk/expect" {
 
 **Status:** Already open — no SDK changes needed.
 
-The executor's `onEvent: (event: TimelineEvent) => void` callback is the
-hook. Any package can export a reporter:
+The executor's `onEvent: (event: TimelineEvent) => void` callback is the hook. Any package can export a reporter:
 
 ```typescript
 // @glubean/reporter-slack
@@ -464,40 +446,35 @@ export function createSlackReporter(options: { webhook: string }) {
 
 ## Plugin Event Visualization (Cloud)
 
-> **Priority:** Post-cloud-launch. This section is not required for Phase 1–4
-> (SDK-side plugin architecture), but **must be addressed before plugins ship
-> events that users expect to see in the Cloud dashboard**.
+> **Priority:** Post-cloud-launch. This section is not required for Phase 1–4 (SDK-side plugin architecture), but **must
+> be addressed before plugins ship events that users expect to see in the Cloud dashboard**.
 
 ### The Gap
 
-Hooks 1–6 cover the full **execution** pipeline: plugins can load data,
-configure clients, extend context, intercept HTTP, define custom assertions,
-and report events. But when a plugin produces a new event type (e.g.
-`plugin:graphql:query` or `plugin:db:fixture-setup`), the Cloud viewer has
-no mechanism to render it. Today's `RunEvent.type` in `@glubean/contracts`
-is a closed union — the viewer only knows how to render `log`, `assert`,
+Hooks 1–6 cover the full **execution** pipeline: plugins can load data, configure clients, extend context, intercept
+HTTP, define custom assertions, and report events. But when a plugin produces a new event type (e.g.
+`plugin:graphql:query` or `plugin:db:fixture-setup`), the Cloud viewer has no mechanism to render it. Today's
+`RunEvent.type` in `@glubean/contracts` is a closed union — the viewer only knows how to render `log`, `assert`,
 `trace`, `metric`, etc.
 
-The storage layer (`RunEventEntity` in MongoDB) already stores `type: string`
-and `payload: unknown`, so plugin events can be persisted. The gap is
-between **ingestion** and **presentation**: no schema contract, no rendering
-protocol, no fallback UX.
+The storage layer (`RunEventEntity` in MongoDB) already stores `type: string` and `payload: unknown`, so plugin events
+can be persisted. The gap is between **ingestion** and **presentation**: no schema contract, no rendering protocol, no
+fallback UX.
 
 ### Why This Is Hard
 
 Three tensions make this a non-trivial design problem:
 
-1. **Open vs. secure.** Plugins want expressive visualization, but the Cloud
-   viewer must never execute third-party frontend code (XSS, supply chain).
-2. **Decoupled vs. consistent.** Plugins iterate faster than the Cloud
-   frontend deploys. Rendering can't require a Cloud redeploy per plugin.
-3. **Rich vs. portable.** Plugin authors want tables, diffs, and code blocks
-   — but the rendering vocabulary must remain finite and controlled by core.
+1. **Open vs. secure.** Plugins want expressive visualization, but the Cloud viewer must never execute third-party
+   frontend code (XSS, supply chain).
+2. **Decoupled vs. consistent.** Plugins iterate faster than the Cloud frontend deploys. Rendering can't require a Cloud
+   redeploy per plugin.
+3. **Rich vs. portable.** Plugin authors want tables, diffs, and code blocks — but the rendering vocabulary must remain
+   finite and controlled by core.
 
 ### Shared Foundation
 
-Regardless of which rendering approach is used, the following changes are
-required as a foundation.
+Regardless of which rendering approach is used, the following changes are required as a foundation.
 
 #### Open `RunEvent.type` namespace
 
@@ -527,9 +504,8 @@ type KnownEventType =
   | "summary";
 ```
 
-Existing `KnownEventType` values are unchanged. Plugin events use the
-`plugin:` prefix namespace (e.g. `plugin:graphql:query`,
-`plugin:auth:token-refresh`).
+Existing `KnownEventType` values are unchanged. Plugin events use the `plugin:` prefix namespace (e.g.
+`plugin:graphql:query`, `plugin:auth:token-refresh`).
 
 #### SDK emit API
 
@@ -544,33 +520,29 @@ ctx.emit("plugin:graphql:query", {
 
 #### Viewer fallback pyramid
 
-No matter which rendering solution is chosen, the Cloud viewer uses a
-fallback chain so that **no plugin event is ever invisible**:
+No matter which rendering solution is chosen, the Cloud viewer uses a fallback chain so that **no plugin event is ever
+invisible**:
 
-1. **Dedicated renderer** — if a purpose-built component exists for this
-   event type, use it.
-2. **RenderHint renderer** — if the event carries a `render` field, use the
-   matching built-in renderer (kv, table, code, etc.).
-3. **Structured fallback** — display a "Plugin Event" card with the type
-   name and a collapsible JSON tree of the payload.
+1. **Dedicated renderer** — if a purpose-built component exists for this event type, use it.
+2. **RenderHint renderer** — if the event carries a `render` field, use the matching built-in renderer (kv, table, code,
+   etc.).
+3. **Structured fallback** — display a "Plugin Event" card with the type name and a collapsible JSON tree of the
+   payload.
 4. **Raw fallback** — collapsed raw JSON for completely unknown events.
 
 #### Security invariants
 
-- **Redaction still applies.** Plugin event payloads pass through the same
-  ingestion-time redaction pipeline as all other events (Blueprint
-  invariant E).
-- **Markdown is sanitized.** The `markdown` render hint goes through a safe
-  markdown renderer (no raw HTML pass-through).
+- **Redaction still applies.** Plugin event payloads pass through the same ingestion-time redaction pipeline as all
+  other events (Blueprint invariant E).
+- **Markdown is sanitized.** The `markdown` render hint goes through a safe markdown renderer (no raw HTML
+  pass-through).
 
 ---
 
 ### Solution Candidate A: Structured Render Hints (recommended starting point)
 
-Plugins don't ship frontend code. They ship **structured rendering hints**
-alongside their events. The Cloud viewer has a finite set of built-in
-renderers that interpret these hints. No third-party JS ever reaches the
-browser.
+Plugins don't ship frontend code. They ship **structured rendering hints** alongside their events. The Cloud viewer has
+a finite set of built-in renderers that interpret these hints. No third-party JS ever reaches the browser.
 
 **`RenderHint` vocabulary:**
 
@@ -586,8 +558,8 @@ type RenderHint =
   | { kind: "hidden" };
 ```
 
-New `RenderHint.kind` values are added via core viewer releases, not by
-plugins. This keeps the rendering vocabulary bounded and quality-controlled.
+New `RenderHint.kind` values are added via core viewer releases, not by plugins. This keeps the rendering vocabulary
+bounded and quality-controlled.
 
 **Usage:**
 
@@ -613,20 +585,18 @@ ctx.emit("plugin:db:fixtures", {
 **Limitations:**
 
 - Expressiveness is bounded by the hint vocabulary
-- Complex visualizations (flame graphs, multi-panel layouts) can't be
-  represented
+- Complex visualizations (flame graphs, multi-panel layouts) can't be represented
 - Adding new hint kinds requires a core viewer release
 
-**When to use:** Default for all plugins. Covers 90%+ of real use cases
-(tables, code blocks, key-value cards, diffs, badges, timelines).
+**When to use:** Default for all plugins. Covers 90%+ of real use cases (tables, code blocks, key-value cards, diffs,
+badges, timelines).
 
 ---
 
 ### Solution Candidate B: Community Renderer Repo (for richer visualization)
 
-An open-source `glubean/plugin-renderers` repo where plugin authors submit
-full React components as pull requests. The Glubean team reviews, merges,
-and the Cloud viewer imports the registry as a dependency.
+An open-source `glubean/plugin-renderers` repo where plugin authors submit full React components as pull requests. The
+Glubean team reviews, merges, and the Cloud viewer imports the registry as a dependency.
 
 **Repo structure:**
 
@@ -665,48 +635,37 @@ if (Renderer) {
 // fall through to RenderHint → structured fallback → raw JSON
 ```
 
-**Review model:** Plugin authors submit PRs with a React component,
-Storybook stories, and tests. AI-assisted code review (with clear rules in
-`CONTRIBUTING.md` and `AGENTS.md`) handles most verification — correct use
-of `shared/` components, dark mode support, no external network calls, no
-DOM manipulation outside the component tree. Human review becomes a quick
-final approval.
+**Review model:** Plugin authors submit PRs with a React component, Storybook stories, and tests. AI-assisted code
+review (with clear rules in `CONTRIBUTING.md` and `AGENTS.md`) handles most verification — correct use of `shared/`
+components, dark mode support, no external network calls, no DOM manipulation outside the component tree. Human review
+becomes a quick final approval.
 
 **Strengths:**
 
-- Full React expressiveness — flame graphs, interactive panels, rich
-  layouts are all possible
-- Native look and feel — renderers use the same design system as the
-  viewer
+- Full React expressiveness — flame graphs, interactive panels, rich layouts are all possible
+- Native look and feel — renderers use the same design system as the viewer
 - Community-driven — plugin authors own their visualization
-- Security by review — no untrusted code reaches production without
-  approval
-- AI-assisted review scales well — the review surface is small and
-  well-defined (React component with constrained imports)
+- Security by review — no untrusted code reaches production without approval
+- AI-assisted review scales well — the review surface is small and well-defined (React component with constrained
+  imports)
 
 **Limitations:**
 
-- Requires the `plugin-renderers` repo infrastructure (Storybook, CI,
-  shared component library)
-- Renderer availability lags behind plugin releases (PR → review → merge
-  → deploy). RenderHint fallback covers the gap.
-- Design system changes in the viewer may require renderer updates
-  (mitigated by stable `shared/` exports)
+- Requires the `plugin-renderers` repo infrastructure (Storybook, CI, shared component library)
+- Renderer availability lags behind plugin releases (PR → review → merge → deploy). RenderHint fallback covers the gap.
+- Design system changes in the viewer may require renderer updates (mitigated by stable `shared/` exports)
 
-**When to use:** First-party plugins and popular community plugins that
-need visualization beyond what RenderHint can express. Not required for
-simple plugins.
+**When to use:** First-party plugins and popular community plugins that need visualization beyond what RenderHint can
+express. Not required for simple plugins.
 
 ---
 
 ### Recommendation
 
-Start with **Candidate A** (RenderHint) — it's the simplest path, covers
-most use cases, and works from day one as the fallback layer. Evaluate
-**Candidate B** (plugin-renderers repo) once Cloud is live and first-party
-plugins (`@glubean/graphql`, `@glubean/auth`) need richer dashboard cards.
-The two approaches are complementary, not mutually exclusive — Candidate B
-adds a layer above Candidate A in the fallback pyramid.
+Start with **Candidate A** (RenderHint) — it's the simplest path, covers most use cases, and works from day one as the
+fallback layer. Evaluate **Candidate B** (plugin-renderers repo) once Cloud is live and first-party plugins
+(`@glubean/graphql`, `@glubean/auth`) need richer dashboard cards. The two approaches are complementary, not mutually
+exclusive — Candidate B adds a layer above Candidate A in the fallback pyramid.
 
 ---
 
@@ -755,8 +714,7 @@ Only what cannot be extracted:
 
 ### Phase 0: Prerequisites (1-2 days)
 
-Before extracting GraphQL, establish behavioral baselines so the plugin
-version can be verified against the original.
+Before extracting GraphQL, establish behavioral baselines so the plugin version can be verified against the original.
 
 | Task                                               | Files                     | Why                                                                                    |
 | -------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------- |
@@ -783,18 +741,18 @@ version can be verified against the original.
 | Tests for `buildLazyPlugins`                                         | configure_test.ts      | +50   |
 | Tests for hooks passthrough                                          | configure_test.ts      | +30   |
 
-**Exit criteria:** `configure({ plugins: { x: definePlugin(...) } })` works
-with full type inference. HTTP hooks pass through. All tests green.
+**Exit criteria:** `configure({ plugins: { x: definePlugin(...) } })` works with full type inference. HTTP hooks pass
+through. All tests green.
 
 **Outcome:** Community can write configure-level plugins and HTTP middleware.
 
 ### Phase 2: Dogfooding — Extract & Publish (4-5 days)
 
-Ship `@glubean/graphql` first (validates the architecture on a known module),
-then `@glubean/auth` (showcases ecosystem value with a new capability).
+Ship `@glubean/graphql` first (validates the architecture on a known module), then `@glubean/auth` (showcases ecosystem
+value with a new capability).
 
-Since the SDK hasn't shipped to production users, there's no deprecation
-period. GraphQL is simply removed from core and published as a plugin.
+Since the SDK hasn't shipped to production users, there's no deprecation period. GraphQL is simply removed from core and
+published as a plugin.
 
 | Task                                                          | Files                                                         | Lines           |
 | ------------------------------------------------------------- | ------------------------------------------------------------- | --------------- |
@@ -816,12 +774,11 @@ period. GraphQL is simply removed from core and published as a plugin.
 | `deno.json`    | remove `./graphql` export entry                                              | 1 reference                     |
 | `README.md`    | update GraphQL examples to show plugin usage                                 | ~39 references                  |
 
-Total: ~60 code lines to update across 5 source files, plus docs and config.
-`graphql.ts` itself moves wholesale and doesn't count as "changes."
+Total: ~60 code lines to update across 5 source files, plus docs and config. `graphql.ts` itself moves wholesale and
+doesn't count as "changes."
 
-**Exit criteria:** `@glubean/graphql` and `@glubean/auth` published to JSR.
-Phase 0 baseline tests pass against the plugin version. SDK core has zero
-GraphQL references.
+**Exit criteria:** `@glubean/graphql` and `@glubean/auth` published to JSR. Phase 0 baseline tests pass against the
+plugin version. SDK core has zero GraphQL references.
 
 **Outcome:** Two published plugins prove the architecture works.
 
@@ -841,8 +798,7 @@ GraphQL references.
 
 #### Scanner Compatibility
 
-`test.extend()` encourages a pattern where users re-export `test` from a
-local `fixtures.ts` file:
+`test.extend()` encourages a pattern where users re-export `test` from a local `fixtures.ts` file:
 
 ```typescript
 // tests/fixtures.ts
@@ -853,36 +809,30 @@ export const test = base.extend({ auth: ... });
 import { test } from "./fixtures.ts";
 ```
 
-The scanner's file-discovery regex (Pattern 3: `/import\s+.*\{[^}]*test[^}]*\}/`)
-is broad enough to match `import { test } from "./fixtures.ts"`. This has
-been verified against the current scanner source. However:
+The scanner's file-discovery regex (Pattern 3: `/import\s+.*\{[^}]*test[^}]*\}/`) is broad enough to match
+`import { test } from "./fixtures.ts"`. This has been verified against the current scanner source. However:
 
-1. **Pattern 3 is overly broad** — it matches `import { testUtils } from "..."`,
-   causing false positives. The runtime extractor filters non-test exports,
-   but the regex should be tightened to reduce noise. **This is a Phase 3
-   task, not a follow-up.**
+1. **Pattern 3 is overly broad** — it matches `import { testUtils } from "..."`, causing false positives. The runtime
+   extractor filters non-test exports, but the regex should be tightened to reduce noise. **This is a Phase 3 task, not
+   a follow-up.**
 
-2. **Validation message is misleading** — `validate()` says "import from
-   @glubean/sdk" but Pattern 3 doesn't require that. Update the message to
-   reflect reality.
+2. **Validation message is misleading** — `validate()` says "import from @glubean/sdk" but Pattern 3 doesn't require
+   that. Update the message to reflect reality.
 
-3. **Runtime extraction still works** — `extractor-deno.ts` runs the file
-   in a subprocess and reads from `getRegistry()`, which is populated by
-   `test()` regardless of import source. `test.extend()` wraps the original
+3. **Runtime extraction still works** — `extractor-deno.ts` runs the file in a subprocess and reads from
+   `getRegistry()`, which is populated by `test()` regardless of import source. `test.extend()` wraps the original
    `test()`, so the registry chain stays intact.
 
-**Exit criteria:** `test.extend()` and chained extend work with full type
-inference. Scanner discovers test files using `./fixtures.ts` re-export
-pattern. All tests green. `Expectation.extend()` matchers work with `.not`
-negation and `.orFail()` chaining.
+**Exit criteria:** `test.extend()` and chained extend work with full type inference. Scanner discovers test files using
+`./fixtures.ts` re-export pattern. All tests green. `Expectation.extend()` matchers work with `.not` negation and
+`.orFail()` chaining.
 
 **Outcome:** Full plugin architecture. Plugins can extend ctx and assertions.
 
 ### Phase 4: Ecosystem Enablement (1-2 weeks, NOT optional)
 
-This phase is critical for adoption. Without it, the plugin system is an
-architecture with no users. This is the difference between "built it" and
-"they came."
+This phase is critical for adoption. Without it, the plugin system is an architecture with no users. This is the
+difference between "built it" and "they came."
 
 | Task                                            | Priority      | Why                                      |
 | ----------------------------------------------- | ------------- | ---------------------------------------- |
@@ -893,18 +843,15 @@ architecture with no users. This is the difference between "built it" and
 | AGENTS.md template for plugin repos             | High          | AI agents can assist plugin development  |
 | Plugin discovery page on docs site              | Medium        | Visibility for community packages        |
 
-**Exit criteria:** A new developer can create a working plugin from template
-to published JSR package in under 30 minutes, guided only by the docs.
-Plugin author guide published. Template repo working. `glubean init --plugin`
+**Exit criteria:** A new developer can create a working plugin from template to published JSR package in under 30
+minutes, guided only by the docs. Plugin author guide published. Template repo working. `glubean init --plugin`
 generates a buildable scaffold.
 
 ### Phase 5: Plugin Visualization (post-cloud-launch)
 
-> **Priority:** This phase starts **after Cloud launches** and after
-> Phase 1–4 are complete. It is not a prerequisite for the SDK-side plugin
-> architecture, but it **must be done before we publicly encourage plugins
-> that produce custom event types** — otherwise plugin results are invisible
-> on the dashboard.
+> **Priority:** This phase starts **after Cloud launches** and after Phase 1–4 are complete. It is not a prerequisite
+> for the SDK-side plugin architecture, but it **must be done before we publicly encourage plugins that produce custom
+> event types** — otherwise plugin results are invisible on the dashboard.
 
 | Task                                                                                           | Where                | Effort           |
 | ---------------------------------------------------------------------------------------------- | -------------------- | ---------------- |
@@ -919,35 +866,28 @@ generates a buildable scaffold.
 
 **Suggested sub-phasing:**
 
-1. **5a — Contracts + SDK** (1–2 days): Open `RunEvent.type`, add
-   `RenderHint`, ship `ctx.emit()`. This unblocks plugin authors to start
-   emitting events even before the viewer renders them nicely.
-2. **5b — Fallback rendering** (1–2 days): Cloud viewer shows a structured
-   JSON card for any `plugin:*` event. This ensures nothing is invisible.
-3. **5c — RenderHint renderers** (3–5 days): Implement the kv / table /
-   code / diff / badge / markdown / timeline components. Most are
-   composable from existing shadcn primitives.
-4. **5d — First-party dogfooding** (1–2 days): Add `render` hints to
-   `@glubean/graphql` and `@glubean/auth` events. Update plugin author
-   guide with visualization examples.
-5. **5e — Plugin-renderers repo** (evaluate after 5d): If RenderHint proves
-   insufficient for first-party plugins, set up the `plugin-renderers`
-   repo (see [Solution Candidate B](#solution-candidate-b-community-renderer-repo-for-richer-visualization)).
-   This adds a dedicated-renderer layer above RenderHint in the fallback
-   pyramid.
+1. **5a — Contracts + SDK** (1–2 days): Open `RunEvent.type`, add `RenderHint`, ship `ctx.emit()`. This unblocks plugin
+   authors to start emitting events even before the viewer renders them nicely.
+2. **5b — Fallback rendering** (1–2 days): Cloud viewer shows a structured JSON card for any `plugin:*` event. This
+   ensures nothing is invisible.
+3. **5c — RenderHint renderers** (3–5 days): Implement the kv / table / code / diff / badge / markdown / timeline
+   components. Most are composable from existing shadcn primitives.
+4. **5d — First-party dogfooding** (1–2 days): Add `render` hints to `@glubean/graphql` and `@glubean/auth` events.
+   Update plugin author guide with visualization examples.
+5. **5e — Plugin-renderers repo** (evaluate after 5d): If RenderHint proves insufficient for first-party plugins, set up
+   the `plugin-renderers` repo (see
+   [Solution Candidate B](#solution-candidate-b-community-renderer-repo-for-richer-visualization)). This adds a
+   dedicated-renderer layer above RenderHint in the fallback pyramid.
 
-**Exit criteria:** Plugin events with `RenderHint` render correctly in the
-Cloud dashboard. Plugin events without hints display a structured fallback
-card. Plugin author guide documents `ctx.emit()` and render hints with
-examples.
+**Exit criteria:** Plugin events with `RenderHint` render correctly in the Cloud dashboard. Plugin events without hints
+display a structured fallback card. Plugin author guide documents `ctx.emit()` and render hints with examples.
 
 ---
 
 ## GraphQL Extraction
 
-The SDK hasn't shipped to production users yet. No deprecation period, no
-shim layer, no compat re-exports. GraphQL is simply removed from core and
-published as `@glubean/graphql`.
+The SDK hasn't shipped to production users yet. No deprecation period, no shim layer, no compat re-exports. GraphQL is
+simply removed from core and published as `@glubean/graphql`.
 
 | What                     | Before                                   | After                                               |
 | ------------------------ | ---------------------------------------- | --------------------------------------------------- |
@@ -975,7 +915,7 @@ Auth spans multiple hooks because different auth modes have different needs:
 
 ```typescript
 // Static auth — Hook 2 (configure helpers)
-import { bearer, basicAuth, apiKey } from "@glubean/auth";
+import { apiKey, basicAuth, bearer } from "@glubean/auth";
 
 configure({ http: bearer("base_url", "api_token") });
 configure({ http: basicAuth("base_url", "username", "password") });
@@ -1037,19 +977,16 @@ test("flow")
 
 ### What We Explicitly Chose NOT To Do
 
-- **No plugin manifest or `glubean.plugins` config file.** Plugins are code,
-  not configuration. Import them and use them. If a declarative config becomes
-  necessary later, it can be layered on without breaking the code-first model.
+- **No plugin manifest or `glubean.plugins` config file.** Plugins are code, not configuration. Import them and use
+  them. If a declarative config becomes necessary later, it can be layered on without breaking the code-first model.
 
-- **No plugin lifecycle events (init, destroy, pre-test, post-test).** Keep
-  the harness unaware of plugins in Phase 1–3. If lifecycle hooks are needed,
-  they can be added to `GlubeanRuntime` in a future phase — but the bar is
-  high, because simplicity is more valuable than flexibility at this stage.
+- **No plugin lifecycle events (init, destroy, pre-test, post-test).** Keep the harness unaware of plugins in Phase 1–3.
+  If lifecycle hooks are needed, they can be added to `GlubeanRuntime` in a future phase — but the bar is high, because
+  simplicity is more valuable than flexibility at this stage.
 
-- **No plugin compatibility matrix.** Plugins are just functions — they
-  compose via TypeScript's type system. If two plugins conflict, it's a
-  runtime error, same as any other function composition bug. No need for a
-  "plugin compatibility" framework.
+- **No plugin compatibility matrix.** Plugins are just functions — they compose via TypeScript's type system. If two
+  plugins conflict, it's a runtime error, same as any other function composition bug. No need for a "plugin
+  compatibility" framework.
 
 ---
 
@@ -1084,35 +1021,28 @@ These don't block Phase 1 but should be resolved before the relevant phase.
 
 ### Before Phase 4
 
-1. **Plugin naming convention: `@glubean/X` vs `glubean-plugin-X`?**
-   First-party: `@glubean/X`. Community: either `@scope/glubean-X` or
-   `glubean-X`. Should we recommend or enforce a convention?
+1. **Plugin naming convention: `@glubean/X` vs `glubean-plugin-X`?** First-party: `@glubean/X`. Community: either
+   `@scope/glubean-X` or `glubean-X`. Should we recommend or enforce a convention?
 
-2. **Should there be a "blessed plugins" list on the docs site?**
-   Helps discoverability but creates maintenance burden. Can start with a
-   simple table in the docs and evolve into an automated registry later.
+2. **Should there be a "blessed plugins" list on the docs site?** Helps discoverability but creates maintenance burden.
+   Can start with a simple table in the docs and evolve into an automated registry later.
 
 ### Before Phase 5
 
-3. **Should `ctx.emit()` validate the `plugin:` prefix at runtime?**
-   Strict validation prevents accidental collision with `KnownEventType`.
-   But it adds a runtime check to every emit call. Likely worth it for
-   safety — decide when implementing Phase 5a.
+3. **Should `ctx.emit()` validate the `plugin:` prefix at runtime?** Strict validation prevents accidental collision
+   with `KnownEventType`. But it adds a runtime check to every emit call. Likely worth it for safety — decide when
+   implementing Phase 5a.
 
-4. **How should the `markdown` render hint be sanitized?**
-   Options: DOMPurify, remark with no HTML plugin, or a custom allowlist.
-   Must strip raw HTML, scripts, and external resource references.
+4. **How should the `markdown` render hint be sanitized?** Options: DOMPurify, remark with no HTML plugin, or a custom
+   allowlist. Must strip raw HTML, scripts, and external resource references.
 
-5. **Should `RenderHint` support composition (multiple hints per event)?**
-   E.g. a GraphQL query event might want both a `code` block and a `kv`
-   summary. Current design is single hint per event — composition could be
-   added later by allowing `kind: "group"` with children.
+5. **Should `RenderHint` support composition (multiple hints per event)?** E.g. a GraphQL query event might want both a
+   `code` block and a `kv` summary. Current design is single hint per event — composition could be added later by
+   allowing `kind: "group"` with children.
 
-6. **When should the `plugin-renderers` repo (Candidate B) be created?**
-   Evaluate after Phase 5d. If first-party plugins need visualization
-   beyond what RenderHint can express, create the repo with shared
-   component library, Storybook, and `CONTRIBUTING.md` / `AGENTS.md` for
-   AI-assisted review. If RenderHint is sufficient, defer.
+6. **When should the `plugin-renderers` repo (Candidate B) be created?** Evaluate after Phase 5d. If first-party plugins
+   need visualization beyond what RenderHint can express, create the repo with shared component library, Storybook, and
+   `CONTRIBUTING.md` / `AGENTS.md` for AI-assisted review. If RenderHint is sufficient, defer.
 
 ### Resolved Questions
 

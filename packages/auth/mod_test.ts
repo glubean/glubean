@@ -17,12 +17,7 @@ import { apiKey } from "./api_key.ts";
 import { oauth2 } from "./oauth2.ts";
 import { withLogin } from "./with_login.ts";
 import { encodeBase64 } from "@std/encoding/base64";
-import type {
-  HttpClient,
-  HttpRequestOptions,
-  HttpResponsePromise,
-  TestBuilder,
-} from "@glubean/sdk";
+import type { HttpClient, HttpRequestOptions, HttpResponsePromise, TestBuilder } from "@glubean/sdk";
 
 // =============================================================================
 // Test helpers
@@ -61,8 +56,7 @@ function createMockHttp(
     // deno-lint-ignore no-explicit-any
     (p as any).blob = () => Promise.resolve(new Blob([JSON.stringify(body)]));
     // deno-lint-ignore no-explicit-any
-    (p as any).arrayBuffer = () =>
-      Promise.resolve(new TextEncoder().encode(JSON.stringify(body)).buffer);
+    (p as any).arrayBuffer = () => Promise.resolve(new TextEncoder().encode(JSON.stringify(body)).buffer);
     return p as HttpResponsePromise;
   }
 
@@ -448,8 +442,7 @@ Deno.test("withLogin() - resolves template values in credentials", async () => {
   const mockCtx = {
     http: mockHttp,
     vars: {
-      get: (key: string) =>
-        key === "user_email" ? "alice@example.com" : undefined,
+      get: (key: string) => key === "user_email" ? "alice@example.com" : undefined,
       require: (key: string) => key,
     },
     secrets: {

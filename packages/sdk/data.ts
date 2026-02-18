@@ -107,18 +107,19 @@ function extractArray<T extends Record<string, unknown>>(
   // Data is an object — provide helpful error with discovered array fields
   if (data && typeof data === "object" && !Array.isArray(data)) {
     const arrayFields: string[] = [];
-    for (const [key, value] of Object.entries(
-      data as Record<string, unknown>,
-    )) {
+    for (
+      const [key, value] of Object.entries(
+        data as Record<string, unknown>,
+      )
+    ) {
       if (Array.isArray(value)) {
         arrayFields.push(`"${key}" (${value.length} items)`);
       }
     }
-    const hint =
-      arrayFields.length > 0
-        ? `\nFound these array fields: ${arrayFields.join(", ")}` +
-          `\nHint: use { pick: "${arrayFields[0]?.match(/"([^"]+)"/)?.[1] ?? ""}" } to select one.`
-        : "\nNo array fields found at the top level.";
+    const hint = arrayFields.length > 0
+      ? `\nFound these array fields: ${arrayFields.join(", ")}` +
+        `\nHint: use { pick: "${arrayFields[0]?.match(/"([^"]+)"/)?.[1] ?? ""}" } to select one.`
+      : "\nNo array fields found at the top level.";
 
     throw new Error(`${sourcePath}: root is an object, not an array.${hint}`);
   }
@@ -422,9 +423,7 @@ export async function fromDir<
   for (const filePath of files) {
     const content = await loadSingleFileAsObject(filePath);
     const name = fileNameWithoutExt(filePath);
-    const relativePath = filePath.startsWith(path)
-      ? filePath.slice(path.length).replace(/^\//, "")
-      : filePath;
+    const relativePath = filePath.startsWith(path) ? filePath.slice(path.length).replace(/^\//, "") : filePath;
 
     result.push({
       _name: name,
@@ -552,14 +551,10 @@ async function collectFiles(
   result: string[],
 ): Promise<void> {
   for await (const entry of Deno.readDir(dir)) {
-    const fullPath = dir.endsWith("/")
-      ? `${dir}${entry.name}`
-      : `${dir}/${entry.name}`;
+    const fullPath = dir.endsWith("/") ? `${dir}${entry.name}` : `${dir}/${entry.name}`;
 
     if (entry.isFile) {
-      const matchesExt = extensions.some((ext) =>
-        entry.name.toLowerCase().endsWith(ext.toLowerCase()),
-      );
+      const matchesExt = extensions.some((ext) => entry.name.toLowerCase().endsWith(ext.toLowerCase()));
       if (matchesExt) {
         result.push(fullPath);
       }

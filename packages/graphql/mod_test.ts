@@ -8,17 +8,13 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import {
   createGraphQLClient,
+  gql,
   graphql,
   type GraphQLResponse,
   GraphQLResponseError,
-  gql,
   parseOperationName,
 } from "./mod.ts";
-import type {
-  HttpClient,
-  HttpRequestOptions,
-  HttpResponsePromise,
-} from "@glubean/sdk";
+import type { HttpClient, HttpRequestOptions, HttpResponsePromise } from "@glubean/sdk";
 import type { GlubeanRuntime } from "@glubean/sdk";
 
 // =============================================================================
@@ -50,8 +46,7 @@ function createMockGqlHttp(
     // deno-lint-ignore no-explicit-any
     (p as any).text = () => Promise.resolve(JSON.stringify(response));
     // deno-lint-ignore no-explicit-any
-    (p as any).blob = () =>
-      Promise.resolve(new Blob([JSON.stringify(response)]));
+    (p as any).blob = () => Promise.resolve(new Blob([JSON.stringify(response)]));
     // deno-lint-ignore no-explicit-any
     (p as any).arrayBuffer = () =>
       Promise.resolve(

@@ -6,13 +6,7 @@
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
-import {
-  type AssertionEmission,
-  deepEqual,
-  Expectation,
-  ExpectFailError,
-  inspect,
-} from "./expect.ts";
+import { type AssertionEmission, deepEqual, Expectation, ExpectFailError, inspect } from "./expect.ts";
 
 // ---------------------------------------------------------------------------
 // Test helper — captures emissions from an Expectation
@@ -1034,8 +1028,7 @@ Deno.test("Expectation.extend() multiple matchers at once", () => {
         actual,
       }),
       toBeInRange: (actual, min, max) => ({
-        passed:
-          typeof actual === "number" &&
+        passed: typeof actual === "number" &&
           actual >= (min as number) &&
           actual <= (max as number),
         message: `to be in range [${min}, ${max}]`,

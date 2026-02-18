@@ -8,10 +8,7 @@
 import { dirname, join } from "@std/path";
 import { ensureDir } from "@std/fs";
 import { UntarStream } from "@std/tar/untar-stream";
-import {
-  TestExecutor,
-  type TimelineEvent,
-} from "@glubean/runner";
+import { TestExecutor, type TimelineEvent } from "@glubean/runner";
 import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
 import { ENV_VARS } from "./config.ts";
