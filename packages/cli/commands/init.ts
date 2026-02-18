@@ -382,6 +382,27 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     isMinimal = choice === "2";
   }
 
+  if (interactive && !options.overwrite) {
+    const hasExisting = await fileExists("deno.json") ||
+      await fileExists(".env");
+    if (hasExisting) {
+      console.log(
+        `\n  ${colors.yellow}⚠${colors.reset} Existing Glubean files detected in this directory.\n`,
+      );
+      const overwrite = promptYesNo(
+        "  Overwrite existing files?",
+        false,
+      );
+      if (overwrite) {
+        options.overwrite = true;
+      } else {
+        console.log(
+          `\n  ${colors.dim}Keeping existing files — new files will still be created${colors.reset}\n`,
+        );
+      }
+    }
+  }
+
   if (isMinimal) {
     await initMinimal(options.overwrite ?? false);
     return;

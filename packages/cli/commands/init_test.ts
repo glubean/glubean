@@ -522,3 +522,86 @@ Deno.test("init interactive - choose minimal", async () => {
     await cleanupDir(dir);
   }
 });
+
+Deno.test(
+  "init interactive - existing files prompts overwrite, yes overwrites",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      await Deno.writeTextFile(join(dir, "deno.json"), '{"existing": true}');
+
+      // Step 1: Enter (Best Practice)
+      // Overwrite prompt: y
+      // Step 2: Enter (default base URL)
+      // Step 3: no .git → init git? n
+      const { code } = await runInitCommand(dir, [], "\ny\n\nn\n", {
+        GLUBEAN_FORCE_INTERACTIVE: "1",
+      });
+      assertEquals(code, 0, "init command should succeed");
+
+      const content = await Deno.readTextFile(join(dir, "deno.json"));
+      assertEquals(
+        content.includes('"imports"'),
+        true,
+        "deno.json should be overwritten with new content",
+      );
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
+
+Deno.test(
+  "init interactive - existing files prompts overwrite, no keeps them",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      await Deno.writeTextFile(join(dir, "deno.json"), '{"existing": true}');
+
+      // Step 1: Enter (Best Practice)
+      // Overwrite prompt: n (keep existing)
+      // Step 2: Enter (default base URL)
+      // Step 3: no .git → init git? n
+      const { code, stdout } = await runInitCommand(dir, [], "\nn\n\nn\n", {
+        GLUBEAN_FORCE_INTERACTIVE: "1",
+      });
+      assertEquals(code, 0, "init command should succeed");
+
+      const content = await Deno.readTextFile(join(dir, "deno.json"));
+      assertEquals(
+        content,
+        '{"existing": true}',
+        "deno.json should be preserved",
+      );
+      assertEquals(stdout.includes("skip"), true);
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
+
+Deno.test(
+  "init interactive - minimal with existing files prompts overwrite",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      await Deno.writeTextFile(join(dir, ".env"), "OLD=true");
+
+      // Step 1: "2" (Minimal)
+      // Overwrite prompt: y
+      const { code } = await runInitCommand(dir, [], "2\ny\n", {
+        GLUBEAN_FORCE_INTERACTIVE: "1",
+      });
+      assertEquals(code, 0, "init command should succeed");
+
+      const content = await Deno.readTextFile(join(dir, ".env"));
+      assertEquals(
+        content.includes("dummyjson.com"),
+        true,
+        ".env should be overwritten",
+      );
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
