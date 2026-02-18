@@ -5,6 +5,9 @@
  * Fail-fast on missing required values.
  */
 
+import { WORKER_RUN_DEFAULTS } from "@glubean/runner";
+import type { SharedRunConfig } from "@glubean/runner";
+
 /**
  * Configuration for a Glubean worker.
  */
@@ -42,17 +45,14 @@ export interface WorkerConfig {
   /** Timeout for bundle downloads (ms). */
   downloadTimeoutMs: number;
 
-  /** Allowed network hosts for test execution (comma-separated or "*"). */
-  allowNet: string;
+  /** Shared run config for test execution (permissions, timeout, concurrency, etc.). */
+  run: SharedRunConfig;
 
-  /** Timeout for test execution (ms). */
-  executionTimeoutMs: number;
-
-  /** Max concurrency for test execution. */
-  executionConcurrency: number;
-
-  /** Stop executing remaining tests after first failure. */
-  stopOnFailure: boolean;
+  /**
+   * Overall task deadline in ms (download + extract + run all tests).
+   * Worker derives per-test timeout from this: floor(taskTimeoutMs * 0.9 / testCount).
+   */
+  taskTimeoutMs: number;
 
   /** Interval between event flush attempts (ms). */
   eventFlushIntervalMs: number;
@@ -110,9 +110,15 @@ export const ENV_VARS = {
   WORK_DIR: "GLUBEAN_WORK_DIR",
   DOWNLOAD_TIMEOUT_MS: "GLUBEAN_DOWNLOAD_TIMEOUT_MS",
   ALLOW_NET: "GLUBEAN_ALLOW_NET",
+  // New name (preferred)
+  TASK_TIMEOUT_MS: "GLUBEAN_TASK_TIMEOUT_MS",
+  // Old name (accepted during transition, removed in Phase 3)
   EXECUTION_TIMEOUT_MS: "GLUBEAN_EXECUTION_TIMEOUT_MS",
-  EXECUTION_CONCURRENCY: "GLUBEAN_EXECUTION_CONCURRENCY",
+  // New name
+  FAIL_FAST: "GLUBEAN_FAIL_FAST",
+  // Old name (transition)
   STOP_ON_FAILURE: "GLUBEAN_STOP_ON_FAILURE",
+  EXECUTION_CONCURRENCY: "GLUBEAN_EXECUTION_CONCURRENCY",
   EVENT_FLUSH_INTERVAL_MS: "GLUBEAN_EVENT_FLUSH_INTERVAL_MS",
   EVENT_FLUSH_MAX_BUFFER: "GLUBEAN_EVENT_FLUSH_MAX_BUFFER",
   EVENT_MAX_BUFFER: "GLUBEAN_EVENT_MAX_BUFFER",
@@ -168,6 +174,15 @@ export function loadConfig(): WorkerConfig {
   // Generate default worker ID from hostname + random suffix
   const defaultWorkerId = `worker-${crypto.randomUUID().slice(0, 8)}`;
 
+  // Dual-read for transition: prefer new name, fall back to old
+  const failFast = get(ENV_VARS.FAIL_FAST) !== undefined
+    ? getBool(ENV_VARS.FAIL_FAST, false)
+    : getBool(ENV_VARS.STOP_ON_FAILURE, false);
+  const taskTimeoutMs = getInt(
+    ENV_VARS.TASK_TIMEOUT_MS,
+    getInt(ENV_VARS.EXECUTION_TIMEOUT_MS, 300_000),
+  );
+
   return {
     controlPlaneUrl: require(ENV_VARS.CONTROL_PLANE_URL),
     workerToken: require(ENV_VARS.WORKER_TOKEN),
@@ -181,10 +196,13 @@ export function loadConfig(): WorkerConfig {
     workDir: get(ENV_VARS.WORK_DIR) ||
       Deno.makeTempDirSync({ prefix: "glubean-" }),
     downloadTimeoutMs: getInt(ENV_VARS.DOWNLOAD_TIMEOUT_MS, 60_000),
-    allowNet: get(ENV_VARS.ALLOW_NET) || "*",
-    executionTimeoutMs: getInt(ENV_VARS.EXECUTION_TIMEOUT_MS, 300_000),
-    executionConcurrency: getInt(ENV_VARS.EXECUTION_CONCURRENCY, 1),
-    stopOnFailure: getBool(ENV_VARS.STOP_ON_FAILURE, false),
+    run: {
+      ...WORKER_RUN_DEFAULTS,
+      failFast,
+      allowNet: get(ENV_VARS.ALLOW_NET) ?? "*",
+      concurrency: getInt(ENV_VARS.EXECUTION_CONCURRENCY, 1),
+    },
+    taskTimeoutMs,
     eventFlushIntervalMs: getInt(ENV_VARS.EVENT_FLUSH_INTERVAL_MS, 1_000),
     eventFlushMaxBuffer: getInt(ENV_VARS.EVENT_FLUSH_MAX_BUFFER, 50),
     eventMaxBuffer: getInt(ENV_VARS.EVENT_MAX_BUFFER, 10_000),
@@ -213,8 +231,14 @@ export interface ConfigFile {
   workerId?: string;
   logLevel?: "debug" | "info" | "warn" | "error";
   allowNet?: string;
+  /** New name (preferred). */
+  taskTimeoutMs?: number;
+  /** Old name (accepted during transition). */
   executionTimeoutMs?: number;
   executionConcurrency?: number;
+  /** New name (preferred). */
+  failFast?: boolean;
+  /** Old name (accepted during transition). */
   stopOnFailure?: boolean;
   /** Tags for task matching (e.g., ["tier:pro", "team:acme"]). */
   tags?: string[];
@@ -255,17 +279,17 @@ export async function loadConfigFromFile(
   if (fileConfig.logLevel && !Deno.env.get(ENV_VARS.LOG_LEVEL)) {
     Deno.env.set(ENV_VARS.LOG_LEVEL, fileConfig.logLevel);
   }
-  if (fileConfig.allowNet && !Deno.env.get(ENV_VARS.ALLOW_NET)) {
+  if (fileConfig.allowNet !== undefined && Deno.env.get(ENV_VARS.ALLOW_NET) === undefined) {
     Deno.env.set(ENV_VARS.ALLOW_NET, fileConfig.allowNet);
   }
+  // Prefer new name (taskTimeoutMs), fall back to old (executionTimeoutMs)
+  const fileTimeout = fileConfig.taskTimeoutMs ?? fileConfig.executionTimeoutMs;
   if (
-    fileConfig.executionTimeoutMs !== undefined &&
+    fileTimeout !== undefined &&
+    !Deno.env.get(ENV_VARS.TASK_TIMEOUT_MS) &&
     !Deno.env.get(ENV_VARS.EXECUTION_TIMEOUT_MS)
   ) {
-    Deno.env.set(
-      ENV_VARS.EXECUTION_TIMEOUT_MS,
-      String(fileConfig.executionTimeoutMs),
-    );
+    Deno.env.set(ENV_VARS.TASK_TIMEOUT_MS, String(fileTimeout));
   }
   if (
     fileConfig.executionConcurrency !== undefined &&
@@ -276,11 +300,14 @@ export async function loadConfigFromFile(
       String(fileConfig.executionConcurrency),
     );
   }
+  // Prefer new name (failFast), fall back to old (stopOnFailure)
+  const fileFailFast = fileConfig.failFast ?? fileConfig.stopOnFailure;
   if (
-    fileConfig.stopOnFailure !== undefined &&
+    fileFailFast !== undefined &&
+    !Deno.env.get(ENV_VARS.FAIL_FAST) &&
     !Deno.env.get(ENV_VARS.STOP_ON_FAILURE)
   ) {
-    Deno.env.set(ENV_VARS.STOP_ON_FAILURE, String(fileConfig.stopOnFailure));
+    Deno.env.set(ENV_VARS.FAIL_FAST, String(fileFailFast));
   }
   if (fileConfig.tags?.length && !Deno.env.get(ENV_VARS.WORKER_TAGS)) {
     Deno.env.set(ENV_VARS.WORKER_TAGS, fileConfig.tags.join(","));

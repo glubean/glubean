@@ -124,7 +124,8 @@ This repository follows **GitHub Flow**. No exceptions.
   - Committing (`git commit`)
   - Pushing (`git push`)
   - Creating a PR (`gh pr create`)
-- Never perform any of these operations silently or automatically. Always describe what you intend to do and wait for a clear "yes" or equivalent confirmation.
+- Never perform any of these operations silently or automatically. Always describe what you intend to do and wait for a
+  clear "yes" or equivalent confirmation.
 - **Never run `git push` to `main`** — push to the feature branch and open a PR.
 
 ## Testing

@@ -17,6 +17,8 @@
 import { resolve } from "@std/path";
 import { DEFAULT_CONFIG } from "@glubean/redaction";
 import type { RedactionConfig } from "@glubean/redaction";
+import { LOCAL_RUN_DEFAULTS } from "@glubean/runner";
+import type { SharedRunConfig } from "@glubean/runner";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,6 +35,18 @@ export interface GlubeanRunConfig {
   testDir: string;
   /** Directory containing exploratory test files (default: "./explore") */
   exploreDir: string;
+  /** Per-test timeout in ms. Default: 30_000. */
+  perTestTimeoutMs: number;
+  /**
+   * Max parallel test execution. Default: 1.
+   * Reserved: CLI execution is currently serial; this field flows to
+   * SharedRunConfig for Worker/future use but is not consumed by CLI's run loop.
+   */
+  concurrency: number;
+  /** Deno permission flags for the sandboxed subprocess. */
+  permissions: string[];
+  /** Network access policy ("*" = unrestricted, "" = none, "host1,host2" = allowlist). */
+  allowNet: string;
 }
 
 /** Partial run config as read from a file (all fields optional). */
@@ -46,6 +60,10 @@ export interface GlubeanRunConfigInput {
   failAfter?: number | null;
   testDir?: string;
   exploreDir?: string;
+  perTestTimeoutMs?: number;
+  concurrency?: number;
+  permissions?: string[];
+  allowNet?: string;
 }
 
 /** Redaction config input from user files (additive fields only). */
@@ -84,6 +102,10 @@ export const RUN_DEFAULTS: GlubeanRunConfig = {
   failAfter: null,
   testDir: "./tests",
   exploreDir: "./explore",
+  perTestTimeoutMs: LOCAL_RUN_DEFAULTS.perTestTimeoutMs,
+  concurrency: LOCAL_RUN_DEFAULTS.concurrency,
+  permissions: [...LOCAL_RUN_DEFAULTS.permissions],
+  allowNet: LOCAL_RUN_DEFAULTS.allowNet,
 };
 
 /**
@@ -327,6 +349,27 @@ export function mergeRunOptions(
   if (cliFlags.exploreDir !== undefined) {
     result.exploreDir = String(cliFlags.exploreDir);
   }
+  if (cliFlags.timeout !== undefined) {
+    result.perTestTimeoutMs = Number(cliFlags.timeout);
+  }
+  // concurrency: reserved for future parallel execution in CLI.
+  // Currently flows into SharedRunConfig but CLI's run loop is serial.
 
   return result;
+}
+
+/**
+ * Convert a resolved GlubeanRunConfig to a SharedRunConfig
+ * suitable for TestExecutor.fromSharedConfig().
+ */
+export function toSharedRunConfig(config: GlubeanRunConfig): SharedRunConfig {
+  return {
+    failFast: config.failFast,
+    failAfter: config.failAfter ?? undefined,
+    perTestTimeoutMs: config.perTestTimeoutMs,
+    concurrency: config.concurrency,
+    permissions: config.permissions,
+    allowNet: config.allowNet,
+    emitFullTrace: config.emitFullTrace,
+  };
 }

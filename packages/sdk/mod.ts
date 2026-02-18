@@ -132,8 +132,7 @@ export class TestBuilder<S = unknown, Ctx extends TestContext = TestContext> {
    * ```
    */
   setup<NewS>(fn: (ctx: Ctx) => Promise<NewS>): TestBuilder<NewS, Ctx> {
-    (this as unknown as TestBuilder<NewS, Ctx>)._setup =
-      fn as unknown as SetupFunction<NewS>;
+    (this as unknown as TestBuilder<NewS, Ctx>)._setup = fn as unknown as SetupFunction<NewS>;
     return this as unknown as TestBuilder<NewS, Ctx>;
   }
 
@@ -222,8 +221,7 @@ export class TestBuilder<S = unknown, Ctx extends TestContext = TestContext> {
     // deno-lint-ignore no-explicit-any
   ): TestBuilder<any, Ctx> {
     const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn!;
-    const options =
-      typeof optionsOrFn === "function" ? {} : (optionsOrFn as StepMeta);
+    const options = typeof optionsOrFn === "function" ? {} : (optionsOrFn as StepMeta);
 
     this._steps.push({
       meta: { name, ...options },
@@ -416,10 +414,9 @@ export function test<S = unknown>(
   idOrMeta: string | TestMeta,
   fn?: SimpleTestFunction,
 ): Test | TestBuilder<S> {
-  const meta: TestMeta =
-    typeof idOrMeta === "string"
-      ? { id: idOrMeta, name: idOrMeta }
-      : { name: idOrMeta.id, ...idOrMeta };
+  const meta: TestMeta = typeof idOrMeta === "string"
+    ? { id: idOrMeta, name: idOrMeta }
+    : { name: idOrMeta.id, ...idOrMeta };
 
   // Normalize tags to string[]
   if (meta.tags) {
@@ -481,9 +478,7 @@ function interpolateTemplate(
  * @internal
  */
 function resolveBaseMeta(idOrMeta: string | TestMeta): TestMeta {
-  return typeof idOrMeta === "string"
-    ? { id: idOrMeta, name: idOrMeta }
-    : { name: idOrMeta.id, ...idOrMeta };
+  return typeof idOrMeta === "string" ? { id: idOrMeta, name: idOrMeta } : { name: idOrMeta.id, ...idOrMeta };
 }
 
 // =============================================================================
@@ -653,8 +648,7 @@ export class EachBuilder<
   setup<NewS>(
     fn: (ctx: Ctx, row: T) => Promise<NewS>,
   ): EachBuilder<NewS, T, Ctx> {
-    (this as unknown as EachBuilder<NewS, T, Ctx>)._setup =
-      fn as unknown as EachSetupFunction<NewS, T, Ctx>;
+    (this as unknown as EachBuilder<NewS, T, Ctx>)._setup = fn as unknown as EachSetupFunction<NewS, T, Ctx>;
     return this as unknown as EachBuilder<NewS, T, Ctx>;
   }
 
@@ -728,8 +722,7 @@ export class EachBuilder<
     // deno-lint-ignore no-explicit-any
   ): EachBuilder<any, T, Ctx> {
     const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn!;
-    const options =
-      typeof optionsOrFn === "function" ? {} : (optionsOrFn as StepMeta);
+    const options = typeof optionsOrFn === "function" ? {} : (optionsOrFn as StepMeta);
 
     this._steps.push({
       meta: { name, ...options },
@@ -802,9 +795,7 @@ export class EachBuilder<
   private _filteredTable(): readonly T[] {
     const filter = this._baseMeta.filter;
     if (!filter) return this._table;
-    return this._table.filter((row, index) =>
-      filter(row as Record<string, unknown>, index),
-    );
+    return this._table.filter((row, index) => filter(row as Record<string, unknown>, index));
   }
 
   /**
@@ -841,9 +832,7 @@ export class EachBuilder<
     for (let i = 0; i < table.length; i++) {
       const row = table[i];
       const id = interpolateTemplate(this._baseMeta.id, row, i);
-      const name = this._baseMeta.name
-        ? interpolateTemplate(this._baseMeta.name, row, i)
-        : id;
+      const name = this._baseMeta.name ? interpolateTemplate(this._baseMeta.name, row, i) : id;
 
       registerTest({
         id,
@@ -870,9 +859,7 @@ export class EachBuilder<
     const table = this._filteredTable();
     return table.map((row, index) => {
       const id = interpolateTemplate(this._baseMeta.id, row, index);
-      const name = this._baseMeta.name
-        ? interpolateTemplate(this._baseMeta.name, row, index)
-        : id;
+      const name = this._baseMeta.name ? interpolateTemplate(this._baseMeta.name, row, index) : id;
 
       const meta: TestMeta = {
         ...this._baseMeta,
@@ -887,17 +874,13 @@ export class EachBuilder<
       return {
         meta,
         type: "steps" as const,
-        setup: setup
-          ? (((ctx: TestContext) => setup(ctx as Ctx, row)) as SetupFunction<S>)
-          : undefined,
+        setup: setup ? (((ctx: TestContext) => setup(ctx as Ctx, row)) as SetupFunction<S>) : undefined,
         teardown: teardown
-          ? (((ctx: TestContext, state: S) =>
-              teardown(ctx as Ctx, state, row)) as TeardownFunction<S>)
+          ? (((ctx: TestContext, state: S) => teardown(ctx as Ctx, state, row)) as TeardownFunction<S>)
           : undefined,
         steps: this._steps.map((s) => ({
           meta: s.meta,
-          fn: ((ctx: TestContext, state: S) =>
-            s.fn(ctx as Ctx, state, row)) as StepFunction<S>,
+          fn: ((ctx: TestContext, state: S) => s.fn(ctx as Ctx, state, row)) as StepFunction<S>,
         })),
         ...(this._fixtures ? { fixtures: this._fixtures } : {}),
       };
@@ -1027,8 +1010,7 @@ function selectPickExamples<T extends Record<string, unknown>>(
 
   let pickedEnv: string | undefined;
   try {
-    pickedEnv =
-      typeof Deno !== "undefined" ? Deno.env.get("GLUBEAN_PICK") : undefined;
+    pickedEnv = typeof Deno !== "undefined" ? Deno.env.get("GLUBEAN_PICK") : undefined;
   } catch {
     pickedEnv = undefined;
   }
@@ -1093,10 +1075,9 @@ function createExtendedTest<Ctx extends TestContext>(
   ): Test | TestBuilder<any, Ctx> {
     if (fn) {
       // Quick mode
-      const meta: TestMeta =
-        typeof idOrMeta === "string"
-          ? { id: idOrMeta, name: idOrMeta }
-          : { name: idOrMeta.id, ...idOrMeta };
+      const meta: TestMeta = typeof idOrMeta === "string"
+        ? { id: idOrMeta, name: idOrMeta }
+        : { name: idOrMeta.id, ...idOrMeta };
       if (meta.tags) meta.tags = toArray(meta.tags);
 
       const testDef: Test = {
@@ -1150,18 +1131,14 @@ function createExtendedTest<Ctx extends TestContext>(
 
       // Simple mode with fixtures
       const filteredTable = baseMeta.filter
-        ? table.filter((row, i) =>
-            baseMeta.filter!(row as Record<string, unknown>, i),
-          )
+        ? table.filter((row, i) => baseMeta.filter!(row as Record<string, unknown>, i))
         : table;
       const tagFieldNames = toArray(baseMeta.tagFields);
       const staticTags = toArray(baseMeta.tags);
 
       return filteredTable.map((row, index) => {
         const id = interpolateTemplate(baseMeta.id, row, index);
-        const name = baseMeta.name
-          ? interpolateTemplate(baseMeta.name, row, index)
-          : id;
+        const name = baseMeta.name ? interpolateTemplate(baseMeta.name, row, index) : id;
         const dynamicTags = tagFieldNames
           .map((field) => {
             const value = (row as Record<string, unknown>)[field];
@@ -1180,8 +1157,7 @@ function createExtendedTest<Ctx extends TestContext>(
         const testDef: Test = {
           meta,
           type: "simple",
-          fn: (async (ctx) =>
-            await fn(ctx as unknown as Ctx, row)) as SimpleTestFunction,
+          fn: (async (ctx) => await fn(ctx as unknown as Ctx, row)) as SimpleTestFunction,
           fixtures: allFixtures,
         };
 
@@ -1235,9 +1211,7 @@ export namespace test {
 
       // Apply filter if present
       const filteredTable = baseMeta.filter
-        ? table.filter((row, index) =>
-            baseMeta.filter!(row as Record<string, unknown>, index),
-          )
+        ? table.filter((row, index) => baseMeta.filter!(row as Record<string, unknown>, index))
         : table;
 
       const tagFieldNames = toArray(baseMeta.tagFields);
@@ -1246,9 +1220,7 @@ export namespace test {
       // Simple mode: with callback → return Test[]
       return filteredTable.map((row, index) => {
         const id = interpolateTemplate(baseMeta.id, row, index);
-        const name = baseMeta.name
-          ? interpolateTemplate(baseMeta.name, row, index)
-          : id;
+        const name = baseMeta.name ? interpolateTemplate(baseMeta.name, row, index) : id;
 
         // Compute tags: static tags + dynamic tagFields
         const dynamicTags = tagFieldNames
@@ -1423,12 +1395,7 @@ export * from "./types.ts";
 // Re-export data loaders for convenience
 // Users can also import from "@glubean/sdk/data" directly
 export { fromCsv, fromDir, fromJsonl, fromYaml, toArray } from "./data.ts";
-export type {
-  FromCsvOptions,
-  FromDirConcatOptions,
-  FromDirOptions,
-  FromYamlOptions,
-} from "./data.ts";
+export type { FromCsvOptions, FromDirConcatOptions, FromDirOptions, FromYamlOptions } from "./data.ts";
 
 // Re-export configure API
 export { configure, resolveTemplate } from "./configure.ts";
@@ -1438,10 +1405,4 @@ export { definePlugin } from "./plugin.ts";
 
 // Re-export assertion utilities
 export { Expectation, ExpectFailError } from "./expect.ts";
-export type {
-  AssertEmitter,
-  AssertionEmission,
-  CustomMatchers,
-  MatcherFn,
-  MatcherResult,
-} from "./expect.ts";
+export type { AssertEmitter, AssertionEmission, CustomMatchers, MatcherFn, MatcherResult } from "./expect.ts";

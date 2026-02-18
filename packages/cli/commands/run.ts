@@ -1,6 +1,6 @@
-import { type ExecutionEvent, TestExecutor } from "@glubean/runner";
+import { type ExecutionEvent, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import { basename, relative, resolve, toFileUrl } from "@std/path";
-import { loadConfig, mergeRunOptions } from "../lib/config.ts";
+import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.ts";
 import { walk } from "@std/fs/walk";
 import { expandGlob } from "@std/fs/expand-glob";
 import { extractWithDeno } from "@glubean/scanner";
@@ -544,10 +544,10 @@ export async function runCommand(
   }
 
   // Execute tests
-  const executor = new TestExecutor({
+  const shared = toSharedRunConfig(effectiveRun);
+  const executor = TestExecutor.fromSharedConfig(shared, {
     configPath,
     cwd: rootDir,
-    emitFullTrace: effectiveRun.emitFullTrace,
     ...(options.inspectBrk && { inspectBrk: options.inspectBrk }),
   });
   let passed = 0;
@@ -679,7 +679,7 @@ export async function runCommand(
           vars: envVars,
           secrets,
         },
-        { exportName },
+        { ...toSingleExecutionOptions(shared), exportName },
       )
     ) {
       // Collect every event for result JSON and summary

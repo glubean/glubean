@@ -17,7 +17,9 @@
  *   GLUBEAN_WORKER_TOKEN       (required) Worker authentication token
  *   GLUBEAN_WORKER_ID          Worker identifier (auto-generated if not set)
  *   GLUBEAN_LOG_LEVEL          Log level (debug, info, warn, error)
- *   GLUBEAN_ALLOW_NET          Allowed network hosts (* for all)
+ *   GLUBEAN_ALLOW_NET          Allowed network hosts (* for all, "" for none)
+ *   GLUBEAN_TASK_TIMEOUT_MS    Overall task deadline in ms
+ *   GLUBEAN_FAIL_FAST          Stop on first test failure
  *
  * @example
  * # Using environment variables
@@ -52,13 +54,18 @@ OPTIONS:
   --help             Show this help message
 
 ENVIRONMENT VARIABLES:
-  GLUBEAN_CONTROL_PLANE_URL   (required) Control plane API URL
-  GLUBEAN_WORKER_TOKEN        (required) Worker authentication token
-  GLUBEAN_WORKER_ID           Worker identifier
-  GLUBEAN_LOG_LEVEL           Log level (debug, info, warn, error)
-  GLUBEAN_ALLOW_NET           Allowed network hosts (* for all)
-  GLUBEAN_EXECUTION_TIMEOUT_MS    Test execution timeout
-  GLUBEAN_EXECUTION_CONCURRENCY   Max parallel test execution
+  GLUBEAN_CONTROL_PLANE_URL       (required) Control plane API URL
+  GLUBEAN_WORKER_TOKEN            (required) Worker authentication token
+  GLUBEAN_WORKER_ID               Worker identifier
+  GLUBEAN_LOG_LEVEL               Log level (debug, info, warn, error)
+  GLUBEAN_ALLOW_NET               Allowed network hosts (* for all, "" for none)
+  GLUBEAN_TASK_TIMEOUT_MS         Overall task deadline in ms (default: 300000)
+  GLUBEAN_FAIL_FAST               Stop on first test failure (default: false)
+  GLUBEAN_EXECUTION_CONCURRENCY   Max parallel test execution (default: 1)
+
+  Deprecated (still supported):
+  GLUBEAN_EXECUTION_TIMEOUT_MS    Use GLUBEAN_TASK_TIMEOUT_MS instead
+  GLUBEAN_STOP_ON_FAILURE         Use GLUBEAN_FAIL_FAST instead
 
 EXAMPLES:
   # Using environment variables

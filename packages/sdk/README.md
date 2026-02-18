@@ -184,9 +184,7 @@ const allVars = ctx.vars.all(); // Get all vars (for debugging)
 const port = ctx.vars.require("PORT", (v) => !isNaN(Number(v)));
 
 // With custom error message
-const apiKey = ctx.vars.require("API_KEY", (v) =>
-  v.length >= 32 ? true : `must be at least 32 chars, got ${v.length}`,
-);
+const apiKey = ctx.vars.require("API_KEY", (v) => v.length >= 32 ? true : `must be at least 32 chars, got ${v.length}`);
 ```
 
 #### Secrets
@@ -479,8 +477,7 @@ export const e2e = test("e2e")
   .group("setup", (b) =>
     b
       .step("seed database", async (ctx) => ({ dbId: "..." }))
-      .step("create user", async (ctx, { dbId }) => ({ dbId, userId: "..." })),
-  )
+      .step("create user", async (ctx, { dbId }) => ({ dbId, userId: "..." })))
   .step("verify", async (ctx, { dbId, userId }) => {
     /* ... */
   });
@@ -493,7 +490,7 @@ Both `.use()` and `.group()` are also available on `EachBuilder` for data-driven
 GraphQL support is provided by the `@glubean/graphql` plugin package. Install it separately:
 
 ```typescript
-import { test, configure } from "@glubean/sdk";
+import { configure, test } from "@glubean/sdk";
 import { graphql } from "@glubean/graphql";
 
 const { gql } = configure({
@@ -515,7 +512,8 @@ export const getUser = test("get-user", async (ctx) => {
 });
 ```
 
-See the [`@glubean/graphql` documentation](https://jsr.io/@glubean/graphql) for full API details, `.gql` file loading, and standalone usage.
+See the [`@glubean/graphql` documentation](https://jsr.io/@glubean/graphql) for full API details, `.gql` file loading,
+and standalone usage.
 
 ## API Reference
 

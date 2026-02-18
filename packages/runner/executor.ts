@@ -1,4 +1,6 @@
 import type { ApiTrace } from "@glubean/sdk";
+import { resolveAllowNetFlag } from "./config.ts";
+import type { SharedRunConfig } from "./config.ts";
 
 // Constants
 const DEFAULT_CONCURRENCY = 1;
@@ -378,6 +380,20 @@ export interface ExecutorOptions {
    * new TestExecutor({ inspectBrk: true });
    */
   inspectBrk?: number | boolean;
+
+  /**
+   * Env var prefixes to mask in the subprocess environment.
+   * Matching vars are overwritten with "***" (not removed).
+   *
+   * Why overwrite instead of remove? Deno.Command's `env` option
+   * merges with (not replaces) the parent environment. Using
+   * `clearEnv: true` would also wipe system vars (PATH, HOME, etc.).
+   * Overwriting to "***" is safe and simple.
+   *
+   * @example
+   * new TestExecutor({ maskEnvPrefixes: ["GLUBEAN_WORKER_TOKEN"] });
+   */
+  maskEnvPrefixes?: string[];
 }
 
 /**
@@ -391,6 +407,54 @@ export class TestExecutor {
     // Use full URL for JSR compatibility (pathname doesn't work with jsr: URLs)
     this.harnessPath = new URL("./harness.ts", import.meta.url).href;
     this.options = options;
+  }
+
+  /**
+   * Create a TestExecutor pre-configured from SharedRunConfig.
+   * Consumers only need to add context-specific overrides.
+   *
+   * @example
+   * const executor = TestExecutor.fromSharedConfig(LOCAL_RUN_DEFAULTS, {
+   *   configPath, cwd: rootDir,
+   * });
+   */
+  static fromSharedConfig(
+    shared: SharedRunConfig,
+    overrides?: Partial<ExecutorOptions>,
+  ): TestExecutor {
+    // Sanitize: strip any --allow-net that leaked into permissions
+    // (allowNet field is the single source for network policy).
+    // --allow-env is NOT stripped — it's a legitimate permission
+    // that CLI/MCP presets include. Credential safety is handled
+    // by maskEnvPrefixes, not by removing --allow-env.
+    const sanitized = shared.permissions.filter(
+      (p) => !p.startsWith("--allow-net"),
+    );
+
+    const netFlag = resolveAllowNetFlag(shared.allowNet);
+    const permissions = netFlag ? [netFlag, ...sanitized] : [...sanitized];
+
+    return new TestExecutor({
+      permissions,
+      emitFullTrace: shared.emitFullTrace,
+      ...overrides,
+    });
+  }
+
+  /**
+   * Build an env overlay that masks sensitive vars with "***".
+   * Returns undefined when no masking is needed (parent env inherited as-is).
+   */
+  private buildEnvOverlay(): Record<string, string> | undefined {
+    const prefixes = this.options.maskEnvPrefixes;
+    if (!prefixes?.length) return undefined;
+    const overlay: Record<string, string> = {};
+    for (const key of Object.keys(Deno.env.toObject())) {
+      if (prefixes.some((p) => key.startsWith(p))) {
+        overlay[key] = "***";
+      }
+    }
+    return Object.keys(overlay).length > 0 ? overlay : undefined;
   }
 
   /**
@@ -476,8 +540,9 @@ export class TestExecutor {
     // know when to attach the debugger. In normal mode, stderr is piped for error reporting.
     const command = new Deno.Command(Deno.execPath(), {
       args,
-      cwd: this.options.cwd, // Project root for relative path resolution
-      stdin: "piped", // Enable stdin for context passing
+      cwd: this.options.cwd,
+      env: this.buildEnvOverlay(),
+      stdin: "piped",
       stdout: "piped",
       stderr: inspectBrk ? "inherit" : "piped",
     });

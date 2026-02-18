@@ -9,7 +9,7 @@ import { dirname, join } from "@std/path";
 import { ensureDir } from "@std/fs";
 import { UntarStream } from "@std/tar/untar-stream";
 import { TestExecutor, type TimelineEvent } from "@glubean/runner";
-import type { Id as _Id, RunEvent, RuntimeContext } from "./types.ts";
+import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
 import { ENV_VARS } from "./config.ts";
 import type { Logger } from "./logger.ts";
@@ -475,25 +475,11 @@ export async function executeBundle(
       ? Math.floor(config.taskMemoryLimitBytes / (1024 * 1024))
       : undefined;
 
-    const executor = new TestExecutor({
+    const executor = TestExecutor.fromSharedConfig(config.run, {
       maxHeapSizeMb,
       configPath,
-      cwd: extractDir, // Project root for relative path resolution in data loaders
-      permissions: [
-        // Constrain network access for the sandboxed subprocess.
-        // `*` means unrestricted.
-        (() => {
-          const raw = (config.allowNet || "*").trim();
-          if (raw === "*" || raw === "") return "--allow-net";
-          const normalized = raw
-            .split(",")
-            .map((h) => h.trim())
-            .filter(Boolean)
-            .join(",");
-          return normalized ? `--allow-net=${normalized}` : "--allow-net";
-        })(),
-        "--allow-read",
-      ],
+      cwd: extractDir,
+      maskEnvPrefixes: ["GLUBEAN_WORKER_TOKEN"],
     });
 
     // Set up timeout
@@ -502,7 +488,7 @@ export async function executeBundle(
     signal?.addEventListener("abort", forwardAbort);
 
     const overallTimeoutMs = context.limits?.timeoutMs ??
-      config.executionTimeoutMs;
+      config.taskTimeoutMs;
     const timeoutId = setTimeout(() => {
       timedOut = true;
       internalAbort.abort();
@@ -510,7 +496,7 @@ export async function executeBundle(
 
     // Determine concurrency
     const requestedConcurrency = context.limits?.requestedConcurrency ??
-      config.executionConcurrency;
+      config.run.concurrency;
     const maxConcurrency = context.limits?.maxConcurrency ??
       requestedConcurrency;
     const concurrency = Math.min(
@@ -519,7 +505,12 @@ export async function executeBundle(
       tests.length,
     );
 
-    // Calculate per-test timeout (reserve 10% for overhead)
+    // Derive per-test timeout from overall task deadline (reserve 10% for overhead)
+    if (tests.length === 0) {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", forwardAbort);
+      return { success: true, eventCount, aborted: false, timedOut: false };
+    }
     const perTestTimeoutMs = Math.floor(
       (overallTimeoutMs * 0.9) / tests.length,
     );
@@ -624,7 +615,7 @@ export async function executeBundle(
             if (!error) {
               error = result.error || "Assertion failed";
             }
-            if (config.stopOnFailure) {
+            if (config.run.failFast) {
               internalAbort.abort();
               return;
             }
@@ -638,7 +629,7 @@ export async function executeBundle(
             testId: test.testId,
             error: message,
           });
-          if (config.stopOnFailure) {
+          if (config.run.failFast) {
             internalAbort.abort();
             return;
           }
@@ -660,7 +651,7 @@ export async function executeBundle(
     if (signal?.aborted || internalAbort.signal.aborted) {
       aborted = true;
       if (timedOut) {
-        error = `Execution timed out after ${config.executionTimeoutMs}ms`;
+        error = `Execution timed out after ${overallTimeoutMs}ms`;
       } else {
         error = error ?? "Execution aborted";
       }

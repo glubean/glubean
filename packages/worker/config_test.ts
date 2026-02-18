@@ -65,11 +65,14 @@ Deno.test("loadConfig loads minimal config", () => {
     assertEquals(config.controlPlaneUrl, "https://api.glubean.com");
     assertEquals(config.workerToken, "gwt_test_token");
     assertEquals(config.logLevel, "info");
-    assertEquals(config.executionConcurrency, 1);
+    assertEquals(config.run.concurrency, 1);
+    assertEquals(config.run.failFast, false);
+    assertEquals(config.run.allowNet, "*");
+    assertEquals(config.taskTimeoutMs, 300_000);
   });
 });
 
-Deno.test("loadConfig respects custom values", () => {
+Deno.test("loadConfig respects custom values (old env var names)", () => {
   withEnv({
     [ENV_VARS.CONTROL_PLANE_URL]: "https://custom.api.com",
     [ENV_VARS.WORKER_TOKEN]: "gwt_custom",
@@ -85,9 +88,48 @@ Deno.test("loadConfig respects custom values", () => {
     assertEquals(config.workerToken, "gwt_custom");
     assertEquals(config.workerId, "my-worker-1");
     assertEquals(config.logLevel, "debug");
-    assertEquals(config.executionConcurrency, 4);
-    assertEquals(config.executionTimeoutMs, 60000);
-    assertEquals(config.stopOnFailure, true);
+    assertEquals(config.run.concurrency, 4);
+    assertEquals(config.taskTimeoutMs, 60000);
+    assertEquals(config.run.failFast, true);
+  });
+});
+
+Deno.test("loadConfig prefers new env var names over old", () => {
+  withEnv({
+    [ENV_VARS.CONTROL_PLANE_URL]: "https://api.glubean.com",
+    [ENV_VARS.WORKER_TOKEN]: "gwt_test",
+    [ENV_VARS.TASK_TIMEOUT_MS]: "120000",
+    [ENV_VARS.EXECUTION_TIMEOUT_MS]: "60000",
+    [ENV_VARS.FAIL_FAST]: "true",
+    [ENV_VARS.STOP_ON_FAILURE]: "false",
+  }, () => {
+    const config = loadConfig();
+
+    assertEquals(config.taskTimeoutMs, 120000);
+    assertEquals(config.run.failFast, true);
+  });
+});
+
+Deno.test("loadConfig: FAIL_FAST=false overrides STOP_ON_FAILURE=true", () => {
+  withEnv({
+    [ENV_VARS.CONTROL_PLANE_URL]: "https://api.glubean.com",
+    [ENV_VARS.WORKER_TOKEN]: "gwt_test",
+    [ENV_VARS.FAIL_FAST]: "false",
+    [ENV_VARS.STOP_ON_FAILURE]: "true",
+  }, () => {
+    const config = loadConfig();
+    assertEquals(config.run.failFast, false);
+  });
+});
+
+Deno.test("loadConfig: ALLOW_NET='' means no network, not '*'", () => {
+  withEnv({
+    [ENV_VARS.CONTROL_PLANE_URL]: "https://api.glubean.com",
+    [ENV_VARS.WORKER_TOKEN]: "gwt_test",
+    [ENV_VARS.ALLOW_NET]: "",
+  }, () => {
+    const config = loadConfig();
+    assertEquals(config.run.allowNet, "");
   });
 });
 

@@ -3,5 +3,8 @@
   "version": "0.10.1",
   "exports": "./mod.ts",
   "license": "MIT",
-  "description": "Glubean MCP server - run checks and fetch facts for AI agents"
+  "description": "Glubean MCP server - run checks and fetch facts for AI agents",
+  "imports": {
+    "@glubean/runner": "jsr:@glubean/runner@^0.11.0"
+  }
 }

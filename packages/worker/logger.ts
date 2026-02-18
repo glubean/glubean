@@ -2,10 +2,11 @@
  * Structured logging for Glubean Worker.
  *
  * Uses JSON-formatted logs suitable for cloud environments.
- * Never logs secrets - caller must ensure sensitive data is excluded.
+ * Sensitive data is automatically redacted via @glubean/redaction.
  */
 
 import type { WorkerConfig } from "./config.ts";
+import { createBuiltinPlugins, DEFAULT_CONFIG, RedactionEngine } from "@glubean/redaction";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -27,41 +28,13 @@ export interface Logger {
   child(bindings: Record<string, unknown>): Logger;
 }
 
-/**
- * Redact sensitive fields from log data.
- */
-const REDACT_FIELDS = new Set([
-  "secrets",
-  "password",
-  "token",
-  "leaseToken",
-  "workerToken",
-  "authorization",
-  "apiKey",
-  "secret",
-]);
+const redactionEngine = new RedactionEngine({
+  config: DEFAULT_CONFIG,
+  plugins: createBuiltinPlugins(DEFAULT_CONFIG),
+});
 
 function redact(data: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(data)) {
-    const lowerKey = key.toLowerCase();
-    if (
-      REDACT_FIELDS.has(lowerKey) ||
-      lowerKey.includes("secret") ||
-      lowerKey.includes("token") ||
-      lowerKey.includes("apikey") ||
-      lowerKey.includes("password")
-    ) {
-      result[key] = "[REDACTED]";
-    } else if (value && typeof value === "object" && !Array.isArray(value)) {
-      result[key] = redact(value as Record<string, unknown>);
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return result;
+  return redactionEngine.redact(data).value as Record<string, unknown>;
 }
 
 /**

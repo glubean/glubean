@@ -1,6 +1,6 @@
 {
   "name": "@glubean/redaction",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "private": true,
   "main": "./mod.ts",
   "types": "./mod.ts",

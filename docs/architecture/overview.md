@@ -186,32 +186,32 @@ When `glubean scan` runs, it produces `metadata.json` — an index of all tests:
 
 ## Plugin System (designed)
 
-The SDK is being extended with a plugin architecture that enables third-party extensibility
-without growing the core kernel. See [Plugin System Design](./plugin-system.md) for the full design.
+The SDK is being extended with a plugin architecture that enables third-party extensibility without growing the core
+kernel. See [Plugin System Design](./plugin-system.md) for the full design.
 
 ### Extension hooks (6 SDK-side)
 
-| Hook | Purpose | Phase |
-| ---- | ------- | ----- |
-| Data Loaders | Custom data sources (`fromGraphQL`, `fromProtobuf`, etc.) | 1 |
-| Configure Plugins | Register plugins via `configure()` | 1 |
-| Context Extension | `test.extend()` for custom fixtures (Playwright-inspired) | 3 |
-| HTTP Middleware | Request/response interceptors on `ctx.http` | 2 |
-| Custom Assertion Matchers | `Expectation.extend()` for domain-specific assertions | 2 |
-| Event Reporters | Custom event sinks (`ctx.emit()`) | 2 |
+| Hook                      | Purpose                                                   | Phase |
+| ------------------------- | --------------------------------------------------------- | ----- |
+| Data Loaders              | Custom data sources (`fromGraphQL`, `fromProtobuf`, etc.) | 1     |
+| Configure Plugins         | Register plugins via `configure()`                        | 1     |
+| Context Extension         | `test.extend()` for custom fixtures (Playwright-inspired) | 3     |
+| HTTP Middleware           | Request/response interceptors on `ctx.http`               | 2     |
+| Custom Assertion Matchers | `Expectation.extend()` for domain-specific assertions     | 2     |
+| Event Reporters           | Custom event sinks (`ctx.emit()`)                         | 2     |
 
 ### Planned SDK restructuring
 
-As the plugin system matures, the SDK will evolve toward a **core kernel + extracted plugins**
-model. Built-in capabilities (like `ctx.http`, data loaders) will be refactored into first-party
-plugins that use the same extension API as community plugins. This keeps the kernel minimal
-while demonstrating that the plugin API is sufficient for real workloads.
+As the plugin system matures, the SDK will evolve toward a **core kernel + extracted plugins** model. Built-in
+capabilities (like `ctx.http`, data loaders) will be refactored into first-party plugins that use the same extension API
+as community plugins. This keeps the kernel minimal while demonstrating that the plugin API is sufficient for real
+workloads.
 
 ### Cloud-side visualization
 
-Plugin-generated events (`plugin:*` types) need rendering in the Cloud dashboard. Two solution
-candidates are documented in the plugin system design: structured render hints (data-driven)
-and a community renderer repository (React components reviewed and merged by the Glubean team).
+Plugin-generated events (`plugin:*` types) need rendering in the Cloud dashboard. Two solution candidates are documented
+in the plugin system design: structured render hints (data-driven) and a community renderer repository (React components
+reviewed and merged by the Glubean team).
 
 ## Version Compatibility
 

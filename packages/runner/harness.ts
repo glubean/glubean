@@ -423,8 +423,7 @@ const ctx = {
     if (typeof arg1 === "boolean") {
       // Overload 1: assert(condition, message?, details?)
       passed = arg1;
-      message =
-        (typeof arg2 === "string" ? arg2 : undefined) ||
+      message = (typeof arg2 === "string" ? arg2 : undefined) ||
         (passed ? "Assertion passed" : "Assertion failed");
       const details = typeof arg2 === "object" ? arg2 : arg3;
       if (details) {
@@ -436,8 +435,7 @@ const ctx = {
       passed = arg1.passed;
       actual = arg1.actual;
       expected = arg1.expected;
-      message =
-        (typeof arg2 === "string" ? arg2 : undefined) ||
+      message = (typeof arg2 === "string" ? arg2 : undefined) ||
         (passed ? "Assertion passed" : "Assertion failed");
     }
 
@@ -684,10 +682,7 @@ function emitSummary() {
         // HTTP stats (always present, 0 when no HTTP calls)
         httpRequestTotal,
         httpErrorTotal,
-        httpErrorRate:
-          httpRequestTotal > 0
-            ? Math.round((httpErrorTotal / httpRequestTotal) * 10000) / 10000
-            : 0,
+        httpErrorRate: httpRequestTotal > 0 ? Math.round((httpErrorTotal / httpRequestTotal) * 10000) / 10000 : 0,
         // Assertion stats
         assertionTotal: totalAssertions,
         assertionFailed: totalFailedAssertions,
@@ -934,13 +929,11 @@ function wrapKy(instance: any): any {
 
   for (const method of methods) {
     // deno-lint-ignore no-explicit-any
-    wrapped[method] = (input: any, options?: any) =>
-      callWithSchema(instance[method].bind(instance), input, options);
+    wrapped[method] = (input: any, options?: any) => callWithSchema(instance[method].bind(instance), input, options);
   }
 
   // deno-lint-ignore no-explicit-any
-  wrapped.extend = (options?: any) =>
-    wrapKy(instance.extend(normalizeOptions(options)));
+  wrapped.extend = (options?: any) => wrapKy(instance.extend(normalizeOptions(options)));
 
   return wrapped;
 }
@@ -1001,9 +994,11 @@ try {
     await executeNewTest(testObj);
   } else {
     throw new Error(
-      `Test "${testId}" not found. Available exports: ${Object.keys(
-        userModule,
-      ).join(", ")}`,
+      `Test "${testId}" not found. Available exports: ${
+        Object.keys(
+          userModule,
+        ).join(", ")
+      }`,
     );
   }
 } catch (error) {
@@ -1036,7 +1031,7 @@ try {
 
 // Resolution utilities shared with MCP and other consumers.
 // Extracted to resolve.ts for reuse outside the sandbox.
-import { findTestById, findTestByExport } from "./resolve.ts";
+import { findTestByExport, findTestById } from "./resolve.ts";
 
 /**
  * Resolve test.extend() fixtures and run the test body with an augmented context.
@@ -1073,8 +1068,7 @@ async function withFixtures(
 
   // Resolve simple fixtures first
   for (const [key, fn] of simple) {
-    (augmented as unknown as Record<string, unknown>)[key] =
-      await fn(augmented);
+    (augmented as unknown as Record<string, unknown>)[key] = await fn(augmented);
   }
 
   // No lifecycle fixtures — run the test directly
@@ -1279,9 +1273,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 JSON.stringify({
                   type: "log",
                   message: `Teardown error: ${
-                    teardownError instanceof Error
-                      ? teardownError.message
-                      : String(teardownError)
+                    teardownError instanceof Error ? teardownError.message : String(teardownError)
                   }`,
                 }),
               );

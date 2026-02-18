@@ -1,6 +1,7 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createLogger, createNoopLogger } from "./logger.ts";
 import type { WorkerConfig } from "./config.ts";
+import { WORKER_RUN_DEFAULTS } from "@glubean/runner";
 
 function createTestConfig(
   logLevel: "debug" | "info" | "warn" | "error",
@@ -17,10 +18,11 @@ function createTestConfig(
     logLevel,
     workDir: "/tmp/test",
     downloadTimeoutMs: 60000,
-    allowNet: "*",
-    executionTimeoutMs: 300000,
-    executionConcurrency: 1,
-    stopOnFailure: false,
+    run: {
+      ...WORKER_RUN_DEFAULTS,
+      allowNet: "*",
+    },
+    taskTimeoutMs: 300000,
     eventFlushIntervalMs: 1000,
     eventFlushMaxBuffer: 50,
     eventMaxBuffer: 10000,

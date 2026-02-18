@@ -4,9 +4,9 @@ import { ensureDir } from "@std/fs";
 import { executeBundle } from "./executor.ts";
 import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
+import { TestExecutor, WORKER_RUN_DEFAULTS } from "@glubean/runner";
 import { createNoopLogger } from "./logger.ts";
 
-// Helper to create a minimal config
 function createTestConfig(): WorkerConfig {
   return {
     controlPlaneUrl: "https://test.glubean.com",
@@ -20,10 +20,11 @@ function createTestConfig(): WorkerConfig {
     logLevel: "error",
     workDir: Deno.makeTempDirSync({ prefix: "glubean-test-" }),
     downloadTimeoutMs: 30000,
-    allowNet: "*",
-    executionTimeoutMs: 30000,
-    executionConcurrency: 1,
-    stopOnFailure: false,
+    run: {
+      ...WORKER_RUN_DEFAULTS,
+      allowNet: "*",
+    },
+    taskTimeoutMs: 30000,
     eventFlushIntervalMs: 1000,
     eventFlushMaxBuffer: 50,
     eventMaxBuffer: 1000,
@@ -155,7 +156,9 @@ export const simpleTest = test({ id: "simpleTest", name: "Simple Test" }, async 
       context,
       config,
       logger,
-      (event) => { events.push(event); },
+      (event) => {
+        events.push(event);
+      },
     );
 
     assertEquals(result.success, true);
@@ -171,6 +174,20 @@ export const simpleTest = test({ id: "simpleTest", name: "Simple Test" }, async 
     await shutdown();
     await Deno.remove(config.workDir, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test("executeBundle - configures maskEnvPrefixes for GLUBEAN_WORKER_TOKEN", () => {
+  // Regression guard: the worker must always mask its own token so that
+  // untrusted test code cannot exfiltrate it via --allow-env.
+  // This verifies the hardcoded value in executeBundle's call to
+  // TestExecutor.fromSharedConfig(..., { maskEnvPrefixes: [...] }).
+  const config = createTestConfig();
+  const executor = TestExecutor.fromSharedConfig(config.run, {
+    maskEnvPrefixes: ["GLUBEAN_WORKER_TOKEN"],
+  });
+  // deno-lint-ignore no-explicit-any
+  const opts = (executor as any).options;
+  assertEquals(opts.maskEnvPrefixes, ["GLUBEAN_WORKER_TOKEN"]);
 });
 
 Deno.test("executeBundle - detects checksum mismatch", async () => {
@@ -221,7 +238,9 @@ Deno.test("executeBundle - detects checksum mismatch", async () => {
       context,
       config,
       logger,
-      (event) => { events.push(event); },
+      (event) => {
+        events.push(event);
+      },
     );
 
     assertEquals(result.success, false);
@@ -287,7 +306,9 @@ export const failingTest = test({ id: "fail-1" }, async (ctx) => {
       context,
       config,
       logger,
-      (event) => { events.push(event); },
+      (event) => {
+        events.push(event);
+      },
     );
 
     // executeBundle returns success=false when a test fails

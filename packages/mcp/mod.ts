@@ -16,8 +16,8 @@ import { z } from "zod";
 import { dirname, resolve, toFileUrl } from "@std/path";
 import { crypto } from "@std/crypto";
 import { encodeHex } from "@std/encoding/hex";
-import { resolveModuleTests, TestExecutor } from "@glubean/runner";
-import type { ResolvedTest } from "@glubean/runner";
+import { LOCAL_RUN_DEFAULTS, resolveModuleTests, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import type { ResolvedTest, SharedRunConfig } from "@glubean/runner";
 import { createStaticScanner, scan } from "@glubean/scanner";
 import type { BundleMetadata, FileMeta, ScanResult } from "@glubean/scanner";
 
@@ -243,10 +243,15 @@ async function runLocalTestsFromFile(args: {
     };
   }
 
-  const executor = new TestExecutor();
+  const shared: SharedRunConfig = {
+    ...LOCAL_RUN_DEFAULTS,
+    failFast: Boolean(args.stopOnFailure),
+    concurrency: Math.max(1, args.concurrency ?? 1),
+  };
+  const executor = TestExecutor.fromSharedConfig(shared);
 
-  const concurrency = Math.max(1, args.concurrency ?? 1);
-  const stopOnFailure = Boolean(args.stopOnFailure);
+  const concurrency = shared.concurrency;
+  const stopOnFailure = shared.failFast;
   const includeLogs = args.includeLogs ?? true;
   const includeTraces = args.includeTraces ?? false;
 
@@ -274,7 +279,7 @@ async function runLocalTestsFromFile(args: {
         const event of executor.run(fileUrl, test.id, {
           vars,
           secrets,
-        }, { exportName: test.exportName })
+        }, { ...toSingleExecutionOptions(shared), exportName: test.exportName })
       ) {
         switch (event.type) {
           case "log":

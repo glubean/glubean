@@ -1,12 +1,12 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { TestExecutor } from "./executor.ts";
-import type { ExecutionEvent, TimelineEvent } from "./executor.ts";
+import type { ExecutionEvent, ExecutorOptions, TimelineEvent } from "./executor.ts";
+import { LOCAL_RUN_DEFAULTS, SHARED_RUN_DEFAULTS, WORKER_RUN_DEFAULTS } from "./config.ts";
 
 // Helper to filter assertions from events
 function getAssertions(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "assertion" }> =>
-      e.type === "assertion",
+    (e): e is Extract<TimelineEvent, { type: "assertion" }> => e.type === "assertion",
   );
 }
 
@@ -136,10 +136,12 @@ Deno.test("TestExecutor - streaming run yields events", async () => {
   const executor = new TestExecutor();
 
   const events: ExecutionEvent[] = [];
-  for await (const event of executor.run(`file://${testFile}`, "passingTest", {
-    vars: {},
-    secrets: {},
-  })) {
+  for await (
+    const event of executor.run(`file://${testFile}`, "passingTest", {
+      vars: {},
+      secrets: {},
+    })
+  ) {
     events.push(event);
   }
 
@@ -383,9 +385,11 @@ Deno.test("ctx.fail - can be caught in try/catch (user choice)", async () => {
   assertEquals(
     result.success,
     true,
-    `Test should pass when ctx.fail is caught. Events: ${JSON.stringify(
-      result.events,
-    )}`,
+    `Test should pass when ctx.fail is caught. Events: ${
+      JSON.stringify(
+        result.events,
+      )
+    }`,
   );
 
   // Should have the assertion from after the catch
@@ -741,15 +745,13 @@ Deno.test("builder with .build() still works as before", async () => {
 
 function getStepStarts(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "step_start" }> =>
-      e.type === "step_start",
+    (e): e is Extract<TimelineEvent, { type: "step_start" }> => e.type === "step_start",
   );
 }
 
 function getStepEnds(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "step_end" }> =>
-      e.type === "step_end",
+    (e): e is Extract<TimelineEvent, { type: "step_end" }> => e.type === "step_end",
   );
 }
 
@@ -1079,8 +1081,7 @@ Deno.test("summary event - includes assertion and step counts", async () => {
   );
 
   const summaries = result.events.filter(
-    (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-      e.type === "summary",
+    (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
   );
   assertEquals(summaries.length, 1, "Should have exactly one summary event");
 
@@ -1106,8 +1107,7 @@ Deno.test("summary event - step failure counts", async () => {
   );
 
   const summaries = result.events.filter(
-    (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-      e.type === "summary",
+    (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
   );
   assertEquals(summaries.length, 1);
 
@@ -1128,8 +1128,7 @@ Deno.test("summary event - step failure counts", async () => {
 
 function getWarnings(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "warning" }> =>
-      e.type === "warning",
+    (e): e is Extract<TimelineEvent, { type: "warning" }> => e.type === "warning",
   );
 }
 
@@ -1206,8 +1205,7 @@ Deno.test("ctx.warn - summary includes warning counters", async () => {
   });
 
   const summaries = result.events.filter(
-    (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-      e.type === "summary",
+    (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
   );
   assertEquals(summaries.length, 1);
 
@@ -1318,8 +1316,7 @@ async function createValidateTestFile(): Promise<string> {
 
 function getSchemaValidations(events: TimelineEvent[]) {
   return events.filter(
-    (e): e is Extract<TimelineEvent, { type: "schema_validation" }> =>
-      e.type === "schema_validation",
+    (e): e is Extract<TimelineEvent, { type: "schema_validation" }> => e.type === "schema_validation",
   );
 }
 
@@ -1423,8 +1420,7 @@ Deno.test("ctx.validate - fatal severity aborts test", async () => {
 
   // "after fatal" log should not appear
   const logs = result.events.filter(
-    (e) =>
-      e.type === "log" && "message" in e && e.message.includes("after fatal"),
+    (e) => e.type === "log" && "message" in e && e.message.includes("after fatal"),
   );
   assertEquals(logs.length, 0, "Code after fatal should not execute");
 
@@ -1466,8 +1462,7 @@ Deno.test(
     );
 
     const summaries = result.events.filter(
-      (e): e is Extract<TimelineEvent, { type: "summary" }> =>
-        e.type === "summary",
+      (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
     );
     assertEquals(summaries.length, 1);
 
@@ -2379,3 +2374,72 @@ Deno.test(
     await Deno.remove(testFile, { recursive: true });
   },
 );
+
+// --- fromSharedConfig tests ---
+
+Deno.test("fromSharedConfig: uses allowNet for network permission", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    allowNet: "api.example.com",
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.permissions?.includes("--allow-net=api.example.com"), true);
+  assertEquals(opts.permissions?.includes("--allow-read"), true);
+});
+
+Deno.test("fromSharedConfig: strips --allow-net from permissions array", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    permissions: ["--allow-read", "--allow-net=evil.com"],
+    allowNet: "safe.com",
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.permissions?.includes("--allow-net=evil.com"), false);
+  assertEquals(opts.permissions?.includes("--allow-net=safe.com"), true);
+});
+
+Deno.test("fromSharedConfig: preserves --allow-env from permissions", () => {
+  const executor = TestExecutor.fromSharedConfig(LOCAL_RUN_DEFAULTS);
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.permissions?.includes("--allow-env"), true);
+});
+
+Deno.test("fromSharedConfig: WORKER_RUN_DEFAULTS has no --allow-env", () => {
+  const executor = TestExecutor.fromSharedConfig(WORKER_RUN_DEFAULTS);
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(
+    opts.permissions?.some((p) => p.startsWith("--allow-env")),
+    false,
+  );
+});
+
+Deno.test("fromSharedConfig: empty allowNet omits --allow-net", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    allowNet: "",
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(
+    opts.permissions?.some((p) => p.startsWith("--allow-net")),
+    false,
+  );
+});
+
+Deno.test("fromSharedConfig: passes overrides through", () => {
+  const executor = TestExecutor.fromSharedConfig(SHARED_RUN_DEFAULTS, {
+    cwd: "/test/dir",
+    maskEnvPrefixes: ["SECRET_"],
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.cwd, "/test/dir");
+  assertEquals(opts.maskEnvPrefixes, ["SECRET_"]);
+});
+
+Deno.test("fromSharedConfig: wires emitFullTrace", () => {
+  const executor = TestExecutor.fromSharedConfig({
+    ...SHARED_RUN_DEFAULTS,
+    emitFullTrace: true,
+  });
+  const opts = (executor as unknown as { options: ExecutorOptions }).options;
+  assertEquals(opts.emitFullTrace, true);
+});
