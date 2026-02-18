@@ -28,7 +28,7 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - run: deno check packages/*/mod.ts packages/*/*.test.ts packages/*/commands/*.ts
+      - run: deno check $(find packages -name '*.ts' -not -path '*/templates/*' -not -path '*/testdata/*')
       - run: deno test -A
 
   check-versions:
