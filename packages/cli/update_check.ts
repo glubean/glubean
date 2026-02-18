@@ -8,22 +8,57 @@ type UpdateCache = {
   latest?: string;
 };
 
-function parseSemver(version: string): number[] | null {
-  const parts = version.split(".").map((part) => Number(part));
-  if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) {
-    return null;
-  }
-  return parts.slice(0, 3);
+/** @internal Exported for testing. */
+export function parseSemver(version: string): { parts: number[]; pre: string | null } | null {
+  // Strip build metadata (+...) per semver spec — it has no ordering significance
+  const noBuild = version.split("+")[0];
+  const [core, ...rest] = noBuild.split("-");
+  const parts = core.split(".").map((p) => Number(p));
+  if (parts.length < 3 || parts.some((p) => Number.isNaN(p))) return null;
+  return { parts: parts.slice(0, 3), pre: rest.length > 0 ? rest.join("-") : null };
 }
 
-function isNewer(latest: string, current: string): boolean {
-  const latestParts = parseSemver(latest);
-  const currentParts = parseSemver(current);
-  if (!latestParts || !currentParts) return false;
-  for (let i = 0; i < 3; i += 1) {
-    if (latestParts[i] > currentParts[i]) return true;
-    if (latestParts[i] < currentParts[i]) return false;
+/**
+ * Compare pre-release identifiers per semver 2.0.0 spec (§11):
+ * dot-separated identifiers compared left to right; numeric ids compared as
+ * integers, string ids compared lexically, numeric < string, fewer fields < more.
+ */
+function comparePrerelease(a: string, b: string): number {
+  const segsA = a.split(".");
+  const segsB = b.split(".");
+  const len = Math.max(segsA.length, segsB.length);
+  for (let i = 0; i < len; i++) {
+    if (i >= segsA.length) return -1; // a has fewer fields → a < b
+    if (i >= segsB.length) return 1;
+    const na = Number(segsA[i]);
+    const nb = Number(segsB[i]);
+    const aIsNum = !Number.isNaN(na);
+    const bIsNum = !Number.isNaN(nb);
+    if (aIsNum && bIsNum) {
+      if (na !== nb) return na - nb;
+    } else if (aIsNum !== bIsNum) {
+      return aIsNum ? -1 : 1; // numeric < string
+    } else {
+      if (segsA[i] < segsB[i]) return -1;
+      if (segsA[i] > segsB[i]) return 1;
+    }
   }
+  return 0;
+}
+
+/** @internal Exported for testing. */
+export function isNewer(latest: string, current: string): boolean {
+  const l = parseSemver(latest);
+  const c = parseSemver(current);
+  if (!l || !c) return false;
+  for (let i = 0; i < 3; i += 1) {
+    if (l.parts[i] > c.parts[i]) return true;
+    if (l.parts[i] < c.parts[i]) return false;
+  }
+  // Same major.minor.patch — compare pre-release
+  if (c.pre !== null && l.pre === null) return true; // release > pre-release
+  if (c.pre === null && l.pre !== null) return false; // pre-release < release
+  if (c.pre !== null && l.pre !== null) return comparePrerelease(l.pre, c.pre) > 0;
   return false;
 }
 

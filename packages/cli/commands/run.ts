@@ -1,5 +1,6 @@
 import { type ExecutionEvent, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import { basename, relative, resolve, toFileUrl } from "@std/path";
+import { parse as parseDotenv } from "@std/dotenv/parse";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.ts";
 import { walk } from "@std/fs/walk";
 import { expandGlob } from "@std/fs/expand-glob";
@@ -127,33 +128,13 @@ async function findProjectConfig(
   return { rootDir: startDir };
 }
 
-/**
- * Load environment variables from a .env file.
- */
 async function loadEnvFile(envPath: string): Promise<Record<string, string>> {
-  const vars: Record<string, string> = {};
   try {
     const content = await Deno.readTextFile(envPath);
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIndex = trimmed.indexOf("=");
-      if (eqIndex === -1) continue;
-      const key = trimmed.slice(0, eqIndex).trim();
-      let value = trimmed.slice(eqIndex + 1).trim();
-      // Remove surrounding quotes if present
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      vars[key] = value;
-    }
+    return parseDotenv(content);
   } catch {
-    // File doesn't exist, return empty
+    return {};
   }
-  return vars;
 }
 
 // ── SDK import patterns (mirrors @glubean/scanner) ──────────────────────────

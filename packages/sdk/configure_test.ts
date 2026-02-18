@@ -648,6 +648,32 @@ Deno.test("http - header without template placeholders passed as-is", () => {
   }
 });
 
+Deno.test("http - resolves hyphenated {{X-API-KEY}} template placeholders", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    {},
+    { "X-API-KEY": "key-abc-123", "AWS-REGION": "us-east-1" },
+    mockHttp,
+  );
+  try {
+    const { http } = configure({
+      http: {
+        headers: {
+          "X-Api-Key": "{{X-API-KEY}}",
+          "X-Region": "{{AWS-REGION}}",
+        },
+      },
+    });
+    http.get("https://example.com");
+    const headers = extendCalls[0].options.headers as Record<string, string>;
+    assertEquals(headers["X-Api-Key"], "key-abc-123");
+    assertEquals(headers["X-Region"], "us-east-1");
+  } finally {
+    cleanup();
+  }
+});
+
 // =============================================================================
 // HTTP hooks passthrough
 // =============================================================================

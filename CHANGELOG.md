@@ -2,6 +2,54 @@
 
 All notable changes to the Glubean OSS project will be documented in this file.
 
+## 0.11.0
+
+### New Packages
+
+- **`@glubean/auth`** — Auth helpers for bearer, basic, apiKey, OAuth 2.0, and dynamic login flows
+- **`@glubean/graphql`** — GraphQL plugin with `.query()` / `.mutate()` helpers, `.gql` file loading, and auto-tracing
+
+### @glubean/sdk
+
+- **Builder API** — `test(id).setup(fn).step(name, fn).teardown(fn)` for multi-step tests with typed state
+- **`test.each()`** — Data-driven test generation from arrays, CSV, YAML, JSONL, or directories
+- **`test.pick()`** — Example-driven tests with random selection or pinned examples via `--pick`
+- **Plugin composition** — `.use(fn)` and `.group(id, fn)` for reusable step sequences
+- **`ctx.expect()`** — Fluent assertion API (soft by default, `.orFail()` for guards, `.not` for negation)
+- **`ctx.warn()`** — Non-failing soft checks for best-practice validation
+- **`ctx.validate()`** — Schema validation with any library (Zod, Valibot, ArkType) and severity control (`error` /
+  `warn` / `fatal`)
+- **HTTP schema auto-validation** — `schema: { request, response, query }` option on `ctx.http` calls
+- **`ctx.pollUntil()`** — Async polling with configurable interval and timeout
+- **`ctx.setTimeout()`** — Dynamic test timeout adjustment
+- **`configure()`** — File-level shared setup with prefixUrl, headers, hooks, and plugins
+- **Template placeholders** — `{{key}}` in headers resolved from vars/secrets (now supports hyphenated keys like
+  `{{X-API-KEY}}`)
+- **Data loaders** — `fromCsv()`, `fromYaml()`, `fromJsonl()`, `fromDir()` for `test.each()`
+
+### @glubean/cli
+
+- **`glubean context`** — Generate AI context file from OpenAPI spec
+- **`glubean coverage`** — API endpoint test coverage report against OpenAPI spec
+- **`glubean diff`** — OpenAPI spec change detection (vs git HEAD)
+- **Directory convention** — `tests/` and `explore/` directories replace `*.explore.ts` suffix
+- **`glubean run`** — Defaults to `testDir`, `--explore` scans `exploreDir`
+- **Unified .env parsing** — Replaced hand-rolled parser with `@std/dotenv` for robust handling of quotes, comments, and
+  special characters
+- **Update checker** — Improved semver comparison with pre-release support
+- **Bump script** — Now also updates template SDK version constants and testdata imports
+
+### @glubean/runner
+
+- HTTP interception and auto-tracing
+- Structured event streaming (logs, assertions, traces, metrics, warnings)
+- V8 Inspector debug support (`--inspect-brk`)
+- Timeout, retry, and fail-fast handling
+
+### @glubean/mcp
+
+- Unified .env parsing with `@std/dotenv`
+
 ## 2026-02-13
 
 ### @glubean/cli

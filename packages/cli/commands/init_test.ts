@@ -99,7 +99,7 @@ Deno.test("init --no-interactive creates basic project files", async () => {
     );
     assertEquals(
       denoJson.imports?.["@glubean/sdk"],
-      "jsr:@glubean/sdk@^0.10.0",
+      "jsr:@glubean/sdk@^0.11.0",
     );
     assertEquals(typeof denoJson.tasks?.scan, "string");
     assertEquals(typeof denoJson.tasks?.["validate-metadata"], "string");

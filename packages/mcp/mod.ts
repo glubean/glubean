@@ -14,6 +14,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { dirname, resolve, toFileUrl } from "@std/path";
+import { parse } from "@std/dotenv/parse";
 import { crypto } from "@std/crypto";
 import { encodeHex } from "@std/encoding/hex";
 import { LOCAL_RUN_DEFAULTS, resolveModuleTests, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
@@ -40,28 +41,12 @@ async function findProjectRoot(startDir: string): Promise<string> {
 }
 
 async function loadEnvFile(envPath: string): Promise<Vars> {
-  const vars: Vars = {};
   try {
     const content = await Deno.readTextFile(envPath);
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIndex = trimmed.indexOf("=");
-      if (eqIndex === -1) continue;
-      const key = trimmed.slice(0, eqIndex).trim();
-      let value = trimmed.slice(eqIndex + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      vars[key] = value;
-    }
+    return parse(content);
   } catch {
-    // missing env file is allowed
+    return {};
   }
-  return vars;
 }
 
 function normalizeFilePath(path: string): string {

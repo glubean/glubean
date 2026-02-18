@@ -155,12 +155,11 @@ export function inspect(value: unknown, maxLen = 64): string {
 /**
  * Deep equality check.
  * Handles primitives, arrays, plain objects, Date, RegExp, Map, Set, null, undefined.
+ * Safely handles circular references via a seen-pairs set.
  */
-export function deepEqual(a: unknown, b: unknown): boolean {
-  // Strict equality (covers primitives, same references, null/undefined)
+export function deepEqual(a: unknown, b: unknown, seen?: Set<object>): boolean {
   if (Object.is(a, b)) return true;
 
-  // Both must be objects from this point
   if (
     a === null ||
     b === null ||
@@ -169,6 +168,16 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   ) {
     return false;
   }
+
+  // Circular reference guard: if we've already started comparing this exact
+  // pair of object references, treat them as equal to avoid infinite recursion.
+  if (!seen) seen = new Set();
+  const sentinel = { a, b } as unknown as object;
+  for (const s of seen) {
+    const pair = s as unknown as { a: unknown; b: unknown };
+    if (pair.a === a && pair.b === b) return true;
+  }
+  seen.add(sentinel);
 
   // Date
   if (a instanceof Date && b instanceof Date) {
@@ -182,7 +191,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   if (a instanceof Map && b instanceof Map) {
     if (a.size !== b.size) return false;
     for (const [key, val] of a) {
-      if (!b.has(key) || !deepEqual(val, b.get(key))) return false;
+      if (!b.has(key) || !deepEqual(val, b.get(key), seen)) return false;
     }
     return true;
   }
@@ -198,7 +207,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
-      if (!deepEqual(a[i], b[i])) return false;
+      if (!deepEqual(a[i], b[i], seen)) return false;
     }
     return true;
   }
@@ -212,6 +221,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
       !deepEqual(
         (a as Record<string, unknown>)[key],
         (b as Record<string, unknown>)[key],
+        seen,
       )
     ) {
       return false;

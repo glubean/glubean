@@ -137,7 +137,7 @@ function requireSecret(key: string): string {
 /**
  * Regex for `{{key}}` template placeholders in header values.
  */
-const TEMPLATE_RE = /\{\{(\w+)\}\}/g;
+const TEMPLATE_RE = /\{\{([\w-]+)\}\}/g;
 
 /**
  * Build a lazy vars accessor object.

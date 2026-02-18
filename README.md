@@ -46,7 +46,36 @@ export const listProducts = test("list-products", async (ctx) => {
 });
 ```
 
-Multi-step tests, data-driven tests, schema validation, and more — see the [Getting Started](docs/getting-started.md)
+Chain multiple steps with shared state:
+
+```typescript
+export const createAndVerify = test("create-and-verify")
+  .step("create product", async (ctx) => {
+    const res = await ctx.http.post(`${baseUrl}/products`, {
+      json: { name: "Widget" },
+    });
+    ctx.expect(res.status).toBe(201).orFail();
+    return { id: (await res.json()).id };
+  })
+  .step("verify product", async (ctx, { id }) => {
+    const product = await ctx.http.get(`${baseUrl}/products/${id}`).json();
+    ctx.expect(product.name).toBe("Widget");
+  });
+```
+
+Run the same test against a table of inputs:
+
+```typescript
+export const statusCodes = test.each([
+  { path: "/products/1", expected: 200 },
+  { path: "/products/0", expected: 404 },
+])("check-$path", async (ctx, { path, expected }) => {
+  const res = await ctx.http.get(`${baseUrl}${path}`);
+  ctx.expect(res.status).toBe(expected);
+});
+```
+
+Schema validation, `test.pick`, auth helpers, GraphQL, and more — see the [Getting Started](docs/getting-started.md)
 guide.
 
 ## Packages
@@ -57,6 +86,8 @@ guide.
 | [`@glubean/runner`](packages/runner/)       | Sandboxed test execution engine (Deno subprocess)                      |
 | [`@glubean/cli`](packages/cli/)             | CLI for running, scanning, and managing test projects                  |
 | [`@glubean/scanner`](packages/scanner/)     | Static analysis for test file discovery and metadata extraction        |
+| [`@glubean/auth`](packages/auth/)           | Auth helpers — bearer, basic, apiKey, OAuth 2.0, dynamic login         |
+| [`@glubean/graphql`](packages/graphql/)     | GraphQL plugin — `.query()` / `.mutate()` with auto-tracing            |
 | [`@glubean/redaction`](packages/redaction/) | Sensitive data redaction for logs and traces                           |
 | [`@glubean/mcp`](packages/mcp/)             | Model Context Protocol server for AI agent integration                 |
 | [`@glubean/worker`](packages/worker/)       | Worker agent for remote test execution                                 |
