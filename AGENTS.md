@@ -11,6 +11,7 @@ Glubean OSS is a Deno-based monorepo containing the core runner technology.
 - **Workspace:** `packages/sdk`, `packages/runner`, `packages/cli`, `packages/scanner`, `packages/redaction`,
   `packages/mcp`, `packages/worker`
 - **VSCode Extension:** `packages/vscode` (Node.js + esbuild)
+- **Setup:** `deno task setup` (enables pre-commit hooks for format + type checking)
 
 ## AI-Friendly Coding Standards
 

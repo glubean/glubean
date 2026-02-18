@@ -1,0 +1,13 @@
+#!/bin/sh
+# Pre-commit hook: format + type check
+# Install: git config core.hooksPath .githooks
+
+if ! deno fmt --check >/dev/null 2>&1; then
+  echo "❌ Format check failed. Run 'deno fmt' and try again."
+  exit 1
+fi
+
+if ! deno check packages/*/mod.ts packages/*/*.ts 2>/dev/null; then
+  echo "❌ Type check failed. Fix errors and try again."
+  exit 1
+fi
