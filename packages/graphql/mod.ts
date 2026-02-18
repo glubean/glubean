@@ -285,7 +285,7 @@ export function gql(
   for (let i = 0; i < values.length; i++) {
     result += String(values[i]) + strings[i + 1];
   }
-  return result;
+  return result.replace(/\s+/g, " ").trim();
 }
 
 // =============================================================================
