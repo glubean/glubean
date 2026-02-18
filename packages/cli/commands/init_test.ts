@@ -91,7 +91,16 @@ Deno.test("init --no-interactive creates basic project files", async () => {
     );
     assertEquals(await fileExists(join(dir, "tests/pick.test.ts")), true);
     assertEquals(await fileExists(join(dir, "data/create-user.json")), true);
+    assertEquals(
+      await fileExists(join(dir, "data/search-examples.json")),
+      true,
+    );
     assertEquals(await fileExists(join(dir, "AGENTS.md")), true);
+
+    // Explore files
+    assertEquals(await fileExists(join(dir, "explore/api.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/search.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/auth.test.ts")), true);
 
     // Verify deno.json content
     const denoJson = JSON.parse(
@@ -197,7 +206,7 @@ Deno.test(
 );
 
 Deno.test(
-  "init --no-interactive --github-actions creates workflow file",
+  "init --no-interactive --github-actions creates workflow files",
   async () => {
     const dir = await createTempDir();
     try {
@@ -207,12 +216,67 @@ Deno.test(
       ]);
       assertEquals(code, 0, "init command should succeed");
 
-      const workflowPath = join(dir, ".github/workflows/glubean-metadata.yml");
-      assertEquals(await fileExists(workflowPath), true);
+      const metadataPath = join(
+        dir,
+        ".github/workflows/glubean-metadata.yml",
+      );
+      assertEquals(await fileExists(metadataPath), true);
 
-      const content = await Deno.readTextFile(workflowPath);
-      assertEquals(content.includes("Glubean Metadata"), true);
-      assertEquals(content.includes("glubean/cli scan"), true);
+      const metadataContent = await Deno.readTextFile(metadataPath);
+      assertEquals(metadataContent.includes("Glubean Metadata"), true);
+      assertEquals(metadataContent.includes("glubean/cli scan"), true);
+
+      const testsPath = join(dir, ".github/workflows/glubean-tests.yml");
+      assertEquals(await fileExists(testsPath), true);
+
+      const testsContent = await Deno.readTextFile(testsPath);
+      assertEquals(testsContent.includes("Glubean Tests"), true);
+      assertEquals(testsContent.includes("glubean/cli run"), true);
+      assertEquals(testsContent.includes("upload-artifact"), true);
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
+
+Deno.test(
+  "init --overwrite-actions overwrites both workflow files",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      // First init to create the files
+      await runInitCommand(dir, ["--github-actions", "--no-interactive"]);
+
+      // Tamper with both workflow files
+      const metadataPath = join(
+        dir,
+        ".github/workflows/glubean-metadata.yml",
+      );
+      const testsPath = join(dir, ".github/workflows/glubean-tests.yml");
+      await Deno.writeTextFile(metadataPath, "custom-metadata");
+      await Deno.writeTextFile(testsPath, "custom-tests");
+
+      // Re-init with --overwrite-actions
+      const { code } = await runInitCommand(dir, [
+        "--github-actions",
+        "--overwrite-actions",
+        "--no-interactive",
+      ]);
+      assertEquals(code, 0, "init command should succeed");
+
+      const metadataContent = await Deno.readTextFile(metadataPath);
+      assertEquals(
+        metadataContent.includes("Glubean Metadata"),
+        true,
+        "metadata workflow should be overwritten",
+      );
+
+      const testsContent = await Deno.readTextFile(testsPath);
+      assertEquals(
+        testsContent.includes("Glubean Tests"),
+        true,
+        "tests workflow should be overwritten",
+      );
     } finally {
       await cleanupDir(dir);
     }
@@ -291,6 +355,10 @@ Deno.test(
         await fileExists(join(dir, ".github/workflows/glubean-metadata.yml")),
         true,
       );
+      assertEquals(
+        await fileExists(join(dir, ".github/workflows/glubean-tests.yml")),
+        true,
+      );
     } finally {
       await cleanupDir(dir);
     }
@@ -322,6 +390,10 @@ Deno.test(
       assertEquals(await fileExists(join(dir, ".git/hooks/pre-push")), true);
       assertEquals(
         await fileExists(join(dir, ".github/workflows/glubean-metadata.yml")),
+        true,
+      );
+      assertEquals(
+        await fileExists(join(dir, ".github/workflows/glubean-tests.yml")),
         true,
       );
     } finally {

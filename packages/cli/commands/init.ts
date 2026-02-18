@@ -229,7 +229,7 @@ set -e
 deno run -A jsr:@glubean/cli validate-metadata
 `;
 
-const GITHUB_ACTION = `name: Glubean Metadata
+const GITHUB_ACTION_METADATA = `name: Glubean Metadata
 
 on:
   push:
@@ -251,6 +251,43 @@ jobs:
         run: deno run -A jsr:@glubean/cli scan
       - name: Verify metadata.json
         run: git diff --exit-code metadata.json
+`;
+
+const GITHUB_ACTION_TESTS = `name: Glubean Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v2.x
+
+      - name: Write secrets
+        run: |
+          echo "USERNAME=\${{ secrets.USERNAME }}" >> .env.secrets
+          echo "PASSWORD=\${{ secrets.PASSWORD }}" >> .env.secrets
+
+      - name: Run tests
+        run: deno run -A jsr:@glubean/cli run --fail-fast --reporter junit --result-json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            **/*.junit.xml
+            **/*.result.json
 `;
 
 // ---------------------------------------------------------------------------
@@ -533,8 +570,23 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     },
     {
       path: "explore/api.test.ts",
-      content: () => readCliTemplate("explore-api.test.ts"),
-      description: "Explore scratchpad (quick API calls)",
+      content: () => readCliTemplate("minimal-api.test.ts"),
+      description: "Explore — GET and POST basics",
+    },
+    {
+      path: "explore/search.test.ts",
+      content: () => readCliTemplate("minimal-search.test.ts"),
+      description: "Explore — parameterized search with test.pick",
+    },
+    {
+      path: "explore/auth.test.ts",
+      content: () => readCliTemplate("minimal-auth.test.ts"),
+      description: "Explore — multi-step auth flow",
+    },
+    {
+      path: "data/search-examples.json",
+      content: () => readCliTemplate("data/search-examples.json"),
+      description: "Search examples for test.pick",
     },
     {
       path: "AGENTS.md",
@@ -559,11 +611,18 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   }
 
   if (enableActions) {
-    files.push({
-      path: ".github/workflows/glubean-metadata.yml",
-      content: GITHUB_ACTION,
-      description: "GitHub Actions metadata workflow",
-    });
+    files.push(
+      {
+        path: ".github/workflows/glubean-metadata.yml",
+        content: GITHUB_ACTION_METADATA,
+        description: "GitHub Actions metadata workflow",
+      },
+      {
+        path: ".github/workflows/glubean-tests.yml",
+        content: GITHUB_ACTION_TESTS,
+        description: "GitHub Actions test workflow",
+      },
+    );
   }
 
   let created = 0;
@@ -575,7 +634,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     if (options.overwriteHooks && path.startsWith(".git/hooks/")) return true;
     if (
       options.overwriteActions &&
-      path === ".github/workflows/glubean-metadata.yml"
+      path.startsWith(".github/workflows/glubean-")
     ) {
       return true;
     }
