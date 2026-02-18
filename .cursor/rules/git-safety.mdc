@@ -1,0 +1,30 @@
+---
+description: Always ask for explicit permission before git operations and package publishing
+alwaysApply: true
+---
+
+# Git & Publish Safety
+
+## Git operations
+
+Never run `git commit` or `git push` (or any variant) without first asking the user for explicit permission and receiving confirmation.
+
+This applies to all situations, including:
+
+- Committing staged changes
+- Amending commits
+- Pushing to any remote branch
+- Force pushing
+- Creating tags and pushing them
+
+Always describe what will be committed/pushed and wait for a "yes" or equivalent confirmation before proceeding.
+
+## Package publishing
+
+Never run `deno publish`, `npm publish`, or any package publishing command without first:
+
+1. Listing which packages will be published and their new versions
+2. Asking the user for explicit permission
+3. Receiving a clear "yes" or equivalent confirmation
+
+This applies regardless of context — even if the user asked to "bump and publish", always pause before the actual publish step to confirm.
