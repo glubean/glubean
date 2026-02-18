@@ -28,7 +28,8 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - run: deno test -A --no-check
+      - run: deno check $(find packages -name '*.ts' -not -path '*/templates/*' -not -path '*/testdata/*')
+      - run: deno test -A
 
   check-versions:
     name: Verify version consistency

@@ -28,6 +28,8 @@ Thumbs.db
 .vscode/
 .idea/
 .VSCodeCounter/
+.cursor/*
+!.cursor/rules/
 *.swp
 *.swo
 

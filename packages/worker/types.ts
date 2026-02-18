@@ -184,10 +184,6 @@ export interface RuntimeContext {
     requestedConcurrency?: number;
     maxConcurrency?: number;
   };
-  networkPolicy?: {
-    allowlist?: string[];
-    denylist?: string[];
-  };
 }
 
 /**

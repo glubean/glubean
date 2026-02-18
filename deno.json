@@ -34,9 +34,11 @@
     "lineWidth": 120
   },
   "tasks": {
+    "setup": "git config core.hooksPath .githooks",
     "test": "deno test -A",
     "fmt": "deno fmt",
     "lint": "deno lint",
+    "check": "deno fmt --check && deno check packages/*/mod.ts",
     "version": "deno run -A ./scripts/bump-version.ts",
     "cli": "deno run -A ./packages/cli/mod.ts",
     "mcp": "deno run -A ./packages/mcp/mod.ts"
