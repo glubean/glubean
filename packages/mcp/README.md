@@ -43,13 +43,11 @@ Notes:
 
 ### Local debugging helpers
 
-- `glubean_get_last_run_summary`: Returns summary metadata for the most recent
-  `glubean_run_local_file` call.
-- `glubean_get_local_events`: Returns flattened local events (`result`,
-  `assertion`, `log`, `trace`) with optional filtering.
-- `glubean_diagnose_config`: Checks project config health (`deno.json`, `.env`,
-  `.env.secrets`, `tests/`, `explore/`) and returns actionable
-  recommendations.
+- `glubean_get_last_run_summary`: Returns summary metadata for the most recent `glubean_run_local_file` call.
+- `glubean_get_local_events`: Returns flattened local events (`result`, `assertion`, `log`, `trace`) with optional
+  filtering.
+- `glubean_diagnose_config`: Checks project config health (`deno.json`, `.env`, `.env.secrets`, `tests/`, `explore/`)
+  and returns actionable recommendations.
 
 ## Security notes
 

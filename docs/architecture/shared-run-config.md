@@ -587,10 +587,8 @@ No ambiguity, no conflict.
 
 Worker runtime supports two deployment models:
 
-1. `trusted` (self-hosted): operator-controlled infrastructure, no shared-tenant
-   egress restrictions by default.
-2. `shared_serverless`: multi-tenant serverless workers with mandatory egress
-   guardrails.
+1. `trusted` (self-hosted): operator-controlled infrastructure, no shared-tenant egress restrictions by default.
+2. `shared_serverless`: multi-tenant serverless workers with mandatory egress guardrails.
 
 In `shared_serverless` mode, guardrails are enforced inside harness runtime:
 
@@ -614,7 +612,8 @@ In `shared_serverless` mode, guardrails are enforced inside harness runtime:
 
 5. **CLI**: Add new fields to `GlubeanRunConfig` (flat, backward-compatible), use `toSharedRunConfig` +
    `fromSharedConfig` in `run.ts`. Config file format stays flat — new fields are optional with defaults.
-6. **Worker**: Replace execution fields with `run: SharedRunConfig`, add `taskTimeoutMs`, and enforce canonical env keys.
+6. **Worker**: Replace execution fields with `run: SharedRunConfig`, add `taskTimeoutMs`, and enforce canonical env
+   keys.
 7. **MCP**: Use `LOCAL_RUN_DEFAULTS` + `fromSharedConfig`.
 8. Update all tests in each consumer PR.
 
@@ -626,12 +625,12 @@ In `shared_serverless` mode, guardrails are enforced inside harness runtime:
 
 ## Risks
 
-| Risk                                                                    | Severity | Mitigation                                                                                                                                                                                                                                                                         |
-| ----------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Worker env/file legacy keys are still used by deploy scripts            | Medium   | Fail fast with clear error messages and update deployment docs/examples to canonical keys before rollout                                                                                                                                                                           |
-| CLI config file format                                                  | **Low**  | Format stays flat — only adds optional fields with defaults. No nesting change.                                                                                                                                                                                                    |
-| `maskEnvPrefixes` misconfigured or omitted in Worker                    | **High** | `maskEnvPrefixes` is the primary credential isolation barrier. Worker must always set it. Enforce via: (1) test that verifies Worker passes `maskEnvPrefixes` to `fromSharedConfig`, (2) code review checklist. `--allow-env` absence is a secondary barrier, not the primary one. |
-| Version coordination (runner published before consumers)                | Low      | Already the normal flow — runner is a JSR dependency                                                                                                                                                                                                                               |
+| Risk                                                         | Severity | Mitigation                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worker env/file legacy keys are still used by deploy scripts | Medium   | Fail fast with clear error messages and update deployment docs/examples to canonical keys before rollout                                                                                                                                                                           |
+| CLI config file format                                       | **Low**  | Format stays flat — only adds optional fields with defaults. No nesting change.                                                                                                                                                                                                    |
+| `maskEnvPrefixes` misconfigured or omitted in Worker         | **High** | `maskEnvPrefixes` is the primary credential isolation barrier. Worker must always set it. Enforce via: (1) test that verifies Worker passes `maskEnvPrefixes` to `fromSharedConfig`, (2) code review checklist. `--allow-env` absence is a secondary barrier, not the primary one. |
+| Version coordination (runner published before consumers)     | Low      | Already the normal flow — runner is a JSR dependency                                                                                                                                                                                                                               |
 
 ## Files Changed
 

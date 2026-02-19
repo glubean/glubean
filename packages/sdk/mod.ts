@@ -1259,9 +1259,7 @@ export namespace test {
     idOrMeta: string | TestMeta,
     fn?: SimpleTestFunction,
   ): Test | TestBuilder<S> {
-    const baseMeta: TestMeta = typeof idOrMeta === "string"
-      ? { id: idOrMeta, name: idOrMeta }
-      : idOrMeta;
+    const baseMeta: TestMeta = typeof idOrMeta === "string" ? { id: idOrMeta, name: idOrMeta } : idOrMeta;
     const metaWithOnly: TestMeta = { ...baseMeta, only: true };
     return fn ? test(metaWithOnly, fn) : test<S>(metaWithOnly);
   }
@@ -1281,9 +1279,7 @@ export namespace test {
     idOrMeta: string | TestMeta,
     fn?: SimpleTestFunction,
   ): Test | TestBuilder<S> {
-    const baseMeta: TestMeta = typeof idOrMeta === "string"
-      ? { id: idOrMeta, name: idOrMeta }
-      : idOrMeta;
+    const baseMeta: TestMeta = typeof idOrMeta === "string" ? { id: idOrMeta, name: idOrMeta } : idOrMeta;
     const metaWithSkip: TestMeta = { ...baseMeta, skip: true };
     return fn ? test(metaWithSkip, fn) : test<S>(metaWithSkip);
   }

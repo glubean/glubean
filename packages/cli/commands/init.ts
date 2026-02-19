@@ -480,9 +480,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
   // ── Step 2/3 — API Setup ─────────────────────────────────────────────────
 
-  let baseUrl = options.baseUrl
-    ? validateBaseUrlOrExit(options.baseUrl, "--base-url")
-    : DEFAULT_BASE_URL;
+  let baseUrl = options.baseUrl ? validateBaseUrlOrExit(options.baseUrl, "--base-url") : DEFAULT_BASE_URL;
 
   if (interactive) {
     console.log(

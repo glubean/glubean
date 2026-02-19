@@ -908,9 +908,7 @@ Deno.test("step retries - passes on retry and continues flow", async () => {
     (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
   );
   assertEquals(
-    logs.some((l) =>
-      l.message.includes('Retrying step "flaky with retry" (2/3)')
-    ),
+    logs.some((l) => l.message.includes('Retrying step "flaky with retry" (2/3)')),
     true,
     "Should log retry attempt",
   );
@@ -944,9 +942,7 @@ Deno.test("step retries - exhausted retries fail the step", async () => {
   const logs = result.events.filter(
     (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
   );
-  const retryLogs = logs.filter((l) =>
-    l.message.includes('Retrying step "always failing with retry"')
-  );
+  const retryLogs = logs.filter((l) => l.message.includes('Retrying step "always failing with retry"'));
   assertEquals(retryLogs.length, 2, "Should log two retries");
 
   await Deno.remove(testFile, { recursive: true });
@@ -970,7 +966,7 @@ Deno.test("step timeout - marks timed out step as failed", async () => {
   assertEquals(ends[0].attempts, 1);
   assertEquals(ends[0].retriesUsed, 0);
   assertEquals(
-    ends[0].error?.includes('timed out after 80ms'),
+    ends[0].error?.includes("timed out after 80ms"),
     true,
     `Unexpected step timeout error: ${ends[0].error}`,
   );
@@ -1002,7 +998,7 @@ Deno.test("step timeout - is terminal even when retries are configured", async (
   assertEquals(ends[0].attempts, 1);
   assertEquals(ends[0].retriesUsed, 0);
   assertEquals(
-    ends[0].error?.includes('timed out after 80ms'),
+    ends[0].error?.includes("timed out after 80ms"),
     true,
     `Unexpected timeout error: ${ends[0].error}`,
   );

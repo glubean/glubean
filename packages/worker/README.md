@@ -50,23 +50,23 @@ glubean-worker --config ./worker.json
 
 ## Configuration
 
-| Environment Variable            | Description                                 | Default        |
-| ------------------------------- | ------------------------------------------- | -------------- |
-| `GLUBEAN_CONTROL_PLANE_URL`     | Control plane API URL                       | (required)     |
-| `GLUBEAN_WORKER_TOKEN`          | Worker authentication token                 | (required)     |
-| `GLUBEAN_WORKER_ID`             | Worker identifier                           | auto-generated |
-| `GLUBEAN_WORKER_TAGS`           | Tags for task matching (comma-separated)    | (none)         |
-| `GLUBEAN_LOG_LEVEL`             | Log level (debug, info, warn, error)        | `info`         |
-| `GLUBEAN_MAX_CONCURRENT_TASKS`  | Max concurrent tasks per worker             | `1`            |
-| `GLUBEAN_TASK_MEMORY_LIMIT_MB`  | Memory limit per task in MB (0 = unlimited) | `0`            |
-| `GLUBEAN_TASK_TIMEOUT_MS`       | Task timeout in milliseconds                | `300000`       |
-| `GLUBEAN_EXECUTION_CONCURRENCY` | Max parallel tests within a task            | `1`            |
-| `GLUBEAN_NETWORK_POLICY_MODE`   | Network guardrail mode (`trusted` or `shared_serverless`) | `trusted` |
-| `GLUBEAN_EGRESS_MAX_REQUESTS`   | Max outbound requests per test execution (shared mode) | `300` |
-| `GLUBEAN_EGRESS_MAX_CONCURRENT_REQUESTS` | Max in-flight outbound requests (shared mode) | `20` |
-| `GLUBEAN_EGRESS_REQUEST_TIMEOUT_MS` | Per-request outbound timeout in ms (shared mode) | `30000` |
-| `GLUBEAN_EGRESS_MAX_RESPONSE_BYTES` | Approx response-byte budget per execution (shared mode) | `20971520` |
-| `GLUBEAN_EGRESS_ALLOWED_PORTS`  | Allowed outbound ports (comma-separated, shared mode) | `80,443,8080,8443` |
+| Environment Variable                     | Description                                               | Default            |
+| ---------------------------------------- | --------------------------------------------------------- | ------------------ |
+| `GLUBEAN_CONTROL_PLANE_URL`              | Control plane API URL                                     | (required)         |
+| `GLUBEAN_WORKER_TOKEN`                   | Worker authentication token                               | (required)         |
+| `GLUBEAN_WORKER_ID`                      | Worker identifier                                         | auto-generated     |
+| `GLUBEAN_WORKER_TAGS`                    | Tags for task matching (comma-separated)                  | (none)             |
+| `GLUBEAN_LOG_LEVEL`                      | Log level (debug, info, warn, error)                      | `info`             |
+| `GLUBEAN_MAX_CONCURRENT_TASKS`           | Max concurrent tasks per worker                           | `1`                |
+| `GLUBEAN_TASK_MEMORY_LIMIT_MB`           | Memory limit per task in MB (0 = unlimited)               | `0`                |
+| `GLUBEAN_TASK_TIMEOUT_MS`                | Task timeout in milliseconds                              | `300000`           |
+| `GLUBEAN_EXECUTION_CONCURRENCY`          | Max parallel tests within a task                          | `1`                |
+| `GLUBEAN_NETWORK_POLICY_MODE`            | Network guardrail mode (`trusted` or `shared_serverless`) | `trusted`          |
+| `GLUBEAN_EGRESS_MAX_REQUESTS`            | Max outbound requests per test execution (shared mode)    | `300`              |
+| `GLUBEAN_EGRESS_MAX_CONCURRENT_REQUESTS` | Max in-flight outbound requests (shared mode)             | `20`               |
+| `GLUBEAN_EGRESS_REQUEST_TIMEOUT_MS`      | Per-request outbound timeout in ms (shared mode)          | `30000`            |
+| `GLUBEAN_EGRESS_MAX_RESPONSE_BYTES`      | Approx response-byte budget per execution (shared mode)   | `20971520`         |
+| `GLUBEAN_EGRESS_ALLOWED_PORTS`           | Allowed outbound ports (comma-separated, shared mode)     | `80,443,8080,8443` |
 
 ## Concurrent Task Execution
 

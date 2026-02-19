@@ -100,7 +100,7 @@ Deno.test("fromCsv - nonexistent file error includes path context", async () => 
   await assertRejects(
     () => fromCsv("./nonexistent.csv"),
     Error,
-    'Hint: data loader paths are resolved from project root',
+    "Hint: data loader paths are resolved from project root",
   );
 });
 

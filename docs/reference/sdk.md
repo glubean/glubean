@@ -19,8 +19,7 @@ For local iteration, ergonomic helpers are also available:
 
 - `test.only(...)` sets `only: true`
 - `test.skip(...)` sets `skip: true`
-- If both flags are set on the same test, `skip` takes precedence during run
-  selection.
+- If both flags are set on the same test, `skip` takes precedence during run selection.
 
 **Quick mode:**
 
@@ -115,16 +114,14 @@ Ownership model:
 
 - Runner/control plane decides whether and when to re-run a test.
 - SDK code can read `ctx.retryCount`, but cannot schedule whole-test retries.
-- Step retries (`StepMeta.retries`) happen inside a single execution and are
-  separate from `ctx.retryCount`.
+- Step retries (`StepMeta.retries`) happen inside a single execution and are separate from `ctx.retryCount`.
 
 ### Metric Data Safety
 
-`ctx.metric()` is for numeric observability and dashboard dimensions. Treat metric
-names and tags as non-secret metadata.
+`ctx.metric()` is for numeric observability and dashboard dimensions. Treat metric names and tags as non-secret
+metadata.
 
-- Do not put tokens, API keys, emails, phone numbers, or user identifiers into
-  metric names or tags.
+- Do not put tokens, API keys, emails, phone numbers, or user identifiers into metric names or tags.
 - Prefer stable, low-cardinality tags such as `endpoint`, `method`, or `region`.
 
 ```ts

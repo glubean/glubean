@@ -1,8 +1,5 @@
 import denoJson from "../../packages/mcp/deno.json" with { type: "json" };
-import {
-  DEFAULT_GENERATED_BY,
-  MCP_PACKAGE_VERSION,
-} from "../../packages/mcp/version.ts";
+import { DEFAULT_GENERATED_BY, MCP_PACKAGE_VERSION } from "../../packages/mcp/version.ts";
 
 if (MCP_PACKAGE_VERSION !== denoJson.version) {
   console.error(

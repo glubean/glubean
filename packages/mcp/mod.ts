@@ -688,15 +688,18 @@ server.registerTool(
     description: "Return summary of the most recent glubean_run_local_file execution.",
     inputSchema: {},
   },
-  async () => {
+  () => {
     if (!lastLocalRunSnapshot) {
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
-            error:
-              "No local run snapshot available. Run glubean_run_local_file first.",
-          }, null, 2),
+          text: JSON.stringify(
+            {
+              error: "No local run snapshot available. Run glubean_run_local_file first.",
+            },
+            null,
+            2,
+          ),
         }],
       };
     }
@@ -731,7 +734,7 @@ server.registerTool(
         .describe("Maximum events returned (default: 200)"),
     },
   },
-  async (input: {
+  (input: {
     type?: LocalDebugEvent["type"];
     testId?: string;
     limit?: number;
@@ -740,10 +743,13 @@ server.registerTool(
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
-            error:
-              "No local run snapshot available. Run glubean_run_local_file first.",
-          }, null, 2),
+          text: JSON.stringify(
+            {
+              error: "No local run snapshot available. Run glubean_run_local_file first.",
+            },
+            null,
+            2,
+          ),
         }],
       };
     }
@@ -758,16 +764,20 @@ server.registerTool(
     return {
       content: [{
         type: "text",
-        text: JSON.stringify({
-          availableTotal: events.length,
-          returned: filtered.length,
-          filters: {
-            type: input.type,
-            testId: input.testId,
-            limit: input.limit ?? 200,
+        text: JSON.stringify(
+          {
+            availableTotal: events.length,
+            returned: filtered.length,
+            filters: {
+              type: input.type,
+              testId: input.testId,
+              limit: input.limit ?? 200,
+            },
+            events: filtered,
           },
-          events: filtered,
-        }, null, 2),
+          null,
+          2,
+        ),
       }],
     };
   },

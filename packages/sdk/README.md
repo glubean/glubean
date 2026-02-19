@@ -340,8 +340,8 @@ if (ctx.retryCount > 0) {
 - `ctx.retryCount` represents whole-test re-runs:
   - `0` on the first execution attempt
   - `1+` on subsequent re-runs of the same test
-- Step retries configured via `.step(..., { retries })` are internal to one
-  execution and do not increment `ctx.retryCount`.
+- Step retries configured via `.step(..., { retries })` are internal to one execution and do not increment
+  `ctx.retryCount`.
 
 ```typescript
 if (ctx.retryCount > 0) {

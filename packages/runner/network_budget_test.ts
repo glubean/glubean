@@ -1,9 +1,4 @@
-import {
-  assertEquals,
-  assertRejects,
-  assertStringIncludes,
-  assertThrows,
-} from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { applyResponseByteBudget } from "./network_budget.ts";
 
 function makeChunkedResponse(chunks: string[]): Response {

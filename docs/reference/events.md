@@ -37,17 +37,16 @@ The **executor** (parent process) reads these lines, adds `ts` (milliseconds sin
 
 Emitted once at the beginning of test execution.
 
-| Field        | Type        | Description                          |
-| ------------ | ----------- | ------------------------------------ |
-| `type`       | `"start"`   | Event type                           |
-| `id`         | `string`    | Test ID                              |
-| `name`       | `string`    | Human-readable test name             |
-| `tags`       | `string[]?` | Test tags                            |
+| Field        | Type        | Description                                                |
+| ------------ | ----------- | ---------------------------------------------------------- |
+| `type`       | `"start"`   | Event type                                                 |
+| `id`         | `string`    | Test ID                                                    |
+| `name`       | `string`    | Human-readable test name                                   |
+| `tags`       | `string[]?` | Test tags                                                  |
 | `retryCount` | `number?`   | Whole-test re-run count (omitted when first attempt = `0`) |
 
-`retryCount` reflects execution-level retries orchestrated by the runner/control
-plane. It is different from step retries (`StepMeta.retries`), which happen
-inside a single execution.
+`retryCount` reflects execution-level retries orchestrated by the runner/control plane. It is different from step
+retries (`StepMeta.retries`), which happen inside a single execution.
 
 ---
 
@@ -111,8 +110,7 @@ An HTTP API trace, auto-emitted by `ctx.http` for every request.
 
 A custom or auto-generated metric from `ctx.metric()` or `ctx.http`.
 
-Metric payloads are not redaction-focused fields. Keep names/tags free of
-secrets and PII.
+Metric payloads are not redaction-focused fields. Keep names/tags free of secrets and PII.
 
 | Field       | Type                      | Description                            |
 | ----------- | ------------------------- | -------------------------------------- |
@@ -180,8 +178,7 @@ step_start(0) → step_end(0, passed) → step_start(1) → step_end(1, failed) 
 
 Test execution summary. Always emitted once before the final `status` event.
 
-Summary data is aggregate telemetry. Do not place sensitive values in custom
-summary-like payloads emitted by user code.
+Summary data is aggregate telemetry. Do not place sensitive values in custom summary-like payloads emitted by user code.
 
 | Field                   | Type        | Description                      |
 | ----------------------- | ----------- | -------------------------------- |

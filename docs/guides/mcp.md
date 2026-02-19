@@ -164,8 +164,8 @@ Secrets values are never returned — only the count.
 
 ### `glubean_get_last_run_summary`
 
-Return a compact summary for the most recent `glubean_run_local_file` execution.
-Useful for quick status checks before requesting detailed events.
+Return a compact summary for the most recent `glubean_run_local_file` execution. Useful for quick status checks before
+requesting detailed events.
 
 **Input:**
 

@@ -4,9 +4,9 @@ import {
   buildLastRunSummary,
   diagnoseProjectConfig,
   filterLocalDebugEvents,
+  type LocalRunSnapshot,
   MCP_TOOL_NAMES,
   toLocalDebugEvents,
-  type LocalRunSnapshot,
 } from "./mod.ts";
 import { DEFAULT_GENERATED_BY, MCP_PACKAGE_VERSION } from "./version.ts";
 
