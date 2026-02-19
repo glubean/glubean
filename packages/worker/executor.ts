@@ -8,11 +8,7 @@
 import { dirname, join, resolve } from "@std/path";
 import { ensureDir } from "@std/fs";
 import { UntarStream } from "@std/tar/untar-stream";
-import {
-  normalizePositiveTimeoutMs,
-  TestExecutor,
-  type TimelineEvent,
-} from "@glubean/runner";
+import { normalizePositiveTimeoutMs, TestExecutor, type TimelineEvent } from "@glubean/runner";
 import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
 import { ENV_VARS } from "./config.ts";
@@ -88,6 +84,29 @@ interface SelectedTest {
   exportName: string;
   tags: string[];
   timeout?: number;
+}
+
+interface RunnerNetworkPolicy {
+  mode: "shared_serverless";
+  maxRequests: number;
+  maxConcurrentRequests: number;
+  requestTimeoutMs: number;
+  maxResponseBytes: number;
+  allowedPorts: number[];
+}
+
+function toRunnerNetworkPolicy(config: WorkerConfig): RunnerNetworkPolicy | undefined {
+  if (config.networkPolicy.mode !== "shared_serverless") {
+    return undefined;
+  }
+  return {
+    mode: "shared_serverless",
+    maxRequests: config.networkPolicy.maxRequests,
+    maxConcurrentRequests: config.networkPolicy.maxConcurrentRequests,
+    requestTimeoutMs: config.networkPolicy.requestTimeoutMs,
+    maxResponseBytes: config.networkPolicy.maxResponseBytes,
+    allowedPorts: config.networkPolicy.allowedPorts,
+  };
 }
 
 /**
@@ -537,9 +556,7 @@ export async function executeBundle(
 
         const test = tests[index];
         const testUrl = `file://${join(extractDir, test.filePath)}`;
-        const derivedTimeout = derivedPerTestTimeoutMs > 0
-          ? derivedPerTestTimeoutMs
-          : undefined;
+        const derivedTimeout = derivedPerTestTimeoutMs > 0 ? derivedPerTestTimeoutMs : undefined;
         const explicitTaskTimeout = context.limits?.timeoutMs !== undefined;
         const metaTimeout = normalizePositiveTimeoutMs(test.timeout);
         const configuredTimeout = normalizePositiveTimeoutMs(
@@ -621,11 +638,16 @@ export async function executeBundle(
         };
 
         try {
+          const executionContext = {
+            vars: context.vars ?? {},
+            // Secrets are loaded locally, never from RuntimeContext
+            secrets,
+            networkPolicy: toRunnerNetworkPolicy(config),
+          };
           const result = await executor.execute(
             testUrl,
             test.exportName,
-            // Secrets are loaded locally, never from RuntimeContext
-            { vars: context.vars ?? {}, secrets },
+            executionContext,
             {
               onEvent: handleEvent,
               includeTestId: true,

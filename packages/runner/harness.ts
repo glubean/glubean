@@ -8,6 +8,14 @@
 
 import { parseArgs } from "@std/cli/parse-args";
 import ky from "ky";
+import {
+  classifyHostnameBlockReason,
+  classifyIpBlockReason,
+  isAllowedPort,
+  isAllowedProtocol,
+  isIpLiteral,
+  resolveUrlPort,
+} from "./network_policy.ts";
 import type {
   ApiTrace,
   AssertionDetails,
@@ -113,6 +121,44 @@ const contextData = contextJson ? JSON.parse(contextJson) : {};
 const rawVars = (contextData.vars ?? {}) as Record<string, string>;
 const rawSecrets = (contextData.secrets ?? {}) as Record<string, string>;
 const retryCount = (contextData.retryCount ?? 0) as number;
+
+interface SharedServerlessNetworkPolicy {
+  mode: "shared_serverless";
+  maxRequests: number;
+  maxConcurrentRequests: number;
+  requestTimeoutMs: number;
+  maxResponseBytes: number;
+  allowedPorts: number[];
+}
+
+function parseNetworkPolicy(
+  input: unknown,
+): SharedServerlessNetworkPolicy | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const candidate = input as Record<string, unknown>;
+  if (candidate.mode !== "shared_serverless") return undefined;
+
+  const allowedPorts = Array.isArray(candidate.allowedPorts)
+    ? candidate.allowedPorts.filter((p): p is number =>
+      typeof p === "number" && Number.isFinite(p) && p > 0 && p <= 65535
+    ).map((p) => Math.floor(p))
+    : [];
+
+  return {
+    mode: "shared_serverless",
+    maxRequests: Number(candidate.maxRequests) > 0 ? Math.floor(Number(candidate.maxRequests)) : 300,
+    maxConcurrentRequests: Number(candidate.maxConcurrentRequests) > 0
+      ? Math.floor(Number(candidate.maxConcurrentRequests))
+      : 20,
+    requestTimeoutMs: Number(candidate.requestTimeoutMs) > 0 ? Math.floor(Number(candidate.requestTimeoutMs)) : 30_000,
+    maxResponseBytes: Number(candidate.maxResponseBytes) > 0
+      ? Math.floor(Number(candidate.maxResponseBytes))
+      : 20 * 1024 * 1024,
+    allowedPorts: allowedPorts.length > 0 ? Array.from(new Set(allowedPorts)) : [80, 443, 8080, 8443],
+  };
+}
+
+const networkPolicy = parseNetworkPolicy(contextData.networkPolicy);
 
 // Memory monitoring state
 let peakMemoryBytes = 0;
@@ -714,6 +760,215 @@ function emitSummary() {
   );
 }
 
+const MAX_NETWORK_WARNINGS_PER_CODE = 3;
+const networkWarningCounts = new Map<string, number>();
+let networkRequestCount = 0;
+let networkInFlightCount = 0;
+let networkResponseBytes = 0;
+
+function emitNetworkWarning(code: string, message: string): void {
+  const nextCount = (networkWarningCounts.get(code) ?? 0) + 1;
+  networkWarningCounts.set(code, nextCount);
+  if (nextCount <= MAX_NETWORK_WARNINGS_PER_CODE) {
+    ctx.warn(false, `[network_guard:${code}] ${message}`);
+  } else if (nextCount === MAX_NETWORK_WARNINGS_PER_CODE + 1) {
+    ctx.warn(false, `[network_guard:${code}] further warnings suppressed`);
+  }
+}
+
+async function resolveHostIps(hostname: string): Promise<string[]> {
+  const ips = new Set<string>();
+  try {
+    const aRecords = await Deno.resolveDns(hostname, "A");
+    for (const ip of aRecords) ips.add(ip);
+  } catch {
+    // Ignore; try AAAA next.
+  }
+  try {
+    const aaaaRecords = await Deno.resolveDns(hostname, "AAAA");
+    for (const ip of aaaaRecords) ips.add(ip);
+  } catch {
+    // Ignore; caller decides behavior when no records are resolved.
+  }
+  return Array.from(ips);
+}
+
+function toRequestUrl(input: Request | URL | string): URL {
+  if (input instanceof Request) return new URL(input.url);
+  if (input instanceof URL) return input;
+  return new URL(input);
+}
+
+async function enforceNetworkPolicy(url: URL): Promise<void> {
+  if (!networkPolicy) return;
+
+  if (!isAllowedProtocol(url.protocol)) {
+    emitNetworkWarning(
+      "protocol_blocked",
+      `Blocked protocol ${url.protocol} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy blocked protocol ${url.protocol}. Only http/https are allowed.`,
+    );
+  }
+
+  const port = resolveUrlPort(url);
+  if (!isAllowedPort(port, networkPolicy.allowedPorts)) {
+    emitNetworkWarning(
+      "port_blocked",
+      `Blocked port ${port} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy blocked destination port ${port}.`,
+    );
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  const hostnameReason = classifyHostnameBlockReason(hostname);
+  if (hostnameReason) {
+    emitNetworkWarning(
+      hostnameReason,
+      `Blocked hostname ${hostname} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy blocked sensitive hostname ${hostname}.`,
+    );
+  }
+
+  if (isIpLiteral(hostname)) {
+    const ipReason = classifyIpBlockReason(hostname);
+    if (ipReason) {
+      emitNetworkWarning(
+        ipReason,
+        `Blocked destination IP ${hostname} for ${url.href}`,
+      );
+      throw new Error(`Network policy blocked destination IP ${hostname}.`);
+    }
+    return;
+  }
+
+  const resolvedIps = await resolveHostIps(hostname);
+  if (resolvedIps.length === 0) {
+    emitNetworkWarning(
+      "dns_resolution_failed",
+      `Could not resolve ${hostname} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy could not resolve host ${hostname}. Request denied.`,
+    );
+  }
+
+  for (const ip of resolvedIps) {
+    const ipReason = classifyIpBlockReason(ip);
+    if (ipReason) {
+      emitNetworkWarning(
+        ipReason,
+        `Blocked resolved IP ${ip} (${hostname}) for ${url.href}`,
+      );
+      throw new Error(
+        `Network policy blocked resolved destination ${ip} for host ${hostname}.`,
+      );
+    }
+  }
+}
+
+const originalFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = async (input, init) => {
+  if (!networkPolicy) {
+    return originalFetch(input, init);
+  }
+
+  const requestUrl = toRequestUrl(input);
+
+  if (networkRequestCount >= networkPolicy.maxRequests) {
+    emitNetworkWarning(
+      "request_limit_exceeded",
+      `Request limit exceeded (${networkPolicy.maxRequests})`,
+    );
+    throw new Error(
+      `Network policy exceeded max outbound requests (${networkPolicy.maxRequests}).`,
+    );
+  }
+  if (networkInFlightCount >= networkPolicy.maxConcurrentRequests) {
+    emitNetworkWarning(
+      "concurrency_limit_exceeded",
+      `In-flight request limit exceeded (${networkPolicy.maxConcurrentRequests})`,
+    );
+    throw new Error(
+      `Network policy exceeded max concurrent outbound requests (${networkPolicy.maxConcurrentRequests}).`,
+    );
+  }
+
+  // Reserve counters before await to avoid TOCTOU races when user code issues
+  // concurrent requests in a single Promise.all frame.
+  networkRequestCount++;
+  networkInFlightCount++;
+
+  const timeoutController = new AbortController();
+  const parentSignal = init?.signal;
+  const onParentAbort = () => timeoutController.abort(parentSignal?.reason);
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      timeoutController.abort(parentSignal.reason);
+    } else {
+      parentSignal.addEventListener("abort", onParentAbort, { once: true });
+    }
+  }
+
+  const timeoutId = setTimeout(() => {
+    timeoutController.abort(
+      new Error(
+        `Network request timed out after ${networkPolicy.requestTimeoutMs}ms`,
+      ),
+    );
+  }, networkPolicy.requestTimeoutMs);
+
+  try {
+    await enforceNetworkPolicy(requestUrl);
+
+    const response = await originalFetch(input, {
+      ...init,
+      signal: timeoutController.signal,
+    });
+
+    // Approximation: we only account for responses that declare content-length.
+    // Chunked/streaming responses without this header are not counted here.
+    const contentLength = Number(response.headers.get("content-length") ?? "");
+    if (Number.isFinite(contentLength) && contentLength > 0) {
+      networkResponseBytes += contentLength;
+      if (networkResponseBytes > networkPolicy.maxResponseBytes) {
+        emitNetworkWarning(
+          "response_budget_exceeded",
+          `Response-byte budget exceeded (${networkPolicy.maxResponseBytes})`,
+        );
+        throw new Error(
+          `Network policy exceeded response-byte budget (${networkPolicy.maxResponseBytes}).`,
+        );
+      }
+    } else {
+      emitNetworkWarning(
+        "response_size_unknown",
+        `No content-length for ${requestUrl.href}; response-byte budget accounting is approximate.`,
+      );
+    }
+
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(
+        `Network request timed out after ${networkPolicy.requestTimeoutMs}ms`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    if (parentSignal) {
+      parentSignal.removeEventListener("abort", onParentAbort);
+    }
+    networkInFlightCount = Math.max(0, networkInFlightCount - 1);
+  }
+};
+
 const kyInstance = ky.create({
   hooks: {
     beforeRequest: [
@@ -1215,18 +1470,14 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
               let stepError: string | undefined;
               let stepReturnState: unknown = undefined;
               const retries = step.meta.retries;
-              const configuredRetries =
-                typeof retries === "number" && Number.isFinite(retries)
-                  ? Math.max(0, Math.floor(retries))
+              const configuredRetries = typeof retries === "number" && Number.isFinite(retries)
+                ? Math.max(0, Math.floor(retries))
                 : 0;
               const stepTimeout = step.meta.timeout;
-              const configuredStepTimeout =
-                typeof stepTimeout === "number" && Number.isFinite(stepTimeout)
-                  ? Math.floor(stepTimeout)
+              const configuredStepTimeout = typeof stepTimeout === "number" && Number.isFinite(stepTimeout)
+                ? Math.floor(stepTimeout)
                 : 0;
-              const stepTimeoutMs = configuredStepTimeout > 0
-                ? configuredStepTimeout
-                : undefined;
+              const stepTimeoutMs = configuredStepTimeout > 0 ? configuredStepTimeout : undefined;
               const maxAttempts = configuredRetries + 1;
               let attemptsUsed = 0;
               let lastFailedAssertions = 0;
@@ -1247,18 +1498,16 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                   // Note: timed-out step bodies cannot be force-cancelled in JS.
                   // We treat timeout as terminal (no further retries) to avoid
                   // overlapping attempts mutating shared step context.
-                  const result = stepTimeoutMs === undefined
-                    ? await stepResult
-                    : await Promise.race([
-                      stepResult,
-                      new Promise<never>((_, reject) => {
-                        stepTimeoutId = setTimeout(() => {
-                          reject(
-                            new StepTimeoutError(step.meta.name, stepTimeoutMs),
-                          );
-                        }, stepTimeoutMs);
-                      }),
-                    ]);
+                  const result = stepTimeoutMs === undefined ? await stepResult : await Promise.race([
+                    stepResult,
+                    new Promise<never>((_, reject) => {
+                      stepTimeoutId = setTimeout(() => {
+                        reject(
+                          new StepTimeoutError(step.meta.name, stepTimeoutMs),
+                        );
+                      }, stepTimeoutMs);
+                    }),
+                  ]);
                   if (result !== undefined) {
                     state = result;
                     stepReturnState = result;
@@ -1287,15 +1536,14 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 }
 
                 if (attempt < maxAttempts) {
-                  const reason = stepError
-                    ? stepError
-                    : `${stepFailedAssertions} failed assertion(s)`;
+                  const reason = stepError ? stepError : `${stepFailedAssertions} failed assertion(s)`;
                   console.log(
                     JSON.stringify({
                       type: "log",
                       stepIndex: i,
-                      message:
-                        `Retrying step "${step.meta.name}" (${attempt + 1}/${maxAttempts}) after failure: ${reason}`,
+                      message: `Retrying step "${step.meta.name}" (${
+                        attempt + 1
+                      }/${maxAttempts}) after failure: ${reason}`,
                     }),
                   );
                 }

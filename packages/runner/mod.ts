@@ -4,6 +4,7 @@ export type {
   ExecutionBatchResult,
   ExecutionContext,
   ExecutionEvent,
+  ExecutionNetworkPolicy,
   ExecutionOptions,
   ExecutionResult,
   ExecutorOptions,

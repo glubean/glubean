@@ -33,6 +33,14 @@ function createTestConfig(): WorkerConfig {
     maxConcurrentTasks: 1,
     taskMemoryLimitBytes: 0,
     memoryCheckIntervalMs: 2000,
+    networkPolicy: {
+      mode: "trusted",
+      maxRequests: 300,
+      maxConcurrentRequests: 20,
+      requestTimeoutMs: 30000,
+      maxResponseBytes: 20 * 1024 * 1024,
+      allowedPorts: [80, 443, 8080, 8443],
+    },
   };
 }
 

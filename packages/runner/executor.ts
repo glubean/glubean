@@ -110,11 +110,28 @@ export type ExecutionEvent =
 /**
  * Execution context passed to the test.
  */
+export interface ExecutionNetworkPolicy {
+  /** Shared serverless mode enforces egress guardrails in harness runtime. */
+  mode: "shared_serverless";
+  /** Hard cap on outbound requests per test execution. */
+  maxRequests: number;
+  /** Max in-flight outbound requests per test execution. */
+  maxConcurrentRequests: number;
+  /** Per-request timeout in milliseconds. */
+  requestTimeoutMs: number;
+  /** Approximate response-byte budget per execution. */
+  maxResponseBytes: number;
+  /** Allowed destination ports for outbound HTTP(S) traffic. */
+  allowedPorts: number[];
+}
+
 export interface ExecutionContext {
   vars: Record<string, string>;
   secrets: Record<string, string>;
   /** Retry count for this execution (0 for first attempt) */
   retryCount?: number;
+  /** Optional egress policy applied by the harness runtime. */
+  networkPolicy?: ExecutionNetworkPolicy;
 }
 
 /**
@@ -619,9 +636,7 @@ export class TestExecutor {
     try {
       // Read stderr in parallel to avoid blocking.
       // When debugging (inspectBrk), stderr is inherited (not piped), so we skip reading it.
-      const stderrPromise = inspectBrk
-        ? Promise.resolve("")
-        : this.readStreamAsText(process.stderr, decoder);
+      const stderrPromise = inspectBrk ? Promise.resolve("") : this.readStreamAsText(process.stderr, decoder);
 
       // Read stdout as a stream so timeout updates can be applied immediately.
       const stdoutReader = process.stdout.getReader();

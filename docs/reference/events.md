@@ -107,6 +107,9 @@ An HTTP API trace, auto-emitted by `ctx.http` for every request.
 
 A custom or auto-generated metric from `ctx.metric()` or `ctx.http`.
 
+Metric payloads are not redaction-focused fields. Keep names/tags free of
+secrets and PII.
+
 | Field       | Type                      | Description                            |
 | ----------- | ------------------------- | -------------------------------------- |
 | `type`      | `"metric"`                | Event type                             |
@@ -172,6 +175,9 @@ step_start(0) → step_end(0, passed) → step_start(1) → step_end(1, failed) 
 ### `summary`
 
 Test execution summary. Always emitted once before the final `status` event.
+
+Summary data is aggregate telemetry. Do not place sensitive values in custom
+summary-like payloads emitted by user code.
 
 | Field                   | Type        | Description                      |
 | ----------------------- | ----------- | -------------------------------- |

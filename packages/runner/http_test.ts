@@ -5,7 +5,7 @@
  * and auto-metric hooks, and that ctx.http is functional inside sandbox.
  */
 
-import { assertEquals, assertExists } from "@std/assert";
+import { assertEquals, assertExists, assertStringIncludes } from "@std/assert";
 import { TestExecutor } from "./executor.ts";
 import type { TimelineEvent } from "./executor.ts";
 
@@ -34,6 +34,12 @@ function getLogs(events: TimelineEvent[]) {
 function getSummaries(events: TimelineEvent[]) {
   return events.filter(
     (e): e is Extract<TimelineEvent, { type: "summary" }> => e.type === "summary",
+  );
+}
+
+function getWarnings(events: TimelineEvent[]) {
+  return events.filter(
+    (e): e is Extract<TimelineEvent, { type: "warning" }> => e.type === "warning",
   );
 }
 
@@ -559,3 +565,273 @@ export const httpAllOk = test("httpAllOk", async (ctx) => {
     controller.abort();
   }
 });
+
+Deno.test("ctx.http - shared-serverless policy blocks localhost destinations", async () => {
+  const { baseUrl, controller } = startTestServer();
+  const serverPort = Number(new URL(baseUrl).port);
+  try {
+    const testFile = await createHttpTestFile(`
+export const localhostBlocked = test("localhostBlocked", async (ctx) => {
+  await ctx.http.get("${baseUrl}/health");
+});
+`);
+    const executor = new TestExecutor();
+    const result = await executor.execute(
+      `file://${testFile}`,
+      "localhostBlocked",
+      {
+        vars: {},
+        secrets: {},
+        networkPolicy: {
+          mode: "shared_serverless",
+          maxRequests: 5,
+          maxConcurrentRequests: 2,
+          requestTimeoutMs: 1000,
+          maxResponseBytes: 1024 * 1024,
+          allowedPorts: [80, 443, 8080, 8443, serverPort],
+        },
+      },
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(
+      result.error ?? "",
+      "Network policy blocked sensitive hostname localhost",
+    );
+    const warnings = getWarnings(result.events);
+    assertEquals(
+      warnings.some((w) => w.message.includes("network_guard:blocked_hostname")),
+      true,
+    );
+    await Deno.remove(testFile, { recursive: true });
+  } finally {
+    controller.abort();
+  }
+});
+
+Deno.test("ctx.http - shared-serverless policy enforces request count limit", async () => {
+  const testFile = await createHttpTestFile(`
+export const requestLimit = test("requestLimit", async (ctx) => {
+  try {
+    await ctx.http.get("http://8.8.8.8", { throwHttpErrors: false });
+  } catch {
+    // Ignore first request failure so we can hit request-count limit on second call.
+  }
+  await ctx.http.get("http://8.8.8.8", { throwHttpErrors: false });
+});
+`);
+  const executor = new TestExecutor();
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "requestLimit",
+    {
+      vars: {},
+      secrets: {},
+      networkPolicy: {
+        mode: "shared_serverless",
+        maxRequests: 1,
+        maxConcurrentRequests: 2,
+        requestTimeoutMs: 100,
+        maxResponseBytes: 1024 * 1024,
+        allowedPorts: [80, 443, 8080, 8443],
+      },
+    },
+  );
+
+  assertEquals(result.success, false);
+  assertStringIncludes(
+    result.error ?? "",
+    "Network policy exceeded max outbound requests",
+  );
+  const warnings = getWarnings(result.events);
+  assertEquals(
+    warnings.some((w) => w.message.includes("network_guard:request_limit_exceeded")),
+    true,
+  );
+  await Deno.remove(testFile, { recursive: true });
+});
+
+Deno.test(
+  "ctx.http - shared-serverless policy enforces concurrency for Promise.all",
+  async () => {
+    const testFile = await createHttpTestFile(`
+export const concurrencyLimit = test("concurrencyLimit", async (ctx) => {
+  await Promise.all([
+    ctx.http.get("http://8.8.8.8", { throwHttpErrors: false }),
+    ctx.http.get("http://1.1.1.1", { throwHttpErrors: false }),
+  ]);
+});
+`);
+    const executor = new TestExecutor();
+    const result = await executor.execute(
+      `file://${testFile}`,
+      "concurrencyLimit",
+      {
+        vars: {},
+        secrets: {},
+        networkPolicy: {
+          mode: "shared_serverless",
+          maxRequests: 10,
+          maxConcurrentRequests: 1,
+          requestTimeoutMs: 2_000,
+          maxResponseBytes: 1024 * 1024,
+          allowedPorts: [80, 443, 8080, 8443],
+        },
+      },
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(
+      result.error ?? "",
+      "Network policy exceeded max concurrent outbound requests",
+    );
+    const warnings = getWarnings(result.events);
+    assertEquals(
+      warnings.some((w) => w.message.includes("network_guard:concurrency_limit_exceeded")),
+      true,
+    );
+    await Deno.remove(testFile, { recursive: true });
+  },
+);
+
+Deno.test(
+  "ctx.http - shared-serverless policy blocks unsupported protocol",
+  async () => {
+    const testFile = await createHttpTestFile(`
+export const protocolBlocked = test("protocolBlocked", async (ctx) => {
+  await ctx.http.get("ftp://example.com/resource");
+});
+`);
+    const executor = new TestExecutor();
+    const result = await executor.execute(
+      `file://${testFile}`,
+      "protocolBlocked",
+      {
+        vars: {},
+        secrets: {},
+        networkPolicy: {
+          mode: "shared_serverless",
+          maxRequests: 5,
+          maxConcurrentRequests: 2,
+          requestTimeoutMs: 1_000,
+          maxResponseBytes: 1024 * 1024,
+          allowedPorts: [80, 443, 8080, 8443],
+        },
+      },
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(
+      result.error ?? "",
+      "Network policy blocked protocol",
+    );
+    await Deno.remove(testFile, { recursive: true });
+  },
+);
+
+Deno.test(
+  "ctx.http - shared-serverless policy blocks disallowed port",
+  async () => {
+    const testFile = await createHttpTestFile(`
+export const portBlocked = test("portBlocked", async (ctx) => {
+  await ctx.http.get("http://8.8.8.8:22", { throwHttpErrors: false });
+});
+`);
+    const executor = new TestExecutor();
+    const result = await executor.execute(
+      `file://${testFile}`,
+      "portBlocked",
+      {
+        vars: {},
+        secrets: {},
+        networkPolicy: {
+          mode: "shared_serverless",
+          maxRequests: 5,
+          maxConcurrentRequests: 2,
+          requestTimeoutMs: 1_000,
+          maxResponseBytes: 1024 * 1024,
+          allowedPorts: [80, 443, 8080, 8443],
+        },
+      },
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(
+      result.error ?? "",
+      "Network policy blocked destination port 22",
+    );
+    await Deno.remove(testFile, { recursive: true });
+  },
+);
+
+Deno.test(
+  "ctx.http - shared-serverless policy blocks IPv6 loopback literal",
+  async () => {
+    const testFile = await createHttpTestFile(`
+export const ipv6Blocked = test("ipv6Blocked", async (ctx) => {
+  await ctx.http.get("http://[::1]/health", { throwHttpErrors: false });
+});
+`);
+    const executor = new TestExecutor();
+    const result = await executor.execute(
+      `file://${testFile}`,
+      "ipv6Blocked",
+      {
+        vars: {},
+        secrets: {},
+        networkPolicy: {
+          mode: "shared_serverless",
+          maxRequests: 5,
+          maxConcurrentRequests: 2,
+          requestTimeoutMs: 1_000,
+          maxResponseBytes: 1024 * 1024,
+          allowedPorts: [80, 443, 8080, 8443],
+        },
+      },
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(result.error ?? "", "Network policy blocked destination IP");
+    const warnings = getWarnings(result.events);
+    assertEquals(
+      warnings.some((w) => w.message.includes("network_guard:loopback_ip")),
+      true,
+    );
+    await Deno.remove(testFile, { recursive: true });
+  },
+);
+
+Deno.test(
+  "ctx.http - shared-serverless policy fails closed on DNS resolution errors",
+  async () => {
+    const testFile = await createHttpTestFile(`
+export const dnsFailClosed = test("dnsFailClosed", async (ctx) => {
+  await ctx.http.get("http://does-not-exist.invalid/health", { throwHttpErrors: false });
+});
+`);
+    const executor = new TestExecutor();
+    const result = await executor.execute(
+      `file://${testFile}`,
+      "dnsFailClosed",
+      {
+        vars: {},
+        secrets: {},
+        networkPolicy: {
+          mode: "shared_serverless",
+          maxRequests: 5,
+          maxConcurrentRequests: 2,
+          requestTimeoutMs: 1_000,
+          maxResponseBytes: 1024 * 1024,
+          allowedPorts: [80, 443, 8080, 8443],
+        },
+      },
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(
+      result.error ?? "",
+      "Network policy could not resolve host does-not-exist.invalid",
+    );
+    await Deno.remove(testFile, { recursive: true });
+  },
+);

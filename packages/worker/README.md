@@ -59,8 +59,14 @@ glubean-worker --config ./worker.json
 | `GLUBEAN_LOG_LEVEL`             | Log level (debug, info, warn, error)        | `info`         |
 | `GLUBEAN_MAX_CONCURRENT_TASKS`  | Max concurrent tasks per worker             | `1`            |
 | `GLUBEAN_TASK_MEMORY_LIMIT_MB`  | Memory limit per task in MB (0 = unlimited) | `0`            |
-| `GLUBEAN_EXECUTION_TIMEOUT_MS`  | Test execution timeout                      | `300000`       |
+| `GLUBEAN_TASK_TIMEOUT_MS`       | Task timeout in milliseconds                | `300000`       |
 | `GLUBEAN_EXECUTION_CONCURRENCY` | Max parallel tests within a task            | `1`            |
+| `GLUBEAN_NETWORK_POLICY_MODE`   | Network guardrail mode (`trusted` or `shared_serverless`) | `trusted` |
+| `GLUBEAN_EGRESS_MAX_REQUESTS`   | Max outbound requests per test execution (shared mode) | `300` |
+| `GLUBEAN_EGRESS_MAX_CONCURRENT_REQUESTS` | Max in-flight outbound requests (shared mode) | `20` |
+| `GLUBEAN_EGRESS_REQUEST_TIMEOUT_MS` | Per-request outbound timeout in ms (shared mode) | `30000` |
+| `GLUBEAN_EGRESS_MAX_RESPONSE_BYTES` | Approx response-byte budget per execution (shared mode) | `20971520` |
+| `GLUBEAN_EGRESS_ALLOWED_PORTS`  | Allowed outbound ports (comma-separated, shared mode) | `80,443,8080,8443` |
 
 ## Concurrent Task Execution
 
@@ -85,6 +91,30 @@ export GLUBEAN_TASK_MEMORY_LIMIT_MB=500  # Optional: limit each task to 500MB
 - Tests are CPU/memory intensive
 - Predictable resource usage is required
 
+## Network Guardrails (Shared Serverless)
+
+Worker networking supports two threat models:
+
+- `trusted` (default): self-hosted workers you operate and trust.
+- `shared_serverless`: multi-tenant serverless workers with strict egress guardrails.
+
+In `shared_serverless` mode, outbound requests are limited and validated:
+
+- Blocks localhost/private/link-local/metadata targets.
+- Enforces protocol/port rules (`http`/`https` + allowed ports list).
+- Resolves host IPs on each request and blocks sensitive resolved addresses.
+- Enforces per-execution request count, in-flight concurrency, timeout, and response-byte budgets.
+
+Example:
+
+```bash
+export GLUBEAN_NETWORK_POLICY_MODE=shared_serverless
+export GLUBEAN_EGRESS_MAX_REQUESTS=200
+export GLUBEAN_EGRESS_MAX_CONCURRENT_REQUESTS=15
+export GLUBEAN_EGRESS_REQUEST_TIMEOUT_MS=20000
+export GLUBEAN_EGRESS_ALLOWED_PORTS=80,443,8080,8443
+```
+
 ## Kubernetes Deployment
 
 ### Basic Deployment (Shared Workers)
@@ -98,6 +128,7 @@ data:
   GLUBEAN_CONTROL_PLANE_URL: "https://api.glubean.com"
   GLUBEAN_LOG_LEVEL: "info"
   GLUBEAN_EXECUTION_CONCURRENCY: "3"
+  GLUBEAN_TASK_TIMEOUT_MS: "300000"
 ---
 apiVersion: v1
 kind: Secret
@@ -177,7 +208,7 @@ spec:
           env:
             - name: GLUBEAN_WORKER_TAGS
               value: "tier:free"
-            - name: GLUBEAN_EXECUTION_TIMEOUT_MS
+            - name: GLUBEAN_TASK_TIMEOUT_MS
               value: "30000" # 30s limit for free
           resources:
             limits:
@@ -200,7 +231,7 @@ spec:
           env:
             - name: GLUBEAN_WORKER_TAGS
               value: "tier:pro"
-            - name: GLUBEAN_EXECUTION_TIMEOUT_MS
+            - name: GLUBEAN_TASK_TIMEOUT_MS
               value: "60000" # 60s limit for pro
           resources:
             limits:
@@ -223,7 +254,7 @@ spec:
           env:
             - name: GLUBEAN_WORKER_TAGS
               value: "tier:enterprise,team:acme"
-            - name: GLUBEAN_EXECUTION_TIMEOUT_MS
+            - name: GLUBEAN_TASK_TIMEOUT_MS
               value: "300000" # 5min for enterprise
           resources:
             limits:

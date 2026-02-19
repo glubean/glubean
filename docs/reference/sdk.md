@@ -97,6 +97,28 @@ The `ctx` object is passed to every test function. Key methods:
 | `ctx.http`                                 | HTTP client (when using `configure()`)                                            |
 | `ctx.graphql`                              | GraphQL client (when using `configure()`)                                         |
 
+### Metric Data Safety
+
+`ctx.metric()` is for numeric observability and dashboard dimensions. Treat metric
+names and tags as non-secret metadata.
+
+- Do not put tokens, API keys, emails, phone numbers, or user identifiers into
+  metric names or tags.
+- Prefer stable, low-cardinality tags such as `endpoint`, `method`, or `region`.
+
+```ts
+// Good
+ctx.metric("http_duration_ms", duration, {
+  unit: "ms",
+  tags: { endpoint: "/orders", method: "GET" },
+});
+
+// Bad: sensitive value in tags
+ctx.metric("auth_check", 1, {
+  tags: { bearer: ctx.secrets.require("API_TOKEN") },
+});
+```
+
 ## Data-Driven Tests
 
 See [Data Loading](../guides/data-loading.md) for CSV, YAML, JSON, and directory-based data loading.

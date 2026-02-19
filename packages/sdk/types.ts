@@ -356,6 +356,10 @@ export interface TestContext {
    * Metrics are stored separately from logs/traces with longer retention (90 days)
    * and are optimized for time-series queries and dashboards.
    *
+   * Security note: metric names and tags are observable metadata and are not
+   * intended to carry secrets or PII. Never include tokens, API keys, emails,
+   * phone numbers, or user identifiers in `name` / `options.tags`.
+   *
    * @param name Metric name (e.g., "api_duration_ms", "response_size_bytes")
    * @param value Numeric value
    * @param options Optional unit and tags
@@ -383,6 +387,12 @@ export interface TestContext {
    *   unit: "ms",
    *   tags: { endpoint: "/api/v2/optimize", method: "POST" },
    * });
+   * ```
+   *
+   * @example Anti-pattern (do not do this)
+   * ```ts
+   * // Bad: secret data embedded in metric dimensions
+   * ctx.metric("token_check", 1, { tags: { token: ctx.secrets.require("API_KEY") } });
    * ```
    */
   metric(name: string, value: number, options?: MetricOptions): void;
