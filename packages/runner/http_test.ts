@@ -835,3 +835,63 @@ export const dnsFailClosed = test("dnsFailClosed", async (ctx) => {
     await Deno.remove(testFile, { recursive: true });
   },
 );
+
+Deno.test(
+  "ctx.http - shared-serverless policy blocks DNS rebinding-style resolution to loopback",
+  async () => {
+    const testFile = await createHttpTestFile(`
+export const dnsRebindingBlocked = test("dnsRebindingBlocked", async (ctx) => {
+  const originalResolveDns = Deno.resolveDns.bind(Deno);
+  Object.defineProperty(Deno, "resolveDns", {
+    configurable: true,
+    value: async (...args: Parameters<typeof Deno.resolveDns>) => {
+      const [hostname, recordType] = args;
+      if (hostname === "rebinding-safe.test") {
+        if (recordType === "A") return ["127.0.0.1"];
+        if (recordType === "AAAA") return [];
+      }
+      return await originalResolveDns(...args);
+    },
+  });
+
+  try {
+    await ctx.http.get("http://rebinding-safe.test/health", { throwHttpErrors: false });
+  } finally {
+    Object.defineProperty(Deno, "resolveDns", {
+      configurable: true,
+      value: originalResolveDns,
+    });
+  }
+});
+`);
+    const executor = new TestExecutor();
+    const result = await executor.execute(
+      `file://${testFile}`,
+      "dnsRebindingBlocked",
+      {
+        vars: {},
+        secrets: {},
+        networkPolicy: {
+          mode: "shared_serverless",
+          maxRequests: 5,
+          maxConcurrentRequests: 2,
+          requestTimeoutMs: 1_000,
+          maxResponseBytes: 1024 * 1024,
+          allowedPorts: [80, 443, 8080, 8443],
+        },
+      },
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(
+      result.error ?? "",
+      "Network policy blocked resolved destination 127.0.0.1 for host rebinding-safe.test",
+    );
+    const warnings = getWarnings(result.events);
+    assertEquals(
+      warnings.some((w) => w.message.includes("network_guard:loopback_ip")),
+      true,
+    );
+    await Deno.remove(testFile, { recursive: true });
+  },
+);

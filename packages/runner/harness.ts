@@ -16,6 +16,7 @@ import {
   isIpLiteral,
   resolveUrlPort,
 } from "./network_policy.ts";
+import { applyResponseByteBudget } from "./network_budget.ts";
 import type {
   ApiTrace,
   AssertionDetails,
@@ -930,29 +931,15 @@ globalThis.fetch = async (input, init) => {
       ...init,
       signal: timeoutController.signal,
     });
-
-    // Approximation: we only account for responses that declare content-length.
-    // Chunked/streaming responses without this header are not counted here.
-    const contentLength = Number(response.headers.get("content-length") ?? "");
-    if (Number.isFinite(contentLength) && contentLength > 0) {
-      networkResponseBytes += contentLength;
-      if (networkResponseBytes > networkPolicy.maxResponseBytes) {
-        emitNetworkWarning(
-          "response_budget_exceeded",
-          `Response-byte budget exceeded (${networkPolicy.maxResponseBytes})`,
-        );
-        throw new Error(
-          `Network policy exceeded response-byte budget (${networkPolicy.maxResponseBytes}).`,
-        );
-      }
-    } else {
-      emitNetworkWarning(
-        "response_size_unknown",
-        `No content-length for ${requestUrl.href}; response-byte budget accounting is approximate.`,
-      );
-    }
-
-    return response;
+    return applyResponseByteBudget(response, {
+      requestUrl,
+      maxResponseBytes: networkPolicy.maxResponseBytes,
+      getUsedResponseBytes: () => networkResponseBytes,
+      addUsedResponseBytes: (delta) => {
+        networkResponseBytes += delta;
+      },
+      emitWarning: emitNetworkWarning,
+    });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(
