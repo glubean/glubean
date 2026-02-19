@@ -1,1 +1,3 @@
-export const CLI_VERSION = "0.2.25";
+import denoConfig from "./deno.json" with { type: "json" };
+
+export const CLI_VERSION: string = denoConfig.version;
