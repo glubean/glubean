@@ -569,11 +569,19 @@ export class TestExecutor {
     }
 
     // Setup timeout if specified (disabled when debugging — breakpoints would trigger it)
-    const timeout = inspectBrk ? 0 : options?.timeout ?? DEFAULT_TIMEOUT_MS;
+    let timeout = inspectBrk ? 0 : options?.timeout ?? DEFAULT_TIMEOUT_MS;
     let timeoutId: number | undefined;
     let timedOut = false;
 
-    if (timeout > 0) {
+    const armTimeout = (nextTimeout: number) => {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+      timeout = nextTimeout;
+      if (timeout <= 0) {
+        timeoutId = undefined;
+        return;
+      }
       timeoutId = setTimeout(() => {
         timedOut = true;
         try {
@@ -582,23 +590,65 @@ export class TestExecutor {
           // Process may already be dead
         }
       }, timeout);
+    };
+
+    if (timeout > 0) {
+      armTimeout(timeout);
     }
 
     try {
-      // Read stdout and stderr in parallel to avoid blocking.
+      // Read stderr in parallel to avoid blocking.
       // When debugging (inspectBrk), stderr is inherited (not piped), so we skip reading it.
-      const stdoutPromise = this.readStream(process.stdout, decoder);
-      const stderrPromise = inspectBrk ? Promise.resolve("") : this.readStreamAsText(process.stderr, decoder);
+      const stderrPromise = inspectBrk
+        ? Promise.resolve("")
+        : this.readStreamAsText(process.stderr, decoder);
 
-      const [stdoutResult, stderr] = await Promise.all([
-        stdoutPromise,
-        stderrPromise,
-      ]);
+      // Read stdout as a stream so timeout updates can be applied immediately.
+      const stdoutReader = process.stdout.getReader();
+      let stdoutBuffer = "";
+      try {
+        while (true) {
+          const { done, value } = await stdoutReader.read();
+          if (done) break;
 
-      // Yield all stdout events
-      for (const event of stdoutResult.events) {
-        yield event;
+          stdoutBuffer += decoder.decode(value, { stream: true });
+          const lines = stdoutBuffer.split("\n");
+          stdoutBuffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const event = this.parseExecutionLine(line);
+            if (!event) continue;
+            if (
+              !inspectBrk &&
+              event.type === "timeout_update" &&
+              Number.isFinite(event.timeout) &&
+              event.timeout > 0
+            ) {
+              armTimeout(Math.floor(event.timeout));
+            }
+            yield event;
+          }
+        }
+
+        if (stdoutBuffer.trim()) {
+          const event = this.parseExecutionLine(stdoutBuffer);
+          if (event) {
+            if (
+              !inspectBrk &&
+              event.type === "timeout_update" &&
+              Number.isFinite(event.timeout) &&
+              event.timeout > 0
+            ) {
+              armTimeout(Math.floor(event.timeout));
+            }
+            yield event;
+          }
+        }
+      } finally {
+        stdoutReader.releaseLock();
       }
+
+      const stderr = await stderrPromise;
 
       // Clear timeout if set
       if (timeoutId !== undefined) {
@@ -666,61 +716,19 @@ export class TestExecutor {
   }
 
   /**
-   * Read a stream and parse JSON events line by line.
-   *
-   * @param stream The readable stream
-   * @param decoder Text decoder instance
-   * @returns Array of parsed events and remaining buffer
+   * Parse one stdout line into an execution event.
+   * Falls back to a raw log event when the line is not valid JSON.
    */
-  private async readStream(
-    stream: ReadableStream<Uint8Array>,
-    decoder: TextDecoder,
-  ): Promise<{ events: ExecutionEvent[]; buffer: string }> {
-    const reader = stream.getReader();
-    const events: ExecutionEvent[] = [];
-    let buffer = "";
-
+  private parseExecutionLine(line: string): ExecutionEvent | undefined {
+    if (!line.trim()) return undefined;
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line) as ExecutionEvent;
-            events.push(event);
-          } catch {
-            // Non-JSON output, treat as raw log
-            events.push({
-              type: "log",
-              message: line,
-            });
-          }
-        }
-      }
-
-      // Process remaining buffer
-      if (buffer.trim()) {
-        try {
-          const event = JSON.parse(buffer) as ExecutionEvent;
-          events.push(event);
-        } catch {
-          events.push({
-            type: "log",
-            message: buffer,
-          });
-        }
-      }
-    } finally {
-      reader.releaseLock();
+      return JSON.parse(line) as ExecutionEvent;
+    } catch {
+      return {
+        type: "log",
+        message: line,
+      };
     }
-
-    return { events, buffer: "" };
   }
 
   /**

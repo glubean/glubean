@@ -608,6 +608,110 @@ Deno.test("ctx.pollUntil - onTimeout receives last error", async () => {
 });
 
 // =============================================================================
+// Dynamic timeout updates via ctx.setTimeout
+// =============================================================================
+
+const TIMEOUT_UPDATE_TEST_CONTENT = `
+import { test } from "@glubean/sdk";
+
+export const extendTimeoutTest = test({ id: "extend-timeout" }, async (ctx) => {
+  ctx.setTimeout(450);
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  ctx.assert(true, "completed after timeout increase");
+});
+
+export const shortenTimeoutTest = test({ id: "shorten-timeout" }, async (ctx) => {
+  ctx.setTimeout(80);
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  ctx.assert(true, "should not reach");
+});
+
+export const invalidTimeoutUpdateTest = test(
+  { id: "invalid-timeout-update" },
+  async (ctx) => {
+    ctx.setTimeout(Number.NaN);
+    await new Promise((resolve) => setTimeout(resolve, 220));
+    ctx.assert(true, "should not reach");
+  },
+);
+`;
+
+async function createTimeoutUpdateTestFile(): Promise<string> {
+  const tempDir = await Deno.makeTempDir();
+  const testFile = `${tempDir}/timeout_update_test.ts`;
+  await Deno.writeTextFile(testFile, TIMEOUT_UPDATE_TEST_CONTENT);
+  return testFile;
+}
+
+Deno.test("ctx.setTimeout - can extend timeout dynamically", async () => {
+  const testFile = await createTimeoutUpdateTestFile();
+  const executor = new TestExecutor();
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "extend-timeout",
+    { vars: {}, secrets: {} },
+    { timeout: 120 },
+  );
+
+  assertEquals(
+    result.success,
+    true,
+    `Should pass after extending timeout: ${JSON.stringify(result.events)}`,
+  );
+  const assertions = getAssertions(result.events);
+  assertEquals(assertions.length > 0, true);
+  assertEquals(assertions.every((a) => a.passed), true);
+
+  await Deno.remove(testFile, { recursive: true });
+});
+
+Deno.test("ctx.setTimeout - can reduce timeout dynamically", async () => {
+  const testFile = await createTimeoutUpdateTestFile();
+  const executor = new TestExecutor();
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "shorten-timeout",
+    { vars: {}, secrets: {} },
+    { timeout: 600 },
+  );
+
+  assertEquals(result.success, false, "Should fail after reducing timeout");
+  assertExists(result.error);
+  assertEquals(
+    result.error?.includes("timed out after 80ms"),
+    true,
+    `Unexpected error: ${result.error}`,
+  );
+
+  await Deno.remove(testFile, { recursive: true });
+});
+
+Deno.test("ctx.setTimeout - ignores invalid timeout updates", async () => {
+  const testFile = await createTimeoutUpdateTestFile();
+  const executor = new TestExecutor();
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "invalid-timeout-update",
+    { vars: {}, secrets: {} },
+    { timeout: 100 },
+  );
+
+  assertEquals(
+    result.success,
+    false,
+    "Should fail because invalid timeout update is ignored",
+  );
+  assertExists(result.error);
+  assertEquals(
+    result.error?.includes("timed out after 100ms"),
+    true,
+    `Unexpected error: ${result.error}`,
+  );
+
+  await Deno.remove(testFile, { recursive: true });
+});
+
+// =============================================================================
 // Auto-build (no .build()) tests
 // =============================================================================
 
