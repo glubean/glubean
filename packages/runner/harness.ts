@@ -1203,18 +1203,54 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
               let stepError: string | undefined;
               let stepReturnState: unknown = undefined;
-              try {
-                const result = await step.fn(effectiveCtx, state);
-                if (result !== undefined) {
-                  state = result;
-                  stepReturnState = result;
+              const configuredRetries = Number.isFinite(step.meta.retries)
+                ? Math.max(0, Math.floor(step.meta.retries ?? 0))
+                : 0;
+              const maxAttempts = configuredRetries + 1;
+              let lastFailedAssertions = 0;
+              let lastAssertions = 0;
+
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                stepError = undefined;
+                stepReturnState = undefined;
+                stepFailedAssertions = 0;
+                stepAssertionTotal = 0;
+
+                try {
+                  const result = await step.fn(effectiveCtx, state);
+                  if (result !== undefined) {
+                    state = result;
+                    stepReturnState = result;
+                  }
+                } catch (err) {
+                  stepError = err instanceof Error ? err.message : String(err);
                 }
-              } catch (err) {
-                stepError = err instanceof Error ? err.message : String(err);
+
+                lastFailedAssertions = stepFailedAssertions;
+                lastAssertions = stepAssertionTotal;
+
+                const attemptFailed = !!stepError || stepFailedAssertions > 0;
+                if (!attemptFailed) {
+                  break;
+                }
+
+                if (attempt < maxAttempts) {
+                  const reason = stepError
+                    ? stepError
+                    : `${stepFailedAssertions} failed assertion(s)`;
+                  console.log(
+                    JSON.stringify({
+                      type: "log",
+                      stepIndex: i,
+                      message:
+                        `Retrying step "${step.meta.name}" (${attempt + 1}/${maxAttempts}) after failure: ${reason}`,
+                    }),
+                  );
+                }
               }
 
               const durationMs = Math.round(performance.now() - stepStart);
-              const failed = !!stepError || stepFailedAssertions > 0;
+              const failed = !!stepError || lastFailedAssertions > 0;
 
               // Serialize return state with size guard (max 4 KB)
               let returnStatePayload: unknown = undefined;
@@ -1238,8 +1274,8 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                   name: step.meta.name,
                   status: failed ? "failed" : "passed",
                   durationMs,
-                  assertions: stepAssertionTotal,
-                  failedAssertions: stepFailedAssertions,
+                  assertions: lastAssertions,
+                  failedAssertions: lastFailedAssertions,
                   ...(stepError && { error: stepError }),
                   ...(returnStatePayload !== undefined && {
                     returnState: returnStatePayload,

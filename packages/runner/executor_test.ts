@@ -768,6 +768,26 @@ export const stepsAllPass = test("steps-all-pass")
   .step("step B", async (ctx) => {
     ctx.assert(true, "B passes");
   });
+
+let flakyAttempts = 0;
+export const stepRetryPass = test("step-retry-pass")
+  .step("flaky with retry", { retries: 2 }, async (ctx) => {
+    flakyAttempts += 1;
+    ctx.assert(flakyAttempts >= 2, "step should pass on retry");
+  })
+  .step("after retry", async (ctx) => {
+    ctx.assert(true, "next step should run");
+  });
+
+let exhaustedAttempts = 0;
+export const stepRetryExhausted = test("step-retry-exhausted")
+  .step("always failing with retry", { retries: 2 }, async (ctx) => {
+    exhaustedAttempts += 1;
+    ctx.assert(false, "still failing");
+  })
+  .step("skipped after retries", async (ctx) => {
+    ctx.log("this should not run");
+  });
 `;
 
 async function createAutoBuildTestFile(): Promise<string> {
@@ -839,6 +859,75 @@ Deno.test("builder with .build() still works as before", async () => {
     logs.some((l) => l.message.includes("explicit build works")),
     true,
   );
+
+  await Deno.remove(testFile, { recursive: true });
+});
+
+Deno.test("step retries - passes on retry and continues flow", async () => {
+  const testFile = await createAutoBuildTestFile();
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "step-retry-pass",
+    { vars: {}, secrets: {} },
+  );
+
+  assertEquals(
+    result.success,
+    true,
+    `Should pass with retry: ${JSON.stringify(result.events)}`,
+  );
+
+  const ends = getStepEnds(result.events);
+  assertEquals(ends.length, 2);
+  assertEquals(ends[0].name, "flaky with retry");
+  assertEquals(ends[0].status, "passed");
+  assertEquals(ends[1].name, "after retry");
+  assertEquals(ends[1].status, "passed");
+
+  const logs = result.events.filter(
+    (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
+  );
+  assertEquals(
+    logs.some((l) =>
+      l.message.includes('Retrying step "flaky with retry" (2/3)')
+    ),
+    true,
+    "Should log retry attempt",
+  );
+
+  await Deno.remove(testFile, { recursive: true });
+});
+
+Deno.test("step retries - exhausted retries fail the step", async () => {
+  const testFile = await createAutoBuildTestFile();
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "step-retry-exhausted",
+    { vars: {}, secrets: {} },
+  );
+
+  assertEquals(result.success, false, "Should fail after retries are exhausted");
+  const ends = getStepEnds(result.events);
+  assertEquals(ends.length, 2);
+  assertEquals(ends[0].name, "always failing with retry");
+  assertEquals(ends[0].status, "failed");
+  assertEquals(ends[1].name, "skipped after retries");
+  assertEquals(ends[1].status, "skipped");
+
+  const failedAssertions = getAssertions(result.events).filter((a) => !a.passed);
+  assertEquals(failedAssertions.length, 3, "Should run 3 failed attempts total");
+
+  const logs = result.events.filter(
+    (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
+  );
+  const retryLogs = logs.filter((l) =>
+    l.message.includes('Retrying step "always failing with retry"')
+  );
+  assertEquals(retryLogs.length, 2, "Should log two retries");
 
   await Deno.remove(testFile, { recursive: true });
 });
