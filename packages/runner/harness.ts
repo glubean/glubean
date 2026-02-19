@@ -909,6 +909,7 @@ globalThis.fetch = async (input, init) => {
   networkInFlightCount++;
 
   const timeoutController = new AbortController();
+  let timedOutByPolicy = false;
   const parentSignal = (() => {
     if (!init || typeof init !== "object" || !("signal" in init)) {
       return undefined;
@@ -926,6 +927,7 @@ globalThis.fetch = async (input, init) => {
   }
 
   const timeoutId = setTimeout(() => {
+    timedOutByPolicy = true;
     timeoutController.abort(
       new Error(
         `Network request timed out after ${networkPolicy.requestTimeoutMs}ms`,
@@ -951,9 +953,11 @@ globalThis.fetch = async (input, init) => {
     });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(
-        `Network request timed out after ${networkPolicy.requestTimeoutMs}ms`,
-      );
+      if (timedOutByPolicy) {
+        throw new Error(
+          `Network request timed out after ${networkPolicy.requestTimeoutMs}ms`,
+        );
+      }
     }
     throw error;
   } finally {

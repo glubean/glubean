@@ -569,12 +569,9 @@ export async function executeBundle(
         //
         // When an explicit task budget is present, we honor the derived budget
         // to keep the whole task within that hard ceiling.
-        let effectiveTimeout = explicitTaskTimeout
+        const effectiveTimeout = explicitTaskTimeout
           ? derivedTimeout
           : (metaTimeout ?? configuredTimeout ?? derivedTimeout);
-        if (effectiveTimeout !== undefined && derivedTimeout !== undefined) {
-          effectiveTimeout = Math.min(effectiveTimeout, derivedTimeout);
-        }
 
         logger.debug("Running test", { testId: test.testId });
 

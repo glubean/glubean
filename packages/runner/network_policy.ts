@@ -50,7 +50,7 @@ export function classifyIpBlockReason(ip: string): string | undefined {
   if (isIpv4(normalized)) {
     const octets = normalized.split(".").map((value) => Number(value));
     const [a, b] = octets;
-    if (a === 127) return "loopback_ip";
+    if (a === 127 || a === 0) return "loopback_ip";
     if (a === 10) return "private_ip";
     if (a === 192 && b === 168) return "private_ip";
     if (a === 172 && b >= 16 && b <= 31) return "private_ip";

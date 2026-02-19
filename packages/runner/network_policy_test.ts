@@ -19,6 +19,8 @@ Deno.test("network policy: blocks localhost hostnames", () => {
 
 Deno.test("network policy: blocks private and metadata IPs", () => {
   assertEquals(classifyIpBlockReason("127.0.0.1"), "loopback_ip");
+  assertEquals(classifyIpBlockReason("0.0.0.0"), "loopback_ip");
+  assertEquals(classifyIpBlockReason("0.255.255.255"), "loopback_ip");
   assertEquals(classifyIpBlockReason("10.2.3.4"), "private_ip");
   assertEquals(classifyIpBlockReason("172.20.5.1"), "private_ip");
   assertEquals(classifyIpBlockReason("192.168.1.10"), "private_ip");
