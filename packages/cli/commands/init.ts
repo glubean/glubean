@@ -6,6 +6,8 @@
  * Step 3: Git & CI — Auto-detect/init git, hooks, GitHub Actions (Best Practice only)
  */
 
+import cliDenoJson from "../deno.json" with { type: "json" };
+
 const colors = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -172,14 +174,33 @@ async function resolveContent(
 // Templates — Standard project
 // ---------------------------------------------------------------------------
 
-const SDK_VERSION = "^0.11.0";
+function resolveSdkImportVersion(): string {
+  const imports = cliDenoJson.imports;
+  const sdkImport = imports && typeof imports === "object"
+    ? (imports as Record<string, unknown>)["@glubean/sdk"]
+    : undefined;
+  if (typeof sdkImport !== "string") {
+    throw new Error(
+      'Unable to resolve "@glubean/sdk" import from packages/cli/deno.json',
+    );
+  }
+  const match = sdkImport.match(/^jsr:@glubean\/sdk@(.+)$/);
+  if (!match) {
+    throw new Error(
+      `Unexpected @glubean/sdk import format in packages/cli/deno.json: ${sdkImport}`,
+    );
+  }
+  return match[1];
+}
+
+const SDK_IMPORT = `jsr:@glubean/sdk@${resolveSdkImportVersion()}`;
 
 function makeDenoJson(_baseUrl: string): string {
   return (
     JSON.stringify(
       {
         imports: {
-          "@glubean/sdk": `jsr:@glubean/sdk@${SDK_VERSION}`,
+          "@glubean/sdk": SDK_IMPORT,
         },
         tasks: {
           test: "deno run -A jsr:@glubean/cli run",
@@ -341,7 +362,7 @@ jobs:
 
 const MINIMAL_DENO_JSON = `{
   "imports": {
-    "@glubean/sdk": "jsr:@glubean/sdk@${SDK_VERSION}"
+    "@glubean/sdk": "${SDK_IMPORT}"
   },
   "tasks": {
     "explore": "deno run -A jsr:@glubean/cli run --explore --verbose",

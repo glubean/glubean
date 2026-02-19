@@ -1,9 +1,14 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import cliDenoJson from "../deno.json" with { type: "json" };
 
 /**
  * Tests for the init command (3-step wizard).
  */
+
+const EXPECTED_SDK_IMPORT = (
+  cliDenoJson.imports as Record<string, string>
+)["@glubean/sdk"];
 
 async function createTempDir(): Promise<string> {
   return await Deno.makeTempDir({ prefix: "glubean-init-test-" });
@@ -108,7 +113,7 @@ Deno.test("init --no-interactive creates basic project files", async () => {
     );
     assertEquals(
       denoJson.imports?.["@glubean/sdk"],
-      "jsr:@glubean/sdk@^0.11.0",
+      EXPECTED_SDK_IMPORT,
     );
     assertEquals(typeof denoJson.tasks?.scan, "string");
     assertEquals(typeof denoJson.tasks?.["validate-metadata"], "string");
