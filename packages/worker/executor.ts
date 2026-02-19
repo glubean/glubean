@@ -8,7 +8,11 @@
 import { dirname, join, resolve } from "@std/path";
 import { ensureDir } from "@std/fs";
 import { UntarStream } from "@std/tar/untar-stream";
-import { TestExecutor, type TimelineEvent } from "@glubean/runner";
+import {
+  normalizePositiveTimeoutMs,
+  TestExecutor,
+  type TimelineEvent,
+} from "@glubean/runner";
 import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
 import { ENV_VARS } from "./config.ts";
@@ -395,16 +399,6 @@ function selectTests(
 }
 
 /**
- * Normalize timeout values from metadata/config.
- * Returns undefined when value is missing or invalid.
- */
-function toPositiveTimeoutMs(value: unknown): number | undefined {
-  if (!Number.isFinite(value)) return undefined;
-  const normalized = Math.floor(Number(value));
-  return normalized > 0 ? normalized : undefined;
-}
-
-/**
  * Execute tests from a downloaded bundle.
  */
 export async function executeBundle(
@@ -547,8 +541,17 @@ export async function executeBundle(
           ? derivedPerTestTimeoutMs
           : undefined;
         const explicitTaskTimeout = context.limits?.timeoutMs !== undefined;
-        const metaTimeout = toPositiveTimeoutMs(test.timeout);
-        const configuredTimeout = toPositiveTimeoutMs(config.run.perTestTimeoutMs);
+        const metaTimeout = normalizePositiveTimeoutMs(test.timeout);
+        const configuredTimeout = normalizePositiveTimeoutMs(
+          config.run.perTestTimeoutMs,
+        );
+        // Precedence:
+        // 1) Explicit task budget (context.limits.timeoutMs) -> derived per-test budget
+        // 2) Test metadata timeout
+        // 3) Worker config per-test timeout
+        //
+        // When an explicit task budget is present, we honor the derived budget
+        // to keep the whole task within that hard ceiling.
         let effectiveTimeout = explicitTaskTimeout
           ? derivedTimeout
           : (metaTimeout ?? configuredTimeout ?? derivedTimeout);

@@ -202,6 +202,17 @@ class FailError extends Error {
 }
 
 /**
+ * Sentinel error used for step-level timeout failures.
+ * Timeouts are treated as terminal for the step and do not retry.
+ */
+class StepTimeoutError extends Error {
+  constructor(stepName: string, timeoutMs: number) {
+    super(`Step "${stepName}" timed out after ${timeoutMs}ms`);
+    this.name = "StepTimeoutError";
+  }
+}
+
+/**
  * Helper to run validator and get error message.
  *
  * @param result Validator result (true/false/string/void/null)
@@ -1203,28 +1214,37 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
               let stepError: string | undefined;
               let stepReturnState: unknown = undefined;
+              const stepRetriesMeta = step.meta.retries;
               const configuredRetries = Number.isFinite(step.meta.retries)
-                ? Math.max(0, Math.floor(step.meta.retries ?? 0))
+                ? Math.max(0, Math.floor(stepRetriesMeta as number))
                 : 0;
+              const stepTimeoutMeta = step.meta.timeout;
               const configuredStepTimeout = Number.isFinite(step.meta.timeout)
-                ? Math.floor(step.meta.timeout ?? 0)
+                ? Math.floor(stepTimeoutMeta as number)
                 : 0;
               const stepTimeoutMs = configuredStepTimeout > 0
                 ? configuredStepTimeout
                 : undefined;
               const maxAttempts = configuredRetries + 1;
+              let attemptsUsed = 0;
               let lastFailedAssertions = 0;
               let lastAssertions = 0;
+              let timeoutFailure = false;
 
               for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                attemptsUsed = attempt;
                 stepError = undefined;
                 stepReturnState = undefined;
                 stepFailedAssertions = 0;
                 stepAssertionTotal = 0;
+                timeoutFailure = false;
                 let stepTimeoutId: number | undefined;
 
                 try {
                   const stepResult = step.fn(effectiveCtx, state);
+                  // Note: timed-out step bodies cannot be force-cancelled in JS.
+                  // We treat timeout as terminal (no further retries) to avoid
+                  // overlapping attempts mutating shared step context.
                   const result = stepTimeoutMs === undefined
                     ? await stepResult
                     : await Promise.race([
@@ -1232,9 +1252,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                       new Promise<never>((_, reject) => {
                         stepTimeoutId = setTimeout(() => {
                           reject(
-                            new Error(
-                              `Step "${step.meta.name}" timed out after ${stepTimeoutMs}ms`,
-                            ),
+                            new StepTimeoutError(step.meta.name, stepTimeoutMs),
                           );
                         }, stepTimeoutMs);
                       }),
@@ -1245,6 +1263,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                   }
                 } catch (err) {
                   stepError = err instanceof Error ? err.message : String(err);
+                  timeoutFailure = err instanceof StepTimeoutError;
                 } finally {
                   if (stepTimeoutId !== undefined) {
                     clearTimeout(stepTimeoutId);
@@ -1256,6 +1275,12 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
                 const attemptFailed = !!stepError || stepFailedAssertions > 0;
                 if (!attemptFailed) {
+                  break;
+                }
+
+                // Timeouts are terminal to avoid overlapping attempts from
+                // dangling async operations in the timed-out step body.
+                if (timeoutFailure) {
                   break;
                 }
 
@@ -1301,6 +1326,8 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                   durationMs,
                   assertions: lastAssertions,
                   failedAssertions: lastFailedAssertions,
+                  attempts: attemptsUsed,
+                  retriesUsed: Math.max(0, attemptsUsed - 1),
                   ...(stepError && { error: stepError }),
                   ...(returnStatePayload !== undefined && {
                     returnState: returnStatePayload,

@@ -13,6 +13,7 @@ export type {
 
 export {
   LOCAL_RUN_DEFAULTS,
+  normalizePositiveTimeoutMs,
   resolveAllowNetFlag,
   SHARED_RUN_DEFAULTS,
   toExecutionOptions,

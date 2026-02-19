@@ -1,4 +1,9 @@
-import { type ExecutionEvent, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import {
+  type ExecutionEvent,
+  normalizePositiveTimeoutMs,
+  TestExecutor,
+  toSingleExecutionOptions,
+} from "@glubean/runner";
 import { basename, relative, resolve, toFileUrl } from "@std/path";
 import { parse as parseDotenv } from "@std/dotenv/parse";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.ts";
@@ -264,16 +269,6 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
       only: m.only,
     },
   }));
-}
-
-/**
- * Normalize timeout values from metadata/config.
- * Returns undefined when value is missing or invalid.
- */
-function toPositiveTimeoutMs(value: unknown): number | undefined {
-  if (!Number.isFinite(value)) return undefined;
-  const normalized = Math.floor(Number(value));
-  return normalized > 0 ? normalized : undefined;
 }
 
 /**
@@ -664,7 +659,7 @@ export async function runCommand(
     // Also pass exportName as fallback for non-deterministic tests (test.pick)
     // where the testId from discovery may not match the harness re-import.
     const testFileUrl = toFileUrl(testFilePath).toString();
-    const effectiveTimeout = toPositiveTimeoutMs(testItem.meta.timeout) ??
+    const effectiveTimeout = normalizePositiveTimeoutMs(testItem.meta.timeout) ??
       shared.perTestTimeoutMs;
     for await (
       const event of executor.run(

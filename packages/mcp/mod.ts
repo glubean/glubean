@@ -21,12 +21,10 @@ import { LOCAL_RUN_DEFAULTS, resolveModuleTests, TestExecutor, toSingleExecution
 import type { ResolvedTest, SharedRunConfig } from "@glubean/runner";
 import { createStaticScanner, scan } from "@glubean/scanner";
 import type { BundleMetadata, FileMeta, ScanResult } from "@glubean/scanner";
-import denoJson from "./deno.json" with { type: "json" };
+import { DEFAULT_GENERATED_BY, MCP_PACKAGE_VERSION } from "./version.ts";
 
 type Vars = Record<string, string>;
 const METADATA_SCHEMA_VERSION = "1";
-export const MCP_PACKAGE_VERSION = denoJson.version;
-export const DEFAULT_GENERATED_BY = `@glubean/mcp@${MCP_PACKAGE_VERSION}`;
 
 async function findProjectRoot(startDir: string): Promise<string> {
   let dir = startDir;

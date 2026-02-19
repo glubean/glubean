@@ -83,7 +83,7 @@ jobs:
 
       - name: Verify MCP runtime version alignment
         run: |
-          deno eval "import pkg from './packages/mcp/deno.json' with { type: 'json' }; import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from './packages/mcp/mod.ts'; if (MCP_PACKAGE_VERSION !== pkg.version) { console.error('MCP_PACKAGE_VERSION mismatch:', MCP_PACKAGE_VERSION, '!=', pkg.version); Deno.exit(1); } const expectedGeneratedBy = '@glubean/mcp@' + pkg.version; if (DEFAULT_GENERATED_BY !== expectedGeneratedBy) { console.error('DEFAULT_GENERATED_BY mismatch:', DEFAULT_GENERATED_BY, '!=', expectedGeneratedBy); Deno.exit(1); } console.log('✓ MCP runtime metadata version aligned');"
+          deno run -A .github/scripts/check-mcp-version.ts
 
   publish:
     name: Publish to JSR

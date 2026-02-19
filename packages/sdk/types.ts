@@ -488,6 +488,9 @@ export interface TestContext {
    * Dynamically set the timeout for the current test.
    * Must be called before any async operations.
    *
+   * Semantics: this updates the remaining runtime budget from the moment
+   * `setTimeout()` is called (relative deadline), not from test start time.
+   *
    * @param ms Timeout in milliseconds
    *
    * @example Increase timeout for slow endpoint

@@ -81,6 +81,10 @@ export type ExecutionEvent =
     failedAssertions: number;
     error?: string;
     returnState?: unknown;
+    /** Number of step attempts performed (first run + retries). */
+    attempts?: number;
+    /** Number of retries used (attempts - 1). */
+    retriesUsed?: number;
   }
   | { type: "timeout_update"; timeout: number }
   | {
@@ -195,6 +199,10 @@ export type TimelineEvent =
     error?: string;
     /** The return value from the step function, if any (truncated at 4 KB). */
     returnState?: unknown;
+    /** Number of step attempts performed (first run + retries). */
+    attempts?: number;
+    /** Number of retries used (attempts - 1). */
+    retriesUsed?: number;
   }
   | {
     type: "summary";
@@ -591,6 +599,18 @@ export class TestExecutor {
         }
       }, timeout);
     };
+    const handleTimeoutUpdateEvent = (event: ExecutionEvent): void => {
+      if (
+        inspectBrk ||
+        event.type !== "timeout_update" ||
+        !Number.isFinite(event.timeout) ||
+        event.timeout <= 0
+      ) {
+        return;
+      }
+      // Relative semantics: timeout_update re-arms from "now".
+      armTimeout(Math.floor(event.timeout));
+    };
 
     if (timeout > 0) {
       armTimeout(timeout);
@@ -618,14 +638,7 @@ export class TestExecutor {
           for (const line of lines) {
             const event = this.parseExecutionLine(line);
             if (!event) continue;
-            if (
-              !inspectBrk &&
-              event.type === "timeout_update" &&
-              Number.isFinite(event.timeout) &&
-              event.timeout > 0
-            ) {
-              armTimeout(Math.floor(event.timeout));
-            }
+            handleTimeoutUpdateEvent(event);
             yield event;
           }
         }
@@ -633,14 +646,7 @@ export class TestExecutor {
         if (stdoutBuffer.trim()) {
           const event = this.parseExecutionLine(stdoutBuffer);
           if (event) {
-            if (
-              !inspectBrk &&
-              event.type === "timeout_update" &&
-              Number.isFinite(event.timeout) &&
-              event.timeout > 0
-            ) {
-              armTimeout(Math.floor(event.timeout));
-            }
+            handleTimeoutUpdateEvent(event);
             yield event;
           }
         }
@@ -953,6 +959,8 @@ export class TestExecutor {
             assertions: event.assertions,
             failedAssertions: event.failedAssertions,
             error: event.error,
+            attempts: event.attempts,
+            retriesUsed: event.retriesUsed,
             ...(event.returnState !== undefined && {
               returnState: event.returnState,
             }),

@@ -114,6 +114,19 @@ export function resolveAllowNetFlag(allowNet: string): string | null {
 }
 
 /**
+ * Normalize timeout input to a positive integer milliseconds value.
+ *
+ * Returns undefined for missing, non-numeric, zero, or negative values.
+ */
+export function normalizePositiveTimeoutMs(
+  value: unknown,
+): number | undefined {
+  if (!Number.isFinite(value)) return undefined;
+  const normalized = Math.floor(Number(value));
+  return normalized > 0 ? normalized : undefined;
+}
+
+/**
  * Build ExecutionOptions from SharedRunConfig.
  * Maps failFast -> stopOnFailure for backward compatibility
  * with the existing executeMany() interface.
