@@ -5,7 +5,7 @@
  * Uses @glubean/runner directly (no subprocess needed).
  */
 
-import { dirname, join } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 import { ensureDir } from "@std/fs";
 import { UntarStream } from "@std/tar/untar-stream";
 import { TestExecutor, type TimelineEvent } from "@glubean/runner";
@@ -195,10 +195,16 @@ async function verifyChecksum(
  * Extract a tar file to a directory.
  */
 async function extractTar(tarPath: string, destDir: string): Promise<void> {
+  const resolvedDest = resolve(destDir) + "/";
   const file = await Deno.open(tarPath, { read: true });
   try {
     for await (const entry of file.readable.pipeThrough(new UntarStream())) {
-      const filePath = join(destDir, entry.path);
+      const filePath = resolve(destDir, entry.path);
+      if (!filePath.startsWith(resolvedDest) && filePath !== resolve(destDir)) {
+        throw new Error(
+          `Path traversal detected in tar entry: ${entry.path}`,
+        );
+      }
       if (entry.header.typeflag === "directory") {
         await ensureDir(filePath);
       } else {
