@@ -71,6 +71,7 @@ interface ExportMeta {
   id: string;
   name?: string;
   tags?: string[];
+  timeout?: number;
   exportName: string;
 }
 
@@ -82,6 +83,7 @@ interface SelectedTest {
   testId: string;
   exportName: string;
   tags: string[];
+  timeout?: number;
 }
 
 /**
@@ -344,6 +346,7 @@ function selectTests(
         testId: exp.id,
         exportName: exp.exportName,
         tags: exp.tags ?? [],
+        timeout: exp.timeout,
       });
     }
   }
@@ -389,6 +392,16 @@ function selectTests(
   if (selected.size > 0) return Array.from(selected.values());
   if (ids.size > 0 || tags.size > 0) return []; // Filters specified but nothing matched
   return candidates;
+}
+
+/**
+ * Normalize timeout values from metadata/config.
+ * Returns undefined when value is missing or invalid.
+ */
+function toPositiveTimeoutMs(value: unknown): number | undefined {
+  if (!Number.isFinite(value)) return undefined;
+  const normalized = Math.floor(Number(value));
+  return normalized > 0 ? normalized : undefined;
 }
 
 /**
@@ -517,7 +530,7 @@ export async function executeBundle(
       signal?.removeEventListener("abort", forwardAbort);
       return { success: true, eventCount, aborted: false, timedOut: false };
     }
-    const perTestTimeoutMs = Math.floor(
+    const derivedPerTestTimeoutMs = Math.floor(
       (overallTimeoutMs * 0.9) / tests.length,
     );
 
@@ -530,6 +543,18 @@ export async function executeBundle(
 
         const test = tests[index];
         const testUrl = `file://${join(extractDir, test.filePath)}`;
+        const derivedTimeout = derivedPerTestTimeoutMs > 0
+          ? derivedPerTestTimeoutMs
+          : undefined;
+        const explicitTaskTimeout = context.limits?.timeoutMs !== undefined;
+        const metaTimeout = toPositiveTimeoutMs(test.timeout);
+        const configuredTimeout = toPositiveTimeoutMs(config.run.perTestTimeoutMs);
+        let effectiveTimeout = explicitTaskTimeout
+          ? derivedTimeout
+          : (metaTimeout ?? configuredTimeout ?? derivedTimeout);
+        if (effectiveTimeout !== undefined && derivedTimeout !== undefined) {
+          effectiveTimeout = Math.min(effectiveTimeout, derivedTimeout);
+        }
 
         logger.debug("Running test", { testId: test.testId });
 
@@ -601,7 +626,7 @@ export async function executeBundle(
             {
               onEvent: handleEvent,
               includeTestId: true,
-              timeout: perTestTimeoutMs > 0 ? perTestTimeoutMs : undefined,
+              timeout: effectiveTimeout,
             },
           );
 

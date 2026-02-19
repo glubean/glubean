@@ -11,6 +11,8 @@ export interface ExportMeta {
   name?: string;
   /** Tags for filtering */
   tags?: string[];
+  /** Optional per-test timeout from TestMeta.timeout (milliseconds) */
+  timeout?: number;
   /** Whether the test is marked as skip (should not run) */
   skip?: boolean;
   /** Whether the test is marked as only (exclusive run) */

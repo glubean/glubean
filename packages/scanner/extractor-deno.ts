@@ -101,6 +101,7 @@ function processExport(name, value) {
       id: value.meta.id,
       name: value.meta.name || value.meta.id,
       tags: value.meta.tags,
+      timeout: value.meta.timeout,
       exportName: name,
       steps: reg && reg.steps ? reg.steps : undefined,
     };
@@ -130,6 +131,7 @@ for (const [name, value] of Object.entries(testModule)) {
         id: m.id,
         name: m.name || m.id,
         tags: m.tags,
+        timeout: m.timeout,
         exportName: name,
         steps: reg && reg.steps ? reg.steps : undefined,
       };
@@ -154,6 +156,7 @@ for (const reg of registry) {
       id: reg.id,
       name: reg.name,
       tags: reg.tags,
+      timeout: reg.timeout,
       exportName: exportNames.get(reg.id) || reg.id,
       steps: reg.steps ? reg.steps : undefined,
     };

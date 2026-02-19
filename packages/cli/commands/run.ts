@@ -237,6 +237,7 @@ interface DiscoveredTestMeta {
   id: string;
   name?: string;
   tags?: string[];
+  timeout?: number;
   skip?: boolean;
   only?: boolean;
 }
@@ -258,10 +259,21 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
       id: m.id,
       name: m.name,
       tags: m.tags,
+      timeout: m.timeout,
       skip: m.skip,
       only: m.only,
     },
   }));
+}
+
+/**
+ * Normalize timeout values from metadata/config.
+ * Returns undefined when value is missing or invalid.
+ */
+function toPositiveTimeoutMs(value: unknown): number | undefined {
+  if (!Number.isFinite(value)) return undefined;
+  const normalized = Math.floor(Number(value));
+  return normalized > 0 ? normalized : undefined;
 }
 
 /**
@@ -652,6 +664,8 @@ export async function runCommand(
     // Also pass exportName as fallback for non-deterministic tests (test.pick)
     // where the testId from discovery may not match the harness re-import.
     const testFileUrl = toFileUrl(testFilePath).toString();
+    const effectiveTimeout = toPositiveTimeoutMs(testItem.meta.timeout) ??
+      shared.perTestTimeoutMs;
     for await (
       const event of executor.run(
         testFileUrl,
@@ -660,7 +674,7 @@ export async function runCommand(
           vars: envVars,
           secrets,
         },
-        { ...toSingleExecutionOptions(shared), exportName },
+        { ...toSingleExecutionOptions(shared), timeout: effectiveTimeout, exportName },
       )
     ) {
       // Collect every event for result JSON and summary

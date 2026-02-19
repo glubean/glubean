@@ -192,11 +192,13 @@ function findCloseBrace(source: string, openIndex: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse `id`, `name`, and `tags` from a TestMeta-like object literal string.
+ * Parse `id`, `name`, `tags`, and `timeout` from a TestMeta-like object literal string.
  * Handles both `tags: ["a", "b"]` and `tags: "a"` forms, with single or double quotes.
  */
-function parseMetaObject(source: string): { id?: string; name?: string; tags?: string[] } {
-  const result: { id?: string; name?: string; tags?: string[] } = {};
+function parseMetaObject(
+  source: string,
+): { id?: string; name?: string; tags?: string[]; timeout?: number } {
+  const result: { id?: string; name?: string; tags?: string[]; timeout?: number } = {};
 
   const idMatch = source.match(/id:\s*(['"])([^'"]+)\1/);
   if (idMatch) result.id = idMatch[2];
@@ -214,21 +216,25 @@ function parseMetaObject(source: string): { id?: string; name?: string; tags?: s
     if (tagsStringMatch) result.tags = [tagsStringMatch[2]];
   }
 
+  const timeoutMatch = source.match(/timeout:\s*(\d+)/);
+  if (timeoutMatch) result.timeout = Number(timeoutMatch[1]);
+
   return result;
 }
 
 /**
  * Extract `name` and `tags` from a `.meta({...})` builder call within `scope`.
  */
-function extractBuilderMeta(scope: string): { name?: string; tags?: string[] } {
+function extractBuilderMeta(
+  scope: string,
+): { name?: string; tags?: string[]; timeout?: number } {
   const match = scope.match(/\.meta\(\s*\{/);
   if (!match || match.index === undefined) return {};
   const braceStart = scope.indexOf("{", match.index);
   const braceEnd = findCloseBrace(scope, braceStart);
   if (braceEnd === -1) return {};
   const obj = scope.substring(braceStart, braceEnd + 1);
-  const parsed = parseMetaObject(obj);
-  return { name: parsed.name, tags: parsed.tags };
+  return parseMetaObject(obj);
 }
 
 /**
@@ -281,6 +287,7 @@ function parseTestDeclaration(
   let id: string | undefined;
   let name: string | undefined;
   let tags: string[] | undefined;
+  let timeout: number | undefined;
 
   if (afterOpen.startsWith('"') || afterOpen.startsWith("'")) {
     // String ID
@@ -297,6 +304,7 @@ function parseTestDeclaration(
     id = parsed.id;
     name = parsed.name;
     tags = parsed.tags;
+    timeout = parsed.timeout;
   }
 
   if (!id) return null;
@@ -305,6 +313,9 @@ function parseTestDeclaration(
   const builderMeta = extractBuilderMeta(scope);
   if (!name && builderMeta.name) name = builderMeta.name;
   if (!tags && builderMeta.tags) tags = builderMeta.tags;
+  if (timeout === undefined && builderMeta.timeout !== undefined) {
+    timeout = builderMeta.timeout;
+  }
 
   // Extract .step("name", ...) chains from the full scope
   const steps = extractSteps(scope);
@@ -318,6 +329,7 @@ function parseTestDeclaration(
 
   if (name) result.name = name;
   if (tags && tags.length > 0) result.tags = tags;
+  if (timeout !== undefined) result.timeout = timeout;
   if (variant) result.variant = variant;
   if (steps.length > 0) result.steps = steps;
 
