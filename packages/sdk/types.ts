@@ -518,8 +518,18 @@ export interface TestContext {
   setTimeout(ms: number): void;
 
   /**
-   * Current retry count (0 for first attempt, 1+ for retries).
-   * Useful for logging or conditional behavior on retries.
+   * Current execution retry count (0 for first attempt, 1+ for re-runs).
+   *
+   * Retry orchestration is owned by the runner/control plane, not by SDK user
+   * code. `ctx.retryCount` is injected into context at execution start and is
+   * read-only inside the test.
+   *
+   * Important distinction:
+   * - `ctx.retryCount` tracks whole-test re-runs.
+   * - Step retries from `StepMeta.retries` happen within one execution and do
+   *   not increment `ctx.retryCount`.
+   *
+   * Useful for logging, backoff, or idempotency behavior on re-runs.
    *
    * @example Log retry attempts
    * ```ts

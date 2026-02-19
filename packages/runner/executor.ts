@@ -19,7 +19,7 @@ export type ExecutionEvent =
     tags?: string[];
     suiteId?: string;
     suiteName?: string;
-    /** Retry attempt (0 for first attempt, omitted when 0). */
+    /** Whole-test re-run count (0 for first attempt, omitted when 0). */
     retryCount?: number;
   }
   | { type: "log"; message: string; data?: unknown; stepIndex?: number }
@@ -128,7 +128,7 @@ export interface ExecutionNetworkPolicy {
 export interface ExecutionContext {
   vars: Record<string, string>;
   secrets: Record<string, string>;
-  /** Retry count for this execution (0 for first attempt) */
+  /** Whole-test re-run count for this execution (0 for first attempt). */
   retryCount?: number;
   /** Optional egress policy applied by the harness runtime. */
   networkPolicy?: ExecutionNetworkPolicy;
@@ -298,7 +298,7 @@ export interface ExecutionResult {
   error?: string;
   stack?: string;
   duration: number;
-  /** Retry attempt (0 for first attempt, undefined when 0) */
+  /** Whole-test re-run count (0 for first attempt, undefined when 0). */
   retryCount?: number;
   /** Total number of assertions executed */
   assertionCount: number;
@@ -828,6 +828,8 @@ export class TestExecutor {
     let stack: string | undefined;
     let peakMemoryBytes: number | undefined;
     let peakMemoryMB: string | undefined;
+    // Captured from the `start` event emitted by harness.
+    // Omitted when attempt is first run (`0`).
     let retryCount: number | undefined;
     let assertionCount = 0;
     let failedAssertionCount = 0;

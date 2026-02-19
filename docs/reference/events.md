@@ -43,7 +43,11 @@ Emitted once at the beginning of test execution.
 | `id`         | `string`    | Test ID                              |
 | `name`       | `string`    | Human-readable test name             |
 | `tags`       | `string[]?` | Test tags                            |
-| `retryCount` | `number?`   | Retry attempt (omitted on first try) |
+| `retryCount` | `number?`   | Whole-test re-run count (omitted when first attempt = `0`) |
+
+`retryCount` reflects execution-level retries orchestrated by the runner/control
+plane. It is different from step retries (`StepMeta.retries`), which happen
+inside a single execution.
 
 ---
 

@@ -121,6 +121,8 @@ const contextJson = await readContextFromStdin();
 const contextData = contextJson ? JSON.parse(contextJson) : {};
 const rawVars = (contextData.vars ?? {}) as Record<string, string>;
 const rawSecrets = (contextData.secrets ?? {}) as Record<string, string>;
+// Execution-level retry metadata injected by executor/control plane.
+// 0 => first execution attempt.
 const retryCount = (contextData.retryCount ?? 0) as number;
 
 interface SharedServerlessNetworkPolicy {
@@ -667,7 +669,8 @@ const ctx = {
   },
 
   /**
-   * Current retry count (0 for first attempt).
+   * Current execution retry count (0 for first attempt).
+   * This reflects whole-test re-runs, not per-step retries.
    */
   retryCount,
 

@@ -97,6 +97,20 @@ The `ctx` object is passed to every test function. Key methods:
 | `ctx.http`                                 | HTTP client (when using `configure()`)                                            |
 | `ctx.graphql`                              | GraphQL client (when using `configure()`)                                         |
 
+### Retry Model and `ctx.retryCount`
+
+`ctx.retryCount` is execution metadata injected by the runner:
+
+- `0` means first execution attempt.
+- `1+` means the test is being re-run by external retry orchestration.
+
+Ownership model:
+
+- Runner/control plane decides whether and when to re-run a test.
+- SDK code can read `ctx.retryCount`, but cannot schedule whole-test retries.
+- Step retries (`StepMeta.retries`) happen inside a single execution and are
+  separate from `ctx.retryCount`.
+
 ### Metric Data Safety
 
 `ctx.metric()` is for numeric observability and dashboard dimensions. Treat metric

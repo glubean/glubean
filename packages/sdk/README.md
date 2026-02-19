@@ -318,6 +318,21 @@ if (ctx.retryCount > 0) {
 }
 ```
 
+#### Retry Model and `ctx.retryCount`
+
+- Retry orchestration is owned by the runner/control plane, not by SDK code.
+- `ctx.retryCount` represents whole-test re-runs:
+  - `0` on the first execution attempt
+  - `1+` on subsequent re-runs of the same test
+- Step retries configured via `.step(..., { retries })` are internal to one
+  execution and do not increment `ctx.retryCount`.
+
+```typescript
+if (ctx.retryCount > 0) {
+  ctx.log(`Runner re-run #${ctx.retryCount} for this test`);
+}
+```
+
 #### Memory Profiling
 
 ```typescript
