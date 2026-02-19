@@ -97,7 +97,15 @@ jobs:
 
             echo "Publishing $NAME@$VERSION from $DIR..."
             cd "$DIR"
-            deno publish --token "$JSR_TOKEN"
+            if deno publish --token "$JSR_TOKEN" 2>&1; then
+              echo "✅ Published $NAME@$VERSION"
+            else
+              if deno publish --dry-run 2>&1 | grep -q "already exists"; then
+                echo "⏭️  $NAME@$VERSION already exists on JSR, skipping"
+              else
+                echo "::error::Failed to publish $NAME@$VERSION"
+                exit 1
+              fi
+            fi
             cd "$GITHUB_WORKSPACE"
-            echo "✅ Published $NAME@$VERSION"
           done
