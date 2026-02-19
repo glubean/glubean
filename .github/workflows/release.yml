@@ -49,23 +49,27 @@ jobs:
           if [ -n "${{ inputs.version }}" ]; then
             EXPECTED="${{ inputs.version }}"
           elif [ "${{ github.event_name }}" = "release" ]; then
-            # Strip leading 'v' from tag if present
             EXPECTED="${{ github.event.release.tag_name }}"
             EXPECTED="${EXPECTED#v}"
           else
             EXPECTED=$(deno eval "const c = JSON.parse(Deno.readTextFileSync('packages/sdk/deno.json')); console.log(c.version)")
           fi
 
-          echo "Expected version: $EXPECTED"
+          EXPECTED_MAJOR_MINOR=$(echo "$EXPECTED" | cut -d. -f1-2)
+          echo "Expected version: $EXPECTED (major.minor: $EXPECTED_MAJOR_MINOR)"
           echo "version=$EXPECTED" >> "$GITHUB_OUTPUT"
 
-          # Check every package has the same version
+          # Bump all packages to the release version before publish.
+          # Packages may have independent patch versions (e.g. cli at 0.11.1
+          # while others are at 0.11.0). A minor/major release unifies them.
           MISMATCH=0
           for pkg in packages/*/deno.json; do
             PKG_VERSION=$(deno eval "const c = JSON.parse(Deno.readTextFileSync('$pkg')); console.log(c.version)")
             PKG_NAME=$(deno eval "const c = JSON.parse(Deno.readTextFileSync('$pkg')); console.log(c.name)")
-            if [ "$PKG_VERSION" != "$EXPECTED" ]; then
-              echo "::error::$PKG_NAME has version $PKG_VERSION, expected $EXPECTED"
+            PKG_MAJOR_MINOR=$(echo "$PKG_VERSION" | cut -d. -f1-2)
+
+            if [ "$PKG_MAJOR_MINOR" != "$EXPECTED_MAJOR_MINOR" ]; then
+              echo "::error::$PKG_NAME major.minor $PKG_MAJOR_MINOR != expected $EXPECTED_MAJOR_MINOR"
               MISMATCH=1
             else
               echo "✓ $PKG_NAME @ $PKG_VERSION"
@@ -73,7 +77,7 @@ jobs:
           done
 
           if [ "$MISMATCH" -eq 1 ]; then
-            echo "::error::Version mismatch detected. Run: deno task version $EXPECTED"
+            echo "::error::Major.minor mismatch detected. Run: deno task version $EXPECTED"
             exit 1
           fi
 

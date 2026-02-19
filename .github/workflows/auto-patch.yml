@@ -1,0 +1,103 @@
+name: Auto-publish patch releases
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/*/deno.json"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  detect:
+    name: Detect patch bumps
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.diff.outputs.packages }}
+      has_patches: ${{ steps.diff.outputs.has_patches }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find changed package versions
+        id: diff
+        run: |
+          PACKAGES="[]"
+          HAS_PATCHES="false"
+
+          for pkg_json in packages/*/deno.json; do
+            PKG_DIR=$(dirname "$pkg_json")
+            PKG_NAME=$(basename "$PKG_DIR")
+
+            # Get current and previous version
+            CURRENT=$(jq -r '.version' "$pkg_json")
+            PREVIOUS=$(git show HEAD~1:"$pkg_json" 2>/dev/null | jq -r '.version' 2>/dev/null || echo "")
+
+            if [ -z "$PREVIOUS" ] || [ "$CURRENT" = "$PREVIOUS" ]; then
+              continue
+            fi
+
+            # Parse semver components
+            CUR_MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            CUR_MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PREV_MAJOR=$(echo "$PREVIOUS" | cut -d. -f1)
+            PREV_MINOR=$(echo "$PREVIOUS" | cut -d. -f2)
+
+            # Only auto-publish if major.minor unchanged (patch-only bump)
+            if [ "$CUR_MAJOR" != "$PREV_MAJOR" ] || [ "$CUR_MINOR" != "$PREV_MINOR" ]; then
+              echo "⏭️  $PKG_DIR: $PREVIOUS → $CURRENT (minor/major bump, skipping)"
+              continue
+            fi
+
+            JSR_NAME=$(jq -r '.name' "$pkg_json")
+            echo "📦 $JSR_NAME: $PREVIOUS → $CURRENT (patch bump)"
+            PACKAGES=$(echo "$PACKAGES" | jq -c --arg dir "$PKG_DIR" --arg name "$JSR_NAME" --arg ver "$CURRENT" '. + [{"dir": $dir, "name": $name, "version": $ver}]')
+            HAS_PATCHES="true"
+          done
+
+          echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+          echo "has_patches=$HAS_PATCHES" >> "$GITHUB_OUTPUT"
+          echo "Packages to publish: $PACKAGES"
+
+  test:
+    name: Run tests
+    needs: detect
+    if: needs.detect.outputs.has_patches == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno test -A
+
+  publish:
+    name: Publish patches
+    needs: [detect, test]
+    if: needs.detect.outputs.has_patches == 'true'
+    runs-on: ubuntu-latest
+    environment: jsr
+    env:
+      JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Publish changed packages
+        run: |
+          echo '${{ needs.detect.outputs.packages }}' | jq -c '.[]' | while read -r pkg; do
+            DIR=$(echo "$pkg" | jq -r '.dir')
+            NAME=$(echo "$pkg" | jq -r '.name')
+            VERSION=$(echo "$pkg" | jq -r '.version')
+
+            echo "Publishing $NAME@$VERSION from $DIR..."
+            cd "$DIR"
+            deno publish --token "$JSR_TOKEN"
+            cd "$GITHUB_WORKSPACE"
+            echo "✅ Published $NAME@$VERSION"
+          done
