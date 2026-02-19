@@ -1325,9 +1325,12 @@ export interface TestMeta {
   tags?: string | string[];
   /** Timeout in milliseconds (default: 30000) */
   timeout?: number;
-  /** If true, only run this test (and others marked only) */
+  /**
+   * If true, run only focused tests in this file/run context.
+   * If both `only` and `skip` are true, `skip` takes precedence.
+   */
   only?: boolean;
-  /** If true, skip this test */
+  /** If true, skip this test (takes precedence over `only`) */
   skip?: boolean;
 
   /**

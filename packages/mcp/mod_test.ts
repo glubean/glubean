@@ -49,6 +49,11 @@ Deno.test("toLocalDebugEvents flattens local run results", () => {
   assertEquals(events[1].type, "assertion");
   assertEquals(events[2].type, "log");
   assertEquals(events[3].type, "trace");
+  assertEquals(events[3].data, {
+    method: "GET",
+    url: "https://example.com",
+    status: 200,
+  });
 });
 
 Deno.test("filterLocalDebugEvents applies type/testId/limit", () => {
@@ -124,6 +129,30 @@ Deno.test("diagnoseProjectConfig reports missing and present essentials", async 
     assertEquals(diagnostics.envFile.hasBaseUrl, true);
     assertEquals(diagnostics.secretsFile.exists, true);
     assertEquals(diagnostics.testsDir.exists, true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("diagnoseProjectConfig emits recommendations for missing files", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "mcp-diagnose-missing-" });
+  try {
+    await Deno.writeTextFile(`${dir}/deno.json`, "{}");
+
+    const diagnostics = await diagnoseProjectConfig({ dir });
+    assertEquals(diagnostics.denoJson.exists, true);
+    assertEquals(diagnostics.envFile.exists, false);
+    assertEquals(diagnostics.testsDir.exists, false);
+    assertEquals(diagnostics.exploreDir.exists, false);
+    assertEquals(diagnostics.recommendations.length > 0, true);
+    assertEquals(
+      diagnostics.recommendations.includes('Missing ".env" file (expected BASE_URL).'),
+      true,
+    );
+    assertEquals(
+      diagnostics.recommendations.includes('Create "tests/" or "explore/" to add runnable test files.'),
+      true,
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

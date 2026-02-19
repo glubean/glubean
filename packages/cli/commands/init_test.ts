@@ -201,6 +201,22 @@ Deno.test("init --no-interactive --base-url rejects malformed URL", async () => 
   }
 });
 
+Deno.test("init --no-interactive --base-url rejects unsupported protocol", async () => {
+  const dir = await createTempDir();
+  try {
+    const { code, stderr } = await runInitCommand(dir, [
+      "--no-interactive",
+      "--base-url",
+      "ftp://example.com",
+    ]);
+    assertEquals(code, 1, "init command should fail with unsupported protocol");
+    assertEquals(await fileExists(join(dir, "deno.json")), false);
+    assertStringIncludes(stderr, "Only http:// and https:// are supported");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
 Deno.test("init --no-interactive skips existing files", async () => {
   const dir = await createTempDir();
   try {

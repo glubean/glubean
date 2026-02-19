@@ -19,6 +19,8 @@ For local iteration, ergonomic helpers are also available:
 
 - `test.only(...)` sets `only: true`
 - `test.skip(...)` sets `skip: true`
+- If both flags are set on the same test, `skip` takes precedence during run
+  selection.
 
 **Quick mode:**
 

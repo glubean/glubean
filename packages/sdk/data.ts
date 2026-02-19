@@ -62,7 +62,7 @@ function safeCwd(): string {
 
 function formatPathErrorContext(
   path: string,
-  action: "read file" | "read directory",
+  action: "read file" | "read directory" | "parse JSON file",
   error: unknown,
 ): Error {
   const cwd = safeCwd();
@@ -86,6 +86,14 @@ async function readTextFileWithContext(path: string): Promise<string> {
     return await Deno.readTextFile(path);
   } catch (error) {
     throw formatPathErrorContext(path, "read file", error);
+  }
+}
+
+function parseJsonWithContext(path: string, content: string): unknown {
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    throw formatPathErrorContext(path, "parse JSON file", error);
   }
 }
 
@@ -631,7 +639,7 @@ async function loadFileAuto<T extends Record<string, unknown>>(
 
   // Default: JSON
   const content = await readTextFileWithContext(filePath);
-  const data = JSON.parse(content);
+  const data = parseJsonWithContext(filePath, content);
   return extractArray<T>(data, pick, filePath);
 }
 

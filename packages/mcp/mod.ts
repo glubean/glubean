@@ -337,7 +337,7 @@ export async function diagnoseProjectConfig(args: {
     recommendations.push('Add BASE_URL to ".env" for HTTP tests.');
   }
   if (!secretsExists) {
-    recommendations.push('Missing ".env.secrets" file (optional but recommended).');
+    recommendations.push('Missing ".env.secrets" file. Add it when tests require secrets.');
   }
   if (!testsDirExists && !exploreDirExists) {
     recommendations.push('Create "tests/" or "explore/" to add runnable test files.');

@@ -122,7 +122,8 @@ export class TestBuilder<S = unknown, Ctx extends TestContext = TestContext> {
    *
    * Focused tests are intended for local debugging sessions. When any tests in
    * a run are marked as `only`, non-focused tests may be excluded by discovery
-   * tooling/orchestrators.
+   * tooling/orchestrators. If `skip` is also set on the same test, `skip`
+   * still wins during run selection.
    */
   only(): TestBuilder<S, Ctx> {
     this._meta = { ...this._meta, only: true };
@@ -131,6 +132,8 @@ export class TestBuilder<S = unknown, Ctx extends TestContext = TestContext> {
 
   /**
    * Mark this test as skipped.
+   *
+   * Skip takes precedence over `only` when both are present.
    */
   skip(): TestBuilder<S, Ctx> {
     this._meta = { ...this._meta, skip: true };
@@ -654,6 +657,7 @@ export class EachBuilder<
 
   /**
    * Mark all generated tests from this data set as focused.
+   * If `skip` is also set, skipped tests are still excluded.
    */
   only(): EachBuilder<S, T, Ctx> {
     this._baseMeta = { ...this._baseMeta, only: true };
@@ -662,6 +666,7 @@ export class EachBuilder<
 
   /**
    * Mark all generated tests from this data set as skipped.
+   * Skip takes precedence over `only` when both are present.
    */
   skip(): EachBuilder<S, T, Ctx> {
     this._baseMeta = { ...this._baseMeta, skip: true };
@@ -1228,6 +1233,7 @@ export namespace test {
    * Mark a test definition as focused (`only: true`).
    *
    * Works in both quick mode and builder mode.
+   * If `skip` is also set on the same test, `skip` takes precedence.
    *
    * @example Quick mode
    * ```ts
@@ -1264,6 +1270,7 @@ export namespace test {
    * Mark a test definition as skipped (`skip: true`).
    *
    * Works in both quick mode and builder mode.
+   * Skip takes precedence over `only` when both are present.
    */
   export function skip<S = unknown>(idOrMeta: string | TestMeta): TestBuilder<S>;
   export function skip(

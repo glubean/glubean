@@ -117,6 +117,30 @@ Deno.test("fromDir - nonexistent directory error includes path context", async (
   );
 });
 
+Deno.test("fromDir.concat - malformed JSON includes path context", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "sdk-bad-json-" });
+  try {
+    await Deno.writeTextFile(`${tempDir}/invalid.json`, "{ bad json");
+    await assertRejects(
+      () => fromDir.concat(tempDir),
+      Error,
+      "Failed to parse JSON file",
+    );
+    await assertRejects(
+      () => fromDir.concat(tempDir),
+      Error,
+      "Current working directory:",
+    );
+    await assertRejects(
+      () => fromDir.concat(tempDir),
+      Error,
+      "Resolved path:",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
 // =============================================================================
 // fromYaml
 // =============================================================================

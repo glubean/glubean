@@ -113,6 +113,8 @@ function validateBaseUrl(raw: string): { ok: true; value: string } | {
   }
 
   const normalized = parsed.toString();
+  // Keep pathful URLs as entered (`/v2/` stays `/v2/`) and only trim the
+  // synthetic root slash from origin-only URLs to keep env values stable.
   if (parsed.pathname === "/" && !parsed.search && !parsed.hash) {
     return { ok: true, value: normalized.slice(0, -1) };
   }
@@ -193,6 +195,8 @@ function resolveSdkImportVersion(): string {
   return match[1];
 }
 
+// Expected source format in packages/cli/deno.json:
+// "@glubean/sdk": "jsr:@glubean/sdk@<version>"
 const SDK_IMPORT = `jsr:@glubean/sdk@${resolveSdkImportVersion()}`;
 
 function makeDenoJson(_baseUrl: string): string {

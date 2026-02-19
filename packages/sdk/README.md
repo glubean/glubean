@@ -78,6 +78,12 @@ export const flakyFlow = test.skip("flaky-flow", async (ctx) => {
   ctx.log("Skipped for local iteration");
 });
 
+// If both flags are set, skip takes precedence at run selection time.
+export const excludedEvenIfOnly = test("excluded-even-if-only")
+  .only()
+  .skip()
+  .step("noop", async () => {});
+
 // Builder mode - multi-step with lifecycle
 export const checkout = test("checkout-flow")
   .meta({ tags: ["e2e", "critical"] })
@@ -586,7 +592,7 @@ and standalone usage.
 | `fail(message)`                 | `function`        | Fail fast and abort test execution                          |
 | `pollUntil(options, fn)`        | `function`        | Poll until condition becomes truthy                         |
 | `setTimeout(ms)`                | `function`        | Dynamically set timeout                                     |
-| `retryCount`                    | `number`          | Current retry count (0 for first attempt)                   |
+| `retryCount`                    | `number`          | Whole-test re-run count (0 on first execution attempt)      |
 | `getMemoryUsage()`              | `function`        | Read memory usage stats when available                      |
 
 ### VarsAccessor Methods
