@@ -21,9 +21,12 @@ import { LOCAL_RUN_DEFAULTS, resolveModuleTests, TestExecutor, toSingleExecution
 import type { ResolvedTest, SharedRunConfig } from "@glubean/runner";
 import { createStaticScanner, scan } from "@glubean/scanner";
 import type { BundleMetadata, FileMeta, ScanResult } from "@glubean/scanner";
+import denoJson from "./deno.json" with { type: "json" };
 
 type Vars = Record<string, string>;
 const METADATA_SCHEMA_VERSION = "1";
+export const MCP_PACKAGE_VERSION = denoJson.version;
+export const DEFAULT_GENERATED_BY = `@glubean/mcp@${MCP_PACKAGE_VERSION}`;
 
 async function findProjectRoot(startDir: string): Promise<string> {
   let dir = startDir;
@@ -359,7 +362,7 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
 
 const server = new McpServer({
   name: "glubean",
-  version: "0.1.0",
+  version: MCP_PACKAGE_VERSION,
 });
 
 server.registerTool(
@@ -524,7 +527,9 @@ server.registerTool(
       generatedBy: z
         .string()
         .optional()
-        .describe('Override generatedBy field (default: "@glubean/mcp@0.1.0")'),
+        .describe(
+          `Override generatedBy field (default: "${DEFAULT_GENERATED_BY}")`,
+        ),
     },
   },
   async (input: {
@@ -536,7 +541,7 @@ server.registerTool(
     const mode = input.mode ?? "runtime";
     const result = await scanProject(rootDir, mode);
     const metadata = await buildMetadata(result, {
-      generatedBy: input.generatedBy ?? "@glubean/mcp@0.1.0",
+      generatedBy: input.generatedBy ?? DEFAULT_GENERATED_BY,
     });
 
     return {
