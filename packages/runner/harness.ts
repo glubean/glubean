@@ -1214,13 +1214,15 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
               let stepError: string | undefined;
               let stepReturnState: unknown = undefined;
-              const stepRetriesMeta = step.meta.retries;
-              const configuredRetries = Number.isFinite(step.meta.retries)
-                ? Math.max(0, Math.floor(stepRetriesMeta as number))
+              const retries = step.meta.retries;
+              const configuredRetries =
+                typeof retries === "number" && Number.isFinite(retries)
+                  ? Math.max(0, Math.floor(retries))
                 : 0;
-              const stepTimeoutMeta = step.meta.timeout;
-              const configuredStepTimeout = Number.isFinite(step.meta.timeout)
-                ? Math.floor(stepTimeoutMeta as number)
+              const stepTimeout = step.meta.timeout;
+              const configuredStepTimeout =
+                typeof stepTimeout === "number" && Number.isFinite(stepTimeout)
+                  ? Math.floor(stepTimeout)
                 : 0;
               const stepTimeoutMs = configuredStepTimeout > 0
                 ? configuredStepTimeout

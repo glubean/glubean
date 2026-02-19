@@ -83,7 +83,7 @@ jobs:
 
       - name: Verify MCP runtime version alignment
         run: |
-          deno run -A .github/scripts/check-mcp-version.ts
+          deno run --allow-read .github/scripts/check-mcp-version.ts
 
   publish:
     name: Publish to JSR

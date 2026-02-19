@@ -800,16 +800,9 @@ export const stepTimeoutFail = test("step-timeout-fail")
     ctx.log("this should not run");
   });
 
-export const stepTimeoutRetryPass = test("step-timeout-retry-pass")
-  .setup(async () => ({ attempts: 0 }))
-  .step("timeout then pass", { timeout: 80, retries: 1 }, async (ctx, state) => {
-    state.attempts += 1;
-    if (state.attempts === 1) {
-      await new Promise((resolve) => setTimeout(resolve, 140));
-      return state;
-    }
-    ctx.assert(true, "retry attempt should pass");
-    return state;
+export const stepTimeoutTerminal = test("step-timeout-terminal")
+  .step("timeout terminal", { timeout: 80, retries: 1 }, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 140));
   });
 `;
 
@@ -993,7 +986,7 @@ Deno.test("step timeout - is terminal even when retries are configured", async (
 
   const result = await executor.execute(
     `file://${testFile}`,
-    "step-timeout-retry-pass",
+    "step-timeout-terminal",
     { vars: {}, secrets: {} },
   );
 
@@ -1004,7 +997,7 @@ Deno.test("step timeout - is terminal even when retries are configured", async (
   );
   const ends = getStepEnds(result.events);
   assertEquals(ends.length, 1);
-  assertEquals(ends[0].name, "timeout then pass");
+  assertEquals(ends[0].name, "timeout terminal");
   assertEquals(ends[0].status, "failed");
   assertEquals(ends[0].attempts, 1);
   assertEquals(ends[0].retriesUsed, 0);
@@ -1018,7 +1011,7 @@ Deno.test("step timeout - is terminal even when retries are configured", async (
     (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
   );
   assertEquals(
-    logs.some((l) => l.message.includes('Retrying step "timeout then pass"')),
+    logs.some((l) => l.message.includes('Retrying step "timeout terminal"')),
     false,
     "Should not retry after timeout",
   );
