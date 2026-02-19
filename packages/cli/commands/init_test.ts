@@ -91,7 +91,16 @@ Deno.test("init --no-interactive creates basic project files", async () => {
     );
     assertEquals(await fileExists(join(dir, "tests/pick.test.ts")), true);
     assertEquals(await fileExists(join(dir, "data/create-user.json")), true);
+    assertEquals(
+      await fileExists(join(dir, "data/search-examples.json")),
+      true,
+    );
     assertEquals(await fileExists(join(dir, "AGENTS.md")), true);
+
+    // Explore files
+    assertEquals(await fileExists(join(dir, "explore/api.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/search.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/auth.test.ts")), true);
 
     // Verify deno.json content
     const denoJson = JSON.parse(
@@ -197,7 +206,7 @@ Deno.test(
 );
 
 Deno.test(
-  "init --no-interactive --github-actions creates workflow file",
+  "init --no-interactive --github-actions creates workflow files",
   async () => {
     const dir = await createTempDir();
     try {
@@ -207,12 +216,67 @@ Deno.test(
       ]);
       assertEquals(code, 0, "init command should succeed");
 
-      const workflowPath = join(dir, ".github/workflows/glubean-metadata.yml");
-      assertEquals(await fileExists(workflowPath), true);
+      const metadataPath = join(
+        dir,
+        ".github/workflows/glubean-metadata.yml",
+      );
+      assertEquals(await fileExists(metadataPath), true);
 
-      const content = await Deno.readTextFile(workflowPath);
-      assertEquals(content.includes("Glubean Metadata"), true);
-      assertEquals(content.includes("glubean/cli scan"), true);
+      const metadataContent = await Deno.readTextFile(metadataPath);
+      assertEquals(metadataContent.includes("Glubean Metadata"), true);
+      assertEquals(metadataContent.includes("glubean/cli scan"), true);
+
+      const testsPath = join(dir, ".github/workflows/glubean-tests.yml");
+      assertEquals(await fileExists(testsPath), true);
+
+      const testsContent = await Deno.readTextFile(testsPath);
+      assertEquals(testsContent.includes("Glubean Tests"), true);
+      assertEquals(testsContent.includes("glubean/cli run"), true);
+      assertEquals(testsContent.includes("upload-artifact"), true);
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
+
+Deno.test(
+  "init --overwrite-actions overwrites both workflow files",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      // First init to create the files
+      await runInitCommand(dir, ["--github-actions", "--no-interactive"]);
+
+      // Tamper with both workflow files
+      const metadataPath = join(
+        dir,
+        ".github/workflows/glubean-metadata.yml",
+      );
+      const testsPath = join(dir, ".github/workflows/glubean-tests.yml");
+      await Deno.writeTextFile(metadataPath, "custom-metadata");
+      await Deno.writeTextFile(testsPath, "custom-tests");
+
+      // Re-init with --overwrite-actions
+      const { code } = await runInitCommand(dir, [
+        "--github-actions",
+        "--overwrite-actions",
+        "--no-interactive",
+      ]);
+      assertEquals(code, 0, "init command should succeed");
+
+      const metadataContent = await Deno.readTextFile(metadataPath);
+      assertEquals(
+        metadataContent.includes("Glubean Metadata"),
+        true,
+        "metadata workflow should be overwritten",
+      );
+
+      const testsContent = await Deno.readTextFile(testsPath);
+      assertEquals(
+        testsContent.includes("Glubean Tests"),
+        true,
+        "tests workflow should be overwritten",
+      );
     } finally {
       await cleanupDir(dir);
     }
@@ -291,6 +355,10 @@ Deno.test(
         await fileExists(join(dir, ".github/workflows/glubean-metadata.yml")),
         true,
       );
+      assertEquals(
+        await fileExists(join(dir, ".github/workflows/glubean-tests.yml")),
+        true,
+      );
     } finally {
       await cleanupDir(dir);
     }
@@ -322,6 +390,10 @@ Deno.test(
       assertEquals(await fileExists(join(dir, ".git/hooks/pre-push")), true);
       assertEquals(
         await fileExists(join(dir, ".github/workflows/glubean-metadata.yml")),
+        true,
+      );
+      assertEquals(
+        await fileExists(join(dir, ".github/workflows/glubean-tests.yml")),
         true,
       );
     } finally {
@@ -376,43 +448,72 @@ Deno.test("init interactive - decline git init skips hooks", async () => {
   }
 });
 
-Deno.test("init --playground creates playground files", async () => {
+Deno.test("init --minimal creates minimal files", async () => {
   const dir = await createTempDir();
   try {
     const { code } = await runInitCommand(dir, [
-      "--playground",
+      "--minimal",
       "--no-interactive",
     ]);
     assertEquals(code, 0, "init command should succeed");
 
+    // Minimal files should exist
     assertEquals(await fileExists(join(dir, "deno.json")), true);
     assertEquals(await fileExists(join(dir, ".env")), true);
-    assertEquals(await fileExists(join(dir, "tests/smoke.test.ts")), true);
+    assertEquals(await fileExists(join(dir, ".env.secrets")), true);
+    assertEquals(await fileExists(join(dir, ".gitignore")), true);
     assertEquals(await fileExists(join(dir, "README.md")), true);
-    assertEquals(await fileExists(join(dir, "AGENTS.md")), true);
+    assertEquals(await fileExists(join(dir, "explore/api.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/search.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/auth.test.ts")), true);
+    assertEquals(
+      await fileExists(join(dir, "data/search-examples.json")),
+      true,
+    );
 
-    // Playground should not create standard test file
+    // Standard test files should NOT exist
     assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), false);
+    assertEquals(await fileExists(join(dir, "AGENTS.md")), false);
 
-    // Verify playground content
+    // Verify deno.json has explore task but not test tasks
+    const denoJson = JSON.parse(
+      await Deno.readTextFile(join(dir, "deno.json")),
+    );
+    assertEquals(typeof denoJson.tasks?.explore, "string");
+    assertEquals(denoJson.tasks?.test, undefined);
+
+    // Verify .env has DummyJSON
     const envContent = await Deno.readTextFile(join(dir, ".env"));
     assertEquals(envContent.includes("dummyjson.com"), true);
+
+    // Verify README contains upgrade prompt
+    const readme = await Deno.readTextFile(join(dir, "README.md"));
+    assertEquals(readme.includes("glubean init"), true);
+    assertEquals(readme.includes("Best Practice"), true);
   } finally {
     await cleanupDir(dir);
   }
 });
 
-Deno.test("init interactive - choose playground", async () => {
+Deno.test("init interactive - choose minimal", async () => {
   const dir = await createTempDir();
   try {
-    // Step 1: "2" (Playground)
+    // Step 1: "2" (Minimal)
     const { code } = await runInitCommand(dir, [], "2\n", {
       GLUBEAN_FORCE_INTERACTIVE: "1",
     });
     assertEquals(code, 0, "init command should succeed");
 
-    // Playground files
-    assertEquals(await fileExists(join(dir, "tests/smoke.test.ts")), true);
+    // Minimal files
+    assertEquals(await fileExists(join(dir, "explore/api.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/search.test.ts")), true);
+    assertEquals(await fileExists(join(dir, "explore/auth.test.ts")), true);
+    assertEquals(
+      await fileExists(join(dir, "data/search-examples.json")),
+      true,
+    );
+
+    // Standard test files should NOT exist
     assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), false);
 
     const envContent = await Deno.readTextFile(join(dir, ".env"));
@@ -421,3 +522,86 @@ Deno.test("init interactive - choose playground", async () => {
     await cleanupDir(dir);
   }
 });
+
+Deno.test(
+  "init interactive - existing files prompts overwrite, yes overwrites",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      await Deno.writeTextFile(join(dir, "deno.json"), '{"existing": true}');
+
+      // Step 1: Enter (Best Practice)
+      // Overwrite prompt: y
+      // Step 2: Enter (default base URL)
+      // Step 3: no .git → init git? n
+      const { code } = await runInitCommand(dir, [], "\ny\n\nn\n", {
+        GLUBEAN_FORCE_INTERACTIVE: "1",
+      });
+      assertEquals(code, 0, "init command should succeed");
+
+      const content = await Deno.readTextFile(join(dir, "deno.json"));
+      assertEquals(
+        content.includes('"imports"'),
+        true,
+        "deno.json should be overwritten with new content",
+      );
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
+
+Deno.test(
+  "init interactive - existing files prompts overwrite, no keeps them",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      await Deno.writeTextFile(join(dir, "deno.json"), '{"existing": true}');
+
+      // Step 1: Enter (Best Practice)
+      // Overwrite prompt: n (keep existing)
+      // Step 2: Enter (default base URL)
+      // Step 3: no .git → init git? n
+      const { code, stdout } = await runInitCommand(dir, [], "\nn\n\nn\n", {
+        GLUBEAN_FORCE_INTERACTIVE: "1",
+      });
+      assertEquals(code, 0, "init command should succeed");
+
+      const content = await Deno.readTextFile(join(dir, "deno.json"));
+      assertEquals(
+        content,
+        '{"existing": true}',
+        "deno.json should be preserved",
+      );
+      assertEquals(stdout.includes("skip"), true);
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
+
+Deno.test(
+  "init interactive - minimal with existing files prompts overwrite",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      await Deno.writeTextFile(join(dir, ".env"), "OLD=true");
+
+      // Step 1: "2" (Minimal)
+      // Overwrite prompt: y
+      const { code } = await runInitCommand(dir, [], "2\ny\n", {
+        GLUBEAN_FORCE_INTERACTIVE: "1",
+      });
+      assertEquals(code, 0, "init command should succeed");
+
+      const content = await Deno.readTextFile(join(dir, ".env"));
+      assertEquals(
+        content.includes("dummyjson.com"),
+        true,
+        ".env should be overwritten",
+      );
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);

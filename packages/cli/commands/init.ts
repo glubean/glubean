@@ -1,9 +1,9 @@
 /**
  * Init command - scaffolds a new Glubean test project with a 3-step wizard.
  *
- * Step 1: Project Type — Standard or Playground
- * Step 2: API Setup — Base URL and optional OpenAPI spec
- * Step 3: Git & CI — Auto-detect/init git, hooks, GitHub Actions
+ * Step 1: Project Type — Best Practice or Minimal
+ * Step 2: API Setup — Base URL and optional OpenAPI spec (Best Practice only)
+ * Step 3: Git & CI — Auto-detect/init git, hooks, GitHub Actions (Best Practice only)
  */
 
 const colors = {
@@ -229,7 +229,7 @@ set -e
 deno run -A jsr:@glubean/cli validate-metadata
 `;
 
-const GITHUB_ACTION = `name: Glubean Metadata
+const GITHUB_ACTION_METADATA = `name: Glubean Metadata
 
 on:
   push:
@@ -253,50 +253,71 @@ jobs:
         run: git diff --exit-code metadata.json
 `;
 
+const GITHUB_ACTION_TESTS = `name: Glubean Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v2.x
+
+      - name: Write secrets
+        run: |
+          echo "USERNAME=\${{ secrets.USERNAME }}" >> .env.secrets
+          echo "PASSWORD=\${{ secrets.PASSWORD }}" >> .env.secrets
+
+      - name: Run tests
+        run: deno run -A jsr:@glubean/cli run --fail-fast --reporter junit --result-json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            **/*.junit.xml
+            **/*.result.json
+`;
+
 // ---------------------------------------------------------------------------
-// Templates — Playground
+// Templates — Minimal project
 // ---------------------------------------------------------------------------
 
-const PLAYGROUND_DENO_JSON = `{
+const MINIMAL_DENO_JSON = `{
   "imports": {
     "@glubean/sdk": "jsr:@glubean/sdk@${SDK_VERSION}"
   },
   "tasks": {
-    "test": "deno run -A jsr:@glubean/cli run",
-    "explore": "deno run -A jsr:@glubean/cli run --explore",
-    "scan": "deno run -A jsr:@glubean/cli scan",
-    "validate-metadata": "deno run -A jsr:@glubean/cli validate-metadata"
+    "explore": "deno run -A jsr:@glubean/cli run --explore --verbose",
+    "scan": "deno run -A jsr:@glubean/cli scan"
   },
   "glubean": {
     "run": {
       "verbose": true,
       "pretty": true,
-      "emitFullTrace": false,
-      "testDir": "./tests",
       "exploreDir": "./explore"
-    },
-    "redaction": {
-      "replacementFormat": "simple"
     }
   }
 }
 `;
 
-const PLAYGROUND_ENV = `# DummyJSON API - no auth required for basic endpoints
+const MINIMAL_ENV = `# Environment variables
 BASE_URL=https://dummyjson.com
 `;
 
-const PLAYGROUND_ENV_SECRETS = `# DummyJSON test credentials (used by auth exercises)
-# These are DummyJSON's built-in test accounts (public, safe to use).
-USERNAME=emilys
-PASSWORD=emilyspass
-`;
-
-const PLAYGROUND_ENV_SECRETS_EXAMPLE = `# DummyJSON test credentials (used by auth exercises)
-# Copy this file to .env.secrets and fill in the values:
-#   cp .env.secrets.example .env.secrets
-#
-# These are DummyJSON's built-in test accounts (public, safe to use).
+const MINIMAL_ENV_SECRETS = `# Secrets (add this file to .gitignore)
+# DummyJSON test credentials (public, safe to use)
 USERNAME=emilys
 PASSWORD=emilyspass
 `;
@@ -306,7 +327,7 @@ PASSWORD=emilyspass
 // ---------------------------------------------------------------------------
 
 export interface InitOptions {
-  playground?: boolean;
+  minimal?: boolean;
   hooks?: boolean;
   githubActions?: boolean;
   interactive?: boolean;
@@ -336,9 +357,9 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
   // ── Step 1/3 — Project Type ──────────────────────────────────────────────
 
-  let isPlayground = options.playground ?? false;
+  let isMinimal = options.minimal ?? false;
 
-  if (interactive && !options.playground) {
+  if (interactive && !options.minimal) {
     console.log(
       `${colors.dim}━━━ Step 1/3 — Project Type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
@@ -347,22 +368,43 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       [
         {
           key: "1",
-          label: "New test project",
-          desc: "Fresh API test project with sample tests",
+          label: "Best Practice",
+          desc: "Full project with tests, CI, multi-env, and examples",
         },
         {
           key: "2",
-          label: "Playground",
-          desc: "Learn Glubean + AI in 30 min (guided exercises)",
+          label: "Minimal",
+          desc: "Quick start — explore folder with GET, POST, and pick examples",
         },
       ],
       "1",
     );
-    isPlayground = choice === "2";
+    isMinimal = choice === "2";
   }
 
-  if (isPlayground) {
-    await initPlayground(options.overwrite ?? false);
+  if (interactive && !options.overwrite) {
+    const hasExisting = await fileExists("deno.json") ||
+      await fileExists(".env");
+    if (hasExisting) {
+      console.log(
+        `\n  ${colors.yellow}⚠${colors.reset} Existing Glubean files detected in this directory.\n`,
+      );
+      const overwrite = promptYesNo(
+        "  Overwrite existing files?",
+        false,
+      );
+      if (overwrite) {
+        options.overwrite = true;
+      } else {
+        console.log(
+          `\n  ${colors.dim}Keeping existing files — new files will still be created${colors.reset}\n`,
+        );
+      }
+    }
+  }
+
+  if (isMinimal) {
+    await initMinimal(options.overwrite ?? false);
     return;
   }
 
@@ -549,8 +591,23 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     },
     {
       path: "explore/api.test.ts",
-      content: () => readCliTemplate("explore-api.test.ts"),
-      description: "Explore scratchpad (quick API calls)",
+      content: () => readCliTemplate("minimal-api.test.ts"),
+      description: "Explore — GET and POST basics",
+    },
+    {
+      path: "explore/search.test.ts",
+      content: () => readCliTemplate("minimal-search.test.ts"),
+      description: "Explore — parameterized search with test.pick",
+    },
+    {
+      path: "explore/auth.test.ts",
+      content: () => readCliTemplate("minimal-auth.test.ts"),
+      description: "Explore — multi-step auth flow",
+    },
+    {
+      path: "data/search-examples.json",
+      content: () => readCliTemplate("data/search-examples.json"),
+      description: "Search examples for test.pick",
     },
     {
       path: "AGENTS.md",
@@ -575,11 +632,18 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   }
 
   if (enableActions) {
-    files.push({
-      path: ".github/workflows/glubean-metadata.yml",
-      content: GITHUB_ACTION,
-      description: "GitHub Actions metadata workflow",
-    });
+    files.push(
+      {
+        path: ".github/workflows/glubean-metadata.yml",
+        content: GITHUB_ACTION_METADATA,
+        description: "GitHub Actions metadata workflow",
+      },
+      {
+        path: ".github/workflows/glubean-tests.yml",
+        content: GITHUB_ACTION_TESTS,
+        description: "GitHub Actions test workflow",
+      },
+    );
   }
 
   let created = 0;
@@ -591,7 +655,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     if (options.overwriteHooks && path.startsWith(".git/hooks/")) return true;
     if (
       options.overwriteActions &&
-      path === ".github/workflows/glubean-metadata.yml"
+      path.startsWith(".github/workflows/glubean-")
     ) {
       return true;
     }
@@ -661,34 +725,29 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Playground init
+// Minimal init
 // ---------------------------------------------------------------------------
 
-async function initPlayground(overwrite: boolean): Promise<void> {
+async function initMinimal(overwrite: boolean): Promise<void> {
   console.log(
-    `${colors.dim}  DummyJSON API — learn Glubean + AI in 30 minutes${colors.reset}\n`,
+    `${colors.dim}  Quick start — explore APIs with GET, POST, and pick examples${colors.reset}\n`,
   );
 
   const files: FileEntry[] = [
     {
       path: "deno.json",
-      content: PLAYGROUND_DENO_JSON,
-      description: "Deno config with playground tasks",
+      content: MINIMAL_DENO_JSON,
+      description: "Deno config with explore task",
     },
     {
       path: ".env",
-      content: PLAYGROUND_ENV,
-      description: "DummyJSON base URL",
+      content: MINIMAL_ENV,
+      description: "Environment variables",
     },
     {
       path: ".env.secrets",
-      content: PLAYGROUND_ENV_SECRETS,
-      description: "DummyJSON test credentials",
-    },
-    {
-      path: ".env.secrets.example",
-      content: PLAYGROUND_ENV_SECRETS_EXAMPLE,
-      description: "Secrets template (safe to commit)",
+      content: MINIMAL_ENV_SECRETS,
+      description: "Secret variables (placeholder)",
     },
     {
       path: ".gitignore",
@@ -697,28 +756,28 @@ async function initPlayground(overwrite: boolean): Promise<void> {
     },
     {
       path: "README.md",
-      content: () => readCliTemplate("playground/README.md"),
-      description: "Playground guide with 8 exercises",
-    },
-    {
-      path: "API_REFERENCE.md",
-      content: () => readCliTemplate("playground/API_REFERENCE.md"),
-      description: "DummyJSON API reference for AI agents",
-    },
-    {
-      path: "tests/smoke.test.ts",
-      content: () => readCliTemplate("playground/smoke.test.ts"),
-      description: "Smoke test (pre-written)",
+      content: () => readCliTemplate("minimal/README.md"),
+      description: "Project README",
     },
     {
       path: "explore/api.test.ts",
-      content: () => readCliTemplate("explore-api.test.ts"),
-      description: "Explore scratchpad (quick API calls)",
+      content: () => readCliTemplate("minimal-api.test.ts"),
+      description: "GET and POST examples",
     },
     {
-      path: "AGENTS.md",
-      content: () => readCliTemplate("AGENTS.md"),
-      description: "AI agent guidelines",
+      path: "explore/search.test.ts",
+      content: () => readCliTemplate("minimal-search.test.ts"),
+      description: "Parameterized search with test.pick",
+    },
+    {
+      path: "explore/auth.test.ts",
+      content: () => readCliTemplate("minimal-auth.test.ts"),
+      description: "Multi-step auth flow (login → profile)",
+    },
+    {
+      path: "data/search-examples.json",
+      content: () => readCliTemplate("data/search-examples.json"),
+      description: "Search parameters for pick examples",
     },
   ];
 
@@ -763,14 +822,19 @@ async function initPlayground(overwrite: boolean): Promise<void> {
   if (created > 0) {
     console.log(`${colors.bold}Next steps:${colors.reset}`);
     console.log(
-      `  1. Run ${colors.cyan}deno task test${colors.reset} to verify setup`,
+      `  1. Run ${colors.cyan}deno task explore${colors.reset} to run all explore tests`,
     );
     console.log(
-      `  2. Open ${colors.cyan}README.md${colors.reset} for the exercise guide`,
+      `  2. Open ${colors.cyan}explore/api.test.ts${colors.reset} — GET and POST basics`,
     );
-    console.log(`  3. Copy the first exercise prompt into your AI agent`);
     console.log(
-      `  4. Watch the AI write, run, fail, and fix — that's the Glubean loop!\n`,
+      `  3. Open ${colors.cyan}explore/search.test.ts${colors.reset} — pick examples with external data`,
+    );
+    console.log(
+      `  4. Open ${colors.cyan}explore/auth.test.ts${colors.reset} — multi-step flow with state`,
+    );
+    console.log(
+      `  5. Read ${colors.cyan}README.md${colors.reset} for links and next steps\n`,
     );
   }
 }

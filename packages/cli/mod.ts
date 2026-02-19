@@ -39,7 +39,7 @@ const cli = new Command()
 // ─────────────────────────────────────────────────────────────────────────────
 cli
   .command("init", "Initialize a new test project (interactive wizard)")
-  .option("--playground", "Scaffold DummyJSON playground (learn Glubean + AI)")
+  .option("--minimal", "Scaffold minimal explore-only project (GET, POST, pick)")
   .option("--hooks", "Install git hooks (pre-commit, pre-push)")
   .option("--github-actions", "Scaffold GitHub Actions workflow")
   .option("--base-url <url:string>", "API base URL for .env")
@@ -49,7 +49,7 @@ cli
   .option("--overwrite-actions", "Overwrite GitHub Actions workflow")
   .action(async (options) => {
     await initCommand({
-      playground: options.playground,
+      minimal: options.minimal,
       hooks: options.hooks,
       githubActions: options.githubActions,
       baseUrl: options.baseUrl,
