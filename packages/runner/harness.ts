@@ -909,7 +909,13 @@ globalThis.fetch = async (input, init) => {
   networkInFlightCount++;
 
   const timeoutController = new AbortController();
-  const parentSignal = init?.signal;
+  const parentSignal = (() => {
+    if (!init || typeof init !== "object" || !("signal" in init)) {
+      return undefined;
+    }
+    const candidate = (init as { signal?: unknown }).signal;
+    return candidate instanceof AbortSignal ? candidate : undefined;
+  })();
   const onParentAbort = () => timeoutController.abort(parentSignal?.reason);
   if (parentSignal) {
     if (parentSignal.aborted) {
