@@ -81,6 +81,10 @@ jobs:
             exit 1
           fi
 
+      - name: Verify MCP runtime version alignment
+        run: |
+          deno run --allow-read .github/scripts/check-mcp-version.ts
+
   publish:
     name: Publish to JSR
     needs: [test, check-versions]

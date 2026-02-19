@@ -1,4 +1,9 @@
-import { type ExecutionEvent, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import {
+  type ExecutionEvent,
+  normalizePositiveTimeoutMs,
+  TestExecutor,
+  toSingleExecutionOptions,
+} from "@glubean/runner";
 import { basename, relative, resolve, toFileUrl } from "@std/path";
 import { parse as parseDotenv } from "@std/dotenv/parse";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.ts";
@@ -237,6 +242,7 @@ interface DiscoveredTestMeta {
   id: string;
   name?: string;
   tags?: string[];
+  timeout?: number;
   skip?: boolean;
   only?: boolean;
 }
@@ -258,6 +264,7 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
       id: m.id,
       name: m.name,
       tags: m.tags,
+      timeout: m.timeout,
       skip: m.skip,
       only: m.only,
     },
@@ -652,6 +659,8 @@ export async function runCommand(
     // Also pass exportName as fallback for non-deterministic tests (test.pick)
     // where the testId from discovery may not match the harness re-import.
     const testFileUrl = toFileUrl(testFilePath).toString();
+    const effectiveTimeout = normalizePositiveTimeoutMs(testItem.meta.timeout) ??
+      shared.perTestTimeoutMs;
     for await (
       const event of executor.run(
         testFileUrl,
@@ -660,7 +669,7 @@ export async function runCommand(
           vars: envVars,
           secrets,
         },
-        { ...toSingleExecutionOptions(shared), exportName },
+        { ...toSingleExecutionOptions(shared), timeout: effectiveTimeout, exportName },
       )
     ) {
       // Collect every event for result JSON and summary

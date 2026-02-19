@@ -19,7 +19,7 @@ export type ExecutionEvent =
     tags?: string[];
     suiteId?: string;
     suiteName?: string;
-    /** Retry attempt (0 for first attempt, omitted when 0). */
+    /** Whole-test re-run count (0 for first attempt, omitted when 0). */
     retryCount?: number;
   }
   | { type: "log"; message: string; data?: unknown; stepIndex?: number }
@@ -81,6 +81,10 @@ export type ExecutionEvent =
     failedAssertions: number;
     error?: string;
     returnState?: unknown;
+    /** Number of step attempts performed (first run + retries). */
+    attempts?: number;
+    /** Number of retries used (attempts - 1). */
+    retriesUsed?: number;
   }
   | { type: "timeout_update"; timeout: number }
   | {
@@ -106,11 +110,28 @@ export type ExecutionEvent =
 /**
  * Execution context passed to the test.
  */
+export interface ExecutionNetworkPolicy {
+  /** Shared serverless mode enforces egress guardrails in harness runtime. */
+  mode: "shared_serverless";
+  /** Hard cap on outbound requests per test execution. */
+  maxRequests: number;
+  /** Max in-flight outbound requests per test execution. */
+  maxConcurrentRequests: number;
+  /** Per-request timeout in milliseconds. */
+  requestTimeoutMs: number;
+  /** Approximate response-byte budget per execution. */
+  maxResponseBytes: number;
+  /** Allowed destination ports for outbound HTTP(S) traffic. */
+  allowedPorts: number[];
+}
+
 export interface ExecutionContext {
   vars: Record<string, string>;
   secrets: Record<string, string>;
-  /** Retry count for this execution (0 for first attempt) */
+  /** Whole-test re-run count for this execution (0 for first attempt). */
   retryCount?: number;
+  /** Optional egress policy applied by the harness runtime. */
+  networkPolicy?: ExecutionNetworkPolicy;
 }
 
 /**
@@ -195,6 +216,10 @@ export type TimelineEvent =
     error?: string;
     /** The return value from the step function, if any (truncated at 4 KB). */
     returnState?: unknown;
+    /** Number of step attempts performed (first run + retries). */
+    attempts?: number;
+    /** Number of retries used (attempts - 1). */
+    retriesUsed?: number;
   }
   | {
     type: "summary";
@@ -273,7 +298,7 @@ export interface ExecutionResult {
   error?: string;
   stack?: string;
   duration: number;
-  /** Retry attempt (0 for first attempt, undefined when 0) */
+  /** Whole-test re-run count (0 for first attempt, undefined when 0). */
   retryCount?: number;
   /** Total number of assertions executed */
   assertionCount: number;
@@ -569,11 +594,19 @@ export class TestExecutor {
     }
 
     // Setup timeout if specified (disabled when debugging — breakpoints would trigger it)
-    const timeout = inspectBrk ? 0 : options?.timeout ?? DEFAULT_TIMEOUT_MS;
+    let timeout = inspectBrk ? 0 : options?.timeout ?? DEFAULT_TIMEOUT_MS;
     let timeoutId: number | undefined;
     let timedOut = false;
 
-    if (timeout > 0) {
+    const armTimeout = (nextTimeout: number) => {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+      timeout = nextTimeout;
+      if (timeout <= 0) {
+        timeoutId = undefined;
+        return;
+      }
       timeoutId = setTimeout(() => {
         timedOut = true;
         try {
@@ -582,23 +615,61 @@ export class TestExecutor {
           // Process may already be dead
         }
       }, timeout);
+    };
+    const handleTimeoutUpdateEvent = (event: ExecutionEvent): void => {
+      if (
+        inspectBrk ||
+        event.type !== "timeout_update" ||
+        !Number.isFinite(event.timeout) ||
+        event.timeout <= 0
+      ) {
+        return;
+      }
+      // Relative semantics: timeout_update re-arms from "now".
+      armTimeout(Math.floor(event.timeout));
+    };
+
+    if (timeout > 0) {
+      armTimeout(timeout);
     }
 
     try {
-      // Read stdout and stderr in parallel to avoid blocking.
+      // Read stderr in parallel to avoid blocking.
       // When debugging (inspectBrk), stderr is inherited (not piped), so we skip reading it.
-      const stdoutPromise = this.readStream(process.stdout, decoder);
       const stderrPromise = inspectBrk ? Promise.resolve("") : this.readStreamAsText(process.stderr, decoder);
 
-      const [stdoutResult, stderr] = await Promise.all([
-        stdoutPromise,
-        stderrPromise,
-      ]);
+      // Read stdout as a stream so timeout updates can be applied immediately.
+      const stdoutReader = process.stdout.getReader();
+      let stdoutBuffer = "";
+      try {
+        while (true) {
+          const { done, value } = await stdoutReader.read();
+          if (done) break;
 
-      // Yield all stdout events
-      for (const event of stdoutResult.events) {
-        yield event;
+          stdoutBuffer += decoder.decode(value, { stream: true });
+          const lines = stdoutBuffer.split("\n");
+          stdoutBuffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const event = this.parseExecutionLine(line);
+            if (!event) continue;
+            handleTimeoutUpdateEvent(event);
+            yield event;
+          }
+        }
+
+        if (stdoutBuffer.trim()) {
+          const event = this.parseExecutionLine(stdoutBuffer);
+          if (event) {
+            handleTimeoutUpdateEvent(event);
+            yield event;
+          }
+        }
+      } finally {
+        stdoutReader.releaseLock();
       }
+
+      const stderr = await stderrPromise;
 
       // Clear timeout if set
       if (timeoutId !== undefined) {
@@ -666,61 +737,19 @@ export class TestExecutor {
   }
 
   /**
-   * Read a stream and parse JSON events line by line.
-   *
-   * @param stream The readable stream
-   * @param decoder Text decoder instance
-   * @returns Array of parsed events and remaining buffer
+   * Parse one stdout line into an execution event.
+   * Falls back to a raw log event when the line is not valid JSON.
    */
-  private async readStream(
-    stream: ReadableStream<Uint8Array>,
-    decoder: TextDecoder,
-  ): Promise<{ events: ExecutionEvent[]; buffer: string }> {
-    const reader = stream.getReader();
-    const events: ExecutionEvent[] = [];
-    let buffer = "";
-
+  private parseExecutionLine(line: string): ExecutionEvent | undefined {
+    if (!line.trim()) return undefined;
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line) as ExecutionEvent;
-            events.push(event);
-          } catch {
-            // Non-JSON output, treat as raw log
-            events.push({
-              type: "log",
-              message: line,
-            });
-          }
-        }
-      }
-
-      // Process remaining buffer
-      if (buffer.trim()) {
-        try {
-          const event = JSON.parse(buffer) as ExecutionEvent;
-          events.push(event);
-        } catch {
-          events.push({
-            type: "log",
-            message: buffer,
-          });
-        }
-      }
-    } finally {
-      reader.releaseLock();
+      return JSON.parse(line) as ExecutionEvent;
+    } catch {
+      return {
+        type: "log",
+        message: line,
+      };
     }
-
-    return { events, buffer: "" };
   }
 
   /**
@@ -799,6 +828,8 @@ export class TestExecutor {
     let stack: string | undefined;
     let peakMemoryBytes: number | undefined;
     let peakMemoryMB: string | undefined;
+    // Captured from the `start` event emitted by harness.
+    // Omitted when attempt is first run (`0`).
     let retryCount: number | undefined;
     let assertionCount = 0;
     let failedAssertionCount = 0;
@@ -945,6 +976,8 @@ export class TestExecutor {
             assertions: event.assertions,
             failedAssertions: event.failedAssertions,
             error: event.error,
+            attempts: event.attempts,
+            retriesUsed: event.retriesUsed,
             ...(event.returnState !== undefined && {
               returnState: event.returnState,
             }),

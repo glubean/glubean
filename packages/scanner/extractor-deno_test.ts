@@ -171,3 +171,37 @@ Deno.test("extractWithDeno — tests without only/skip omit those fields", async
   assertEquals(t.skip, undefined);
   assertEquals(t.only, undefined);
 });
+
+Deno.test("extractWithDeno — timeout propagated from test metadata", async () => {
+  const tempDir = await Deno.makeTempDir({ dir: import.meta.dirname });
+  const testFile = `${tempDir}/timeout_meta.test.ts`;
+
+  await Deno.writeTextFile(
+    testFile,
+    `
+import { test } from "@glubean/sdk";
+
+export const simpleTimeout = test(
+  { id: "simple-timeout", timeout: 1500 },
+  async (ctx) => {},
+);
+
+export const builderTimeout = test("builder-timeout")
+  .meta({ timeout: 700 })
+  .step("one", async (ctx) => {});
+`,
+  );
+
+  try {
+    const extracted = await extractWithDeno(testFile);
+    const simple = extracted.find((t) => t.id === "simple-timeout");
+    const builder = extracted.find((t) => t.id === "builder-timeout");
+
+    assertExists(simple);
+    assertExists(builder);
+    assertEquals(simple.timeout, 1500);
+    assertEquals(builder.timeout, 700);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});

@@ -32,11 +32,22 @@ Notes:
 
 - `glubean_discover_tests`
 - `glubean_run_local_file`
+- `glubean_get_last_run_summary`
+- `glubean_get_local_events`
 - `glubean_list_test_files`
+- `glubean_diagnose_config`
 - `glubean_get_metadata`
 - `glubean_open_trigger_run`
 - `glubean_open_get_run`
 - `glubean_open_get_run_events`
+
+### Local debugging helpers
+
+- `glubean_get_last_run_summary`: Returns summary metadata for the most recent `glubean_run_local_file` call.
+- `glubean_get_local_events`: Returns flattened local events (`result`, `assertion`, `log`, `trace`) with optional
+  filtering.
+- `glubean_diagnose_config`: Checks project config health (`deno.json`, `.env`, `.env.secrets`, `tests/`, `explore/`)
+  and returns actionable recommendations.
 
 ## Security notes
 

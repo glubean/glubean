@@ -78,6 +78,19 @@ export const myTest = test(
   assertEquals(result[0].tags, ["smoke"]);
 });
 
+Deno.test("extracts simple test timeout from TestMeta object", () => {
+  const content = `
+export const withTimeout = test(
+  { id: "timeout-meta", timeout: 1200 },
+  async (ctx) => {}
+);
+`;
+  const result = extractFromSource(content);
+  assertEquals(result.length, 1);
+  assertEquals(result[0].id, "timeout-meta");
+  assertEquals(result[0].timeout, 1200);
+});
+
 // =============================================================================
 // Builder pattern — string ID + .meta() + .step()
 // =============================================================================
@@ -101,6 +114,18 @@ export const authFlow = test("auth-flow")
   assertEquals(result[0].name, "Authentication Flow");
   assertEquals(result[0].tags, ["auth"]);
   assertEquals(result[0].steps, [{ name: "login" }, { name: "get profile" }]);
+});
+
+Deno.test("extracts builder timeout from .meta()", () => {
+  const content = `
+export const timedFlow = test("timed-flow")
+  .meta({ timeout: 900, tags: ["auth"] })
+  .step("login", async (ctx) => {});
+`;
+  const result = extractFromSource(content);
+  assertEquals(result.length, 1);
+  assertEquals(result[0].id, "timed-flow");
+  assertEquals(result[0].timeout, 900);
 });
 
 Deno.test("extracts builder test without .meta() — steps only", () => {

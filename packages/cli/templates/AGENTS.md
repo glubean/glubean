@@ -56,6 +56,18 @@ export const healthCheck = test(
 );
 ```
 
+For local debugging, you can also use:
+
+```typescript
+export const focused = test.only("focus-this", async (ctx) => {
+  // ...
+});
+
+export const temporarilySkipped = test.skip("skip-this", async (ctx) => {
+  // ...
+});
+```
+
 ### Data-driven tests
 
 ```typescript
@@ -194,7 +206,7 @@ const res = await ctx.http.post(`${baseUrl}/users`, {
 - `ctx.fail(message)` — immediately abort test
 - `ctx.skip(reason)` — skip test
 - `ctx.log(message)` — structured log
-- `ctx.metric(name, value, options?)` — custom metric
+- `ctx.metric(name, value, options?)` — custom metric (never put secrets/PII in metric names or tags)
 - `ctx.pollUntil(options, fn)` — poll until truthy or timeout
 - `ctx.setTimeout(ms)` — adjust test timeout
 

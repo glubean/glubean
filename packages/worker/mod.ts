@@ -33,7 +33,16 @@
  */
 
 // Configuration
-export { ConfigError, type ConfigFile, ENV_VARS, loadConfig, loadConfigFromFile, type WorkerConfig } from "./config.ts";
+export {
+  ConfigError,
+  type ConfigFile,
+  ENV_VARS,
+  loadConfig,
+  loadConfigFromFile,
+  type NetworkPolicyMode,
+  type WorkerConfig,
+  type WorkerNetworkPolicy,
+} from "./config.ts";
 
 // Logging
 export { createLogger, createNoopLogger, type Logger, type LogLevel } from "./logger.ts";

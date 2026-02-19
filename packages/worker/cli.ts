@@ -62,10 +62,11 @@ ENVIRONMENT VARIABLES:
   GLUBEAN_TASK_TIMEOUT_MS         Overall task deadline in ms (default: 300000)
   GLUBEAN_FAIL_FAST               Stop on first test failure (default: false)
   GLUBEAN_EXECUTION_CONCURRENCY   Max parallel test execution (default: 1)
-
-  Deprecated (still supported):
-  GLUBEAN_EXECUTION_TIMEOUT_MS    Use GLUBEAN_TASK_TIMEOUT_MS instead
-  GLUBEAN_STOP_ON_FAILURE         Use GLUBEAN_FAIL_FAST instead
+  GLUBEAN_NETWORK_POLICY_MODE     Network guardrail mode: trusted/shared_serverless (default: trusted)
+  GLUBEAN_EGRESS_MAX_REQUESTS     Max outbound requests per execution in shared mode (default: 300)
+  GLUBEAN_EGRESS_MAX_CONCURRENT_REQUESTS  Max in-flight outbound requests in shared mode (default: 20)
+  GLUBEAN_EGRESS_REQUEST_TIMEOUT_MS       Per-request timeout in shared mode (default: 30000)
+  GLUBEAN_EGRESS_ALLOWED_PORTS    Allowed outbound ports in shared mode (default: 80,443,8080,8443)
 
 EXAMPLES:
   # Using environment variables

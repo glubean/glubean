@@ -176,12 +176,55 @@ Deno.test("test() - quick mode function is callable", async () => {
   assertEquals(called, true);
 });
 
+Deno.test("test.only() - quick mode marks metadata as only", () => {
+  clearRegistry();
+  const focused = test.only("focused-quick", async (_ctx) => {});
+  assertEquals(focused.meta.id, "focused-quick");
+  assertEquals(focused.meta.only, true);
+  assertEquals(focused.type, "simple");
+});
+
+Deno.test("test.skip() - quick mode marks metadata as skip", () => {
+  clearRegistry();
+  const skipped = test.skip("skipped-quick", async (_ctx) => {});
+  assertEquals(skipped.meta.id, "skipped-quick");
+  assertEquals(skipped.meta.skip, true);
+  assertEquals(skipped.type, "simple");
+});
+
 Deno.test("test() - builder mode returns TestBuilder", () => {
   clearRegistry();
   const builder = test("builder-test");
 
   assertExists(builder);
   assertEquals(builder instanceof TestBuilder, true);
+});
+
+Deno.test("test.only() - builder mode marks metadata as only", () => {
+  clearRegistry();
+  const result = test.only("focused-builder")
+    .step("s", async () => {})
+    .build();
+  assertEquals(result.meta.only, true);
+});
+
+Deno.test("test.skip() - builder mode marks metadata as skip", () => {
+  clearRegistry();
+  const result = test.skip("skipped-builder")
+    .step("s", async () => {})
+    .build();
+  assertEquals(result.meta.skip, true);
+});
+
+Deno.test("TestBuilder.only()/skip() - fluent flags update metadata", () => {
+  clearRegistry();
+  const result = test("fluent-flags")
+    .only()
+    .skip()
+    .step("s", async () => {})
+    .build();
+  assertEquals(result.meta.only, true);
+  assertEquals(result.meta.skip, true);
 });
 
 Deno.test("test() - builder mode with steps", () => {
@@ -588,6 +631,22 @@ Deno.test("test.each builder - supports metadata object", () => {
   assertEquals(tests[0].meta.tags, ["smoke"]);
   assertEquals(tests[1].meta.id, "status-404");
   assertEquals(tests[1].meta.tags, ["smoke"]);
+});
+
+Deno.test("EachBuilder.only()/skip() - applies flags to every generated test", () => {
+  clearRegistry();
+  const tests = test
+    .each([{ id: 1 }, { id: 2 }])("flags-$id")
+    .only()
+    .skip()
+    .step("run", async () => {})
+    .build();
+
+  assertEquals(tests.length, 2);
+  assertEquals(tests[0].meta.only, true);
+  assertEquals(tests[0].meta.skip, true);
+  assertEquals(tests[1].meta.only, true);
+  assertEquals(tests[1].meta.skip, true);
 });
 
 Deno.test("test.each builder - .meta() merges additional metadata", () => {

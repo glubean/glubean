@@ -6,6 +6,8 @@
  * Step 3: Git & CI — Auto-detect/init git, hooks, GitHub Actions (Best Practice only)
  */
 
+import cliDenoJson from "../deno.json" with { type: "json" };
+
 const colors = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -83,6 +85,53 @@ function promptChoice(
   }
 }
 
+function validateBaseUrl(raw: string): { ok: true; value: string } | {
+  ok: false;
+  reason: string;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, reason: "URL cannot be empty." };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return {
+      ok: false,
+      reason: "Must be a valid absolute URL, for example: https://api.example.com",
+    };
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, reason: "Only http:// and https:// are supported." };
+  }
+
+  if (!parsed.hostname) {
+    return { ok: false, reason: "Hostname is required (for example: localhost)." };
+  }
+
+  const normalized = parsed.toString();
+  // Keep pathful URLs as entered (`/v2/` stays `/v2/`) and only trim the
+  // synthetic root slash from origin-only URLs to keep env values stable.
+  if (parsed.pathname === "/" && !parsed.search && !parsed.hash) {
+    return { ok: true, value: normalized.slice(0, -1) };
+  }
+  return { ok: true, value: normalized };
+}
+
+function validateBaseUrlOrExit(raw: string, source: string): string {
+  const result = validateBaseUrl(raw);
+  if (result.ok) return result.value;
+
+  console.error(
+    `Invalid base URL from ${source}: ${result.reason}\n` +
+      "Example: --base-url https://api.example.com",
+  );
+  Deno.exit(1);
+}
+
 // ---------------------------------------------------------------------------
 // File utilities
 // ---------------------------------------------------------------------------
@@ -127,14 +176,35 @@ async function resolveContent(
 // Templates — Standard project
 // ---------------------------------------------------------------------------
 
-const SDK_VERSION = "^0.11.0";
+function resolveSdkImportVersion(): string {
+  const imports = cliDenoJson.imports;
+  const sdkImport = imports && typeof imports === "object"
+    ? (imports as Record<string, unknown>)["@glubean/sdk"]
+    : undefined;
+  if (typeof sdkImport !== "string") {
+    throw new Error(
+      'Unable to resolve "@glubean/sdk" import from packages/cli/deno.json',
+    );
+  }
+  const match = sdkImport.match(/^jsr:@glubean\/sdk@(.+)$/);
+  if (!match) {
+    throw new Error(
+      `Unexpected @glubean/sdk import format in packages/cli/deno.json: ${sdkImport}`,
+    );
+  }
+  return match[1];
+}
+
+// Expected source format in packages/cli/deno.json:
+// "@glubean/sdk": "jsr:@glubean/sdk@<version>"
+const SDK_IMPORT = `jsr:@glubean/sdk@${resolveSdkImportVersion()}`;
 
 function makeDenoJson(_baseUrl: string): string {
   return (
     JSON.stringify(
       {
         imports: {
-          "@glubean/sdk": `jsr:@glubean/sdk@${SDK_VERSION}`,
+          "@glubean/sdk": SDK_IMPORT,
         },
         tasks: {
           test: "deno run -A jsr:@glubean/cli run",
@@ -296,7 +366,7 @@ jobs:
 
 const MINIMAL_DENO_JSON = `{
   "imports": {
-    "@glubean/sdk": "jsr:@glubean/sdk@${SDK_VERSION}"
+    "@glubean/sdk": "${SDK_IMPORT}"
   },
   "tasks": {
     "explore": "deno run -A jsr:@glubean/cli run --explore --verbose",
@@ -410,18 +480,31 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
   // ── Step 2/3 — API Setup ─────────────────────────────────────────────────
 
-  let baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
+  let baseUrl = options.baseUrl ? validateBaseUrlOrExit(options.baseUrl, "--base-url") : DEFAULT_BASE_URL;
 
   if (interactive) {
     console.log(
       `\n${colors.dim}━━━ Step 2/3 — API Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
 
-    const urlInput = readLine(
-      `  Your API base URL ${colors.dim}(Enter for ${DEFAULT_BASE_URL})${colors.reset}`,
-    );
-    if (urlInput.trim()) {
-      baseUrl = urlInput.trim();
+    while (true) {
+      const urlInput = readLine(
+        `  Your API base URL ${colors.dim}(Enter for ${DEFAULT_BASE_URL})${colors.reset}`,
+      );
+      if (!urlInput.trim()) break;
+
+      const validated = validateBaseUrl(urlInput);
+      if (validated.ok) {
+        baseUrl = validated.value;
+        break;
+      }
+
+      console.log(
+        `  ${colors.yellow}⚠${colors.reset} Invalid URL: ${validated.reason}`,
+      );
+      console.log(
+        `  ${colors.dim}Try something like: https://api.example.com${colors.reset}\n`,
+      );
     }
     console.log(
       `\n  ${colors.green}✓${colors.reset} Base URL: ${colors.cyan}${baseUrl}${colors.reset}`,

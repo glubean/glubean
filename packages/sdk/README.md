@@ -68,6 +68,22 @@ export const login = test("login", async (ctx) => {
   ctx.expect(res.status).toBe(200);
 });
 
+// Focus or skip while debugging locally
+export const loginOnly = test.only("login-only", async (ctx) => {
+  const res = await ctx.http.get(`${ctx.vars.require("BASE_URL")}/login`);
+  ctx.expect(res.status).toBe(200);
+});
+
+export const flakyFlow = test.skip("flaky-flow", async (ctx) => {
+  ctx.log("Skipped for local iteration");
+});
+
+// If both flags are set, skip takes precedence at run selection time.
+export const excludedEvenIfOnly = test("excluded-even-if-only")
+  .only()
+  .skip()
+  .step("noop", async () => {});
+
 // Builder mode - multi-step with lifecycle
 export const checkout = test("checkout-flow")
   .meta({ tags: ["e2e", "critical"] })
@@ -318,6 +334,21 @@ if (ctx.retryCount > 0) {
 }
 ```
 
+#### Retry Model and `ctx.retryCount`
+
+- Retry orchestration is owned by the runner/control plane, not by SDK code.
+- `ctx.retryCount` represents whole-test re-runs:
+  - `0` on the first execution attempt
+  - `1+` on subsequent re-runs of the same test
+- Step retries configured via `.step(..., { retries })` are internal to one execution and do not increment
+  `ctx.retryCount`.
+
+```typescript
+if (ctx.retryCount > 0) {
+  ctx.log(`Runner re-run #${ctx.retryCount} for this test`);
+}
+```
+
 #### Memory Profiling
 
 ```typescript
@@ -523,6 +554,8 @@ and standalone usage.
 | ------------------------------------ | --------------------------------------------------------------------- |
 | `test(id, fn)`                       | Quick mode: creates a single-function test                            |
 | `test(id)`                           | Builder mode: returns a `TestBuilder`                                 |
+| `test.only(id[, fn])`                | Mark a test as focused (`only: true`)                                 |
+| `test.skip(id[, fn])`                | Mark a test as skipped (`skip: true`)                                 |
 | `test.each(table)`                   | Data-driven tests (simple or builder mode)                            |
 | `test.pick(examples, count?)`        | Select named examples (random by default) and delegate to `test.each` |
 | `configure(options)`                 | Declare file-level vars/secrets/http/plugins config (lazy at runtime) |
@@ -559,7 +592,7 @@ and standalone usage.
 | `fail(message)`                 | `function`        | Fail fast and abort test execution                          |
 | `pollUntil(options, fn)`        | `function`        | Poll until condition becomes truthy                         |
 | `setTimeout(ms)`                | `function`        | Dynamically set timeout                                     |
-| `retryCount`                    | `number`          | Current retry count (0 for first attempt)                   |
+| `retryCount`                    | `number`          | Whole-test re-run count (0 on first execution attempt)      |
 | `getMemoryUsage()`              | `function`        | Read memory usage stats when available                      |
 
 ### VarsAccessor Methods

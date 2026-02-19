@@ -8,6 +8,15 @@
 
 import { parseArgs } from "@std/cli/parse-args";
 import ky from "ky";
+import {
+  classifyHostnameBlockReason,
+  classifyIpBlockReason,
+  isAllowedPort,
+  isAllowedProtocol,
+  isIpLiteral,
+  resolveUrlPort,
+} from "./network_policy.ts";
+import { applyResponseByteBudget } from "./network_budget.ts";
 import type {
   ApiTrace,
   AssertionDetails,
@@ -112,7 +121,47 @@ const contextJson = await readContextFromStdin();
 const contextData = contextJson ? JSON.parse(contextJson) : {};
 const rawVars = (contextData.vars ?? {}) as Record<string, string>;
 const rawSecrets = (contextData.secrets ?? {}) as Record<string, string>;
+// Execution-level retry metadata injected by executor/control plane.
+// 0 => first execution attempt.
 const retryCount = (contextData.retryCount ?? 0) as number;
+
+interface SharedServerlessNetworkPolicy {
+  mode: "shared_serverless";
+  maxRequests: number;
+  maxConcurrentRequests: number;
+  requestTimeoutMs: number;
+  maxResponseBytes: number;
+  allowedPorts: number[];
+}
+
+function parseNetworkPolicy(
+  input: unknown,
+): SharedServerlessNetworkPolicy | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const candidate = input as Record<string, unknown>;
+  if (candidate.mode !== "shared_serverless") return undefined;
+
+  const allowedPorts = Array.isArray(candidate.allowedPorts)
+    ? candidate.allowedPorts.filter((p): p is number =>
+      typeof p === "number" && Number.isFinite(p) && p > 0 && p <= 65535
+    ).map((p) => Math.floor(p))
+    : [];
+
+  return {
+    mode: "shared_serverless",
+    maxRequests: Number(candidate.maxRequests) > 0 ? Math.floor(Number(candidate.maxRequests)) : 300,
+    maxConcurrentRequests: Number(candidate.maxConcurrentRequests) > 0
+      ? Math.floor(Number(candidate.maxConcurrentRequests))
+      : 20,
+    requestTimeoutMs: Number(candidate.requestTimeoutMs) > 0 ? Math.floor(Number(candidate.requestTimeoutMs)) : 30_000,
+    maxResponseBytes: Number(candidate.maxResponseBytes) > 0
+      ? Math.floor(Number(candidate.maxResponseBytes))
+      : 20 * 1024 * 1024,
+    allowedPorts: allowedPorts.length > 0 ? Array.from(new Set(allowedPorts)) : [80, 443, 8080, 8443],
+  };
+}
+
+const networkPolicy = parseNetworkPolicy(contextData.networkPolicy);
 
 // Memory monitoring state
 let peakMemoryBytes = 0;
@@ -198,6 +247,17 @@ class FailError extends Error {
   constructor(public readonly reason: string) {
     super(reason);
     this.name = "FailError";
+  }
+}
+
+/**
+ * Sentinel error used for step-level timeout failures.
+ * Timeouts are treated as terminal for the step and do not retry.
+ */
+class StepTimeoutError extends Error {
+  constructor(stepName: string, timeoutMs: number) {
+    super(`Step "${stepName}" timed out after ${timeoutMs}ms`);
+    this.name = "StepTimeoutError";
   }
 }
 
@@ -609,7 +669,8 @@ const ctx = {
   },
 
   /**
-   * Current retry count (0 for first attempt).
+   * Current execution retry count (0 for first attempt).
+   * This reflects whole-test re-runs, not per-step retries.
    */
   retryCount,
 
@@ -702,6 +763,211 @@ function emitSummary() {
     }),
   );
 }
+
+const MAX_NETWORK_WARNINGS_PER_CODE = 3;
+const networkWarningCounts = new Map<string, number>();
+let networkRequestCount = 0;
+let networkInFlightCount = 0;
+let networkResponseBytes = 0;
+
+function emitNetworkWarning(code: string, message: string): void {
+  const nextCount = (networkWarningCounts.get(code) ?? 0) + 1;
+  networkWarningCounts.set(code, nextCount);
+  if (nextCount <= MAX_NETWORK_WARNINGS_PER_CODE) {
+    ctx.warn(false, `[network_guard:${code}] ${message}`);
+  } else if (nextCount === MAX_NETWORK_WARNINGS_PER_CODE + 1) {
+    ctx.warn(false, `[network_guard:${code}] further warnings suppressed`);
+  }
+}
+
+async function resolveHostIps(hostname: string): Promise<string[]> {
+  const ips = new Set<string>();
+  try {
+    const aRecords = await Deno.resolveDns(hostname, "A");
+    for (const ip of aRecords) ips.add(ip);
+  } catch {
+    // Ignore; try AAAA next.
+  }
+  try {
+    const aaaaRecords = await Deno.resolveDns(hostname, "AAAA");
+    for (const ip of aaaaRecords) ips.add(ip);
+  } catch {
+    // Ignore; caller decides behavior when no records are resolved.
+  }
+  return Array.from(ips);
+}
+
+function toRequestUrl(input: Request | URL | string): URL {
+  if (input instanceof Request) return new URL(input.url);
+  if (input instanceof URL) return input;
+  return new URL(input);
+}
+
+async function enforceNetworkPolicy(url: URL): Promise<void> {
+  if (!networkPolicy) return;
+
+  if (!isAllowedProtocol(url.protocol)) {
+    emitNetworkWarning(
+      "protocol_blocked",
+      `Blocked protocol ${url.protocol} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy blocked protocol ${url.protocol}. Only http/https are allowed.`,
+    );
+  }
+
+  const port = resolveUrlPort(url);
+  if (!isAllowedPort(port, networkPolicy.allowedPorts)) {
+    emitNetworkWarning(
+      "port_blocked",
+      `Blocked port ${port} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy blocked destination port ${port}.`,
+    );
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  const hostnameReason = classifyHostnameBlockReason(hostname);
+  if (hostnameReason) {
+    emitNetworkWarning(
+      hostnameReason,
+      `Blocked hostname ${hostname} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy blocked sensitive hostname ${hostname}.`,
+    );
+  }
+
+  if (isIpLiteral(hostname)) {
+    const ipReason = classifyIpBlockReason(hostname);
+    if (ipReason) {
+      emitNetworkWarning(
+        ipReason,
+        `Blocked destination IP ${hostname} for ${url.href}`,
+      );
+      throw new Error(`Network policy blocked destination IP ${hostname}.`);
+    }
+    return;
+  }
+
+  const resolvedIps = await resolveHostIps(hostname);
+  if (resolvedIps.length === 0) {
+    emitNetworkWarning(
+      "dns_resolution_failed",
+      `Could not resolve ${hostname} for ${url.href}`,
+    );
+    throw new Error(
+      `Network policy could not resolve host ${hostname}. Request denied.`,
+    );
+  }
+
+  for (const ip of resolvedIps) {
+    const ipReason = classifyIpBlockReason(ip);
+    if (ipReason) {
+      emitNetworkWarning(
+        ipReason,
+        `Blocked resolved IP ${ip} (${hostname}) for ${url.href}`,
+      );
+      throw new Error(
+        `Network policy blocked resolved destination ${ip} for host ${hostname}.`,
+      );
+    }
+  }
+}
+
+const originalFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = async (input, init) => {
+  if (!networkPolicy) {
+    return originalFetch(input, init);
+  }
+
+  const requestUrl = toRequestUrl(input);
+
+  if (networkRequestCount >= networkPolicy.maxRequests) {
+    emitNetworkWarning(
+      "request_limit_exceeded",
+      `Request limit exceeded (${networkPolicy.maxRequests})`,
+    );
+    throw new Error(
+      `Network policy exceeded max outbound requests (${networkPolicy.maxRequests}).`,
+    );
+  }
+  if (networkInFlightCount >= networkPolicy.maxConcurrentRequests) {
+    emitNetworkWarning(
+      "concurrency_limit_exceeded",
+      `In-flight request limit exceeded (${networkPolicy.maxConcurrentRequests})`,
+    );
+    throw new Error(
+      `Network policy exceeded max concurrent outbound requests (${networkPolicy.maxConcurrentRequests}).`,
+    );
+  }
+
+  // Reserve counters before await to avoid TOCTOU races when user code issues
+  // concurrent requests in a single Promise.all frame.
+  networkRequestCount++;
+  networkInFlightCount++;
+
+  const timeoutController = new AbortController();
+  let timedOutByPolicy = false;
+  const parentSignal = (() => {
+    if (!init || typeof init !== "object" || !("signal" in init)) {
+      return undefined;
+    }
+    const candidate = (init as { signal?: unknown }).signal;
+    return candidate instanceof AbortSignal ? candidate : undefined;
+  })();
+  const onParentAbort = () => timeoutController.abort(parentSignal?.reason);
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      timeoutController.abort(parentSignal.reason);
+    } else {
+      parentSignal.addEventListener("abort", onParentAbort, { once: true });
+    }
+  }
+
+  const timeoutId = setTimeout(() => {
+    timedOutByPolicy = true;
+    timeoutController.abort(
+      new Error(
+        `Network request timed out after ${networkPolicy.requestTimeoutMs}ms`,
+      ),
+    );
+  }, networkPolicy.requestTimeoutMs);
+
+  try {
+    await enforceNetworkPolicy(requestUrl);
+
+    const response = await originalFetch(input, {
+      ...init,
+      signal: timeoutController.signal,
+    });
+    return applyResponseByteBudget(response, {
+      requestUrl,
+      maxResponseBytes: networkPolicy.maxResponseBytes,
+      getUsedResponseBytes: () => networkResponseBytes,
+      addUsedResponseBytes: (delta) => {
+        networkResponseBytes += delta;
+      },
+      emitWarning: emitNetworkWarning,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      if (timedOutByPolicy) {
+        throw new Error(
+          `Network request timed out after ${networkPolicy.requestTimeoutMs}ms`,
+        );
+      }
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    if (parentSignal) {
+      parentSignal.removeEventListener("abort", onParentAbort);
+    }
+    networkInFlightCount = Math.max(0, networkInFlightCount - 1);
+  }
+};
 
 const kyInstance = ky.create({
   hooks: {
@@ -1203,18 +1469,88 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
               let stepError: string | undefined;
               let stepReturnState: unknown = undefined;
-              try {
-                const result = await step.fn(effectiveCtx, state);
-                if (result !== undefined) {
-                  state = result;
-                  stepReturnState = result;
+              const retries = step.meta.retries;
+              const configuredRetries = typeof retries === "number" && Number.isFinite(retries)
+                ? Math.max(0, Math.floor(retries))
+                : 0;
+              const stepTimeout = step.meta.timeout;
+              const configuredStepTimeout = typeof stepTimeout === "number" && Number.isFinite(stepTimeout)
+                ? Math.floor(stepTimeout)
+                : 0;
+              const stepTimeoutMs = configuredStepTimeout > 0 ? configuredStepTimeout : undefined;
+              const maxAttempts = configuredRetries + 1;
+              let attemptsUsed = 0;
+              let lastFailedAssertions = 0;
+              let lastAssertions = 0;
+              let timeoutFailure = false;
+
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                attemptsUsed = attempt;
+                stepError = undefined;
+                stepReturnState = undefined;
+                stepFailedAssertions = 0;
+                stepAssertionTotal = 0;
+                timeoutFailure = false;
+                let stepTimeoutId: number | undefined;
+
+                try {
+                  const stepResult = step.fn(effectiveCtx, state);
+                  // Note: timed-out step bodies cannot be force-cancelled in JS.
+                  // We treat timeout as terminal (no further retries) to avoid
+                  // overlapping attempts mutating shared step context.
+                  const result = stepTimeoutMs === undefined ? await stepResult : await Promise.race([
+                    stepResult,
+                    new Promise<never>((_, reject) => {
+                      stepTimeoutId = setTimeout(() => {
+                        reject(
+                          new StepTimeoutError(step.meta.name, stepTimeoutMs),
+                        );
+                      }, stepTimeoutMs);
+                    }),
+                  ]);
+                  if (result !== undefined) {
+                    state = result;
+                    stepReturnState = result;
+                  }
+                } catch (err) {
+                  stepError = err instanceof Error ? err.message : String(err);
+                  timeoutFailure = err instanceof StepTimeoutError;
+                } finally {
+                  if (stepTimeoutId !== undefined) {
+                    clearTimeout(stepTimeoutId);
+                  }
                 }
-              } catch (err) {
-                stepError = err instanceof Error ? err.message : String(err);
+
+                lastFailedAssertions = stepFailedAssertions;
+                lastAssertions = stepAssertionTotal;
+
+                const attemptFailed = !!stepError || stepFailedAssertions > 0;
+                if (!attemptFailed) {
+                  break;
+                }
+
+                // Timeouts are terminal to avoid overlapping attempts from
+                // dangling async operations in the timed-out step body.
+                if (timeoutFailure) {
+                  break;
+                }
+
+                if (attempt < maxAttempts) {
+                  const reason = stepError ? stepError : `${stepFailedAssertions} failed assertion(s)`;
+                  console.log(
+                    JSON.stringify({
+                      type: "log",
+                      stepIndex: i,
+                      message: `Retrying step "${step.meta.name}" (${
+                        attempt + 1
+                      }/${maxAttempts}) after failure: ${reason}`,
+                    }),
+                  );
+                }
               }
 
               const durationMs = Math.round(performance.now() - stepStart);
-              const failed = !!stepError || stepFailedAssertions > 0;
+              const failed = !!stepError || lastFailedAssertions > 0;
 
               // Serialize return state with size guard (max 4 KB)
               let returnStatePayload: unknown = undefined;
@@ -1238,8 +1574,10 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                   name: step.meta.name,
                   status: failed ? "failed" : "passed",
                   durationMs,
-                  assertions: stepAssertionTotal,
-                  failedAssertions: stepFailedAssertions,
+                  assertions: lastAssertions,
+                  failedAssertions: lastFailedAssertions,
+                  attempts: attemptsUsed,
+                  retriesUsed: Math.max(0, attemptsUsed - 1),
                   ...(stepError && { error: stepError }),
                   ...(returnStatePayload !== undefined && {
                     returnState: returnStatePayload,

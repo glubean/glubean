@@ -33,6 +33,14 @@ function createTestConfig(): WorkerConfig {
     maxConcurrentTasks: 1,
     taskMemoryLimitBytes: 0,
     memoryCheckIntervalMs: 2000,
+    networkPolicy: {
+      mode: "trusted",
+      maxRequests: 300,
+      maxConcurrentRequests: 20,
+      requestTimeoutMs: 30000,
+      maxResponseBytes: 20 * 1024 * 1024,
+      allowedPorts: [80, 443, 8080, 8443],
+    },
   };
 }
 
@@ -233,14 +241,11 @@ Deno.test("executeBundle - detects checksum mismatch", async () => {
       },
     };
 
-    const events: RunEvent[] = [];
     const result = await executeBundle(
       context,
       config,
       logger,
-      (event) => {
-        events.push(event);
-      },
+      () => {},
     );
 
     assertEquals(result.success, false);
@@ -323,6 +328,145 @@ export const failingTest = test({ id: "fail-1" }, async (ctx) => {
     assertEquals(resultEvents.length, 1);
     // deno-lint-ignore no-explicit-any
     assertEquals((resultEvents[0].payload as any).status, "failed");
+  } finally {
+    await shutdown();
+    await Deno.remove(config.workDir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("executeBundle - uses metadata timeout when no explicit task limit is set", async () => {
+  const config = createTestConfig();
+  const logger = createNoopLogger();
+  config.run.perTestTimeoutMs = 1000;
+
+  const testCode = `
+import { test } from "@glubean/sdk";
+
+export const slowTest = test({ id: "slowTest", timeout: 80 }, async (ctx) => {
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  ctx.assert(true, "should not reach");
+});
+`;
+
+  const metadata = {
+    version: "1",
+    projectId: "test-project",
+    files: {
+      "test.ts": {
+        hash: "meta-timeout",
+        exports: [{
+          type: "test",
+          id: "slowTest",
+          exportName: "slowTest",
+          tags: [],
+          timeout: 80,
+        }],
+      },
+    },
+  };
+
+  const { url, checksum, shutdown } = await createAndServeBundle(
+    config.workDir,
+    "meta-timeout-bundle",
+    testCode,
+    metadata,
+  );
+
+  try {
+    const context: RuntimeContext = {
+      taskId: "task-meta-timeout",
+      runId: "run-meta-timeout",
+      projectId: "project-meta-timeout",
+      bundle: {
+        bundleId: "bundle-meta-timeout",
+        download: {
+          type: "bundle",
+          url,
+          checksum,
+        },
+      },
+    };
+
+    const result = await executeBundle(
+      context,
+      config,
+      logger,
+      () => {},
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(result.error ?? "", "timed out after 80ms");
+  } finally {
+    await shutdown();
+    await Deno.remove(config.workDir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("executeBundle - explicit task timeout overrides metadata timeout", async () => {
+  const config = createTestConfig();
+  const logger = createNoopLogger();
+  config.run.perTestTimeoutMs = 1000;
+
+  const testCode = `
+import { test } from "@glubean/sdk";
+
+export const slowTest = test({ id: "slowTest", timeout: 500 }, async (ctx) => {
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  ctx.assert(true, "should not reach");
+});
+`;
+
+  const metadata = {
+    version: "1",
+    projectId: "test-project",
+    files: {
+      "test.ts": {
+        hash: "explicit-timeout",
+        exports: [{
+          type: "test",
+          id: "slowTest",
+          exportName: "slowTest",
+          tags: [],
+          timeout: 500,
+        }],
+      },
+    },
+  };
+
+  const { url, checksum, shutdown } = await createAndServeBundle(
+    config.workDir,
+    "explicit-timeout-bundle",
+    testCode,
+    metadata,
+  );
+
+  try {
+    const context: RuntimeContext = {
+      taskId: "task-explicit-timeout",
+      runId: "run-explicit-timeout",
+      projectId: "project-explicit-timeout",
+      bundle: {
+        bundleId: "bundle-explicit-timeout",
+        download: {
+          type: "bundle",
+          url,
+          checksum,
+        },
+      },
+      limits: {
+        timeoutMs: 120,
+      },
+    };
+
+    const result = await executeBundle(
+      context,
+      config,
+      logger,
+      () => {},
+    );
+
+    assertEquals(result.success, false);
+    assertStringIncludes(result.error ?? "", "timed out after 108ms");
   } finally {
     await shutdown();
     await Deno.remove(config.workDir, { recursive: true }).catch(() => {});

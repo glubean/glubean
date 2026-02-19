@@ -162,6 +162,55 @@ Run tests locally and return structured results.
 
 Secrets values are never returned — only the count.
 
+### `glubean_get_last_run_summary`
+
+Return a compact summary for the most recent `glubean_run_local_file` execution. Useful for quick status checks before
+requesting detailed events.
+
+**Input:**
+
+```json
+{}
+```
+
+**Output (example):**
+
+```json
+{
+  "createdAt": "2026-02-19T00:00:00.000Z",
+  "summary": { "total": 3, "passed": 2, "failed": 1 },
+  "eventCounts": { "result": 3, "assertion": 12, "log": 4, "trace": 1 }
+}
+```
+
+### `glubean_get_local_events`
+
+Return flattened local-run events from the most recent run snapshot.
+
+**Input:**
+
+```json
+{ "type": "assertion", "testId": "my-test", "limit": 100 }
+```
+
+**Output (example):**
+
+```json
+{
+  "events": [
+    {
+      "type": "assertion",
+      "testId": "my-test",
+      "message": "Should return 200",
+      "passed": false,
+      "expected": 200,
+      "actual": 404
+    }
+  ],
+  "count": 1
+}
+```
+
 ### `glubean_list_test_files`
 
 List test files in the project without executing them.
@@ -179,6 +228,29 @@ List test files in the project without executing them.
   "rootDir": "/path/to/project",
   "fileCount": 2,
   "files": ["api.test.ts", "tests/auth.test.ts"]
+}
+```
+
+### `glubean_diagnose_config`
+
+Diagnose local project configuration without running tests.
+
+**Input:**
+
+```json
+{ "dir": "." }
+```
+
+**Output (example):**
+
+```json
+{
+  "projectRoot": "/path/to/project",
+  "denoJson": { "exists": true },
+  "envFile": { "exists": false, "hasBaseUrl": false },
+  "testsDir": { "exists": false },
+  "exploreDir": { "exists": true },
+  "recommendations": ["Missing \".env\" file (expected BASE_URL)."]
 }
 ```
 

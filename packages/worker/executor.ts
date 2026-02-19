@@ -8,7 +8,7 @@
 import { dirname, join, resolve } from "@std/path";
 import { ensureDir } from "@std/fs";
 import { UntarStream } from "@std/tar/untar-stream";
-import { TestExecutor, type TimelineEvent } from "@glubean/runner";
+import { normalizePositiveTimeoutMs, TestExecutor, type TimelineEvent } from "@glubean/runner";
 import type { RunEvent, RuntimeContext } from "./types.ts";
 import type { WorkerConfig } from "./config.ts";
 import { ENV_VARS } from "./config.ts";
@@ -71,6 +71,7 @@ interface ExportMeta {
   id: string;
   name?: string;
   tags?: string[];
+  timeout?: number;
   exportName: string;
 }
 
@@ -82,6 +83,30 @@ interface SelectedTest {
   testId: string;
   exportName: string;
   tags: string[];
+  timeout?: number;
+}
+
+interface RunnerNetworkPolicy {
+  mode: "shared_serverless";
+  maxRequests: number;
+  maxConcurrentRequests: number;
+  requestTimeoutMs: number;
+  maxResponseBytes: number;
+  allowedPorts: number[];
+}
+
+function toRunnerNetworkPolicy(config: WorkerConfig): RunnerNetworkPolicy | undefined {
+  if (config.networkPolicy.mode !== "shared_serverless") {
+    return undefined;
+  }
+  return {
+    mode: "shared_serverless",
+    maxRequests: config.networkPolicy.maxRequests,
+    maxConcurrentRequests: config.networkPolicy.maxConcurrentRequests,
+    requestTimeoutMs: config.networkPolicy.requestTimeoutMs,
+    maxResponseBytes: config.networkPolicy.maxResponseBytes,
+    allowedPorts: config.networkPolicy.allowedPorts,
+  };
 }
 
 /**
@@ -344,6 +369,7 @@ function selectTests(
         testId: exp.id,
         exportName: exp.exportName,
         tags: exp.tags ?? [],
+        timeout: exp.timeout,
       });
     }
   }
@@ -517,7 +543,7 @@ export async function executeBundle(
       signal?.removeEventListener("abort", forwardAbort);
       return { success: true, eventCount, aborted: false, timedOut: false };
     }
-    const perTestTimeoutMs = Math.floor(
+    const derivedPerTestTimeoutMs = Math.floor(
       (overallTimeoutMs * 0.9) / tests.length,
     );
 
@@ -530,6 +556,22 @@ export async function executeBundle(
 
         const test = tests[index];
         const testUrl = `file://${join(extractDir, test.filePath)}`;
+        const derivedTimeout = derivedPerTestTimeoutMs > 0 ? derivedPerTestTimeoutMs : undefined;
+        const explicitTaskTimeout = context.limits?.timeoutMs !== undefined;
+        const metaTimeout = normalizePositiveTimeoutMs(test.timeout);
+        const configuredTimeout = normalizePositiveTimeoutMs(
+          config.run.perTestTimeoutMs,
+        );
+        // Precedence:
+        // 1) Explicit task budget (context.limits.timeoutMs) -> derived per-test budget
+        // 2) Test metadata timeout
+        // 3) Worker config per-test timeout
+        //
+        // When an explicit task budget is present, we honor the derived budget
+        // to keep the whole task within that hard ceiling.
+        const effectiveTimeout = explicitTaskTimeout
+          ? derivedTimeout
+          : (metaTimeout ?? configuredTimeout ?? derivedTimeout);
 
         logger.debug("Running test", { testId: test.testId });
 
@@ -593,15 +635,20 @@ export async function executeBundle(
         };
 
         try {
+          const executionContext = {
+            vars: context.vars ?? {},
+            // Secrets are loaded locally, never from RuntimeContext
+            secrets,
+            networkPolicy: toRunnerNetworkPolicy(config),
+          };
           const result = await executor.execute(
             testUrl,
             test.exportName,
-            // Secrets are loaded locally, never from RuntimeContext
-            { vars: context.vars ?? {}, secrets },
+            executionContext,
             {
               onEvent: handleEvent,
               includeTestId: true,
-              timeout: perTestTimeoutMs > 0 ? perTestTimeoutMs : undefined,
+              timeout: effectiveTimeout,
             },
           );
 

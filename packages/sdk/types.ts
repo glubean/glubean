@@ -356,6 +356,10 @@ export interface TestContext {
    * Metrics are stored separately from logs/traces with longer retention (90 days)
    * and are optimized for time-series queries and dashboards.
    *
+   * Security note: metric names and tags are observable metadata and are not
+   * intended to carry secrets or PII. Never include tokens, API keys, emails,
+   * phone numbers, or user identifiers in `name` / `options.tags`.
+   *
    * @param name Metric name (e.g., "api_duration_ms", "response_size_bytes")
    * @param value Numeric value
    * @param options Optional unit and tags
@@ -383,6 +387,12 @@ export interface TestContext {
    *   unit: "ms",
    *   tags: { endpoint: "/api/v2/optimize", method: "POST" },
    * });
+   * ```
+   *
+   * @example Anti-pattern (do not do this)
+   * ```ts
+   * // Bad: secret data embedded in metric dimensions
+   * ctx.metric("token_check", 1, { tags: { token: ctx.secrets.require("API_KEY") } });
    * ```
    */
   metric(name: string, value: number, options?: MetricOptions): void;
@@ -488,6 +498,9 @@ export interface TestContext {
    * Dynamically set the timeout for the current test.
    * Must be called before any async operations.
    *
+   * Semantics: this updates the remaining runtime budget from the moment
+   * `setTimeout()` is called (relative deadline), not from test start time.
+   *
    * @param ms Timeout in milliseconds
    *
    * @example Increase timeout for slow endpoint
@@ -505,8 +518,18 @@ export interface TestContext {
   setTimeout(ms: number): void;
 
   /**
-   * Current retry count (0 for first attempt, 1+ for retries).
-   * Useful for logging or conditional behavior on retries.
+   * Current execution retry count (0 for first attempt, 1+ for re-runs).
+   *
+   * Retry orchestration is owned by the runner/control plane, not by SDK user
+   * code. `ctx.retryCount` is injected into context at execution start and is
+   * read-only inside the test.
+   *
+   * Important distinction:
+   * - `ctx.retryCount` tracks whole-test re-runs.
+   * - Step retries from `StepMeta.retries` happen within one execution and do
+   *   not increment `ctx.retryCount`.
+   *
+   * Useful for logging, backoff, or idempotency behavior on re-runs.
    *
    * @example Log retry attempts
    * ```ts
@@ -1302,9 +1325,12 @@ export interface TestMeta {
   tags?: string | string[];
   /** Timeout in milliseconds (default: 30000) */
   timeout?: number;
-  /** If true, only run this test (and others marked only) */
+  /**
+   * If true, run only focused tests in this file/run context.
+   * If both `only` and `skip` are true, `skip` takes precedence.
+   */
   only?: boolean;
-  /** If true, skip this test */
+  /** If true, skip this test (takes precedence over `only`) */
   skip?: boolean;
 
   /**

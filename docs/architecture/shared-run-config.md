@@ -515,15 +515,15 @@ const result = await executor.execute(testUrl, test.exportName, context, {
 });
 ```
 
-**Env var compatibility**: `loadConfig` accepts both old and new names during transition:
+**Env var policy**: worker config accepts canonical names only:
 
-| Old env var                     | New env var               | Behavior                |
-| ------------------------------- | ------------------------- | ----------------------- |
-| `GLUBEAN_STOP_ON_FAILURE`       | `GLUBEAN_FAIL_FAST`       | Accept both, prefer new |
-| `GLUBEAN_EXECUTION_TIMEOUT_MS`  | `GLUBEAN_TASK_TIMEOUT_MS` | Accept both, prefer new |
-| `GLUBEAN_EXECUTION_CONCURRENCY` | `GLUBEAN_CONCURRENCY`     | Accept both, prefer new |
+| Canonical env var               | Purpose                     |
+| ------------------------------- | --------------------------- |
+| `GLUBEAN_FAIL_FAST`             | Per-test fail-fast behavior |
+| `GLUBEAN_TASK_TIMEOUT_MS`       | Task timeout budget         |
+| `GLUBEAN_EXECUTION_CONCURRENCY` | Test concurrency            |
 
-Old names are removed in a future major version.
+Legacy keys such as `GLUBEAN_STOP_ON_FAILURE` and `GLUBEAN_EXECUTION_TIMEOUT_MS` fail fast with migration guidance.
 
 #### MCP
 
@@ -583,6 +583,21 @@ CLI does not have a batch timeout — tests run sequentially or with concurrency
 
 No ambiguity, no conflict.
 
+### 7. Worker threat models and egress guardrails
+
+Worker runtime supports two deployment models:
+
+1. `trusted` (self-hosted): operator-controlled infrastructure, no shared-tenant egress restrictions by default.
+2. `shared_serverless`: multi-tenant serverless workers with mandatory egress guardrails.
+
+In `shared_serverless` mode, guardrails are enforced inside harness runtime:
+
+- Block sensitive destinations (localhost, private/link-local ranges, metadata endpoints).
+- Resolve host IPs for each request and validate resolved addresses.
+- Enforce protocol/port policy (`http`/`https` + configured allowed ports).
+- Enforce per-execution limits (request count, in-flight concurrency, request timeout, response-byte budget).
+- Emit warning events for blocked/limited traffic (rate-limited warning output).
+
 ## Migration Strategy
 
 ### Phase 1: Non-breaking (first PR)
@@ -597,26 +612,25 @@ No ambiguity, no conflict.
 
 5. **CLI**: Add new fields to `GlubeanRunConfig` (flat, backward-compatible), use `toSharedRunConfig` +
    `fromSharedConfig` in `run.ts`. Config file format stays flat — new fields are optional with defaults.
-6. **Worker**: Replace execution fields with `run: SharedRunConfig`, add `taskTimeoutMs`. `loadConfig` accepts both old
-   and new env var names.
+6. **Worker**: Replace execution fields with `run: SharedRunConfig`, add `taskTimeoutMs`, and enforce canonical env
+   keys.
 7. **MCP**: Use `LOCAL_RUN_DEFAULTS` + `fromSharedConfig`.
 8. Update all tests in each consumer PR.
 
 ### Phase 3: Cleanup (after all workers are updated)
 
 9. Remove deprecated `stopOnFailure` from `ExecutionOptions`
-10. Remove old env var name support from Worker's `loadConfig`
+10. Enforce canonical worker env/file keys with explicit fail-fast errors
 11. Remove redundant fields from consumer configs
 
 ## Risks
 
-| Risk                                                                    | Severity | Mitigation                                                                                                                                                                                                                                                                         |
-| ----------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Worker env var rename (`GLUBEAN_STOP_ON_FAILURE` → `GLUBEAN_FAIL_FAST`) | Medium   | Accept both during transition, prefer new name, remove old in next major                                                                                                                                                                                                           |
-| Worker config file key rename (`stopOnFailure` → `failFast`)            | Medium   | Same dual-read strategy                                                                                                                                                                                                                                                            |
-| CLI config file format                                                  | **Low**  | Format stays flat — only adds optional fields with defaults. No nesting change.                                                                                                                                                                                                    |
-| `maskEnvPrefixes` misconfigured or omitted in Worker                    | **High** | `maskEnvPrefixes` is the primary credential isolation barrier. Worker must always set it. Enforce via: (1) test that verifies Worker passes `maskEnvPrefixes` to `fromSharedConfig`, (2) code review checklist. `--allow-env` absence is a secondary barrier, not the primary one. |
-| Version coordination (runner published before consumers)                | Low      | Already the normal flow — runner is a JSR dependency                                                                                                                                                                                                                               |
+| Risk                                                         | Severity | Mitigation                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worker env/file legacy keys are still used by deploy scripts | Medium   | Fail fast with clear error messages and update deployment docs/examples to canonical keys before rollout                                                                                                                                                                           |
+| CLI config file format                                       | **Low**  | Format stays flat — only adds optional fields with defaults. No nesting change.                                                                                                                                                                                                    |
+| `maskEnvPrefixes` misconfigured or omitted in Worker         | **High** | `maskEnvPrefixes` is the primary credential isolation barrier. Worker must always set it. Enforce via: (1) test that verifies Worker passes `maskEnvPrefixes` to `fromSharedConfig`, (2) code review checklist. `--allow-env` absence is a secondary barrier, not the primary one. |
+| Version coordination (runner published before consumers)     | Low      | Already the normal flow — runner is a JSR dependency                                                                                                                                                                                                                               |
 
 ## Files Changed
 

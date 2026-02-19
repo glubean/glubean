@@ -505,6 +505,19 @@ Deno.test("adapter: metric event passes through unchanged", () => {
   assertEquals(redacted, event); // Same reference — not cloned
 });
 
+Deno.test("adapter: summary event passes through unchanged", () => {
+  const engine = createEngine();
+  const event: RedactableEvent = {
+    type: "summary",
+    data: {
+      httpRequestTotal: 3,
+      assertionFailed: 0,
+    },
+  };
+  const redacted = redactEvent(engine, event);
+  assertEquals(redacted, event); // Same reference — not cloned
+});
+
 Deno.test("adapter: start event passes through unchanged", () => {
   const engine = createEngine();
   const event: RedactableEvent = {

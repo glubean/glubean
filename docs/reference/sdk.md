@@ -15,6 +15,12 @@ The Glubean SDK provides the API for writing API tests. It is designed to be thi
 
 Two modes: quick (simple function) and builder (multi-step with state).
 
+For local iteration, ergonomic helpers are also available:
+
+- `test.only(...)` sets `only: true`
+- `test.skip(...)` sets `skip: true`
+- If both flags are set on the same test, `skip` takes precedence during run selection.
+
 **Quick mode:**
 
 ```ts
@@ -96,6 +102,40 @@ The `ctx` object is passed to every test function. Key methods:
 | `ctx.pollUntil(options, fn)`               | Poll until a condition is met or timeout                                          |
 | `ctx.http`                                 | HTTP client (when using `configure()`)                                            |
 | `ctx.graphql`                              | GraphQL client (when using `configure()`)                                         |
+
+### Retry Model and `ctx.retryCount`
+
+`ctx.retryCount` is execution metadata injected by the runner:
+
+- `0` means first execution attempt.
+- `1+` means the test is being re-run by external retry orchestration.
+
+Ownership model:
+
+- Runner/control plane decides whether and when to re-run a test.
+- SDK code can read `ctx.retryCount`, but cannot schedule whole-test retries.
+- Step retries (`StepMeta.retries`) happen inside a single execution and are separate from `ctx.retryCount`.
+
+### Metric Data Safety
+
+`ctx.metric()` is for numeric observability and dashboard dimensions. Treat metric names and tags as non-secret
+metadata.
+
+- Do not put tokens, API keys, emails, phone numbers, or user identifiers into metric names or tags.
+- Prefer stable, low-cardinality tags such as `endpoint`, `method`, or `region`.
+
+```ts
+// Good
+ctx.metric("http_duration_ms", duration, {
+  unit: "ms",
+  tags: { endpoint: "/orders", method: "GET" },
+});
+
+// Bad: sensitive value in tags
+ctx.metric("auth_check", 1, {
+  tags: { bearer: ctx.secrets.require("API_TOKEN") },
+});
+```
 
 ## Data-Driven Tests
 

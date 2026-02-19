@@ -4,6 +4,7 @@ export type {
   ExecutionBatchResult,
   ExecutionContext,
   ExecutionEvent,
+  ExecutionNetworkPolicy,
   ExecutionOptions,
   ExecutionResult,
   ExecutorOptions,
@@ -13,6 +14,7 @@ export type {
 
 export {
   LOCAL_RUN_DEFAULTS,
+  normalizePositiveTimeoutMs,
   resolveAllowNetFlag,
   SHARED_RUN_DEFAULTS,
   toExecutionOptions,

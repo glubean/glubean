@@ -21,6 +21,7 @@ import { LOCAL_RUN_DEFAULTS, resolveModuleTests, TestExecutor, toSingleExecution
 import type { ResolvedTest, SharedRunConfig } from "@glubean/runner";
 import { createStaticScanner, scan } from "@glubean/scanner";
 import type { BundleMetadata, FileMeta, ScanResult } from "@glubean/scanner";
+import { DEFAULT_GENERATED_BY, MCP_PACKAGE_VERSION } from "./version.ts";
 
 type Vars = Record<string, string>;
 const METADATA_SCHEMA_VERSION = "1";
@@ -168,6 +169,204 @@ export interface LocalRunResult {
   logs: Array<{ message: string; data?: unknown }>;
   traces: Array<unknown>;
   error?: { message: string; stack?: string };
+}
+
+export interface LocalDebugEvent {
+  type: "result" | "assertion" | "log" | "trace";
+  testId: string;
+  exportName: string;
+  testName?: string;
+  success?: boolean;
+  durationMs?: number;
+  message?: string;
+  passed?: boolean;
+  actual?: unknown;
+  expected?: unknown;
+  data?: unknown;
+  error?: { message: string; stack?: string };
+}
+
+export interface LocalRunSnapshot {
+  createdAt: string;
+  fileUrl: string;
+  projectRoot: string;
+  summary: { total: number; passed: number; failed: number };
+  results: LocalRunResult[];
+  includeLogs: boolean;
+  includeTraces: boolean;
+  filter?: string;
+}
+
+export interface ConfigDiagnostics {
+  projectRoot: string;
+  denoJson: { path: string; exists: boolean };
+  envFile: { path: string; exists: boolean; varCount: number; hasBaseUrl: boolean };
+  secretsFile: { path: string; exists: boolean; secretCount: number };
+  testsDir: { path: string; exists: boolean };
+  exploreDir: { path: string; exists: boolean };
+  recommendations: string[];
+}
+
+let lastLocalRunSnapshot: LocalRunSnapshot | undefined;
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function toLocalDebugEvents(
+  snapshot: LocalRunSnapshot,
+): LocalDebugEvent[] {
+  const events: LocalDebugEvent[] = [];
+  for (const result of snapshot.results) {
+    events.push({
+      type: "result",
+      testId: result.id,
+      exportName: result.exportName,
+      testName: result.name,
+      success: result.success,
+      durationMs: result.durationMs,
+      error: result.error,
+    });
+
+    for (const assertion of result.assertions) {
+      events.push({
+        type: "assertion",
+        testId: result.id,
+        exportName: result.exportName,
+        testName: result.name,
+        passed: assertion.passed,
+        message: assertion.message,
+        actual: assertion.actual,
+        expected: assertion.expected,
+      });
+    }
+
+    for (const log of result.logs) {
+      events.push({
+        type: "log",
+        testId: result.id,
+        exportName: result.exportName,
+        testName: result.name,
+        message: log.message,
+        data: log.data,
+      });
+    }
+
+    for (const trace of result.traces) {
+      events.push({
+        type: "trace",
+        testId: result.id,
+        exportName: result.exportName,
+        testName: result.name,
+        data: trace,
+      });
+    }
+  }
+  return events;
+}
+
+export function filterLocalDebugEvents(
+  events: LocalDebugEvent[],
+  options: { type?: LocalDebugEvent["type"]; testId?: string; limit?: number },
+): LocalDebugEvent[] {
+  let filtered = events;
+  if (options.type) {
+    filtered = filtered.filter((event) => event.type === options.type);
+  }
+  if (options.testId) {
+    filtered = filtered.filter((event) => event.testId === options.testId);
+  }
+  const limit = Math.max(1, Math.min(options.limit ?? 200, 2000));
+  return filtered.slice(0, limit);
+}
+
+export function buildLastRunSummary(
+  snapshot: LocalRunSnapshot,
+): Record<string, unknown> {
+  return {
+    createdAt: snapshot.createdAt,
+    fileUrl: snapshot.fileUrl,
+    projectRoot: snapshot.projectRoot,
+    summary: snapshot.summary,
+    includeLogs: snapshot.includeLogs,
+    includeTraces: snapshot.includeTraces,
+    filter: snapshot.filter,
+    testIds: snapshot.results.map((r) => r.id),
+    eventCounts: {
+      result: snapshot.results.length,
+      assertion: snapshot.results.reduce((acc, r) => acc + r.assertions.length, 0),
+      log: snapshot.results.reduce((acc, r) => acc + r.logs.length, 0),
+      trace: snapshot.results.reduce((acc, r) => acc + r.traces.length, 0),
+    },
+  };
+}
+
+export async function diagnoseProjectConfig(args: {
+  dir?: string;
+  envFile?: string;
+}): Promise<ConfigDiagnostics> {
+  const rootDir = resolveRootDir(args.dir);
+  const projectRoot = await findProjectRoot(rootDir);
+  const denoJsonPath = resolve(projectRoot, "deno.json");
+  const envPath = args.envFile ? resolve(args.envFile) : resolve(projectRoot, ".env");
+  const secretsPath = envPath + ".secrets";
+
+  const [denoJsonExists, envExists, secretsExists, testsDirExists, exploreDirExists] = await Promise.all([
+    pathExists(denoJsonPath),
+    pathExists(envPath),
+    pathExists(secretsPath),
+    pathExists(resolve(projectRoot, "tests")),
+    pathExists(resolve(projectRoot, "explore")),
+  ]);
+
+  const envVars = envExists ? await loadEnvFile(envPath) : {};
+  const secrets = secretsExists ? await loadEnvFile(secretsPath) : {};
+
+  const recommendations: string[] = [];
+  if (!denoJsonExists) {
+    recommendations.push('Missing "deno.json" at project root.');
+  }
+  if (!envExists) {
+    recommendations.push('Missing ".env" file (expected BASE_URL).');
+  } else if (!("BASE_URL" in envVars)) {
+    recommendations.push('Add BASE_URL to ".env" for HTTP tests.');
+  }
+  if (!secretsExists) {
+    recommendations.push('Missing ".env.secrets" file. Add it when tests require secrets.');
+  }
+  if (!testsDirExists && !exploreDirExists) {
+    recommendations.push('Create "tests/" or "explore/" to add runnable test files.');
+  }
+
+  return {
+    projectRoot,
+    denoJson: { path: denoJsonPath, exists: denoJsonExists },
+    envFile: {
+      path: envPath,
+      exists: envExists,
+      varCount: Object.keys(envVars).length,
+      hasBaseUrl: "BASE_URL" in envVars,
+    },
+    secretsFile: {
+      path: secretsPath,
+      exists: secretsExists,
+      secretCount: Object.keys(secrets).length,
+    },
+    testsDir: {
+      path: resolve(projectRoot, "tests"),
+      exists: testsDirExists,
+    },
+    exploreDir: {
+      path: resolve(projectRoot, "explore"),
+      exists: exploreDirExists,
+    },
+    recommendations,
+  };
 }
 
 async function runLocalTestsFromFile(args: {
@@ -359,11 +558,24 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
 
 const server = new McpServer({
   name: "glubean",
-  version: "0.1.0",
+  version: MCP_PACKAGE_VERSION,
 });
 
+export const MCP_TOOL_NAMES = {
+  discoverTests: "glubean_discover_tests",
+  runLocalFile: "glubean_run_local_file",
+  getLastRunSummary: "glubean_get_last_run_summary",
+  getLocalEvents: "glubean_get_local_events",
+  listTestFiles: "glubean_list_test_files",
+  diagnoseConfig: "glubean_diagnose_config",
+  getMetadata: "glubean_get_metadata",
+  openTriggerRun: "glubean_open_trigger_run",
+  openGetRun: "glubean_open_get_run",
+  openGetRunEvents: "glubean_open_get_run_events",
+} as const;
+
 server.registerTool(
-  "glubean_discover_tests",
+  MCP_TOOL_NAMES.discoverTests,
   {
     description: "Discover Glubean test exports from a file path and return their metadata.",
     inputSchema: {
@@ -387,7 +599,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "glubean_run_local_file",
+  MCP_TOOL_NAMES.runLocalFile,
   {
     description: "Run Glubean test exports from a file locally and return structured results for AI debugging/fixing.",
     inputSchema: {
@@ -453,6 +665,17 @@ server.registerTool(
       safe.error = result.error;
     }
 
+    lastLocalRunSnapshot = {
+      createdAt: new Date().toISOString(),
+      fileUrl: result.fileUrl,
+      projectRoot: result.projectRoot,
+      summary: result.summary,
+      results: result.results,
+      includeLogs: input.includeLogs ?? true,
+      includeTraces: input.includeTraces ?? false,
+      filter: input.filter,
+    };
+
     return {
       content: [{ type: "text", text: JSON.stringify(safe, null, 2) }],
     };
@@ -460,7 +683,108 @@ server.registerTool(
 );
 
 server.registerTool(
-  "glubean_list_test_files",
+  MCP_TOOL_NAMES.getLastRunSummary,
+  {
+    description: "Return summary of the most recent glubean_run_local_file execution.",
+    inputSchema: {},
+  },
+  () => {
+    if (!lastLocalRunSnapshot) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(
+            {
+              error: "No local run snapshot available. Run glubean_run_local_file first.",
+            },
+            null,
+            2,
+          ),
+        }],
+      };
+    }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(buildLastRunSummary(lastLocalRunSnapshot), null, 2),
+      }],
+    };
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.getLocalEvents,
+  {
+    description: "Return filtered local events from the most recent glubean_run_local_file execution.",
+    inputSchema: {
+      type: z
+        .enum(["result", "assertion", "log", "trace"])
+        .optional()
+        .describe("Filter by local event type"),
+      testId: z
+        .string()
+        .optional()
+        .describe("Filter by discovered test id"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(2000)
+        .optional()
+        .describe("Maximum events returned (default: 200)"),
+    },
+  },
+  (input: {
+    type?: LocalDebugEvent["type"];
+    testId?: string;
+    limit?: number;
+  }) => {
+    if (!lastLocalRunSnapshot) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(
+            {
+              error: "No local run snapshot available. Run glubean_run_local_file first.",
+            },
+            null,
+            2,
+          ),
+        }],
+      };
+    }
+
+    const events = toLocalDebugEvents(lastLocalRunSnapshot);
+    const filtered = filterLocalDebugEvents(events, {
+      type: input.type,
+      testId: input.testId,
+      limit: input.limit,
+    });
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(
+          {
+            availableTotal: events.length,
+            returned: filtered.length,
+            filters: {
+              type: input.type,
+              testId: input.testId,
+              limit: input.limit ?? 200,
+            },
+            events: filtered,
+          },
+          null,
+          2,
+        ),
+      }],
+    };
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.listTestFiles,
   {
     description: "List Glubean test files in a directory (lightweight index, no file writes).",
     inputSchema: {
@@ -505,7 +829,33 @@ server.registerTool(
 );
 
 server.registerTool(
-  "glubean_get_metadata",
+  MCP_TOOL_NAMES.diagnoseConfig,
+  {
+    description: "Diagnose local project config (.env, .env.secrets, deno.json, tests/explore dirs).",
+    inputSchema: {
+      dir: z
+        .string()
+        .optional()
+        .describe("Project root directory (default: current working directory)"),
+      envFile: z
+        .string()
+        .optional()
+        .describe("Path to .env file (default: <projectRoot>/.env)"),
+    },
+  },
+  async (input: { dir?: string; envFile?: string }) => {
+    const diagnostics = await diagnoseProjectConfig(input);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(diagnostics, null, 2),
+      }],
+    };
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.getMetadata,
   {
     description: "Generate metadata (equivalent to metadata.json) in-memory for AI use, without writing to disk.",
     inputSchema: {
@@ -524,7 +874,9 @@ server.registerTool(
       generatedBy: z
         .string()
         .optional()
-        .describe('Override generatedBy field (default: "@glubean/mcp@0.1.0")'),
+        .describe(
+          `Override generatedBy field (default: "${DEFAULT_GENERATED_BY}")`,
+        ),
     },
   },
   async (input: {
@@ -536,7 +888,7 @@ server.registerTool(
     const mode = input.mode ?? "runtime";
     const result = await scanProject(rootDir, mode);
     const metadata = await buildMetadata(result, {
-      generatedBy: input.generatedBy ?? "@glubean/mcp@0.1.0",
+      generatedBy: input.generatedBy ?? DEFAULT_GENERATED_BY,
     });
 
     return {
@@ -559,7 +911,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "glubean_open_trigger_run",
+  MCP_TOOL_NAMES.openTriggerRun,
   {
     description: "Trigger a remote run via Glubean Open Platform API (POST /open/v1/runs).",
     inputSchema: {
@@ -590,7 +942,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "glubean_open_get_run",
+  MCP_TOOL_NAMES.openGetRun,
   {
     description: "Get run status via Glubean Open Platform API (GET /open/v1/runs/:runId).",
     inputSchema: {
@@ -615,7 +967,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "glubean_open_get_run_events",
+  MCP_TOOL_NAMES.openGetRunEvents,
   {
     description: "Fetch a page of run events via Glubean Open Platform API (GET /open/v1/runs/:runId/events).",
     inputSchema: {
