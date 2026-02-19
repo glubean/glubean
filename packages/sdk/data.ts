@@ -46,10 +46,48 @@
  */
 
 import { parse as parseYaml } from "@std/yaml";
+import { resolve } from "@std/path";
 
 // =============================================================================
 // Shared utilities
 // =============================================================================
+
+function safeCwd(): string {
+  try {
+    return Deno.cwd();
+  } catch {
+    return "(unavailable)";
+  }
+}
+
+function formatPathErrorContext(
+  path: string,
+  action: "read file" | "read directory",
+  error: unknown,
+): Error {
+  const cwd = safeCwd();
+  const resolvedPath = cwd === "(unavailable)" ? path : resolve(cwd, path);
+  const cause = error instanceof Error ? error : undefined;
+  const reason = error instanceof Error ? error.message : String(error);
+
+  return new Error(
+    `Failed to ${action}: "${path}".\n` +
+      `Current working directory: ${cwd}\n` +
+      `Resolved path: ${resolvedPath}\n` +
+      'Hint: data loader paths are resolved from project root (where "deno.json" is).\n' +
+      'Hint: if your file is in the standard data folder, use a path like "./data/cases.csv".\n' +
+      `Cause: ${reason}`,
+    cause ? { cause } : undefined,
+  );
+}
+
+async function readTextFileWithContext(path: string): Promise<string> {
+  try {
+    return await Deno.readTextFile(path);
+  } catch (error) {
+    throw formatPathErrorContext(path, "read file", error);
+  }
+}
 
 /**
  * Normalize `string | string[]` to `string[]`.
@@ -181,7 +219,7 @@ export interface FromCsvOptions {
 export async function fromCsv<
   T extends Record<string, string> = Record<string, string>,
 >(path: string, options?: FromCsvOptions): Promise<T[]> {
-  const content = await Deno.readTextFile(path);
+  const content = await readTextFileWithContext(path);
   const separator = options?.separator ?? ",";
   const hasHeaders = options?.headers !== false;
 
@@ -299,7 +337,7 @@ export interface FromYamlOptions {
 export async function fromYaml<
   T extends Record<string, unknown> = Record<string, unknown>,
 >(path: string, options?: FromYamlOptions): Promise<T[]> {
-  const content = await Deno.readTextFile(path);
+  const content = await readTextFileWithContext(path);
   const data = parseYaml(content);
   return extractArray<T>(data, options?.pick, path);
 }
@@ -330,7 +368,7 @@ export async function fromYaml<
 export async function fromJsonl<
   T extends Record<string, unknown> = Record<string, unknown>,
 >(path: string): Promise<T[]> {
-  const content = await Deno.readTextFile(path);
+  const content = await readTextFileWithContext(path);
   const lines = content.split("\n").filter((line) => line.trim() !== "");
   return lines.map((line, index) => {
     try {
@@ -550,17 +588,21 @@ async function collectFiles(
   recursive: boolean,
   result: string[],
 ): Promise<void> {
-  for await (const entry of Deno.readDir(dir)) {
-    const fullPath = dir.endsWith("/") ? `${dir}${entry.name}` : `${dir}/${entry.name}`;
+  try {
+    for await (const entry of Deno.readDir(dir)) {
+      const fullPath = dir.endsWith("/") ? `${dir}${entry.name}` : `${dir}/${entry.name}`;
 
-    if (entry.isFile) {
-      const matchesExt = extensions.some((ext) => entry.name.toLowerCase().endsWith(ext.toLowerCase()));
-      if (matchesExt) {
-        result.push(fullPath);
+      if (entry.isFile) {
+        const matchesExt = extensions.some((ext) => entry.name.toLowerCase().endsWith(ext.toLowerCase()));
+        if (matchesExt) {
+          result.push(fullPath);
+        }
+      } else if (entry.isDirectory && recursive) {
+        await collectFiles(fullPath, extensions, recursive, result);
       }
-    } else if (entry.isDirectory && recursive) {
-      await collectFiles(fullPath, extensions, recursive, result);
     }
+  } catch (error) {
+    throw formatPathErrorContext(dir, "read directory", error);
   }
 }
 
@@ -588,7 +630,7 @@ async function loadFileAuto<T extends Record<string, unknown>>(
   }
 
   // Default: JSON
-  const content = await Deno.readTextFile(filePath);
+  const content = await readTextFileWithContext(filePath);
   const data = JSON.parse(content);
   return extractArray<T>(data, pick, filePath);
 }
@@ -601,7 +643,7 @@ async function loadSingleFileAsObject(
   filePath: string,
 ): Promise<Record<string, unknown>> {
   const lower = filePath.toLowerCase();
-  const content = await Deno.readTextFile(filePath);
+  const content = await readTextFileWithContext(filePath);
 
   if (lower.endsWith(".yaml") || lower.endsWith(".yml")) {
     const data = parseYaml(content);

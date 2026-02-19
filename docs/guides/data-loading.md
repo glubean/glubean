@@ -15,6 +15,30 @@ This guide covers how to load test data from files and directories for use with 
 
 All file paths are **relative to the project root** (the directory containing `deno.json`).
 
+## Troubleshooting Path Errors
+
+If a loader cannot find a file or directory, the error now includes:
+
+- current working directory (`Deno.cwd()`)
+- resolved absolute path
+- quick hints for common fixes
+
+Typical causes:
+
+- using import-relative paths instead of project-root-relative paths
+- running from a different directory than expected
+- typo in file extension or folder name
+
+Example:
+
+```
+Failed to read file: "./data/cases.csv"
+Current working directory: /Users/me/project
+Resolved path: /Users/me/project/data/cases.csv
+Hint: data loader paths are resolved from project root (where "deno.json" is).
+Hint: if your file is in the standard data folder, use a path like "./data/cases.csv".
+```
+
 ---
 
 ## JSON — Use Native Import

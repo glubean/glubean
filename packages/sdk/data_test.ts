@@ -79,7 +79,42 @@ Deno.test("fromCsv - empty file returns empty array", async () => {
 });
 
 Deno.test("fromCsv - nonexistent file throws", async () => {
-  await assertRejects(() => fromCsv("./nonexistent.csv"), Deno.errors.NotFound);
+  await assertRejects(
+    () => fromCsv("./nonexistent.csv"),
+    Error,
+    "Failed to read file",
+  );
+});
+
+Deno.test("fromCsv - nonexistent file error includes path context", async () => {
+  await assertRejects(
+    () => fromCsv("./nonexistent.csv"),
+    Error,
+    "Current working directory:",
+  );
+  await assertRejects(
+    () => fromCsv("./nonexistent.csv"),
+    Error,
+    "Resolved path:",
+  );
+  await assertRejects(
+    () => fromCsv("./nonexistent.csv"),
+    Error,
+    'Hint: data loader paths are resolved from project root',
+  );
+});
+
+Deno.test("fromDir - nonexistent directory error includes path context", async () => {
+  await assertRejects(
+    () => fromDir("./missing-data-dir"),
+    Error,
+    "Failed to read directory",
+  );
+  await assertRejects(
+    () => fromDir("./missing-data-dir"),
+    Error,
+    "Resolved path:",
+  );
 });
 
 // =============================================================================
