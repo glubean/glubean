@@ -15,6 +15,11 @@ The Glubean SDK provides the API for writing API tests. It is designed to be thi
 
 Two modes: quick (simple function) and builder (multi-step with state).
 
+For local iteration, ergonomic helpers are also available:
+
+- `test.only(...)` sets `only: true`
+- `test.skip(...)` sets `skip: true`
+
 **Quick mode:**
 
 ```ts

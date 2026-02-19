@@ -118,6 +118,26 @@ export class TestBuilder<S = unknown, Ctx extends TestContext = TestContext> {
   }
 
   /**
+   * Mark this test as focused.
+   *
+   * Focused tests are intended for local debugging sessions. When any tests in
+   * a run are marked as `only`, non-focused tests may be excluded by discovery
+   * tooling/orchestrators.
+   */
+  only(): TestBuilder<S, Ctx> {
+    this._meta = { ...this._meta, only: true };
+    return this;
+  }
+
+  /**
+   * Mark this test as skipped.
+   */
+  skip(): TestBuilder<S, Ctx> {
+    this._meta = { ...this._meta, skip: true };
+    return this;
+  }
+
+  /**
    * Set the setup function that runs before all steps.
    * The returned state is passed to all steps and teardown.
    *
@@ -629,6 +649,22 @@ export class EachBuilder<
    */
   meta(meta: Omit<TestMeta, "id">): EachBuilder<S, T, Ctx> {
     this._baseMeta = { ...this._baseMeta, ...meta };
+    return this;
+  }
+
+  /**
+   * Mark all generated tests from this data set as focused.
+   */
+  only(): EachBuilder<S, T, Ctx> {
+    this._baseMeta = { ...this._baseMeta, only: true };
+    return this;
+  }
+
+  /**
+   * Mark all generated tests from this data set as skipped.
+   */
+  skip(): EachBuilder<S, T, Ctx> {
+    this._baseMeta = { ...this._baseMeta, skip: true };
     return this;
   }
 
@@ -1188,6 +1224,63 @@ function createExtendedTest<Ctx extends TestContext>(
 
 // deno-lint-ignore no-namespace
 export namespace test {
+  /**
+   * Mark a test definition as focused (`only: true`).
+   *
+   * Works in both quick mode and builder mode.
+   *
+   * @example Quick mode
+   * ```ts
+   * export const focused = test.only("focused-login", async (ctx) => {
+   *   ctx.expect(true).toBeTruthy();
+   * });
+   * ```
+   *
+   * @example Builder mode
+   * ```ts
+   * export const focusedFlow = test.only("focused-flow")
+   *   .step("run", async (ctx) => {
+   *     ctx.expect(true).toBeTruthy();
+   *   });
+   * ```
+   */
+  export function only<S = unknown>(idOrMeta: string | TestMeta): TestBuilder<S>;
+  export function only(
+    idOrMeta: string | TestMeta,
+    fn: SimpleTestFunction,
+  ): Test;
+  export function only<S = unknown>(
+    idOrMeta: string | TestMeta,
+    fn?: SimpleTestFunction,
+  ): Test | TestBuilder<S> {
+    const baseMeta: TestMeta = typeof idOrMeta === "string"
+      ? { id: idOrMeta, name: idOrMeta }
+      : idOrMeta;
+    const metaWithOnly: TestMeta = { ...baseMeta, only: true };
+    return fn ? test(metaWithOnly, fn) : test<S>(metaWithOnly);
+  }
+
+  /**
+   * Mark a test definition as skipped (`skip: true`).
+   *
+   * Works in both quick mode and builder mode.
+   */
+  export function skip<S = unknown>(idOrMeta: string | TestMeta): TestBuilder<S>;
+  export function skip(
+    idOrMeta: string | TestMeta,
+    fn: SimpleTestFunction,
+  ): Test;
+  export function skip<S = unknown>(
+    idOrMeta: string | TestMeta,
+    fn?: SimpleTestFunction,
+  ): Test | TestBuilder<S> {
+    const baseMeta: TestMeta = typeof idOrMeta === "string"
+      ? { id: idOrMeta, name: idOrMeta }
+      : idOrMeta;
+    const metaWithSkip: TestMeta = { ...baseMeta, skip: true };
+    return fn ? test(metaWithSkip, fn) : test<S>(metaWithSkip);
+  }
+
   export function each<T extends Record<string, unknown>>(
     table: readonly T[],
   ): {

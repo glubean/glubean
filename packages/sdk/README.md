@@ -68,6 +68,16 @@ export const login = test("login", async (ctx) => {
   ctx.expect(res.status).toBe(200);
 });
 
+// Focus or skip while debugging locally
+export const loginOnly = test.only("login-only", async (ctx) => {
+  const res = await ctx.http.get(`${ctx.vars.require("BASE_URL")}/login`);
+  ctx.expect(res.status).toBe(200);
+});
+
+export const flakyFlow = test.skip("flaky-flow", async (ctx) => {
+  ctx.log("Skipped for local iteration");
+});
+
 // Builder mode - multi-step with lifecycle
 export const checkout = test("checkout-flow")
   .meta({ tags: ["e2e", "critical"] })
@@ -538,6 +548,8 @@ and standalone usage.
 | ------------------------------------ | --------------------------------------------------------------------- |
 | `test(id, fn)`                       | Quick mode: creates a single-function test                            |
 | `test(id)`                           | Builder mode: returns a `TestBuilder`                                 |
+| `test.only(id[, fn])`                | Mark a test as focused (`only: true`)                                 |
+| `test.skip(id[, fn])`                | Mark a test as skipped (`skip: true`)                                 |
 | `test.each(table)`                   | Data-driven tests (simple or builder mode)                            |
 | `test.pick(examples, count?)`        | Select named examples (random by default) and delegate to `test.each` |
 | `configure(options)`                 | Declare file-level vars/secrets/http/plugins config (lazy at runtime) |

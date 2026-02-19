@@ -56,6 +56,18 @@ export const healthCheck = test(
 );
 ```
 
+For local debugging, you can also use:
+
+```typescript
+export const focused = test.only("focus-this", async (ctx) => {
+  // ...
+});
+
+export const temporarilySkipped = test.skip("skip-this", async (ctx) => {
+  // ...
+});
+```
+
 ### Data-driven tests
 
 ```typescript
