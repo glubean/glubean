@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 
 /**
@@ -158,6 +158,39 @@ Deno.test("init --no-interactive --base-url uses custom URL", async () => {
 
     // Verify deno.json was created
     assertEquals(await fileExists(join(dir, "deno.json")), true);
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+Deno.test("init --no-interactive --base-url accepts localhost URL", async () => {
+  const dir = await createTempDir();
+  try {
+    const { code } = await runInitCommand(dir, [
+      "--no-interactive",
+      "--base-url",
+      "http://localhost:3000",
+    ]);
+    assertEquals(code, 0, "init command should succeed");
+
+    const envContent = await Deno.readTextFile(join(dir, ".env"));
+    assertEquals(envContent.includes("BASE_URL=http://localhost:3000"), true);
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+Deno.test("init --no-interactive --base-url rejects malformed URL", async () => {
+  const dir = await createTempDir();
+  try {
+    const { code, stderr } = await runInitCommand(dir, [
+      "--no-interactive",
+      "--base-url",
+      "not-a-url",
+    ]);
+    assertEquals(code, 1, "init command should fail with invalid base URL");
+    assertEquals(await fileExists(join(dir, "deno.json")), false);
+    assertStringIncludes(stderr, "Invalid base URL from --base-url");
   } finally {
     await cleanupDir(dir);
   }
@@ -447,6 +480,33 @@ Deno.test("init interactive - decline git init skips hooks", async () => {
     await cleanupDir(dir);
   }
 });
+
+Deno.test(
+  "init interactive - invalid base URL reprompts until valid URL",
+  async () => {
+    const dir = await createTempDir();
+    try {
+      // Step 1: Enter (Best Practice)
+      // Step 2: invalid URL -> valid URL
+      // Step 3: no .git -> init git? n
+      const { code, stdout } = await runInitCommand(
+        dir,
+        [],
+        "\nnot-a-url\nhttps://api.example.com\nn\n",
+        {
+          GLUBEAN_FORCE_INTERACTIVE: "1",
+        },
+      );
+      assertEquals(code, 0, "init command should succeed");
+      assertStringIncludes(stdout, "Invalid URL:");
+
+      const envContent = await Deno.readTextFile(join(dir, ".env"));
+      assertEquals(envContent.includes("BASE_URL=https://api.example.com"), true);
+    } finally {
+      await cleanupDir(dir);
+    }
+  },
+);
 
 Deno.test("init --minimal creates minimal files", async () => {
   const dir = await createTempDir();

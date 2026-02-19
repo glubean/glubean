@@ -83,6 +83,51 @@ function promptChoice(
   }
 }
 
+function validateBaseUrl(raw: string): { ok: true; value: string } | {
+  ok: false;
+  reason: string;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, reason: "URL cannot be empty." };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return {
+      ok: false,
+      reason: "Must be a valid absolute URL, for example: https://api.example.com",
+    };
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, reason: "Only http:// and https:// are supported." };
+  }
+
+  if (!parsed.hostname) {
+    return { ok: false, reason: "Hostname is required (for example: localhost)." };
+  }
+
+  const normalized = parsed.toString();
+  if (parsed.pathname === "/" && !parsed.search && !parsed.hash) {
+    return { ok: true, value: normalized.slice(0, -1) };
+  }
+  return { ok: true, value: normalized };
+}
+
+function validateBaseUrlOrExit(raw: string, source: string): string {
+  const result = validateBaseUrl(raw);
+  if (result.ok) return result.value;
+
+  console.error(
+    `Invalid base URL from ${source}: ${result.reason}\n` +
+      "Example: --base-url https://api.example.com",
+  );
+  Deno.exit(1);
+}
+
 // ---------------------------------------------------------------------------
 // File utilities
 // ---------------------------------------------------------------------------
@@ -410,18 +455,33 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
   // ── Step 2/3 — API Setup ─────────────────────────────────────────────────
 
-  let baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
+  let baseUrl = options.baseUrl
+    ? validateBaseUrlOrExit(options.baseUrl, "--base-url")
+    : DEFAULT_BASE_URL;
 
   if (interactive) {
     console.log(
       `\n${colors.dim}━━━ Step 2/3 — API Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
 
-    const urlInput = readLine(
-      `  Your API base URL ${colors.dim}(Enter for ${DEFAULT_BASE_URL})${colors.reset}`,
-    );
-    if (urlInput.trim()) {
-      baseUrl = urlInput.trim();
+    while (true) {
+      const urlInput = readLine(
+        `  Your API base URL ${colors.dim}(Enter for ${DEFAULT_BASE_URL})${colors.reset}`,
+      );
+      if (!urlInput.trim()) break;
+
+      const validated = validateBaseUrl(urlInput);
+      if (validated.ok) {
+        baseUrl = validated.value;
+        break;
+      }
+
+      console.log(
+        `  ${colors.yellow}⚠${colors.reset} Invalid URL: ${validated.reason}`,
+      );
+      console.log(
+        `  ${colors.dim}Try something like: https://api.example.com${colors.reset}\n`,
+      );
     }
     console.log(
       `\n  ${colors.green}✓${colors.reset} Base URL: ${colors.cyan}${baseUrl}${colors.reset}`,
