@@ -1206,6 +1206,12 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
               const configuredRetries = Number.isFinite(step.meta.retries)
                 ? Math.max(0, Math.floor(step.meta.retries ?? 0))
                 : 0;
+              const configuredStepTimeout = Number.isFinite(step.meta.timeout)
+                ? Math.floor(step.meta.timeout ?? 0)
+                : 0;
+              const stepTimeoutMs = configuredStepTimeout > 0
+                ? configuredStepTimeout
+                : undefined;
               const maxAttempts = configuredRetries + 1;
               let lastFailedAssertions = 0;
               let lastAssertions = 0;
@@ -1215,15 +1221,34 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 stepReturnState = undefined;
                 stepFailedAssertions = 0;
                 stepAssertionTotal = 0;
+                let stepTimeoutId: number | undefined;
 
                 try {
-                  const result = await step.fn(effectiveCtx, state);
+                  const stepResult = step.fn(effectiveCtx, state);
+                  const result = stepTimeoutMs === undefined
+                    ? await stepResult
+                    : await Promise.race([
+                      stepResult,
+                      new Promise<never>((_, reject) => {
+                        stepTimeoutId = setTimeout(() => {
+                          reject(
+                            new Error(
+                              `Step "${step.meta.name}" timed out after ${stepTimeoutMs}ms`,
+                            ),
+                          );
+                        }, stepTimeoutMs);
+                      }),
+                    ]);
                   if (result !== undefined) {
                     state = result;
                     stepReturnState = result;
                   }
                 } catch (err) {
                   stepError = err instanceof Error ? err.message : String(err);
+                } finally {
+                  if (stepTimeoutId !== undefined) {
+                    clearTimeout(stepTimeoutId);
+                  }
                 }
 
                 lastFailedAssertions = stepFailedAssertions;

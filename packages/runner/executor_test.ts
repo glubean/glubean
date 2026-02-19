@@ -788,6 +788,26 @@ export const stepRetryExhausted = test("step-retry-exhausted")
   .step("skipped after retries", async (ctx) => {
     ctx.log("this should not run");
   });
+
+export const stepTimeoutFail = test("step-timeout-fail")
+  .step("slow timed step", { timeout: 80 }, async (ctx) => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    ctx.assert(true, "should not reach");
+  })
+  .step("after timeout", async (ctx) => {
+    ctx.log("this should not run");
+  });
+
+let timeoutRetryAttempts = 0;
+export const stepTimeoutRetryPass = test("step-timeout-retry-pass")
+  .step("timeout then pass", { timeout: 80, retries: 1 }, async (ctx) => {
+    timeoutRetryAttempts += 1;
+    if (timeoutRetryAttempts === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 140));
+      return;
+    }
+    ctx.assert(true, "retry attempt should pass");
+  });
 `;
 
 async function createAutoBuildTestFile(): Promise<string> {
@@ -928,6 +948,66 @@ Deno.test("step retries - exhausted retries fail the step", async () => {
     l.message.includes('Retrying step "always failing with retry"')
   );
   assertEquals(retryLogs.length, 2, "Should log two retries");
+
+  await Deno.remove(testFile, { recursive: true });
+});
+
+Deno.test("step timeout - marks timed out step as failed", async () => {
+  const testFile = await createAutoBuildTestFile();
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "step-timeout-fail",
+    { vars: {}, secrets: {} },
+  );
+
+  assertEquals(result.success, false, "Step timeout should fail the test");
+  const ends = getStepEnds(result.events);
+  assertEquals(ends.length, 2);
+  assertEquals(ends[0].name, "slow timed step");
+  assertEquals(ends[0].status, "failed");
+  assertEquals(
+    ends[0].error?.includes('timed out after 80ms'),
+    true,
+    `Unexpected step timeout error: ${ends[0].error}`,
+  );
+  assertEquals(ends[1].name, "after timeout");
+  assertEquals(ends[1].status, "skipped");
+
+  await Deno.remove(testFile, { recursive: true });
+});
+
+Deno.test("step timeout - retries and passes on later attempt", async () => {
+  const testFile = await createAutoBuildTestFile();
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "step-timeout-retry-pass",
+    { vars: {}, secrets: {} },
+  );
+
+  assertEquals(
+    result.success,
+    true,
+    `Should pass after retrying timed out step: ${JSON.stringify(result.events)}`,
+  );
+  const ends = getStepEnds(result.events);
+  assertEquals(ends.length, 1);
+  assertEquals(ends[0].name, "timeout then pass");
+  assertEquals(ends[0].status, "passed");
+
+  const logs = result.events.filter(
+    (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
+  );
+  assertEquals(
+    logs.some((l) =>
+      l.message.includes('Retrying step "timeout then pass" (2/2)')
+    ),
+    true,
+    "Should log retry after timeout",
+  );
 
   await Deno.remove(testFile, { recursive: true });
 });
