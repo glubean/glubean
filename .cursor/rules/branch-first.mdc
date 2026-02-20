@@ -1,0 +1,30 @@
+---
+description: Always create a feature branch from latest remote main before making any code changes
+alwaysApply: true
+---
+
+# Branch-First Workflow
+
+**Before editing ANY file in this repository, you MUST:**
+
+1. Run `git fetch origin main` to get the latest remote state
+2. Run `git checkout -b <branch-name> origin/main` to create a new branch from remote main
+3. Only then start making changes
+
+This applies even if the user says "do it", "fix it", "make the change", etc. Never edit files while on `main`.
+
+## Branch naming
+
+- Bug fix: `fix/<short-description>`
+- Feature: `feat/<short-description>`
+- Docs: `docs/<short-description>`
+- Chore: `chore/<short-description>`
+
+## Exceptions
+
+- If the user explicitly says to work on an existing branch (e.g., "continue on branch X"), switch to that branch instead.
+- If you are already on a feature branch (not `main`), you may continue working on it.
+
+## How to check
+
+Run `git branch --show-current` first. If the output is `main`, you MUST create a new branch before editing.
