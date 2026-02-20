@@ -1253,3 +1253,33 @@ Deno.test("test.pick - registers tests in global registry", () => {
     Deno.env.delete("GLUBEAN_PICK");
   }
 });
+
+Deno.test("test.pick - sets groupId to template ID in registry", () => {
+  clearRegistry();
+  Deno.env.set("GLUBEAN_PICK", "normal,admin");
+
+  try {
+    test.pick(pickExamples)("pick-$_pick", async () => {});
+
+    const reg = getRegistry();
+    assertEquals(reg.length, 2);
+    assertEquals(reg[0].groupId, "pick-$_pick");
+    assertEquals(reg[1].groupId, "pick-$_pick");
+  } finally {
+    Deno.env.delete("GLUBEAN_PICK");
+  }
+});
+
+Deno.test("test.each - does not set groupId in registry", () => {
+  clearRegistry();
+
+  test.each([
+    { id: 1, name: "a" },
+    { id: 2, name: "b" },
+  ])("each-$id", async () => {});
+
+  const reg = getRegistry();
+  assertEquals(reg.length, 2);
+  assertEquals(reg[0].groupId, undefined);
+  assertEquals(reg[1].groupId, undefined);
+});

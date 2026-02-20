@@ -1581,4 +1581,10 @@ export interface RegisteredTestMeta {
   file?: string;
   /** Export name in the module */
   exportName?: string;
+  /**
+   * Trace grouping ID — the unresolved template ID for pick tests.
+   * When set, the CLI uses this as the trace directory name so all
+   * pick variants land in one directory for easy diffing.
+   */
+  groupId?: string;
 }

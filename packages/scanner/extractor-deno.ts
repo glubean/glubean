@@ -107,6 +107,7 @@ function processExport(name, value) {
     };
     if (value.meta.skip) entry.skip = true;
     if (value.meta.only) entry.only = true;
+    if (reg && reg.groupId) entry.groupId = reg.groupId;
     exports.push(entry);
     seenIds.add(value.meta.id);
   }
@@ -162,6 +163,7 @@ for (const reg of registry) {
     };
     if (reg.skip) entry.skip = true;
     if (reg.only) entry.only = true;
+    if (reg.groupId) entry.groupId = reg.groupId;
     exports.push(entry);
   }
 }
