@@ -678,17 +678,17 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     },
     {
       path: "tests/demo.test.ts",
-      content: () => readCliTemplate("demo.test.ts"),
+      content: () => readCliTemplate("demo.test.ts.tpl"),
       description: "Demo tests (rich output for dashboard preview)",
     },
     {
       path: "tests/data-driven.test.ts",
-      content: () => readCliTemplate("data-driven.test.ts"),
+      content: () => readCliTemplate("data-driven.test.ts.tpl"),
       description: "Data-driven test examples (JSON, CSV, YAML)",
     },
     {
       path: "tests/pick.test.ts",
-      content: () => readCliTemplate("pick.test.ts"),
+      content: () => readCliTemplate("pick.test.ts.tpl"),
       description: "Example selection with test.pick (inline + JSON)",
     },
     {
@@ -713,17 +713,17 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     },
     {
       path: "explore/api.test.ts",
-      content: () => readCliTemplate("minimal-api.test.ts"),
+      content: () => readCliTemplate("minimal-api.test.ts.tpl"),
       description: "Explore — GET and POST basics",
     },
     {
       path: "explore/search.test.ts",
-      content: () => readCliTemplate("minimal-search.test.ts"),
+      content: () => readCliTemplate("minimal-search.test.ts.tpl"),
       description: "Explore — parameterized search with test.pick",
     },
     {
       path: "explore/auth.test.ts",
-      content: () => readCliTemplate("minimal-auth.test.ts"),
+      content: () => readCliTemplate("minimal-auth.test.ts.tpl"),
       description: "Explore — multi-step auth flow",
     },
     {
@@ -883,17 +883,17 @@ async function initMinimal(overwrite: boolean): Promise<void> {
     },
     {
       path: "explore/api.test.ts",
-      content: () => readCliTemplate("minimal-api.test.ts"),
+      content: () => readCliTemplate("minimal-api.test.ts.tpl"),
       description: "GET and POST examples",
     },
     {
       path: "explore/search.test.ts",
-      content: () => readCliTemplate("minimal-search.test.ts"),
+      content: () => readCliTemplate("minimal-search.test.ts.tpl"),
       description: "Parameterized search with test.pick",
     },
     {
       path: "explore/auth.test.ts",
-      content: () => readCliTemplate("minimal-auth.test.ts"),
+      content: () => readCliTemplate("minimal-auth.test.ts.tpl"),
       description: "Multi-step auth flow (login → profile)",
     },
     {
