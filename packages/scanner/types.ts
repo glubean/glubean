@@ -28,6 +28,15 @@ export interface ExportMeta {
    * `test.each` from `test.pick` since both produce `EachBuilder` objects.
    */
   variant?: "each" | "pick";
+  /**
+   * Trace grouping ID — the unresolved template ID for pick tests.
+   * When set, the CLI uses this as the trace directory name so all
+   * pick variants share one directory for easy diffing.
+   *
+   * Populated by runtime extraction when the SDK sets `groupId` on
+   * registered test metadata (i.e., for `test.pick` tests).
+   */
+  groupId?: string;
   /** JavaScript export name (e.g., "myTest" or "default") */
   exportName: string;
   /** Source location */

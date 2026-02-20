@@ -79,6 +79,7 @@ Deno.test("extractWithDeno — test.each simple mode expands rows", async () => 
   assertExists(item2, "should discover 'item-2'");
   assertEquals(item1.exportName, "items");
   assertEquals(item2.exportName, "items");
+  assertEquals(item1.groupId, undefined, "each tests should not have groupId");
 });
 
 Deno.test("extractWithDeno — test.each builder mode expands rows", async () => {
@@ -98,6 +99,7 @@ Deno.test("extractWithDeno — test.pick", async () => {
   const picks = results.filter((r) => r.id.startsWith("p-"));
   assertEquals(picks.length >= 1, true, "should discover at least one test.pick test");
   assertEquals(picks[0].exportName, "pick");
+  assertEquals(picks[0].groupId, "p-$_pick", "pick tests should have groupId = template ID");
 });
 
 Deno.test("extractWithDeno — only flag propagated", async () => {

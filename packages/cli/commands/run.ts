@@ -79,6 +79,7 @@ interface CollectedTestRun {
   events: ExecutionEvent[];
   success: boolean;
   durationMs: number;
+  groupId?: string;
 }
 
 /** Aggregated run-level summary data from all summary events. */
@@ -245,6 +246,7 @@ interface DiscoveredTestMeta {
   timeout?: number;
   skip?: boolean;
   only?: boolean;
+  groupId?: string;
 }
 
 interface DiscoveredTest {
@@ -267,6 +269,7 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
       timeout: m.timeout,
       skip: m.skip,
       only: m.only,
+      groupId: m.groupId,
     },
   }));
 }
@@ -877,6 +880,7 @@ export async function runCommand(
       events: testEvents,
       success: finalSuccess,
       durationMs: duration,
+      groupId: testItem.meta.groupId,
     });
 
     // Add result entry for file output
@@ -1316,6 +1320,11 @@ function p2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
+/** Replace path-unsafe characters in test IDs used as file/directory names. */
+function sanitizeForPath(s: string): string {
+  return s.replace(/[/\\:*?"<>|]/g, "_");
+}
+
 /** Format a Date as a human-readable local time string. */
 function localTimeString(d: Date): string {
   return (
@@ -1340,10 +1349,10 @@ async function writeTraceFiles(
   traceLimit?: number,
 ): Promise<void> {
   const limit = traceLimit ?? TRACE_HISTORY_LIMIT;
-  // Timestamp in local time (compact, minute precision, sortable)
+  // Timestamp in local time (compact, second precision, sortable)
   const now = new Date();
   const ts = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}` +
-    `T${p2(now.getHours())}${p2(now.getMinutes())}`;
+    `T${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
   const envLabel = envFile || ".env";
 
   for (const run of collectedRuns) {
@@ -1385,18 +1394,22 @@ async function writeTraceFiles(
 
     if (pairs.length === 0) continue;
 
-    // .glubean/traces/{fileName}/{testId}/{timestamp}.trace.jsonc
+    // .glubean/traces/{fileName}/{dirId}/{filename}.trace.jsonc
+    // For pick tests, dirId = groupId (template) and filename includes testId.
+    // For other tests, dirId = testId and filename is just the timestamp.
     const fileName = basename(run.filePath).replace(/\.ts$/, "");
+    const dirId = sanitizeForPath(run.groupId ?? run.testId);
     const tracesDir = resolve(
       rootDir,
       ".glubean",
       "traces",
       fileName,
-      run.testId,
+      dirId,
     );
     await Deno.mkdir(tracesDir, { recursive: true });
 
-    const traceFilePath = resolve(tracesDir, `${ts}.trace.jsonc`);
+    const traceName = (run.groupId && run.groupId !== run.testId) ? `${ts}--${sanitizeForPath(run.testId)}` : ts;
+    const traceFilePath = resolve(tracesDir, `${traceName}.trace.jsonc`);
 
     // Build JSONC content with comment header
     const relFile = relative(rootDir, run.filePath);

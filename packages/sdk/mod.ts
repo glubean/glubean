@@ -870,6 +870,7 @@ export class EachBuilder<
       ...(s.meta.group ? { group: s.meta.group } : {}),
     }));
     const table = this._filteredTable();
+    const isPick = table.length > 0 && "_pick" in table[0];
     for (let i = 0; i < table.length; i++) {
       const row = table[i];
       const id = interpolateTemplate(this._baseMeta.id, row, i);
@@ -884,6 +885,7 @@ export class EachBuilder<
         steps: stepMetas,
         hasSetup: !!this._setup,
         hasTeardown: !!this._teardown,
+        ...(isPick ? { groupId: this._baseMeta.id } : {}),
       });
     }
   }
@@ -1176,6 +1178,7 @@ function createExtendedTest<Ctx extends TestContext>(
         : table;
       const tagFieldNames = toArray(baseMeta.tagFields);
       const staticTags = toArray(baseMeta.tags);
+      const isPick = filteredTable.length > 0 && "_pick" in filteredTable[0];
 
       return filteredTable.map((row, index) => {
         const id = interpolateTemplate(baseMeta.id, row, index);
@@ -1208,6 +1211,7 @@ function createExtendedTest<Ctx extends TestContext>(
           type: "simple",
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
+          ...(isPick ? { groupId: baseMeta.id } : {}),
         });
 
         return testDef;
@@ -1312,6 +1316,7 @@ export namespace test {
 
       const tagFieldNames = toArray(baseMeta.tagFields);
       const staticTags = toArray(baseMeta.tags);
+      const isPick = filteredTable.length > 0 && "_pick" in filteredTable[0];
 
       // Simple mode: with callback → return Test[]
       return filteredTable.map((row, index) => {
@@ -1346,6 +1351,7 @@ export namespace test {
           type: "simple",
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
+          ...(isPick ? { groupId: baseMeta.id } : {}),
         });
 
         return testDef;
