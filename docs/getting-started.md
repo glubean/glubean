@@ -129,10 +129,26 @@ environment.
 
 Locally, `.env` files still take precedence, so nothing changes for development.
 
+## Import Convention
+
+Always import from the `@glubean/sdk` alias defined in your `deno.json`, not from a hardcoded JSR URL:
+
+```typescript
+// ✅ Correct
+import { test } from "@glubean/sdk";
+
+// ❌ Wrong — breaks tooling features
+import { test } from "jsr:@glubean/sdk@^0.11.0";
+```
+
+The `deno.json` import map handles version resolution. Using the alias ensures your test code works correctly with
+Glubean tooling (scanner, trace grouping, VS Code extension).
+
 ## Next Steps
 
 - [Assertions & Validation](guides/assertions.md) — `ctx.expect`, `ctx.assert`, `ctx.warn`, schema validation
 - [Data-Driven Tests](guides/data-loading.md) — CSV, YAML, JSON, directory-based test data
 - [AI Agent / MCP](guides/mcp.md) — Set up the MCP server for Cursor
+- [Releasing Packages](guides/releasing.md) — Version bumping, cross-repo coordination, template maintenance
 - [SDK Reference](reference/sdk.md) — Full API reference
 - [Event Reference](reference/events.md) — Runner event types

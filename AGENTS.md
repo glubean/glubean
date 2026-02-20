@@ -13,6 +13,49 @@ Glubean OSS is a Deno-based monorepo containing the core runner technology.
 - **VSCode Extension:** `packages/vscode` (Node.js + esbuild)
 - **Setup:** `deno task setup` (enables pre-commit hooks for format + type checking)
 
+## Package Dependency Graph
+
+The monorepo packages have internal dependencies. When changing a package's **public exports** (add, remove, or rename),
+all downstream dependents must be version-bumped in the same PR.
+
+```
+sdk ← scanner ← cli
+sdk ← runner  ← cli
+```
+
+### Pre-merge version checklist
+
+1. Does any changed package add, remove, or rename an export?
+2. If yes — grep downstream packages for that symbol.
+3. Bump **all** affected packages' `deno.json` versions in the same PR so `auto-patch` publishes them together.
+4. Run `deno check` across the workspace before pushing to catch missing-export errors early.
+
+Failing to bump a downstream package means the published version will import a symbol that doesn't exist on JSR yet,
+causing `SyntaxError: does not provide an export` for every user.
+
+## Import Path Rule (Critical)
+
+Test files (both templates and user projects) **must** use the import map alias, never a hardcoded JSR URL:
+
+```typescript
+// ✅ Correct — uses the alias defined in deno.json
+import { test } from "@glubean/sdk";
+
+// ❌ Wrong — hardcoded URL, may resolve to a different module instance
+import { test } from "jsr:@glubean/sdk@^X.Y.Z";
+```
+
+**Why this matters:** The scanner runs a subprocess that imports `@glubean/sdk/internal` via the import map. If the test
+file uses a hardcoded JSR URL, Deno may resolve it to a different module instance, creating two separate registries.
+Features that rely on the shared registry (e.g., `groupId` for trace grouping) silently break — tests still pass, but
+tooling features stop working.
+
+This rule applies to:
+
+- `packages/cli/templates/*.test.ts` — scaffolded test files
+- `packages/cli/templates/AGENTS.md` — code examples the user's AI will copy
+- Documentation and examples in `docs/`
+
 ## AI-Friendly Coding Standards
 
 When writing code in `packages/sdk`, you must follow these rules to ensure the code is consumable by _other_ AI agents
