@@ -1,5 +1,20 @@
 # Glubean Test Project — AI Agent Guidelines
 
+## Import Convention
+
+Always use the import map alias defined in `deno.json`, never hardcoded JSR URLs:
+
+```typescript
+// ✅ Correct
+import { test } from "@glubean/sdk";
+
+// ❌ Wrong — breaks tooling features like trace grouping
+import { test } from "jsr:@glubean/sdk@^X.Y.Z";
+```
+
+The alias ensures your test code and Glubean's internal tooling (scanner, trace writer) share the same SDK module
+instance. Hardcoded URLs can cause a module-instance split where features silently stop working.
+
 ## Test Patterns — Builder vs Simple
 
 **Rule: 2+ steps → MUST use builder API. Single request → simple API is fine.**
