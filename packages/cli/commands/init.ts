@@ -230,14 +230,14 @@ function makeDenoJson(_baseUrl: string): string {
           "@glubean/sdk": SDK_IMPORT,
         },
         tasks: {
-          test: "deno run -A jsr:@glubean/cli run",
-          "test:verbose": "deno run -A jsr:@glubean/cli run --verbose",
-          "test:staging": "deno run -A jsr:@glubean/cli run --env-file .env.staging",
-          "test:log": "deno run -A jsr:@glubean/cli run --log-file",
-          explore: "deno run -A jsr:@glubean/cli run --explore",
-          "explore:verbose": "deno run -A jsr:@glubean/cli run --explore --verbose",
-          scan: "deno run -A jsr:@glubean/cli scan",
-          "validate-metadata": "deno run -A jsr:@glubean/cli validate-metadata",
+          test: "glubean run",
+          "test:verbose": "glubean run --verbose",
+          "test:staging": "glubean run --env-file .env.staging",
+          "test:log": "glubean run --log-file",
+          explore: "glubean run --explore",
+          "explore:verbose": "glubean run --explore --verbose",
+          scan: "glubean scan",
+          "validate-metadata": "glubean validate-metadata",
         },
         glubean: {
           run: {
@@ -308,7 +308,7 @@ const GITIGNORE = `# Secrets (all env-specific secrets files)
 const PRE_COMMIT_HOOK = `#!/bin/sh
 set -e
 
-deno run -A jsr:@glubean/cli scan
+glubean scan
 
 if [ -n "$(git diff --name-only -- metadata.json)" ]; then
   echo "metadata.json updated. Please git add metadata.json"
@@ -319,7 +319,7 @@ fi
 const PRE_PUSH_HOOK = `#!/bin/sh
 set -e
 
-deno run -A jsr:@glubean/cli validate-metadata
+glubean validate-metadata
 `;
 
 const GITHUB_ACTION_METADATA = `name: Glubean Metadata
@@ -340,8 +340,10 @@ jobs:
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v2.x
+      - name: Install CLI
+        run: deno install -Agf -n glubean jsr:@glubean/cli
       - name: Generate metadata.json
-        run: deno run -A jsr:@glubean/cli scan
+        run: glubean scan
       - name: Verify metadata.json
         run: git diff --exit-code metadata.json
 `;
@@ -370,8 +372,11 @@ jobs:
           echo "USERNAME=\${{ secrets.USERNAME }}" >> .env.secrets
           echo "PASSWORD=\${{ secrets.PASSWORD }}" >> .env.secrets
 
+      - name: Install CLI
+        run: deno install -Agf -n glubean jsr:@glubean/cli
+
       - name: Run tests
-        run: deno run -A jsr:@glubean/cli run --fail-fast --reporter junit --result-json
+        run: glubean run --ci --result-json
 
       - name: Upload results
         if: always()
@@ -392,8 +397,8 @@ const MINIMAL_DENO_JSON = `{
     "@glubean/sdk": "${SDK_IMPORT}"
   },
   "tasks": {
-    "explore": "deno run -A jsr:@glubean/cli run --explore --verbose",
-    "scan": "deno run -A jsr:@glubean/cli scan"
+    "explore": "glubean run --explore --verbose",
+    "scan": "glubean scan"
   },
   "glubean": {
     "run": {

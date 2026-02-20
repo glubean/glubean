@@ -90,8 +90,8 @@ cli
   .option("--fail-fast", "Stop on first test failure")
   .option("--fail-after <count:number>", "Stop after N test failures")
   .option(
-    "--result-json",
-    "Write structured results to .result.json (open glubean.com/viewer to visualize)",
+    "--result-json [path:string]",
+    "Write structured results to .result.json (or custom path)",
   )
   .option(
     "--emit-full-trace",
@@ -112,11 +112,15 @@ cli
   )
   .option(
     "--reporter <format:string>",
-    'Output format: "junit" for JUnit XML (writes .junit.xml alongside results)',
+    'Output format: "junit" or "junit:/path/to/output.xml"',
   )
   .option(
     "--trace-limit <count:number>",
     "Max trace files to keep per test (default: 20)",
+  )
+  .option(
+    "--ci",
+    "CI mode: enables --fail-fast and --reporter junit",
   )
   .action(async (options, target?: string) => {
     // Flatten --config values: support both comma-separated and repeated flags
@@ -136,6 +140,23 @@ cli
       resolvedTarget = options.explore ? config.run.exploreDir : config.run.testDir;
     }
 
+    // --ci implies --fail-fast and --reporter junit
+    const isCi = options.ci === true;
+    const failFast = options.failFast || isCi;
+    let reporter = options.reporter;
+    let reporterPath: string | undefined;
+    if (!reporter && isCi) {
+      reporter = "junit";
+    }
+    // Parse "junit:/path/to/file.xml" syntax
+    if (reporter && reporter.startsWith("junit:")) {
+      reporterPath = reporter.slice("junit:".length);
+      reporter = "junit";
+    }
+
+    // --result-json: true (boolean flag), string (custom path), or undefined
+    const resultJson = options.resultJson;
+
     await runCommand(resolvedTarget, {
       filter: options.filter,
       pick: options.pick,
@@ -145,13 +166,14 @@ cli
       logFile: options.logFile,
       pretty: options.pretty,
       verbose: options.verbose,
-      failFast: options.failFast,
+      failFast,
       failAfter: options.failAfter,
-      resultJson: options.resultJson,
+      resultJson,
       emitFullTrace: options.emitFullTrace,
       configFiles,
       inspectBrk: options.inspectBrk,
-      reporter: options.reporter,
+      reporter,
+      reporterPath,
       traceLimit: options.traceLimit,
     });
   });

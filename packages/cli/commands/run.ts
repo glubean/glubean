@@ -4,7 +4,7 @@ import {
   TestExecutor,
   toSingleExecutionOptions,
 } from "@glubean/runner";
-import { basename, relative, resolve, toFileUrl } from "@std/path";
+import { basename, dirname, relative, resolve, toFileUrl } from "@std/path";
 import { parse as parseDotenv } from "@std/dotenv/parse";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.ts";
 import { walk } from "@std/fs/walk";
@@ -56,16 +56,18 @@ interface RunOptions {
   failFast?: boolean;
   /** Stop after N test failures */
   failAfter?: number;
-  /** Write structured results to <testfile>.result.json for visualization */
-  resultJson?: boolean;
+  /** Write structured results — true for default path, string for custom path */
+  resultJson?: boolean | string;
   /** Emit full HTTP request/response headers and bodies in trace events */
   emitFullTrace?: boolean;
   /** Config file paths from --config (undefined = auto-read deno.json) */
   configFiles?: string[];
   /** Enable V8 Inspector for debugging (port number or true for default 9229) */
   inspectBrk?: number | boolean;
-  /** Output reporter format: "junit" writes JUnit XML */
+  /** Output reporter format, optionally with custom path: "junit" or "junit:/path/to/output.xml" */
   reporter?: string;
+  /** Custom path for JUnit XML output (parsed from --reporter junit:<path>) */
+  reporterPath?: string;
   /** Max trace files to keep per test (default: 20) */
   traceLimit?: number;
 }
@@ -1153,34 +1155,48 @@ export async function runCommand(
     }
   }
 
-  // ── Result JSON output (hidden flag) ────────────────────────────────────
+  // ── Result JSON output ───────────────────────────────────────────────────
+  // Always write .glubean/last-run.json for tooling (VS Code, viewer).
+  // When --result-json is set, also write to the explicit/default path.
+  const resultPayload = {
+    target,
+    files: testFiles.map((f) => relative(Deno.cwd(), f)),
+    runAt: runStartLocal,
+    summary: {
+      total: passed + failed + skipped,
+      passed,
+      failed,
+      skipped,
+      durationMs: totalDurationMs,
+      stats: runStats,
+    },
+    tests: collectedRuns.map((r) => ({
+      testId: r.testId,
+      testName: r.testName,
+      tags: r.tags,
+      success: r.success,
+      durationMs: r.durationMs,
+      events: r.events,
+    })),
+  };
+  const resultJson = JSON.stringify(resultPayload, null, 2);
+
+  try {
+    const glubeanDir = resolve(rootDir, ".glubean");
+    await Deno.mkdir(glubeanDir, { recursive: true });
+    await Deno.writeTextFile(resolve(glubeanDir, "last-run.json"), resultJson);
+  } catch {
+    // Non-critical
+  }
+
   if (options.resultJson) {
-    // resultJson stays as a direct CLI flag (not in config)
-    const resultPath = isMultiFile
+    const resultPath = typeof options.resultJson === "string"
+      ? resolve(options.resultJson)
+      : isMultiFile
       ? resolve(Deno.cwd(), "glubean-run.result.json")
       : getLogFilePath(testFiles[0]).replace(/\.log$/, ".result.json");
-    const result = {
-      target,
-      files: testFiles.map((f) => relative(Deno.cwd(), f)),
-      runAt: runStartLocal,
-      summary: {
-        total: passed + failed + skipped,
-        passed,
-        failed,
-        skipped,
-        durationMs: totalDurationMs,
-        stats: runStats,
-      },
-      tests: collectedRuns.map((r) => ({
-        testId: r.testId,
-        testName: r.testName,
-        tags: r.tags,
-        success: r.success,
-        durationMs: r.durationMs,
-        events: r.events,
-      })),
-    };
-    await Deno.writeTextFile(resultPath, JSON.stringify(result, null, 2));
+    await Deno.mkdir(dirname(resultPath), { recursive: true });
+    await Deno.writeTextFile(resultPath, resultJson);
     console.log(`${colors.dim}Result written to: ${resultPath}${colors.reset}`);
     console.log(
       `${colors.dim}Open ${colors.reset}${colors.cyan}https://glubean.com/viewer${colors.reset}${colors.dim} to visualize it${colors.reset}\n`,
@@ -1189,7 +1205,9 @@ export async function runCommand(
 
   // ── JUnit XML output ───────────────────────────────────────────────────
   if (options.reporter === "junit") {
-    const junitPath = isMultiFile
+    const junitPath = options.reporterPath
+      ? resolve(options.reporterPath)
+      : isMultiFile
       ? resolve(Deno.cwd(), "glubean-run.junit.xml")
       : getLogFilePath(testFiles[0]).replace(/\.log$/, ".junit.xml");
     const summaryData = {
@@ -1200,6 +1218,7 @@ export async function runCommand(
       durationMs: totalDurationMs,
     };
     const xml = toJunitXml(collectedRuns, target, summaryData);
+    await Deno.mkdir(dirname(junitPath), { recursive: true });
     await Deno.writeTextFile(junitPath, xml);
     console.log(
       `${colors.dim}JUnit XML written to: ${junitPath}${colors.reset}\n`,
