@@ -7,6 +7,7 @@
  */
 
 import cliDenoJson from "../deno.json" with { type: "json" };
+import { Confirm, Input, Select } from "@cliffy/prompt";
 
 const colors = {
   reset: "\x1b[0m",
@@ -26,6 +27,16 @@ function isInteractive(): boolean {
 }
 
 /**
+ * True when running in a real TTY (not piped stdin).
+ * Cliffy prompts (arrow-key selection) only work in a real TTY.
+ * Piped stdin (used by tests with GLUBEAN_FORCE_INTERACTIVE=1) falls back
+ * to the plain readLine-based helpers.
+ */
+function useFancyPrompts(): boolean {
+  return Deno.stdin.isTerminal();
+}
+
+/**
  * Read a line from stdin. Works correctly with both TTY and piped input.
  * Uses Deno's built-in prompt() for TTY (shows prompt text, handles backspace).
  * Falls back to manual stdin read for piped input (prompt() ignores piped data).
@@ -34,22 +45,24 @@ function readLine(message: string): string {
   if (Deno.stdin.isTerminal()) {
     return prompt(message) ?? "";
   }
-  // Piped stdin: write prompt to stdout, read one byte at a time until newline
   const encoder = new TextEncoder();
   Deno.stdout.writeSync(encoder.encode(message + " "));
   const buf = new Uint8Array(1);
   const line: number[] = [];
   while (true) {
     const n = Deno.stdin.readSync(buf);
-    if (n === null || n === 0) break; // EOF
-    if (buf[0] === 0x0a) break; // newline — done
-    if (buf[0] !== 0x0d) line.push(buf[0]); // skip CR
+    if (n === null || n === 0) break;
+    if (buf[0] === 0x0a) break;
+    if (buf[0] !== 0x0d) line.push(buf[0]);
   }
   Deno.stdout.writeSync(encoder.encode("\n"));
   return new TextDecoder().decode(new Uint8Array(line));
 }
 
-function promptYesNo(question: string, defaultYes: boolean): boolean {
+async function promptYesNo(question: string, defaultYes: boolean): Promise<boolean> {
+  if (useFancyPrompts()) {
+    return await Confirm.prompt({ message: question, default: defaultYes });
+  }
   const hint = defaultYes ? "[Y/n]" : "[y/N]";
   while (true) {
     const input = readLine(`${question} ${hint}`);
@@ -60,11 +73,21 @@ function promptYesNo(question: string, defaultYes: boolean): boolean {
   }
 }
 
-function promptChoice(
+async function promptChoice(
   question: string,
   options: { key: string; label: string; desc: string }[],
   defaultKey: string,
-): string {
+): Promise<string> {
+  if (useFancyPrompts()) {
+    return await Select.prompt({
+      message: question,
+      options: options.map((o) => ({
+        name: `${o.label}  ${colors.dim}${o.desc}${colors.reset}`,
+        value: o.key,
+      })),
+      default: defaultKey,
+    });
+  }
   console.log(`  ${question}\n`);
   for (const opt of options) {
     const marker = opt.key === defaultKey ? `${colors.green}❯${colors.reset}` : " ";
@@ -433,7 +456,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     console.log(
       `${colors.dim}━━━ Step 1/3 — Project Type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
-    const choice = promptChoice(
+    const choice = await promptChoice(
       "What would you like to create?",
       [
         {
@@ -459,8 +482,8 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       console.log(
         `\n  ${colors.yellow}⚠${colors.reset} Existing Glubean files detected in this directory.\n`,
       );
-      const overwrite = promptYesNo(
-        "  Overwrite existing files?",
+      const overwrite = await promptYesNo(
+        "Overwrite existing files?",
         false,
       );
       if (overwrite) {
@@ -487,24 +510,40 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       `\n${colors.dim}━━━ Step 2/3 — API Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
 
-    while (true) {
-      const urlInput = readLine(
-        `  Your API base URL ${colors.dim}(Enter for ${DEFAULT_BASE_URL})${colors.reset}`,
-      );
-      if (!urlInput.trim()) break;
-
-      const validated = validateBaseUrl(urlInput);
-      if (validated.ok) {
-        baseUrl = validated.value;
-        break;
+    if (useFancyPrompts()) {
+      const urlInput = await Input.prompt({
+        message: "Your API base URL",
+        default: DEFAULT_BASE_URL,
+        validate: (value) => {
+          if (!value.trim()) return true;
+          const result = validateBaseUrl(value);
+          return result.ok || result.reason;
+        },
+      });
+      if (urlInput.trim() && urlInput !== DEFAULT_BASE_URL) {
+        const validated = validateBaseUrl(urlInput);
+        if (validated.ok) baseUrl = validated.value;
       }
+    } else {
+      while (true) {
+        const urlInput = readLine(
+          `  Your API base URL ${colors.dim}(Enter for ${DEFAULT_BASE_URL})${colors.reset}`,
+        );
+        if (!urlInput.trim()) break;
 
-      console.log(
-        `  ${colors.yellow}⚠${colors.reset} Invalid URL: ${validated.reason}`,
-      );
-      console.log(
-        `  ${colors.dim}Try something like: https://api.example.com${colors.reset}\n`,
-      );
+        const validated = validateBaseUrl(urlInput);
+        if (validated.ok) {
+          baseUrl = validated.value;
+          break;
+        }
+
+        console.log(
+          `  ${colors.yellow}⚠${colors.reset} Invalid URL: ${validated.reason}`,
+        );
+        console.log(
+          `  ${colors.dim}Try something like: https://api.example.com${colors.reset}\n`,
+        );
+      }
     }
     console.log(
       `\n  ${colors.green}✓${colors.reset} Base URL: ${colors.cyan}${baseUrl}${colors.reset}`,
@@ -526,8 +565,8 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       console.log(
         `  ${colors.yellow}⚠${colors.reset} No Git repository detected\n`,
       );
-      const initGit = promptYesNo(
-        "  Initialize Git repository? (recommended — enables hooks, CI, and glubean diff)",
+      const initGit = await promptYesNo(
+        "Initialize Git repository? (recommended — enables hooks, CI, and glubean diff)",
         true,
       );
       if (initGit) {
@@ -563,14 +602,14 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
     if (hasGit) {
       if (enableHooks === undefined) {
-        enableHooks = promptYesNo(
-          "  Enable Git hooks? (auto-updates metadata.json on commit)",
+        enableHooks = await promptYesNo(
+          "Enable Git hooks? (auto-updates metadata.json on commit)",
           true,
         );
       }
       if (enableActions === undefined) {
-        enableActions = promptYesNo(
-          "  Enable GitHub Actions? (CI verifies metadata.json on PR)",
+        enableActions = await promptYesNo(
+          "Enable GitHub Actions? (CI verifies metadata.json on PR)",
           true,
         );
       }

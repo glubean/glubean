@@ -13,6 +13,7 @@
     "@glubean/scanner": "jsr:@glubean/scanner@^0.11.0",
     "@glubean/redaction": "jsr:@glubean/redaction@^0.11.0",
     "@cliffy/command": "jsr:@cliffy/command@^1.0.0-rc.8",
+    "@cliffy/prompt": "jsr:@cliffy/prompt@^1.0.0-rc.8",
     "@std/cli": "jsr:@std/cli@^1.0.0",
     "@std/path": "jsr:@std/path@^1.0.0",
     "@std/fs": "jsr:@std/fs@^1.0.0",
