@@ -709,19 +709,43 @@ let httpErrorTotal = 0;
 // deno-lint-ignore no-explicit-any
 let lastRequestBody: any = undefined;
 
-/** Max serialized body size (bytes) to include in trace events. */
-const TRACE_BODY_MAX_SIZE = 10_240; // 10KB
+/** Max serialized body size (chars) to include in trace events. */
+const TRACE_BODY_MAX_SIZE = 1_048_576; // 1MB
 
 /**
- * Truncate a value's JSON representation if it exceeds the size limit.
- * Returns the original value if within limits, otherwise a truncated string.
+ * Truncate a response body if its JSON representation exceeds the size limit.
+ * Preserves structure: arrays are sliced and a count annotation is appended
+ * so the trace file stays valid JSON and diffable.
  */
 // deno-lint-ignore no-explicit-any
 function truncateBody(body: any): any {
   try {
     const json = JSON.stringify(body);
     if (json.length <= TRACE_BODY_MAX_SIZE) return body;
-    return json.slice(0, TRACE_BODY_MAX_SIZE) + "... (truncated)";
+
+    if (typeof body === "object" && body !== null) {
+      // For arrays, keep first few items + count
+      if (Array.isArray(body)) {
+        const preview = body.slice(0, 3);
+        return [...preview, `(${body.length - 3} more items truncated)`];
+      }
+      // For objects with large array values, truncate those arrays
+      const pruned: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(body)) {
+        if (Array.isArray(value) && value.length > 3) {
+          pruned[key] = [
+            ...value.slice(0, 3),
+            `(${value.length - 3} more items truncated)`,
+          ];
+        } else {
+          pruned[key] = value;
+        }
+      }
+      const rechecked = JSON.stringify(pruned);
+      if (rechecked.length <= TRACE_BODY_MAX_SIZE * 1.5) return pruned;
+    }
+
+    return { _truncated: true, _sizeBytes: json.length };
   } catch {
     return "(non-serializable)";
   }
