@@ -39,7 +39,7 @@ import createUserExamples from "../data/create-user.json" with { type: "json" };
  */
 export const searchProducts = test.pick({
   "by-name": { q: "phone", minPrice: 0, expected: "phone" },
-  "by-category": { q: "laptops", minPrice: 500, expected: "laptop" },
+  "by-category": { q: "laptop", minPrice: 500, expected: "laptop" },
   "empty-query": { q: "", minPrice: 0, expected: "" },
 })(
   "search-products-$_pick",
