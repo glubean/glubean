@@ -346,6 +346,26 @@ function resolveOutputPath(userPath: string, cwd: string): string {
   return resolved;
 }
 
+async function writeEmptyResult(target: string, runAt: string): Promise<void> {
+  const payload = {
+    target,
+    files: [],
+    runAt,
+    summary: { total: 0, passed: 0, failed: 0, skipped: 0, durationMs: 0, stats: {} },
+    tests: [],
+  };
+  try {
+    const glubeanDir = resolve(Deno.cwd(), ".glubean");
+    await Deno.mkdir(glubeanDir, { recursive: true });
+    await Deno.writeTextFile(
+      resolve(glubeanDir, "last-run.result.json"),
+      JSON.stringify(payload, null, 2),
+    );
+  } catch {
+    // Non-critical
+  }
+}
+
 /**
  * Run tests from a file, directory, or glob pattern with pretty output.
  */
@@ -381,6 +401,7 @@ export async function runCommand(
     console.error(
       `${colors.dim}Make sure *.test.ts files import from @glubean/sdk${colors.reset}\n`,
     );
+    await writeEmptyResult(target, runStartLocal);
     Deno.exit(1);
   }
 
