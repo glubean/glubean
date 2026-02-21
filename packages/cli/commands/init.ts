@@ -234,7 +234,7 @@ function makeDenoJson(_baseUrl: string): string {
           "test:verbose": "glubean run --verbose",
           "test:staging": "glubean run --env-file .env.staging",
           "test:log": "glubean run --log-file",
-          ci: "glubean run --ci --result-json",
+          "test:ci": "glubean run --ci --result-json",
           explore: "glubean run --explore",
           "explore:verbose": "glubean run --explore --verbose",
           scan: "glubean scan",
