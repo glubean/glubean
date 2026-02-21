@@ -1180,7 +1180,7 @@ export async function runCommand(
   }
 
   // ── Result JSON output ───────────────────────────────────────────────────
-  // Always write .glubean/last-run.json for tooling (VS Code, viewer).
+  // Always write .glubean/last-run.result.json for tooling (VS Code, viewer).
   // When --result-json is set, also write to the explicit/default path.
   const resultPayload = {
     target,
@@ -1208,7 +1208,7 @@ export async function runCommand(
   try {
     const glubeanDir = resolve(rootDir, ".glubean");
     await Deno.mkdir(glubeanDir, { recursive: true });
-    await Deno.writeTextFile(resolve(glubeanDir, "last-run.json"), resultJson);
+    await Deno.writeTextFile(resolve(glubeanDir, "last-run.result.json"), resultJson);
   } catch {
     // Non-critical
   }
