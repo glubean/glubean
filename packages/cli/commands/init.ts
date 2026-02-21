@@ -234,6 +234,7 @@ function makeDenoJson(_baseUrl: string): string {
           "test:verbose": "glubean run --verbose",
           "test:staging": "glubean run --env-file .env.staging",
           "test:log": "glubean run --log-file",
+          "test:ci": "glubean run --ci --result-json",
           explore: "glubean run --explore",
           "explore:verbose": "glubean run --explore --verbose",
           scan: "glubean scan",
@@ -889,6 +890,11 @@ async function initMinimal(overwrite: boolean): Promise<void> {
       path: "README.md",
       content: () => readCliTemplate("minimal/README.md"),
       description: "Project README",
+    },
+    {
+      path: "tests/demo.test.ts",
+      content: () => readCliTemplate("demo.test.ts.tpl"),
+      description: "Demo tests (GET, POST, auth flow, pagination)",
     },
     {
       path: "explore/api.test.ts",
