@@ -7,6 +7,15 @@
   },
   "license": "MIT",
   "description": "Glubean Worker - Self-hosted test execution agent",
+  "publish": {
+    "exclude": [
+      "*_test.ts",
+      "testdata/",
+      "P0_FIXES.md",
+      "P1_FIXES.md",
+      "REVIEW.md"
+    ]
+  },
   "tasks": {
     "start": "deno run -A cli.ts",
     "dev": "deno run --watch -A cli.ts"

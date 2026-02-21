@@ -4,6 +4,13 @@
   "exports": "./mod.ts",
   "license": "MIT",
   "description": "Glubean Runner - Test executor with sandboxed Deno subprocess",
+  "publish": {
+    "exclude": [
+      "*_test.ts",
+      "testdata/",
+      "IMPROVEMENTS.md"
+    ]
+  },
   "imports": {
     "@glubean/sdk": "jsr:@glubean/sdk@^0.11.0",
     "@std/cli": "jsr:@std/cli@^1.0.0",
