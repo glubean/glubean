@@ -552,8 +552,8 @@ Deno.test("init --minimal creates minimal files", async () => {
       true,
     );
 
-    // Standard test files should NOT exist
-    assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), false);
+    // tests/ has demo but no standard-only files
+    assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), true);
     assertEquals(await fileExists(join(dir, "AGENTS.md")), false);
 
     // Verify deno.json has explore and test tasks
