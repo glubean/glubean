@@ -4,7 +4,7 @@ import {
   TestExecutor,
   toSingleExecutionOptions,
 } from "@glubean/runner";
-import { basename, dirname, relative, resolve, toFileUrl } from "@std/path";
+import { basename, dirname, isAbsolute, relative, resolve, toFileUrl } from "@std/path";
 import { parse as parseDotenv } from "@std/dotenv/parse";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.ts";
 import { walk } from "@std/fs/walk";
@@ -320,6 +320,30 @@ interface FileTest {
   filePath: string;
   exportName: string;
   test: DiscoveredTest;
+}
+
+/**
+ * Resolve a user-supplied output path safely.
+ *
+ * - Absolute paths are returned as-is (the caller explicitly chose the location).
+ * - Relative paths are resolved from `cwd` and then validated to ensure they do
+ *   not escape the project directory via `..` traversal sequences.
+ *
+ * Throws if a relative path would resolve outside `cwd`.
+ */
+function resolveOutputPath(userPath: string, cwd: string): string {
+  if (isAbsolute(userPath)) {
+    return resolve(userPath);
+  }
+  const resolved = resolve(cwd, userPath);
+  const rel = relative(cwd, resolved);
+  if (rel.startsWith("..")) {
+    throw new Error(
+      `Output path "${userPath}" escapes the project directory. ` +
+        `Use an absolute path to write outside the project (e.g. /tmp/output.json).`,
+    );
+  }
+  return resolved;
 }
 
 /**
@@ -1191,7 +1215,7 @@ export async function runCommand(
 
   if (options.resultJson) {
     const resultPath = typeof options.resultJson === "string"
-      ? resolve(options.resultJson)
+      ? resolveOutputPath(options.resultJson, Deno.cwd())
       : isMultiFile
       ? resolve(Deno.cwd(), "glubean-run.result.json")
       : getLogFilePath(testFiles[0]).replace(/\.log$/, ".result.json");
@@ -1206,7 +1230,7 @@ export async function runCommand(
   // ── JUnit XML output ───────────────────────────────────────────────────
   if (options.reporter === "junit") {
     const junitPath = options.reporterPath
-      ? resolve(options.reporterPath)
+      ? resolveOutputPath(options.reporterPath, Deno.cwd())
       : isMultiFile
       ? resolve(Deno.cwd(), "glubean-run.junit.xml")
       : getLogFilePath(testFiles[0]).replace(/\.log$/, ".junit.xml");
