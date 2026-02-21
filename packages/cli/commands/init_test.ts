@@ -596,8 +596,8 @@ Deno.test("init interactive - choose minimal", async () => {
       true,
     );
 
-    // Standard test files should NOT exist
-    assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), false);
+    // Minimal now scaffolds tests/demo.test.ts
+    assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), true);
 
     const envContent = await Deno.readTextFile(join(dir, ".env"));
     assertEquals(envContent.includes("dummyjson.com"), true);
