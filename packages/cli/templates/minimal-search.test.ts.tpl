@@ -6,8 +6,8 @@
  * click a specific example to run.
  *
  * Run all:      deno task explore
- * Pick one:     deno run -A jsr:@glubean/cli run explore/search.test.ts --pick by-name
- * Pick another: deno run -A jsr:@glubean/cli run explore/search.test.ts --pick no-results
+ * Pick one:     glubean run explore/search.test.ts --pick by-name
+ * Pick another: glubean run explore/search.test.ts --pick no-results
  */
 import { test } from "@glubean/sdk";
 import examples from "../data/search-examples.json" with { type: "json" };

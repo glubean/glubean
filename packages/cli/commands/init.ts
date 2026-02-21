@@ -397,6 +397,9 @@ const MINIMAL_DENO_JSON = `{
     "@glubean/sdk": "${SDK_IMPORT}"
   },
   "tasks": {
+    "test": "glubean run",
+    "test:verbose": "glubean run --verbose",
+    "test:ci": "glubean run --ci --result-json",
     "explore": "glubean run --explore --verbose",
     "scan": "glubean scan"
   },
@@ -404,6 +407,7 @@ const MINIMAL_DENO_JSON = `{
     "run": {
       "verbose": true,
       "pretty": true,
+      "testDir": "./tests",
       "exploreDir": "./explore"
     }
   }
