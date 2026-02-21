@@ -87,7 +87,7 @@ glubean run --env-file .env.production
 Or add a task in `deno.json`:
 
 ```json
-"test:production": "deno run -A jsr:@glubean/cli run --env-file .env.production"
+"test:production": "glubean run --env-file .env.production"
 ```
 
 All `*.secrets` files are gitignored by default. The non-secret `.env.*` files can be committed safely — they typically
