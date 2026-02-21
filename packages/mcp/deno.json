@@ -4,6 +4,12 @@
   "exports": "./mod.ts",
   "license": "MIT",
   "description": "Glubean MCP server - run checks and fetch facts for AI agents",
+  "publish": {
+    "exclude": [
+      "*_test.ts",
+      "testdata/"
+    ]
+  },
   "imports": {
     "@glubean/runner": "jsr:@glubean/runner@^0.11.0"
   }

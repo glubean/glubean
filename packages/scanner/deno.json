@@ -6,5 +6,11 @@
     "./static": "./static.ts"
   },
   "license": "MIT",
-  "description": "Glubean Scanner - Static analysis for Glubean test files"
+  "description": "Glubean Scanner - Static analysis for Glubean test files",
+  "publish": {
+    "exclude": [
+      "*_test.ts",
+      "testdata/"
+    ]
+  }
 }

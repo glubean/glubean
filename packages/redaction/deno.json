@@ -3,5 +3,11 @@
   "version": "0.11.0",
   "exports": "./mod.ts",
   "license": "MIT",
-  "description": "Glubean Redaction Engine - Plugin-based secrets/PII detection and masking"
+  "description": "Glubean Redaction Engine - Plugin-based secrets/PII detection and masking",
+  "publish": {
+    "exclude": [
+      "*_test.ts",
+      "testdata/"
+    ]
+  }
 }
