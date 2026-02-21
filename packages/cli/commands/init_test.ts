@@ -278,14 +278,14 @@ Deno.test(
 
       const metadataContent = await Deno.readTextFile(metadataPath);
       assertEquals(metadataContent.includes("Glubean Metadata"), true);
-      assertEquals(metadataContent.includes("glubean/cli scan"), true);
+      assertEquals(metadataContent.includes("glubean scan"), true);
 
       const testsPath = join(dir, ".github/workflows/glubean-tests.yml");
       assertEquals(await fileExists(testsPath), true);
 
       const testsContent = await Deno.readTextFile(testsPath);
       assertEquals(testsContent.includes("Glubean Tests"), true);
-      assertEquals(testsContent.includes("glubean/cli run"), true);
+      assertEquals(testsContent.includes("glubean run --ci"), true);
       assertEquals(testsContent.includes("upload-artifact"), true);
     } finally {
       await cleanupDir(dir);
@@ -357,7 +357,7 @@ Deno.test(
       const preCommit = await Deno.readTextFile(
         join(dir, ".git/hooks/pre-commit"),
       );
-      assertEquals(preCommit.includes("glubean/cli scan"), true);
+      assertEquals(preCommit.includes("glubean scan"), true);
 
       const prePush = await Deno.readTextFile(join(dir, ".git/hooks/pre-push"));
       assertEquals(prePush.includes("validate-metadata"), true);
