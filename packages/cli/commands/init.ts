@@ -400,6 +400,7 @@ const MINIMAL_DENO_JSON = `{
   "tasks": {
     "test": "glubean run",
     "test:verbose": "glubean run --verbose",
+    "test:staging": "glubean run --env-file .env.staging",
     "test:ci": "glubean run --ci --result-json",
     "explore": "glubean run --explore --verbose",
     "scan": "glubean scan"
@@ -416,6 +417,8 @@ const MINIMAL_DENO_JSON = `{
 `;
 
 const MINIMAL_ENV = `# Environment variables
+# Tip: switch environments from the VS Code status bar — one click to toggle
+# between default, staging, and any custom .env.* file.
 BASE_URL=https://dummyjson.com
 `;
 
@@ -423,6 +426,19 @@ const MINIMAL_ENV_SECRETS = `# Secrets (add this file to .gitignore)
 # DummyJSON test credentials (public, safe to use)
 USERNAME=emilys
 PASSWORD=emilyspass
+`;
+
+const MINIMAL_ENV_STAGING = `# Staging environment variables
+# Usage: glubean run --env-file .env.staging
+# Tip: or switch to "staging" from the VS Code status bar — no CLI flags needed.
+BASE_URL=https://staging.dummyjson.com
+`;
+
+const MINIMAL_ENV_STAGING_SECRETS = `# Staging secrets (gitignored)
+# Usage: auto-loaded when --env-file .env.staging is used
+# API_KEY=your-staging-api-key
+USERNAME=
+PASSWORD=
 `;
 
 // ---------------------------------------------------------------------------
@@ -880,6 +896,16 @@ async function initMinimal(overwrite: boolean): Promise<void> {
       path: ".env.secrets",
       content: MINIMAL_ENV_SECRETS,
       description: "Secret variables (placeholder)",
+    },
+    {
+      path: ".env.staging",
+      content: MINIMAL_ENV_STAGING,
+      description: "Staging environment variables",
+    },
+    {
+      path: ".env.staging.secrets",
+      content: MINIMAL_ENV_STAGING_SECRETS,
+      description: "Staging secret variables",
     },
     {
       path: ".gitignore",

@@ -556,12 +556,17 @@ Deno.test("init --minimal creates minimal files", async () => {
     assertEquals(await fileExists(join(dir, "tests/demo.test.ts")), true);
     assertEquals(await fileExists(join(dir, "AGENTS.md")), false);
 
+    // Staging env files
+    assertEquals(await fileExists(join(dir, ".env.staging")), true);
+    assertEquals(await fileExists(join(dir, ".env.staging.secrets")), true);
+
     // Verify deno.json has explore and test tasks
     const denoJson = JSON.parse(
       await Deno.readTextFile(join(dir, "deno.json")),
     );
     assertEquals(typeof denoJson.tasks?.explore, "string");
     assertEquals(denoJson.tasks?.test, "glubean run");
+    assertEquals(denoJson.tasks?.["test:staging"], "glubean run --env-file .env.staging");
     assertEquals(denoJson.tasks?.["test:ci"], "glubean run --ci --result-json");
     assertEquals(denoJson.glubean?.run?.testDir, "./tests");
 
