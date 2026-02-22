@@ -402,7 +402,7 @@ export async function runCommand(
       `${colors.dim}Make sure *.test.ts files import from @glubean/sdk${colors.reset}\n`,
     );
     await writeEmptyResult(target, runStartLocal);
-    Deno.exit(1);
+    return;
   }
 
   if (isMultiFile) {
