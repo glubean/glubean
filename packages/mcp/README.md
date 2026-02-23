@@ -91,39 +91,53 @@ deno run -A jsr:@glubean/mcp
 
 ## Improving AI tool selection (recommended)
 
-AI agents don't always pick the right MCP tool automatically. Adding a **cursor rule** dramatically improves hit rate.
+AI agents don't always pick the right MCP tool on their own — they match based on tool descriptions, which competes with
+dozens of built-in tools. Adding a **cursor rule** dramatically improves hit rate by teaching the AI upfront.
+
+The rule below is ~200 bytes — negligible token cost. We recommend `alwaysApply: true` so it loads in every
+conversation. You won't notice it in your token budget, but the AI will reliably reach for Glubean tools when you say
+"run tests", "debug this API", or "check my config".
 
 ### Cursor
 
 Create `.cursor/rules/glubean.mdc` in your project root:
 
 ```markdown
+---
+description: "Glubean API testing — run, debug, create, fix tests"
+alwaysApply: true
+---
+
 # Glubean API Testing
 
-This project uses Glubean for API testing. When the user asks to run, debug, create, or fix API tests, use the Glubean
-MCP tools:
+This project uses Glubean for API testing. When the user asks to run, debug, create, or fix API tests, always use the
+Glubean MCP tools:
 
-- To run a test file: `glubean_run_local_file`
-- To list test files: `glubean_list_test_files`
-- To see test exports in a file: `glubean_discover_tests`
-- To check project config: `glubean_diagnose_config`
-- To review last run results: `glubean_get_last_run_summary` and `glubean_get_local_events`
+- Run a test file → `glubean_run_local_file`
+- List test files → `glubean_list_test_files`
+- Inspect exports in a file → `glubean_discover_tests`
+- Check project config → `glubean_diagnose_config`
+- Review last run → `glubean_get_last_run_summary` / `glubean_get_local_events`
 
-After running tests, read the structured assertion failures and fix the code. Then re-run to confirm the fix. Repeat
-until all tests pass.
+After running, read the structured assertion failures, fix the code, and re-run until all tests pass.
 
-Test files live in `tests/` or `explore/` and use `@glubean/sdk`. Environment variables are in `.env`, secrets in
+Test files live in `tests/` or `explore/` and use `@glubean/sdk`. Environment variables: `.env`. Secrets:
 `.env.secrets`.
 ```
 
 ### Windsurf
 
-Create `.windsurfrules` in your project root with similar content.
+Create `.windsurfrules` in your project root with the same content (without the YAML frontmatter).
 
-### General tip
+### Why this works
 
-If the AI doesn't trigger MCP tools, mention **"glubean"** explicitly in your prompt — e.g. "use glubean to run the
-test" instead of just "run the test".
+MCP tools compete with the AI's built-in tools (shell, file read, etc.) for attention. Without a rule, the AI sees
+"glubean_run_local_file" in a list of 50+ tools and often ignores it. The rule puts Glubean front-and-center in the
+system prompt so the AI knows _exactly_ when to reach for it — no guessing.
+
+### If the AI still doesn't trigger
+
+Mention **"glubean"** explicitly — e.g. "use glubean to run the test" instead of just "run the test".
 
 ## Talking to your AI
 
