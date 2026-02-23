@@ -467,7 +467,7 @@ function buildActivationAwareHttpClient(
     url: string | URL | Request,
     options?: HttpRequestOptions,
   ) {
-    const method = (options?.method ?? "GET").toUpperCase();
+    const method = (options?.method ?? (url instanceof Request ? url.method : "GET")).toUpperCase();
     assertRequestActive(method, url);
     return http(url, options);
   };
