@@ -110,7 +110,7 @@ interface LogEntry {
   timestamp: string;
   testId: string;
   testName: string;
-  type: "log" | "trace" | "assertion" | "metric" | "error" | "result";
+  type: "log" | "trace" | "assertion" | "metric" | "error" | "result" | "action" | "event";
   message: string;
   data?: unknown;
 }
@@ -777,6 +777,31 @@ export async function runCommand(
             const body = JSON.stringify(event.data.responseBody);
             console.log(
               `        ${colors.dim}res: ${body.slice(0, 120)}${body.length > 120 ? "…" : ""}${colors.reset}`,
+            );
+          }
+          break;
+        }
+
+        case "action": {
+          const a = event.data;
+          // Skip http:request actions — already displayed by the trace handler
+          if (a.category === "http:request") break;
+          const statusColor = a.status === "ok" ? colors.green : a.status === "error" ? colors.red : colors.yellow;
+          const statusIcon = a.status === "ok" ? "✓" : a.status === "error" ? "✗" : "⏱";
+          addLogEntry("action", `[${a.category}] ${a.target} ${a.duration}ms ${a.status}`, a);
+          console.log(
+            `      ${colors.dim}↳${colors.reset} ${colors.cyan}${a.category}${colors.reset} ${a.target} ${colors.dim}${a.duration}ms${colors.reset} ${statusColor}${statusIcon}${colors.reset}`,
+          );
+          break;
+        }
+
+        case "event": {
+          const ev = event.data;
+          addLogEntry("event", `[${ev.type}]`, ev);
+          if (effectiveRun.verbose) {
+            const summary = JSON.stringify(ev.data).slice(0, 80);
+            console.log(
+              `      ${colors.dim}[${ev.type}] ${summary}${colors.reset}`,
             );
           }
           break;
