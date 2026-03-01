@@ -1,13 +1,16 @@
 {
   "name": "@glubean/redaction",
-  "version": "0.10.1",
+  "version": "0.11.1",
   "private": true,
-  "main": "./mod.ts",
-  "types": "./mod.ts",
+  "main": "./dist/mod.js",
+  "types": "./dist/mod.d.ts",
   "exports": {
     ".": {
-      "types": "./mod.ts",
-      "default": "./mod.ts"
+      "types": "./dist/mod.d.ts",
+      "default": "./dist/mod.js"
     }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.node.json"
   }
 }
