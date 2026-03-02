@@ -82,6 +82,8 @@ function createMockContext(
     log: () => {},
     assert: () => {},
     trace: () => {},
+    action: () => {},
+    event: () => {},
     metric: () => {},
     http: mockHttp as unknown as import("./types.ts").HttpClient,
     expect: <V>(actual: V) => new Expectation(actual, () => {}),

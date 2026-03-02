@@ -55,6 +55,8 @@ import type {
   ConfigureHttpOptions,
   ConfigureOptions,
   ConfigureResult,
+  GlubeanAction,
+  GlubeanEvent,
   GlubeanRuntime,
   HttpClient,
   HttpRequestOptions,
@@ -82,6 +84,9 @@ export interface InternalRuntime {
   secrets: Record<string, string>;
   http: HttpClient;
   test?: GlubeanRuntime["test"];
+  action?(a: GlubeanAction): void;
+  event?(ev: GlubeanEvent): void;
+  log?(message: string, data?: unknown): void;
 }
 
 /**
@@ -519,6 +524,7 @@ function buildLazyPluginDescriptors(
         if (cache.has(runtime)) return cache.get(runtime);
 
         // Build the augmented runtime that plugins see
+        const noop = () => {};
         const augmented: GlubeanRuntime = {
           vars: runtime.vars,
           secrets: runtime.secrets,
@@ -531,6 +537,9 @@ function buildLazyPluginDescriptors(
           requireVar,
           requireSecret,
           resolveTemplate: (template: string) => resolveTemplate(template, runtime.vars, runtime.secrets),
+          action: runtime.action?.bind(runtime) ?? noop,
+          event: runtime.event?.bind(runtime) ?? noop,
+          log: runtime.log?.bind(runtime) ?? noop,
         };
 
         const instance = entry.factory.create(augmented);

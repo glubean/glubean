@@ -424,6 +424,69 @@ export interface TestContext {
   trace(request: ApiTrace): void;
 
   /**
+   * Record a structured action to the test timeline.
+   *
+   * Actions are the primary unit of test observability. Every plugin interaction
+   * — browser click, API call, MCP tool invocation, DB query — should be
+   * recorded as an action.
+   *
+   * Actions appear in the Glubean dashboard timeline, are filterable by category,
+   * searchable by target, and aggregatable for trend analysis.
+   *
+   * @example Browser click
+   * ```ts
+   * ctx.action({
+   *   category: "browser:click",
+   *   target: "#submit-btn",
+   *   duration: 50,
+   *   status: "ok",
+   * });
+   * ```
+   *
+   * @example MCP tool call
+   * ```ts
+   * ctx.action({
+   *   category: "mcp:tool-call",
+   *   target: "get_weather",
+   *   duration: 300,
+   *   status: "ok",
+   *   detail: { args: { location: "Tokyo" } },
+   * });
+   * ```
+   */
+  action(a: GlubeanAction): void;
+
+  /**
+   * Emit a structured event with arbitrary payload.
+   *
+   * Use `ctx.event()` for structured data that doesn't fit the action model
+   * (no target/duration/status) but is more than a log message. Events are
+   * renderable by plugin-provided custom renderers in the dashboard.
+   *
+   * The distinction:
+   * - `ctx.log()` — text for humans reading logs
+   * - `ctx.event()` — structured data for machines/dashboard renderers
+   * - `ctx.action()` — typed interaction record for timeline/waterfall/filter
+   *
+   * @example Screenshot captured
+   * ```ts
+   * ctx.event({
+   *   type: "browser:screenshot",
+   *   data: { path: "/screenshots/after-login.png", fullPage: true, sizeKb: 142 },
+   * });
+   * ```
+   *
+   * @example MCP server connected
+   * ```ts
+   * ctx.event({
+   *   type: "mcp:connected",
+   *   data: { server: "weather-api", transport: "stdio", tools: ["get_weather"] },
+   * });
+   * ```
+   */
+  event(ev: GlubeanEvent): void;
+
+  /**
    * Report a numeric metric for performance tracking and trending.
    *
    * Metrics are stored separately from logs/traces with longer retention (90 days)
@@ -1080,6 +1143,24 @@ export interface GlubeanRuntime {
   requireSecret(key: string): string;
   /** Resolve {{key}} template placeholders from vars and secrets */
   resolveTemplate(template: string): string;
+
+  /**
+   * Record a typed interaction to the test timeline.
+   * Available to plugins during initialization and test execution.
+   */
+  action(a: GlubeanAction): void;
+
+  /**
+   * Emit a structured event. For data that doesn't fit the action model
+   * but needs to be surfaced in the dashboard with a custom renderer.
+   */
+  event(ev: GlubeanEvent): void;
+
+  /**
+   * Emit a log message. Convenience alias available to plugins
+   * without requiring the full TestContext.
+   */
+  log(message: string, data?: unknown): void;
 }
 
 /**
@@ -1582,6 +1663,108 @@ export interface ApiTrace {
   responseHeaders?: Record<string, string>;
   /** Optional response body */
   responseBody?: unknown;
+}
+
+/**
+ * A typed interaction record emitted by plugins.
+ *
+ * All fields except `detail` are required, ensuring consistent timeline
+ * rendering, filtering, and analytics across all plugin domains.
+ *
+ * @example Browser interaction
+ * ```ts
+ * ctx.action({
+ *   category: "browser:click",
+ *   target: "#submit-btn",
+ *   duration: 620,
+ *   status: "ok",
+ *   detail: { autoWaitMs: 580 },
+ * });
+ * ```
+ *
+ * @example HTTP request (auto-emitted by ctx.trace())
+ * ```ts
+ * ctx.action({
+ *   category: "http:request",
+ *   target: "POST /api/auth/login",
+ *   duration: 350,
+ *   status: "ok",
+ *   detail: { method: "POST", url: "/api/auth/login", httpStatus: 200 },
+ * });
+ * ```
+ */
+export interface GlubeanAction {
+  /**
+   * Namespaced action category for routing, filtering, and rendering.
+   *
+   * Convention: `"domain:verb"` where `domain` identifies the plugin
+   * (`http`, `browser`, `mcp`, `db`) and `verb` identifies the operation
+   * (`request`, `click`, `assert`, `query`).
+   */
+  category: string;
+
+  /**
+   * The target of the action — what was acted upon.
+   * Must be machine-readable for aggregation and search.
+   *
+   * Examples: `"#submit-btn"`, `"POST /api/users"`, `"get_weather"`.
+   */
+  target: string;
+
+  /** How long the action took, in milliseconds. */
+  duration: number;
+
+  /**
+   * Outcome of the action.
+   * - `"ok"` — completed successfully
+   * - `"error"` — failed (e.g., element not found, assertion mismatch)
+   * - `"timeout"` — timed out (e.g., actionability check exceeded limit)
+   */
+  status: "ok" | "error" | "timeout";
+
+  /**
+   * Domain-specific payload. Optional.
+   * Values must be JSON-serializable.
+   */
+  detail?: Record<string, unknown>;
+}
+
+/**
+ * A generic structured event emitted by plugins.
+ *
+ * Unlike `GlubeanAction` (which has required fields for timeline rendering),
+ * `GlubeanEvent` is a loosely-typed container for any structured data that
+ * plugins want to surface in the dashboard.
+ *
+ * Dashboard plugins can register custom renderers keyed on `type` to
+ * control how events are displayed. Without a custom renderer, events appear
+ * as collapsible JSON in the detail panel.
+ *
+ * @example Screenshot captured
+ * ```ts
+ * ctx.event({
+ *   type: "browser:screenshot",
+ *   data: { path: "/screenshots/login.png", fullPage: true, sizeKb: 142 },
+ * });
+ * ```
+ *
+ * @example MCP server connected
+ * ```ts
+ * ctx.event({
+ *   type: "mcp:connected",
+ *   data: { server: "weather-api", transport: "stdio", tools: ["get_weather"] },
+ * });
+ * ```
+ */
+export interface GlubeanEvent {
+  /**
+   * Namespaced event type. Convention: `"domain:noun"` or `"domain:description"`.
+   * Examples: `"browser:screenshot"`, `"mcp:connected"`, `"db:slow-query-warning"`.
+   */
+  type: string;
+
+  /** Structured payload. Must be JSON-serializable. */
+  data: Record<string, unknown>;
 }
 
 /**

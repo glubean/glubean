@@ -21,6 +21,8 @@ import type {
   ApiTrace,
   AssertionDetails,
   AssertionResultInput,
+  GlubeanAction,
+  GlubeanEvent,
   HttpClient as _HttpClient,
   HttpSchemaOptions,
   MetricOptions,
@@ -594,6 +596,42 @@ const ctx = {
       JSON.stringify({
         type: "trace",
         data: request,
+        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+      }),
+    );
+    // Backward compat: also emit as a typed action for timeline/filtering
+    let pathname: string;
+    try {
+      pathname = new URL(request.url).pathname;
+    } catch {
+      pathname = request.url;
+    }
+    ctx.action({
+      category: "http:request",
+      target: `${request.method} ${pathname}`,
+      duration: request.duration,
+      status: request.status >= 400 ? "error" : "ok",
+      detail: { method: request.method, url: request.url, httpStatus: request.status },
+    });
+  },
+
+  // Action recording function
+  action: (a: GlubeanAction) => {
+    console.log(
+      JSON.stringify({
+        type: "action",
+        data: a,
+        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+      }),
+    );
+  },
+
+  // Structured event emission
+  event: (ev: GlubeanEvent) => {
+    console.log(
+      JSON.stringify({
+        type: "event",
+        data: ev,
         ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
       }),
     );
@@ -1281,6 +1319,9 @@ function withEnvFallback(
   // deno-lint-ignore no-explicit-any
   http: (ctx as any).http,
   test: runtimeTest,
+  action: ctx.action,
+  event: ctx.event,
+  log: ctx.log,
 };
 
 try {

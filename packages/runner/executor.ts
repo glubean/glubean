@@ -1,4 +1,4 @@
-import type { ApiTrace } from "@glubean/sdk";
+import type { ApiTrace, GlubeanAction, GlubeanEvent } from "@glubean/sdk";
 import { resolveAllowNetFlag } from "./config.ts";
 import type { SharedRunConfig } from "./config.ts";
 
@@ -32,6 +32,8 @@ export type ExecutionEvent =
     stepIndex?: number;
   }
   | { type: "trace"; data: ApiTrace; stepIndex?: number }
+  | { type: "action"; data: GlubeanAction; stepIndex?: number }
+  | { type: "event"; data: GlubeanEvent; stepIndex?: number }
   | {
     type: "warning";
     condition: boolean;
@@ -190,6 +192,20 @@ export type TimelineEvent =
     testId?: string;
     stepIndex?: number;
     data: ApiTrace;
+  }
+  | {
+    type: "action";
+    ts: number;
+    testId?: string;
+    stepIndex?: number;
+    data: GlubeanAction;
+  }
+  | {
+    type: "event";
+    ts: number;
+    testId?: string;
+    stepIndex?: number;
+    data: GlubeanEvent;
   }
   | {
     type: "metric";
@@ -921,6 +937,28 @@ export class TestExecutor {
         case "trace":
           timelineEvent = {
             type: "trace",
+            ts,
+            ...(includeTestId && { testId }),
+            ...(event.stepIndex !== undefined && {
+              stepIndex: event.stepIndex,
+            }),
+            data: event.data,
+          };
+          break;
+        case "action":
+          timelineEvent = {
+            type: "action",
+            ts,
+            ...(includeTestId && { testId }),
+            ...(event.stepIndex !== undefined && {
+              stepIndex: event.stepIndex,
+            }),
+            data: event.data,
+          };
+          break;
+        case "event":
+          timelineEvent = {
+            type: "event",
             ts,
             ...(includeTestId && { testId }),
             ...(event.stepIndex !== undefined && {
