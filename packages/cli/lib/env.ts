@@ -18,7 +18,11 @@ export async function loadEnvFile(
   try {
     const content = await Deno.readTextFile(envPath);
     return parseDotenv(content);
-  } catch {
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      return {};
+    }
+    console.warn(`Warning: Could not read env file ${envPath}: ${(error as Error).message}`);
     return {};
   }
 }
