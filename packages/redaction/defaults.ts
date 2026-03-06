@@ -116,5 +116,5 @@ export const DEFAULT_CONFIG: RedactionConfig = {
     hexKeys: true,
     custom: [],
   },
-  replacementFormat: "simple",
+  replacementFormat: "partial",
 };

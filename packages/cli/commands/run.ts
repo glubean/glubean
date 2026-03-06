@@ -1377,7 +1377,21 @@ export async function runCommand(
       );
       Deno.exit(1);
     } else {
-      await uploadToCloud(resultPayload, {
+      // Apply redaction before uploading to Cloud
+      const { RedactionEngine, createBuiltinPlugins, redactEvent } = await import("@glubean/redaction");
+      const engine = new RedactionEngine({
+        config: glubeanConfig.redaction,
+        plugins: createBuiltinPlugins(glubeanConfig.redaction),
+      });
+      const redactedPayload = {
+        ...resultPayload,
+        tests: resultPayload.tests.map((t) => ({
+          ...t,
+          events: t.events.map((e) => redactEvent(engine, e)),
+        })),
+      };
+
+      await uploadToCloud(redactedPayload, {
         apiUrl,
         token,
         projectId,
