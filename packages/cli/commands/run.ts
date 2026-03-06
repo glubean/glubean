@@ -486,15 +486,15 @@ export async function runCommand(
   }
 
   if (allFileTests.length === 0) {
-    console.log(
-      `\n${colors.yellow}⚠️  No test cases found${
+    console.error(
+      `\n${colors.red}❌ No test cases found${
         isMultiFile ? ` in ${testFiles.length} file(s)` : " in file"
       }${colors.reset}`,
     );
-    console.log(
+    console.error(
       `${colors.dim}Make sure to export tests using test()${colors.reset}\n`,
     );
-    return;
+    Deno.exit(1);
   }
 
   if (isMultiFile) {
@@ -548,13 +548,15 @@ export async function runCommand(
         const joiner = options.tagMode === "and" ? " AND " : " OR ";
         parts.push(`tag: ${options.tags!.join(joiner)}`);
       }
-      console.log(
-        `\n${colors.yellow}⚠️  No tests match ${parts.join(" + ")}${colors.reset}\n`,
+      console.error(
+        `\n${colors.red}❌ No tests match ${parts.join(" + ")}${colors.reset}\n`,
       );
     } else {
-      console.log(`\n${colors.yellow}⚠️  All tests skipped${colors.reset}\n`);
+      console.error(
+        `\n${colors.red}❌ All tests skipped${colors.reset}\n`,
+      );
     }
-    return;
+    Deno.exit(1);
   }
 
   if (options.filter || hasTags) {
