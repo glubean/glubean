@@ -417,19 +417,35 @@ export async function runCommand(
 
   const envFileName = effectiveRun.envFile || ".env";
   const envPath = resolve(rootDir, envFileName);
+  const userSpecifiedEnvFile = !!options.envFile;
+
+  // If user explicitly specified --env-file, the file MUST exist
+  if (userSpecifiedEnvFile) {
+    try {
+      await Deno.stat(envPath);
+    } catch {
+      console.error(
+        `${colors.red}Error: env file '${envFileName}' not found in ${rootDir}${colors.reset}`,
+      );
+      Deno.exit(1);
+    }
+  }
+
   const envVars = await loadEnvFile(envPath);
+
   // Secrets file follows the env file: .env → .env.secrets, .env.staging → .env.staging.secrets
   const secretsPath = resolve(rootDir, `${envFileName}.secrets`);
-  const secrets = await loadEnvFile(secretsPath);
+  let secretsExist = true;
+  try {
+    await Deno.stat(secretsPath);
+  } catch {
+    secretsExist = false;
+  }
+  const secrets = secretsExist ? await loadEnvFile(secretsPath) : {};
 
-  // Warn if user explicitly specified --env-file but neither file exists
-  if (
-    options.envFile &&
-    Object.keys(envVars).length === 0 &&
-    Object.keys(secrets).length === 0
-  ) {
+  if (!secretsExist && Object.keys(envVars).length > 0) {
     console.warn(
-      `${colors.yellow}Warning: env file '${envFileName}' not found or empty in ${rootDir}${colors.reset}`,
+      `${colors.yellow}Warning: secrets file '${envFileName}.secrets' not found in ${rootDir}${colors.reset}`,
     );
   }
 
