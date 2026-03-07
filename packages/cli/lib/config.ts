@@ -19,6 +19,7 @@ import { DEFAULT_CONFIG } from "@glubean/redaction";
 import type { RedactionConfig } from "@glubean/redaction";
 import { LOCAL_RUN_DEFAULTS } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
+import type { ThresholdConfig } from "@glubean/sdk";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -90,6 +91,7 @@ export interface GlubeanConfig {
   run: GlubeanRunConfig;
   redaction: RedactionConfig;
   cloud?: GlubeanCloudConfigInput;
+  thresholds?: ThresholdConfig;
 }
 
 /** Partial top-level config as read from a file. */
@@ -97,6 +99,7 @@ export interface GlubeanConfigInput {
   run?: GlubeanRunConfigInput;
   redaction?: GlubeanRedactionConfigInput;
   cloud?: GlubeanCloudConfigInput;
+  thresholds?: ThresholdConfig;
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
@@ -215,6 +218,11 @@ export function mergeConfigInputs(
     merged.cloud = { ...base.cloud, ...overlay.cloud };
   }
 
+  // ── Thresholds section (shallow merge, later rules win per metric key) ──
+  if (base.thresholds || overlay.thresholds) {
+    merged.thresholds = { ...base.thresholds, ...overlay.thresholds };
+  }
+
   return merged;
 }
 
@@ -276,7 +284,7 @@ function resolveRedactionConfig(
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
-const KNOWN_TOP_KEYS = new Set(["run", "redaction", "cloud"]);
+const KNOWN_TOP_KEYS = new Set(["run", "redaction", "cloud", "thresholds"]);
 const KNOWN_RUN_KEYS = new Set(Object.keys(RUN_DEFAULTS));
 const KNOWN_REDACTION_KEYS = new Set([
   "sensitiveKeys",
@@ -391,6 +399,7 @@ export async function loadConfig(
     run: resolvedRun,
     redaction: resolvedRedaction,
     cloud: accumulated.cloud,
+    thresholds: accumulated.thresholds,
   };
 }
 

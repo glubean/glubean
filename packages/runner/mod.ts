@@ -33,3 +33,5 @@ export {
   resolveModuleTests,
 } from "./resolve.ts";
 export type { ResolvedTest } from "./resolve.ts";
+
+export { aggregate, evaluateThresholds, MetricCollector, parseExpression } from "./thresholds.ts";
