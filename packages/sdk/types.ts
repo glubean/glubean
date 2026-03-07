@@ -1606,6 +1606,88 @@ export interface MetricOptions {
   tags?: Record<string, string>;
 }
 
+// ── Metric Thresholds ─────────────────────────────────────────────────────────
+
+/**
+ * Aggregation function for threshold evaluation.
+ *
+ * - `avg`, `min`, `max`: basic statistics
+ * - `p50`, `p90`, `p95`, `p99`: percentiles
+ * - `count`: total number of data points
+ */
+export type ThresholdAggregation =
+  | "avg"
+  | "min"
+  | "max"
+  | "p50"
+  | "p90"
+  | "p95"
+  | "p99"
+  | "count";
+
+/**
+ * A single threshold rule: `"<200"` or `"<=500"`.
+ *
+ * The string format is: `operator + number`, where operator is `<` or `<=`.
+ */
+export type ThresholdExpression = string;
+
+/**
+ * Per-metric threshold rules keyed by aggregation function.
+ *
+ * @example
+ * ```ts
+ * { p95: "<200", avg: "<100", max: "<2000" }
+ * ```
+ */
+export type MetricThresholdRules = Partial<
+  Record<ThresholdAggregation, ThresholdExpression>
+>;
+
+/**
+ * Threshold configuration: metric name → rules (or shorthand string for avg).
+ *
+ * @example
+ * ```ts
+ * {
+ *   thresholds: {
+ *     "http_duration_ms": { p95: "<200", avg: "<100" },
+ *     "error_rate": "<0.01",  // shorthand for { avg: "<0.01" }
+ *   }
+ * }
+ * ```
+ */
+export type ThresholdConfig = Record<
+  string,
+  MetricThresholdRules | ThresholdExpression
+>;
+
+/**
+ * Result of evaluating a single threshold rule.
+ */
+export interface ThresholdResult {
+  /** Metric key (e.g., "http_duration_ms") */
+  metric: string;
+  /** Aggregation function used (e.g., "p95") */
+  aggregation: ThresholdAggregation;
+  /** The threshold expression (e.g., "<200") */
+  threshold: ThresholdExpression;
+  /** The actual computed value */
+  actual: number;
+  /** Whether the threshold was met */
+  pass: boolean;
+}
+
+/**
+ * Summary of all threshold evaluations for a run.
+ */
+export interface ThresholdSummary {
+  /** All individual threshold results */
+  results: ThresholdResult[];
+  /** True if all thresholds passed */
+  pass: boolean;
+}
+
 /**
  * Options for `ctx.pollUntil()`.
  */

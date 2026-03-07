@@ -1,5 +1,7 @@
 import {
+  evaluateThresholds,
   type ExecutionEvent,
+  MetricCollector,
   normalizePositiveTimeoutMs,
   TestExecutor,
   toSingleExecutionOptions,
@@ -676,6 +678,9 @@ export async function runCommand(
   // Collect all events per test (for result JSON and rich summary)
   const collectedRuns: CollectedTestRun[] = [];
 
+  // Collect metric data points for threshold evaluation
+  const metricCollector = new MetricCollector();
+
   // Aggregate summary stats across all tests
   const runStats: RunSummaryStats = {
     httpRequestTotal: 0,
@@ -1055,6 +1060,7 @@ export async function runCommand(
         }
 
         case "metric": {
+          metricCollector.add(event.name, event.value);
           const unit = event.unit ? ` ${event.unit}` : "";
           const tagStr = event.tags
             ? ` ${colors.dim}{${
@@ -1225,6 +1231,31 @@ export async function runCommand(
     );
   }
 
+  // ── Threshold evaluation ──────────────────────────────────────────────────
+  let thresholdSummary: import("@glubean/sdk").ThresholdSummary | undefined;
+  if (glubeanConfig.thresholds && Object.keys(glubeanConfig.thresholds).length > 0) {
+    thresholdSummary = evaluateThresholds(glubeanConfig.thresholds, metricCollector);
+    const { results: thresholdResults, pass: allPass } = thresholdSummary;
+
+    if (thresholdResults.length > 0) {
+      console.log(
+        `${colors.bold}Thresholds:${colors.reset}`,
+      );
+      for (const r of thresholdResults) {
+        const icon = r.pass ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
+        const actualStr = Number.isNaN(r.actual) ? "N/A" : String(r.actual);
+        console.log(
+          `  ${icon} ${r.metric}.${r.aggregation} ... ${actualStr} ${r.threshold}`,
+        );
+      }
+      const tPassed = thresholdResults.filter((r) => r.pass).length;
+      const statusColor = allPass ? colors.green : colors.red;
+      console.log(
+        `  ${statusColor}${tPassed}/${thresholdResults.length} passed${colors.reset}`,
+      );
+    }
+  }
+
   console.log();
 
   // Write log file if enabled (single-file: <file>.log, multi-file: glubean-run.log in cwd)
@@ -1358,6 +1389,7 @@ export async function runCommand(
       durationMs: r.durationMs,
       events: r.events,
     })),
+    ...(thresholdSummary && { thresholds: thresholdSummary }),
   };
   const resultJson = JSON.stringify(resultPayload, null, 2);
 
@@ -1500,7 +1532,7 @@ export async function runCommand(
     }
   }
 
-  if (failed > 0) {
+  if (failed > 0 || (thresholdSummary && !thresholdSummary.pass)) {
     Deno.exit(1);
   }
 }
