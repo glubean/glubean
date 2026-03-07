@@ -20,7 +20,7 @@ import { contextCommand } from "./commands/context.ts";
 import { upgradeCommand } from "./commands/upgrade.ts";
 import { loginCommand } from "./commands/login.ts";
 import { CLI_VERSION } from "./version.ts";
-import { checkForUpdates } from "./update_check.ts";
+import { abortUpdateCheck, checkForUpdates } from "./update_check.ts";
 
 // Custom type for log level validation
 const logLevelType = new EnumType(["debug", "info", "warn", "error"]);
@@ -425,6 +425,8 @@ if (import.meta.main) {
       console.error("An unexpected error occurred");
     }
     Deno.exit(1);
+  } finally {
+    abortUpdateCheck();
   }
 }
 
