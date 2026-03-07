@@ -68,6 +68,18 @@ function getDefaultCachePath(): string | null {
   return join(home, ".glubean", "update-check.json");
 }
 
+/**
+ * AbortController shared with the caller so the main process can
+ * abort the update check on exit (prevents hanging).
+ */
+let _activeController: AbortController | undefined;
+
+/** Abort any in-flight update check. Call before process exit. */
+export function abortUpdateCheck(): void {
+  _activeController?.abort();
+  _activeController = undefined;
+}
+
 export async function checkForUpdates(
   currentVersion: string,
   options?: {
@@ -92,7 +104,7 @@ export async function checkForUpdates(
 
     if (cache && now - cache.lastChecked < UPDATE_INTERVAL_MS) {
       if (cache.latest && isNewer(cache.latest, currentVersion)) {
-        console.log(
+        console.error(
           `Update available: glubean v${cache.latest} (current v${currentVersion}). ` +
             "Run: glubean upgrade",
         );
@@ -102,11 +114,21 @@ export async function checkForUpdates(
 
     let latest: string | undefined;
     try {
-      const response = await fetchFn(UPDATE_URL);
+      const controller = new AbortController();
+      _activeController = controller;
+      const timeout = setTimeout(() => controller.abort(), 3_000);
+      // Unref the timer so it doesn't keep the process alive
+      if (typeof Deno !== "undefined" && Deno.unrefTimer) {
+        Deno.unrefTimer(timeout);
+      }
+      const response = await fetchFn(UPDATE_URL, { signal: controller.signal });
+      clearTimeout(timeout);
+      _activeController = undefined;
       if (!response.ok) return;
       const data = (await response.json()) as { latest?: string };
       latest = data.latest;
     } catch {
+      _activeController = undefined;
       return;
     }
 
@@ -119,7 +141,7 @@ export async function checkForUpdates(
     }
 
     if (latest && isNewer(latest, currentVersion)) {
-      console.log(
+      console.error(
         `Update available: glubean v${latest} (current v${currentVersion}). ` +
           "Run: glubean upgrade",
       );

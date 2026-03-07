@@ -20,7 +20,7 @@ import { contextCommand } from "./commands/context.ts";
 import { upgradeCommand } from "./commands/upgrade.ts";
 import { loginCommand } from "./commands/login.ts";
 import { CLI_VERSION } from "./version.ts";
-import { checkForUpdates } from "./update_check.ts";
+import { abortUpdateCheck, checkForUpdates } from "./update_check.ts";
 
 // Custom type for log level validation
 const logLevelType = new EnumType(["debug", "info", "warn", "error"]);
@@ -76,7 +76,7 @@ cli
   )
   .option(
     "-t, --tag <tag:string>",
-    "Run only tests with matching tag (exact, repeatable)",
+    "Run only tests with matching tag (comma-separated or repeatable)",
     { collect: true },
   )
   .option(
@@ -171,7 +171,7 @@ cli
     await runCommand(resolvedTarget, {
       filter: options.filter,
       pick: options.pick,
-      tags: options.tag,
+      tags: options.tag?.flatMap((t: string) => t.split(",").map((s: string) => s.trim()).filter(Boolean)),
       tagMode: options.tagMode as "or" | "and",
       envFile: options.envFile,
       logFile: options.logFile,
@@ -410,9 +410,9 @@ cli.command("worker", workerCmd);
 // Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
 if (import.meta.main) {
-  // Check for updates (unless --no-update-check)
+  // Check for updates (non-blocking — don't delay CLI startup)
   if (!Deno.args.includes("--no-update-check")) {
-    await checkForUpdates(CLI_VERSION);
+    checkForUpdates(CLI_VERSION).catch(() => {});
   }
 
   try {
@@ -425,6 +425,8 @@ if (import.meta.main) {
       console.error("An unexpected error occurred");
     }
     Deno.exit(1);
+  } finally {
+    abortUpdateCheck();
   }
 }
 

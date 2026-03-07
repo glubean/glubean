@@ -519,7 +519,7 @@ export class TestExecutor {
     testUrl: string,
     testId: string,
     context: ExecutionContext,
-    options?: { timeout?: number; exportName?: string; testIds?: string[] },
+    options?: { timeout?: number; exportName?: string; testIds?: string[]; exportNames?: Record<string, string> },
   ): AsyncGenerator<ExecutionEvent> {
     // Build V8 flags
     const v8Flags: string[] = [];
@@ -531,10 +531,19 @@ export class TestExecutor {
     }
 
     // Build permission flags
-    const permissions = this.options.permissions ?? [
+    // Default permissions are always included; user permissions are appended.
+    // Special case: -A or --allow-all grants everything, skip defaults.
+    const userPerms = this.options.permissions ?? [];
+    const hasAllowAll = userPerms.some(
+      (p) => p === "-A" || p === "--allow-all",
+    );
+    const permissions = hasAllowAll ? ["-A"] : [
       "--allow-net", // Allow network for API testing
       "--allow-read", // Allow reading test files
       "--allow-env", // Allow env access (e.g. GLUBEAN_PICK for test.pick)
+      ...userPerms.filter(
+        (p) => p !== "--allow-net" && p !== "--allow-read" && p !== "--allow-env",
+      ),
     ];
 
     // Build args array
@@ -583,6 +592,13 @@ export class TestExecutor {
     }
     if (options?.exportName) {
       args.push(`--exportName=${options.exportName}`);
+    }
+    if (options?.exportNames && Object.keys(options.exportNames).length > 0) {
+      // Pass testId→exportName mapping for batch mode fallback (test.pick)
+      const pairs = Object.entries(options.exportNames)
+        .map(([id, name]) => `${id}:${name}`)
+        .join(",");
+      args.push(`--exportNames=${pairs}`);
     }
     if (this.options.emitFullTrace) {
       args.push("--emitFullTrace");

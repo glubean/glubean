@@ -378,10 +378,13 @@ export async function runCommand(
       `\n${colors.red}❌ No test files found for target: ${target}${colors.reset}`,
     );
     console.error(
-      `${colors.dim}Make sure *.test.ts files import from @glubean/sdk${colors.reset}\n`,
+      `${colors.dim}Glubean looks for files matching *.test.ts in the target directory.${colors.reset}`,
+    );
+    console.error(
+      `${colors.dim}Run "glubean run tests/" or "glubean run path/to/file.test.ts".${colors.reset}\n`,
     );
     await writeEmptyResult(target, runStartLocal);
-    return;
+    Deno.exit(1);
   }
 
   if (isMultiFile) {
@@ -417,15 +420,110 @@ export async function runCommand(
 
   const envFileName = effectiveRun.envFile || ".env";
   const envPath = resolve(rootDir, envFileName);
+  const userSpecifiedEnvFile = !!options.envFile;
+
+  // If user explicitly specified --env-file, the file MUST exist
+  if (userSpecifiedEnvFile) {
+    try {
+      await Deno.stat(envPath);
+    } catch {
+      console.error(
+        `${colors.red}Error: env file '${envFileName}' not found in ${rootDir}${colors.reset}`,
+      );
+      Deno.exit(1);
+    }
+  }
+
   const envVars = await loadEnvFile(envPath);
+
   // Secrets file follows the env file: .env → .env.secrets, .env.staging → .env.staging.secrets
   const secretsPath = resolve(rootDir, `${envFileName}.secrets`);
-  const secrets = await loadEnvFile(secretsPath);
+  let secretsExist = true;
+  try {
+    await Deno.stat(secretsPath);
+  } catch {
+    secretsExist = false;
+  }
+  const secrets = secretsExist ? await loadEnvFile(secretsPath) : {};
+
+  if (!secretsExist && Object.keys(envVars).length > 0) {
+    console.warn(
+      `${colors.yellow}Warning: secrets file '${envFileName}.secrets' not found in ${rootDir}${colors.reset}`,
+    );
+  }
 
   if (Object.keys(envVars).length > 0) {
     console.log(
       `${colors.dim}Loaded ${Object.keys(envVars).length} vars from ${envFileName}${colors.reset}`,
     );
+  }
+
+  // ── Preflight: verify auth before running tests when --upload is set ────
+  if (options.upload) {
+    const { resolveToken, resolveProjectId, resolveApiUrl } = await import(
+      "../lib/auth.ts"
+    );
+    const authOpts = {
+      token: options.token,
+      project: options.project,
+      apiUrl: options.apiUrl,
+    };
+    const sources = {
+      envFileVars: { ...envVars, ...secrets },
+      cloudConfig: glubeanConfig.cloud,
+    };
+    const preToken = await resolveToken(authOpts, sources);
+    const preProject = await resolveProjectId(authOpts, sources);
+    const preApiUrl = await resolveApiUrl(authOpts, sources);
+    if (!preToken) {
+      console.error(
+        `${colors.red}Error: --upload requires authentication but no token found.${colors.reset}`,
+      );
+      console.error(
+        `${colors.dim}Run 'glubean login', set GLUBEAN_TOKEN, or add token to .env.secrets or deno.json glubean.cloud.${colors.reset}`,
+      );
+      Deno.exit(1);
+    }
+    if (!preProject) {
+      console.error(
+        `${colors.red}Error: --upload requires a project ID but none found.${colors.reset}`,
+      );
+      console.error(
+        `${colors.dim}Use --project, set projectId in deno.json glubean.cloud, or run 'glubean init'.${colors.reset}`,
+      );
+      Deno.exit(1);
+    }
+    // Verify token is valid by calling whoami endpoint
+    try {
+      const resp = await fetch(`${preApiUrl}/open/v1/whoami`, {
+        headers: { Authorization: `Bearer ${preToken}` },
+      });
+      if (!resp.ok) {
+        console.error(
+          `${colors.red}Error: authentication failed (${resp.status}).${colors.reset}`,
+        );
+        if (resp.status === 401) {
+          console.error(
+            `${colors.dim}Token is invalid or expired. Run 'glubean login' to re-authenticate.${colors.reset}`,
+          );
+        }
+        Deno.exit(1);
+      }
+      const identity = await resp.json();
+      console.log(
+        `${colors.dim}Authenticated as ${
+          identity.kind === "project_token" ? `project token (${identity.projectName})` : "user"
+        } · upload to ${preApiUrl}${colors.reset}`,
+      );
+    } catch (err) {
+      console.error(
+        `${colors.red}Error: cannot reach server at ${preApiUrl}${colors.reset}`,
+      );
+      console.error(
+        `${colors.dim}${(err as Error).message}${colors.reset}`,
+      );
+      Deno.exit(1);
+    }
   }
 
   // ── Discover tests across all files ─────────────────────────────────────
@@ -459,15 +557,15 @@ export async function runCommand(
   }
 
   if (allFileTests.length === 0) {
-    console.log(
-      `\n${colors.yellow}⚠️  No test cases found${
+    console.error(
+      `\n${colors.red}❌ No test cases found${
         isMultiFile ? ` in ${testFiles.length} file(s)` : " in file"
       }${colors.reset}`,
     );
-    console.log(
-      `${colors.dim}Make sure to export tests using test()${colors.reset}\n`,
+    console.error(
+      `${colors.dim}Each test file must export tests: export const myTest = test("id")...${colors.reset}\n`,
     );
-    return;
+    Deno.exit(1);
   }
 
   if (isMultiFile) {
@@ -521,13 +619,15 @@ export async function runCommand(
         const joiner = options.tagMode === "and" ? " AND " : " OR ";
         parts.push(`tag: ${options.tags!.join(joiner)}`);
       }
-      console.log(
-        `\n${colors.yellow}⚠️  No tests match ${parts.join(" + ")}${colors.reset}\n`,
+      console.error(
+        `\n${colors.red}❌ No tests match ${parts.join(" + ")}${colors.reset}\n`,
       );
     } else {
-      console.log(`\n${colors.yellow}⚠️  All tests skipped${colors.reset}\n`);
+      console.error(
+        `\n${colors.red}❌ All tests skipped${colors.reset}\n`,
+      );
     }
-    return;
+    Deno.exit(1);
   }
 
   if (options.filter || hasTags) {
@@ -645,6 +745,10 @@ export async function runCommand(
 
     // Build batch: all test IDs from this file
     const testIds = fileTests.map((ft) => ft.test.meta.id);
+    const exportNames: Record<string, string> = {};
+    for (const ft of fileTests) {
+      exportNames[ft.test.meta.id] = ft.exportName;
+    }
     const testMap = new Map(
       fileTests.map((ft) => [ft.test.meta.id, ft]),
     );
@@ -813,6 +917,7 @@ export async function runCommand(
           ...toSingleExecutionOptions(shared),
           timeout: batchTimeout,
           testIds,
+          exportNames,
         },
       )
     ) {
@@ -1005,6 +1110,11 @@ export async function runCommand(
           console.log(
             `    ${colors.cyan}└${colors.reset} ${stepIcon} ${colors.dim}${stepParts.join(" · ")}${colors.reset}`,
           );
+          if (event.error) {
+            console.log(
+              `      ${colors.red}${event.error}${colors.reset}`,
+            );
+          }
           break;
         }
 
@@ -1350,15 +1460,37 @@ export async function runCommand(
     const apiUrl = await resolveApiUrl(authOpts, sources);
 
     if (!token) {
-      console.log(
-        `${colors.yellow}No auth token found. Run 'glubean login', set GLUBEAN_TOKEN, or add it to .env.secrets.${colors.reset}`,
+      console.error(
+        `${colors.red}Upload failed: no auth token found.${colors.reset}`,
       );
+      console.error(
+        `${colors.dim}Run 'glubean login', set GLUBEAN_TOKEN, or add token to .env.secrets or deno.json glubean.cloud.${colors.reset}`,
+      );
+      Deno.exit(1);
     } else if (!projectId) {
-      console.log(
-        `${colors.yellow}No project ID. Use --project, set in deno.json glubean.cloud, or run 'glubean login'.${colors.reset}`,
+      console.error(
+        `${colors.red}Upload failed: no project ID.${colors.reset}`,
       );
+      console.error(
+        `${colors.dim}Use --project, set projectId in deno.json glubean.cloud, or run 'glubean login'.${colors.reset}`,
+      );
+      Deno.exit(1);
     } else {
-      await uploadToCloud(resultPayload, {
+      // Apply redaction before uploading to Cloud
+      const { RedactionEngine, createBuiltinPlugins, redactEvent } = await import("@glubean/redaction");
+      const engine = new RedactionEngine({
+        config: glubeanConfig.redaction,
+        plugins: createBuiltinPlugins(glubeanConfig.redaction),
+      });
+      const redactedPayload = {
+        ...resultPayload,
+        tests: resultPayload.tests.map((t) => ({
+          ...t,
+          events: t.events.map((e) => redactEvent(engine, e)),
+        })),
+      };
+
+      await uploadToCloud(redactedPayload, {
         apiUrl,
         token,
         projectId,
