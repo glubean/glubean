@@ -76,7 +76,7 @@ cli
   )
   .option(
     "-t, --tag <tag:string>",
-    "Run only tests with matching tag (exact, repeatable)",
+    "Run only tests with matching tag (comma-separated or repeatable)",
     { collect: true },
   )
   .option(
@@ -171,7 +171,7 @@ cli
     await runCommand(resolvedTarget, {
       filter: options.filter,
       pick: options.pick,
-      tags: options.tag,
+      tags: options.tag?.flatMap((t: string) => t.split(",").map((s: string) => s.trim()).filter(Boolean)),
       tagMode: options.tagMode as "or" | "and",
       envFile: options.envFile,
       logFile: options.logFile,
