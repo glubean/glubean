@@ -17,11 +17,11 @@
   },
   "dependencies": {
     "@glubean/sdk": "workspace:*",
-    "ky": "^1.14.0"
+    "ky": "^1.14.0",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
     "zod": "^4.3.6"
   }
 }

@@ -151,6 +151,7 @@ export interface SingleExecutionOptions {
   onEvent?: EventHandler;
   includeTestId?: boolean;
   timeout?: number;
+  signal?: AbortSignal;
 }
 
 export interface ExecutionResult {
@@ -175,6 +176,7 @@ export interface ExecutionOptions {
   stopOnFailure?: boolean;
   failAfter?: number;
   onEvent?: EventHandler;
+  signal?: AbortSignal;
 }
 
 export interface ExecutionBatchResult {
@@ -232,7 +234,7 @@ export class TestExecutor {
     testUrl: string,
     testId: string,
     context: ExecutionContext,
-    options?: { timeout?: number; exportName?: string; testIds?: string[]; exportNames?: Record<string, string> },
+    options?: { timeout?: number; exportName?: string; testIds?: string[]; exportNames?: Record<string, string>; signal?: AbortSignal },
   ): AsyncGenerator<ExecutionEvent> {
     const args: string[] = [this.harnessPath];
 
@@ -321,6 +323,22 @@ export class TestExecutor {
 
     if (timeout > 0) armTimeout(timeout);
 
+    // AbortSignal support
+    const abortSignal = options?.signal;
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      child.kill("SIGTERM");
+    };
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        child.kill("SIGTERM");
+        aborted = true;
+      } else {
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
     // Read stdout line by line
     let stdoutBuffer = "";
     const stderrChunks: Buffer[] = [];
@@ -360,11 +378,14 @@ export class TestExecutor {
       }
 
       if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
 
       const stderr = Buffer.concat(stderrChunks).toString();
 
       if (code !== 0) {
-        if (timedOut) {
+        if (aborted) {
+          eventQueue.push({ type: "error", message: "Test execution was cancelled" });
+        } else if (timedOut) {
           eventQueue.push({ type: "error", message: `Test execution timed out after ${timeout}ms` });
         } else if (signal === "SIGKILL" || code === 137) {
           const heapInfo = this.options.maxHeapSizeMb ? ` (limit: ${this.options.maxHeapSizeMb} MB)` : "";
@@ -428,7 +449,7 @@ export class TestExecutor {
     let assertionCount = 0;
     let failedAssertionCount = 0;
 
-    for await (const event of this.run(testUrl, testId, context, { timeout: options?.timeout })) {
+    for await (const event of this.run(testUrl, testId, context, { timeout: options?.timeout, signal: options?.signal })) {
       const ts = Date.now() - startTime;
       let timelineEvent: TimelineEvent | undefined;
 
@@ -518,10 +539,11 @@ export class TestExecutor {
 
     const runNext = async (): Promise<void> => {
       while (!stop) {
+        if (options.signal?.aborted) { stop = true; return; }
         const index = nextIndex++;
         if (index >= testIds.length) return;
         const testId = testIds[index];
-        const result = await this.execute(testUrl, testId, context, { onEvent, includeTestId: !!onEvent });
+        const result = await this.execute(testUrl, testId, context, { onEvent, includeTestId: !!onEvent, signal: options.signal });
         results[index] = result;
         if (!result.success) {
           failedCount += 1;
