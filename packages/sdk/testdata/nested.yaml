@@ -1,0 +1,7 @@
+info:
+  name: Test Suite
+testCases:
+  - id: 1
+    expected: 200
+  - id: 2
+    expected: 404

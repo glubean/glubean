@@ -344,7 +344,7 @@ export interface TestContext {
    * ctx.expect(res).toHaveHeader("content-type", /json/, "content type");
    * ```
    */
-  expect<V>(actual: V): import("./expect.ts").Expectation<V>;
+  expect<V>(actual: V): import("./expect.js").Expectation<V>;
 
   /**
    * Soft check — records a warning but never affects test pass/fail.
@@ -823,7 +823,7 @@ export interface ConfigureOptions {
    * });
    * ```
    */
-  // deno-lint-ignore no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   plugins?: Record<string, PluginFactory<any> | PluginEntry<any>>;
 }
 
@@ -2082,7 +2082,7 @@ export interface Test<S = unknown> {
    * The runner resolves these and merges results into `TestContext`
    * before invoking the test function / steps.
    */
-  // deno-lint-ignore no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fixtures?: Record<string, ExtensionFn<any>>;
 }
 

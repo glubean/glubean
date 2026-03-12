@@ -1,0 +1,4 @@
+id,country,expected
+1,US,200
+2,JP,200
+999,US,404

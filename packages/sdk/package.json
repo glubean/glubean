@@ -3,11 +3,33 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./data": "./src/data.ts",
-    "./expect": "./src/expect.ts",
-    "./plugin": "./src/plugin.ts",
-    "./internal": "./src/internal.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./data": {
+      "types": "./dist/data.d.ts",
+      "import": "./dist/data.js"
+    },
+    "./expect": {
+      "types": "./dist/expect.d.ts",
+      "import": "./dist/expect.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
+    },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "import": "./dist/internal.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "yaml": "^2.7.0"

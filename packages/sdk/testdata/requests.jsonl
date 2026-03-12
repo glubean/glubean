@@ -1,0 +1,3 @@
+{"method":"GET","url":"/users/1","expected":200}
+{"method":"GET","url":"/users/999","expected":404}
+{"method":"POST","url":"/users","expected":201}

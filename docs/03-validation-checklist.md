@@ -21,15 +21,15 @@
 | # | 项 | 验收标准 | 状态 |
 |---|-----|---------|------|
 | P0-6 | CLI 端到端 | 从用户视角 `gb run .`：发现测试、执行、正确 exit code、可读输出 | ✅ spike 验证 |
-| P0-7 | SDK 最小用户链路 | 第三方项目 `import { test } from "@glubean/sdk"` 写测试并运行成功，不需要了解 monorepo 结构 | ✅ spike 验证 (workspace 内) |
-| P0-8 | 构建/类型检查闭环 | `tsc --noEmit` 全绿，构建产物可用，无缺失 @types/node | ✅ tsconfig 已配置 |
+| P0-7 | SDK 最小用户链路 | 第三方项目 `import { test } from "@glubean/sdk"` 写测试并运行成功，不需要了解 monorepo 结构 | ❌ workspace 内通过，clean temp project 未验证 |
+| P0-8 | 构建/类型检查闭环 | `tsc --noEmit` 全绿，构建产物可用，无缺失 @types/node | ⚠️ 指定 `-p` 通过，裸跑报 TS2688 (types resolve 不完整) |
 | P0-9 | 文档与实际一致 | README 安装 + 首个示例可逐字复现成功 | ❌ (文档未写) |
 
 ### 功能覆盖
 
 | # | 项 | 验收标准 | 状态 |
 |---|-----|---------|------|
-| P0-10 | 模块加载格式 | `.ts` `.mts` `.js` `.mjs` 均可加载执行 | ✅ regex 支持，`.ts` 已实测 |
+| P0-10 | 模块加载格式 | `.ts` `.mts` `.js` `.mjs` 均可加载执行 | ⚠️ 仅 `.ts` 已实测，其他格式仅代码支持未验证 |
 | P0-11 | 测试发现 | `test()`、builder、`test.each`、`test.pick` 均能发现 | ⚠️ 仅 `test()` 已验证 |
 | P0-12 | 执行模型稳定性 | 正常执行、失败、异常抛出、超时 — 都正确回传状态 | ⚠️ 仅正常执行已验证 |
 | P0-13 | 退出码语义 | 全通过 → 0；有失败 → 非 0；skip → 不误报 | ⚠️ 仅全通过已验证 |

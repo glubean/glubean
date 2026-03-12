@@ -1,0 +1,9 @@
+- id: 1
+  country: US
+  expected: 200
+- id: 2
+  country: JP
+  expected: 200
+- id: 999
+  country: US
+  expected: 404
