@@ -28,6 +28,12 @@ importers:
         specifier: ^22.0.0
         version: 22.19.15
 
+  packages/redaction:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+
   packages/runner:
     dependencies:
       '@glubean/sdk':
@@ -46,6 +52,12 @@ importers:
       zod:
         specifier: ^4.3.6
         version: 4.3.6
+
+  packages/scanner:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
 
   packages/sdk:
     dependencies:

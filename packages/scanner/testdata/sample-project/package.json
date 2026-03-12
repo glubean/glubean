@@ -1,0 +1,7 @@
+{
+  "name": "sample-project",
+  "private": true,
+  "dependencies": {
+    "@glubean/sdk": "^0.12.0"
+  }
+}
