@@ -2,11 +2,11 @@
  * JSONPlaceholder API Tests
  *
  * These tests demonstrate what AI can generate from an OpenAPI spec.
- * Run with: deno task test
+ * Run with: npm test
  *
  * API Reference: @openapi.json
  */
-// deno-lint-ignore no-import-prefix
+// Legacy JSR import style — kept for backward-compat scanner test
 import { test } from "jsr:@glubean/sdk@^0.12.0";
 
 // ============================================================================

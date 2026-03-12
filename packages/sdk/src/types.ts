@@ -685,7 +685,7 @@ export interface TestContext {
 
   /**
    * Get current memory usage statistics.
-   * Only available in Deno runtime (returns null in other environments).
+   * Returns null if not available in the current runtime.
    * Useful for debugging memory issues and profiling tests locally.
    *
    * @returns Memory usage stats or null if not available

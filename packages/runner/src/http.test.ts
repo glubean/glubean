@@ -725,5 +725,5 @@ export const dnsFailClosed = test("dnsFailClosed", async (ctx) => {
   );
 });
 
-// Note: DNS rebinding test (Deno.resolveDns mock) is skipped — deeply Deno-specific.
+// Note: DNS rebinding test is skipped — would require mocking DNS resolution.
 // The network_policy unit tests cover the IP classification logic.

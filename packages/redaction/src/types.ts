@@ -3,8 +3,7 @@
  *
  * Core type definitions for the Glubean Redaction Engine.
  *
- * These types are pure TypeScript with no runtime-specific dependencies,
- * enabling consumption by both Deno (oss CLI/runner) and Node.js (server).
+ * These types are pure TypeScript with no runtime-specific dependencies.
  *
  * The generic parameters on RedactionConfig allow the server to extend
  * base types with premium scopes and patterns without modifying this package.

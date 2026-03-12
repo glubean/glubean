@@ -1,8 +1,7 @@
 /**
  * @glubean/redaction — Plugin-based secrets/PII detection and masking.
  *
- * Pure TypeScript, no runtime-specific dependencies (no Deno.*, no node:*).
- * Consumable by both Deno (oss CLI/runner) and Node.js (server).
+ * Pure TypeScript, no runtime-specific dependencies.
  *
  * @example
  * import {

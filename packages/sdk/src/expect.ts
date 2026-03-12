@@ -414,7 +414,7 @@ export class Expectation<T> {
    * extra arguments, and returns a `MatcherResult`. The SDK automatically
    * handles `.not` negation and `.orFail()` chaining.
    *
-   * **Isolation**: Each test file runs in its own Deno subprocess, so
+   * **Isolation**: Each test file runs in its own subprocess, so
    * prototype mutations from `Expectation.extend()` do not leak between files.
    *
    * **Type safety**: To get full TypeScript support for custom matchers,
