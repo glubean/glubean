@@ -735,17 +735,14 @@ const ctx = {
   retryCount,
 
   /**
-   * Get current memory usage.
-   * Only available in Deno runtime (returns null in other environments).
+   * Get current memory usage via `process.memoryUsage()`.
    * Useful for debugging memory issues locally.
    *
-   * @returns Memory usage stats or null if not available
+   * @returns Memory usage stats
    *
    * @example
    * const mem = ctx.getMemoryUsage();
-   * if (mem) {
-   *   ctx.log(`Heap used: ${(mem.heapUsed / 1024 / 1024).toFixed(2)} MB`);
-   * }
+   * ctx.log(`Heap used: ${(mem.heapUsed / 1024 / 1024).toFixed(2)} MB`);
    */
   getMemoryUsage: () => {
     return process.memoryUsage();

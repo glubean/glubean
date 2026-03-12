@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createRequire } from "node:module";
 import type { ApiTrace, GlubeanAction, GlubeanEvent } from "@glubean/sdk";
-import { resolveAllowNetFlag } from "./config.js";
 import type { SharedRunConfig } from "./config.js";
 
 const DEFAULT_CONCURRENCY = 1;

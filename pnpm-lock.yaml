@@ -43,6 +43,9 @@ importers:
       tsx:
         specifier: ^4.19.0
         version: 4.21.0
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
 
   packages/sdk:
     dependencies:
@@ -593,6 +596,9 @@ packages:
     engines: {node: '>= 14.6'}
     hasBin: true
 
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
+
 snapshots:
 
   '@esbuild/aix-ppc64@0.27.3':
@@ -996,3 +1002,5 @@ snapshots:
       stackback: 0.0.2
 
   yaml@2.8.2: {}
+
+  zod@4.3.6: {}
