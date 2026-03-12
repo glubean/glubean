@@ -1,0 +1,10 @@
+{
+  "name": "test-project",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@glubean/sdk": "workspace:*",
+    "@glubean/runner": "workspace:*",
+    "@glubean/cli": "workspace:*"
+  }
+}

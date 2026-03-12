@@ -1,0 +1,16 @@
+{
+  "name": "@glubean/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "gb": "./bin/gb.js"
+  },
+  "dependencies": {
+    "@glubean/sdk": "workspace:*",
+    "@glubean/runner": "workspace:*",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}
