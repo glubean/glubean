@@ -12,6 +12,8 @@ import { pathToFileURL } from "node:url";
 import { glob } from "node:fs/promises";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
 import { loadEnvFile } from "../lib/env.js";
+import { CLI_VERSION } from "../version.js";
+import type { UploadResultPayload } from "../lib/upload.js";
 import { extractFromSource } from "@glubean/scanner/static";
 
 // ANSI color codes for pretty output
@@ -1241,8 +1243,25 @@ export async function runCommand(
         config: glubeanConfig.redaction,
         plugins: createBuiltinPlugins(glubeanConfig.redaction),
       });
+
+      // Generate metadata for test registry
+      let metadata: UploadResultPayload['metadata'] | undefined;
+      try {
+        const { scan } = await import("@glubean/scanner");
+        const { buildMetadata } = await import("../metadata.js");
+        const scanResult = await scan(rootDir);
+        const built = await buildMetadata(scanResult, {
+          generatedBy: `@glubean/cli@${CLI_VERSION}`,
+          projectId,
+        });
+        metadata = built;
+      } catch {
+        // Non-critical: upload results without metadata
+      }
+
       const redactedPayload = {
         ...resultPayload,
+        metadata,
         tests: resultPayload.tests.map((t) => ({
           ...t,
           events: t.events.map((e) => redactEvent(engine, e)),

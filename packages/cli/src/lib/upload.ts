@@ -82,6 +82,25 @@ export interface UploadResultPayload {
     tags?: string[];
     events?: unknown[];
   }>;
+  metadata?: {
+    schemaVersion: string;
+    generatedBy: string;
+    generatedAt: string;
+    testCount: number;
+    fileCount: number;
+    tags: string[];
+    files: Record<string, {
+      hash: string;
+      exports: Array<{
+        type: string;
+        id: string;
+        name?: string;
+        tags?: string[];
+        exportName: string;
+        skip?: boolean;
+      }>;
+    }>;
+  };
 }
 
 export interface UploadOptions {
@@ -187,6 +206,7 @@ export async function uploadToCloud(
     os: process.platform,
     summary: resultPayload.summary,
     tests: resultPayload.tests,
+    ...(resultPayload.metadata && { metadata: resultPayload.metadata }),
   };
 
   let runId: string;
