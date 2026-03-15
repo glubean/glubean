@@ -188,14 +188,14 @@ test("init --no-interactive --github-actions creates workflow files", async () =
 
     const metadataContent = await readFile(metadataPath, "utf-8");
     expect(metadataContent).toContain("Glubean Metadata");
-    expect(metadataContent).toContain("gb scan");
+    expect(metadataContent).toContain("glubean scan");
 
     const testsPath = join(dir, ".github/workflows/glubean-tests.yml");
     expect(await fileExists(testsPath)).toBe(true);
 
     const testsContent = await readFile(testsPath, "utf-8");
     expect(testsContent).toContain("Glubean Tests");
-    expect(testsContent).toContain("gb run --ci");
+    expect(testsContent).toContain("glubean run --ci");
     expect(testsContent).toContain("upload-artifact");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -246,7 +246,7 @@ test("init --no-interactive --hooks creates git hooks when .git exists", async (
     expect(await fileExists(join(dir, ".git/hooks/pre-push"))).toBe(true);
 
     const preCommit = await readFile(join(dir, ".git/hooks/pre-commit"), "utf-8");
-    expect(preCommit).toContain("gb scan");
+    expect(preCommit).toContain("glubean scan");
 
     const prePush = await readFile(join(dir, ".git/hooks/pre-push"), "utf-8");
     expect(prePush).toContain("validate-metadata");
@@ -317,9 +317,9 @@ test("init --minimal creates minimal files", async () => {
     // Verify package.json has explore and test scripts
     const pkgJson = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
     expect(typeof pkgJson.scripts?.explore).toBe("string");
-    expect(pkgJson.scripts?.test).toBe("gb run");
-    expect(pkgJson.scripts?.["test:staging"]).toBe("gb run --env-file .env.staging");
-    expect(pkgJson.scripts?.["test:ci"]).toBe("gb run --ci --result-json");
+    expect(pkgJson.scripts?.test).toBe("glubean run");
+    expect(pkgJson.scripts?.["test:staging"]).toBe("glubean run --env-file .env.staging");
+    expect(pkgJson.scripts?.["test:ci"]).toBe("glubean run --ci --result-json");
     expect(pkgJson.glubean?.run?.testDir).toBe("./tests");
 
     // Verify .env has DummyJSON

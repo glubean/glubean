@@ -216,15 +216,15 @@ function makePackageJson(_baseUrl: string): string {
         version: "0.1.0",
         type: "module",
         scripts: {
-          test: "gb run",
-          "test:verbose": "gb run --verbose",
-          "test:staging": "gb run --env-file .env.staging",
-          "test:log": "gb run --log-file",
-          "test:ci": "gb run --ci --result-json",
-          explore: "gb run --explore",
-          "explore:verbose": "gb run --explore --verbose",
-          scan: "gb scan",
-          "validate-metadata": "gb validate-metadata",
+          test: "glubean run",
+          "test:verbose": "glubean run --verbose",
+          "test:staging": "glubean run --env-file .env.staging",
+          "test:log": "glubean run --log-file",
+          "test:ci": "glubean run --ci --result-json",
+          explore: "glubean run --explore",
+          "explore:verbose": "glubean run --explore --verbose",
+          scan: "glubean scan",
+          "validate-metadata": "glubean validate-metadata",
         },
         dependencies: {
           "@glubean/sdk": SDK_VERSION,
@@ -263,7 +263,7 @@ PASSWORD=emilyspass
 function makeStagingEnvFile(baseUrl: string): string {
   const stagingUrl = baseUrl.replace(/\/\/([^/]+)/, "//staging.$1");
   return `# Staging environment variables
-# Usage: gb run --env-file .env.staging
+# Usage: glubean run --env-file .env.staging
 BASE_URL=${stagingUrl}
 `;
 }
@@ -295,7 +295,7 @@ node_modules/
 const PRE_COMMIT_HOOK = `#!/bin/sh
 set -e
 
-gb scan
+glubean scan
 
 if [ -n "$(git diff --name-only -- metadata.json)" ]; then
   echo "metadata.json updated. Please git add metadata.json"
@@ -306,7 +306,7 @@ fi
 const PRE_PUSH_HOOK = `#!/bin/sh
 set -e
 
-gb validate-metadata
+glubean validate-metadata
 `;
 
 const GITHUB_ACTION_METADATA = `name: Glubean Metadata
@@ -330,7 +330,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Generate metadata.json
-        run: npx gb scan
+        run: npx glubean scan
       - name: Verify metadata.json
         run: git diff --exit-code metadata.json
 `;
@@ -363,7 +363,7 @@ jobs:
           echo "PASSWORD=\${{ secrets.PASSWORD }}" >> .env.secrets
 
       - name: Run tests
-        run: npx gb run --ci --result-json
+        run: npx glubean run --ci --result-json
 
       - name: Upload results
         if: always()
@@ -386,12 +386,12 @@ function makeMinimalPackageJson(): string {
       version: "0.1.0",
       type: "module",
       scripts: {
-        test: "gb run",
-        "test:verbose": "gb run --verbose",
-        "test:staging": "gb run --env-file .env.staging",
-        "test:ci": "gb run --ci --result-json",
-        explore: "gb run --explore --verbose",
-        scan: "gb scan",
+        test: "glubean run",
+        "test:verbose": "glubean run --verbose",
+        "test:staging": "glubean run --env-file .env.staging",
+        "test:ci": "glubean run --ci --result-json",
+        explore: "glubean run --explore --verbose",
+        scan: "glubean scan",
       },
       dependencies: {
         "@glubean/sdk": SDK_VERSION,
@@ -423,7 +423,7 @@ PASSWORD=emilyspass
 `;
 
 const MINIMAL_ENV_STAGING = `# Staging environment variables
-# Usage: gb run --env-file .env.staging
+# Usage: glubean run --env-file .env.staging
 # Tip: or switch to "staging" from the VS Code status bar — no CLI flags needed.
 BASE_URL=https://staging.dummyjson.com
 `;
@@ -637,7 +637,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
           `\n  ${colors.dim}Skipping Git hooks and GitHub Actions${colors.reset}`,
         );
         console.log(
-          `  ${colors.dim}Run "git init && gb init --hooks --github-actions" later${colors.reset}\n`,
+          `  ${colors.dim}Run "git init && glubean init --hooks --github-actions" later${colors.reset}\n`,
         );
       }
     } else {
@@ -899,7 +899,10 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       `  4. Keep ${colors.cyan}CLAUDE.md${colors.reset} or ${colors.cyan}AGENTS.md${colors.reset} — delete whichever you don't need`,
     );
     console.log(
-      `  5. Drop your OpenAPI spec in ${colors.cyan}context/${colors.reset} for AI-assisted test writing\n`,
+      `  5. Drop your OpenAPI spec in ${colors.cyan}context/${colors.reset} for AI-assisted test writing`,
+    );
+    console.log(
+      `\n  ${colors.dim}Tip: install CLI globally for convenience:${colors.reset} ${colors.cyan}npm install -g @glubean/cli${colors.reset}\n`,
     );
   }
 }
