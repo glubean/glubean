@@ -40,10 +40,13 @@ export interface Hasher {
 export type MetadataExtractor = (filePath: string, customFns?: string[]) => Promise<ExportMeta[]>;
 
 const DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build"];
-const DEFAULT_EXTENSIONS = [".ts"];
+const DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"];
 
-// File detection uses the `.test.ts` extension as the convention.
-// All *.test.ts files in scanned directories are considered Glubean test files.
+const TEST_FILE_SUFFIXES = [".test.ts", ".test.js", ".test.mjs"];
+
+function isTestFile(filePath: string): boolean {
+  return TEST_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
+}
 
 /**
  * Scanner class for extracting test metadata from a directory.
@@ -149,7 +152,7 @@ export class Scanner {
           skipDirs: DEFAULT_SKIP_DIRS,
         })
       ) {
-        if (filePath.endsWith(".test.ts")) {
+        if (isTestFile(filePath)) {
           foundTestFile = true;
           break;
         }
@@ -160,8 +163,8 @@ export class Scanner {
 
     if (!foundTestFile) {
       errors.push(
-        "No *.test.ts files found. " +
-          "Ensure your test files are named *.test.ts.",
+        "No test files found. " +
+          "Ensure your test files are named *.test.ts, *.test.js, or *.test.mjs.",
       );
     }
 
@@ -220,7 +223,7 @@ export class Scanner {
     // Phase 2: collect all *.test.ts files
     const testFiles: string[] = [];
     for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
-      if (!filePath.endsWith(".test.ts")) continue;
+      if (!isTestFile(filePath)) continue;
       testFiles.push(filePath);
     }
 
@@ -254,7 +257,7 @@ export class Scanner {
     if (Object.keys(files).length === 0) {
       warnings.push(
         "No Glubean test files found. " +
-          "Ensure your test files are named *.test.ts and export test().",
+          "Ensure your test files are named *.test.ts, *.test.js, or *.test.mjs and export test().",
       );
     }
 
