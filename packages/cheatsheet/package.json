@@ -1,0 +1,17 @@
+{
+  "name": "@glubean/cheatsheet",
+  "version": "0.1.0",
+  "description": "SDK reference, CLI reference, and test patterns for AI agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glubean/glubean",
+    "directory": "packages/cheatsheet"
+  },
+  "files": [
+    "index.md",
+    "sdk-reference.md",
+    "cli-reference.md",
+    "patterns/"
+  ]
+}
