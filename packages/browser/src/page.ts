@@ -767,10 +767,11 @@ export class GlubeanPage {
   ): Promise<string[]> {
     const start = Date.now();
     try {
-      await this.locator(selector)
+      const handle = await this.locator(selector)
         .setTimeout(this._actionTimeout)
         .waitHandle();
-      const selected = await this.raw.select(selector, ...values);
+      const el = handle as import("puppeteer-core").ElementHandle<HTMLSelectElement>;
+      const selected = await el.select(...values);
       const duration = Date.now() - start;
       this._ctx.action({
         category: "browser:select",
