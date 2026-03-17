@@ -767,11 +767,25 @@ export class GlubeanPage {
   ): Promise<string[]> {
     const start = Date.now();
     try {
-      const handle = await this.locator(selector)
+      await this.locator(selector)
         .setTimeout(this._actionTimeout)
         .waitHandle();
-      const el = handle as import("puppeteer-core").ElementHandle<HTMLSelectElement>;
-      const selected = await el.select(...values);
+      // Use page.evaluate() instead of ElementHandle/Page.select() to avoid
+      // Puppeteer 24's private field access issues (#waitForVisibilityIfNeeded)
+      const selected = await this.raw.evaluate(
+        (sel: string, vals: string[]) => {
+          const el = document.querySelector(sel) as HTMLSelectElement;
+          if (!el) throw new Error(`select: element not found: ${sel}`);
+          for (const opt of Array.from(el.options)) {
+            opt.selected = vals.includes(opt.value);
+          }
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          return Array.from(el.selectedOptions).map((o) => o.value);
+        },
+        selector,
+        values,
+      );
       const duration = Date.now() - start;
       this._ctx.action({
         category: "browser:select",
