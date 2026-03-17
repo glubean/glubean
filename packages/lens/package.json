@@ -1,12 +1,12 @@
 {
-  "name": "@glubean/cheatsheet",
+  "name": "@glubean/lens",
   "version": "0.1.0",
   "description": "SDK reference, CLI reference, and test patterns for AI agents",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/glubean/glubean",
-    "directory": "packages/cheatsheet"
+    "directory": "packages/lens"
   },
   "files": [
     "index.md",

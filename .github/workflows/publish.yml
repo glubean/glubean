@@ -96,8 +96,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Content packages (no build step)
-      - name: Publish @glubean/cheatsheet
+      - name: Publish @glubean/lens
         continue-on-error: true
-        run: pnpm --filter @glubean/cheatsheet publish --access public --no-git-checks
+        run: pnpm --filter @glubean/lens publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
