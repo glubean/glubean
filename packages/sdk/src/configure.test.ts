@@ -268,7 +268,7 @@ test("http - extends runtime http with prefixUrl from var", () => {
   );
   try {
     const { http } = configure({
-      http: { prefixUrl: "base_url" },
+      http: { prefixUrl: "{{base_url}}" },
     });
     // Trigger lazy resolution
     http.get("users");
@@ -290,7 +290,7 @@ test("http - resolves {{key}} templates in headers from secrets", () => {
   try {
     const { http } = configure({
       http: {
-        prefixUrl: "base_url",
+        prefixUrl: "{{base_url}}",
         headers: { Authorization: "Bearer {{api_key}}" },
       },
     });
@@ -369,11 +369,11 @@ test("http - throws on missing prefixUrl var", () => {
   const cleanup = setRuntime({}, {}, mockHttp);
   try {
     const { http } = configure({
-      http: { prefixUrl: "base_url" },
+      http: { prefixUrl: "{{base_url}}" },
     });
     expect(
       () => http.get("users"),
-    ).toThrow("Missing required var: base_url");
+    ).toThrow('Missing value for template placeholder "{{base_url}}"');
   } finally {
     cleanup();
   }
@@ -434,7 +434,7 @@ test("http - caches extended client (extend called once per runtime)", () => {
   );
   try {
     const { http } = configure({
-      http: { prefixUrl: "base_url" },
+      http: { prefixUrl: "{{base_url}}" },
     });
     // Multiple calls should only trigger one extend()
     http.get("users");
@@ -456,7 +456,7 @@ test("http - extend() on configured client delegates to resolved client", () => 
   );
   try {
     const { http } = configure({
-      http: { prefixUrl: "base_url" },
+      http: { prefixUrl: "{{base_url}}" },
     });
     // First extend creates the base configured client
     // Then .extend() on that creates a child
@@ -505,7 +505,7 @@ test("full configure - vars, secrets, and http work together", () => {
       vars: { baseUrl: "base_url", orgId: "org_id" },
       secrets: { apiKey: "api_key" },
       http: {
-        prefixUrl: "base_url",
+        prefixUrl: "{{base_url}}",
         headers: {
           Authorization: "Bearer {{api_key}}",
           "X-Org-Id": "{{org_id}}",
@@ -542,7 +542,7 @@ test("configure() itself does not throw without runtime", () => {
   const result = configure({
     vars: { baseUrl: "base_url" },
     secrets: { apiKey: "api_key" },
-    http: { prefixUrl: "base_url" },
+    http: { prefixUrl: "{{base_url}}" },
   });
   expect(typeof result.vars).toBe("object");
   expect(typeof result.secrets).toBe("object");
@@ -695,7 +695,7 @@ test("http - hooks combined with other options", () => {
     const hook = (_request: Request, _options: HttpRequestOptions) => {};
     const { http } = configure({
       http: {
-        prefixUrl: "base_url",
+        prefixUrl: "{{base_url}}",
         headers: { Authorization: "Bearer {{api_key}}" },
         hooks: { beforeRequest: [hook] },
       },
@@ -890,7 +890,7 @@ test("configure({ plugins }) - returns plugin instances alongside vars/secrets/h
     const result = configure({
       vars: { baseUrl: "base_url" },
       secrets: { apiKey: "api_key" },
-      http: { prefixUrl: "base_url" },
+      http: { prefixUrl: "{{base_url}}" },
       plugins: {
         myClient: definePlugin((runtime) => ({
           endpoint: runtime.requireVar("base_url"),
