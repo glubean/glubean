@@ -767,11 +767,9 @@ export class GlubeanPage {
   ): Promise<string[]> {
     const start = Date.now();
     try {
-      await this.locator(selector)
-        .setTimeout(this._actionTimeout)
-        .waitHandle();
-      // Use page.evaluate() instead of ElementHandle/Page.select() to avoid
-      // Puppeteer 24's private field access issues (#waitForVisibilityIfNeeded)
+      // Use waitForSelector + page.evaluate() to avoid Puppeteer 24's Locator
+      // private field issue (#waitForVisibilityIfNeeded)
+      await this.raw.waitForSelector(selector, { timeout: this._actionTimeout });
       const selected = await this.raw.evaluate(
         (sel: string, vals: string[]) => {
           const el = document.querySelector(sel) as HTMLSelectElement;
