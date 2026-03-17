@@ -24,6 +24,7 @@ import { specSplitCommand } from "./commands/spec_split.js";
 import { workerCommand } from "./commands/worker.js";
 import { redactCommand } from "./commands/redact.js";
 import { configMcpCommand } from "./commands/config_mcp.js";
+import { configSkillCommand } from "./commands/config_skill.js";
 import { abortUpdateCheck, checkForUpdates } from "./update_check.js";
 
 const program = new Command();
@@ -358,6 +359,18 @@ configCmd
   .action(async (options) => {
     await configMcpCommand({
       target: options.target as "claude-code" | "cursor" | "windsurf" | undefined,
+      remove: options.remove,
+    });
+  });
+
+configCmd
+  .command("skill")
+  .description("Install Glubean test-writing skill for AI coding tools")
+  .option("--target <tool>", "AI tool: claude-code, codex, or cursor")
+  .option("--remove", "Remove skill")
+  .action(async (options) => {
+    await configSkillCommand({
+      target: options.target as "claude-code" | "codex" | "cursor" | undefined,
       remove: options.remove,
     });
   });
