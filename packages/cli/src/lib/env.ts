@@ -43,6 +43,28 @@ export async function loadProjectEnv(
 
   const envVars = await loadEnvFile(envPath);
   const secrets = await loadEnvFile(secretsPath);
+  const merged = { ...envVars, ...secrets };
 
-  return { ...envVars, ...secrets };
+  return expandVars(merged);
+}
+
+/**
+ * Expand `${NAME}` references in env values.
+ *
+ * Lookup order:
+ * 1. Already-resolved values from the same pass (supports forward references
+ *    only if the referenced key appears earlier in the file).
+ * 2. `process.env`
+ * 3. Empty string if not found.
+ */
+export function expandVars(
+  vars: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    result[key] = value.replace(/\$\{(\w+)\}/g, (_, name: string) => {
+      return result[name] ?? process.env[name] ?? "";
+    });
+  }
+  return result;
 }
