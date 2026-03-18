@@ -1845,6 +1845,8 @@ export interface ApiTrace {
   responseHeaders?: Record<string, string>;
   /** Optional response body */
   responseBody?: unknown;
+  /** JSON Schema inferred from responseBody (when inferSchema is enabled) */
+  responseSchema?: Record<string, unknown>;
 }
 
 /**

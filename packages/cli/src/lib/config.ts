@@ -29,6 +29,8 @@ export interface GlubeanRunConfig {
   pretty: boolean;
   logFile: boolean;
   emitFullTrace: boolean;
+  inferSchema: boolean;
+  truncateArrays: boolean;
   envFile: string;
   failFast: boolean;
   failAfter: number | null;
@@ -47,6 +49,8 @@ export interface GlubeanRunConfigInput {
   pretty?: boolean;
   logFile?: boolean;
   emitFullTrace?: boolean;
+  inferSchema?: boolean;
+  truncateArrays?: boolean;
   envFile?: string;
   failFast?: boolean;
   failAfter?: number | null;
@@ -96,6 +100,8 @@ export const RUN_DEFAULTS: GlubeanRunConfig = {
   pretty: true,
   logFile: false,
   emitFullTrace: false,
+  inferSchema: false,
+  truncateArrays: false,
   envFile: ".env",
   failFast: false,
   failAfter: null,
@@ -382,5 +388,7 @@ export function toSharedRunConfig(config: GlubeanRunConfig): SharedRunConfig {
     perTestTimeoutMs: config.perTestTimeoutMs,
     concurrency: config.concurrency,
     emitFullTrace: config.emitFullTrace,
+    inferSchema: config.inferSchema ?? false,
+    truncateArrays: config.truncateArrays ?? false,
   };
 }

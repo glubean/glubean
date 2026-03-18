@@ -456,10 +456,19 @@ export async function runLocalTestsFromFile(args: {
     };
   }
 
+  const includeLogs = args.includeLogs ?? true;
+  const includeTraces = args.includeTraces ?? false;
+
   const shared: SharedRunConfig = {
     ...LOCAL_RUN_DEFAULTS,
     failFast: Boolean(args.stopOnFailure),
     concurrency: Math.max(1, args.concurrency ?? 1),
+    // When AI requests traces, auto-enable full trace + schema + truncation
+    ...(includeTraces && {
+      emitFullTrace: true,
+      inferSchema: true,
+      truncateArrays: true,
+    }),
   };
   const executor = TestExecutor.fromSharedConfig(shared, {
     cwd: projectRoot,
@@ -467,8 +476,6 @@ export async function runLocalTestsFromFile(args: {
 
   const concurrency = shared.concurrency;
   const stopOnFailure = shared.failFast;
-  const includeLogs = args.includeLogs ?? true;
-  const includeTraces = args.includeTraces ?? false;
 
   const results: LocalRunResult[] = [];
   let nextIndex = 0;
@@ -632,7 +639,7 @@ server.registerTool(
 server.registerTool(
   MCP_TOOL_NAMES.runLocalFile,
   {
-    description: "Run Glubean test exports from a file locally and return structured results for AI debugging/fixing.",
+    description: "Run Glubean test exports from a file locally and return structured results for AI debugging/fixing. When includeTraces is true, each trace includes responseSchema (inferred JSON Schema) and truncated responseBody — use responseSchema to understand response structure without reading full data.",
     inputSchema: {
       filePath: z.string().describe("Path to a test module file"),
       filter: z
@@ -650,7 +657,7 @@ server.registerTool(
       includeTraces: z
         .boolean()
         .optional()
-        .describe("Include ctx.trace events (default: false)"),
+        .describe("Include HTTP traces with responseSchema (inferred JSON Schema) and truncated responseBody. Use this to understand API response structure. Default: false."),
       stopOnFailure: z
         .boolean()
         .optional()

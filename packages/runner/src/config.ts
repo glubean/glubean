@@ -38,6 +38,12 @@ export interface SharedRunConfig {
 
   /** Include full HTTP request/response in trace events. Default: false. */
   emitFullTrace: boolean;
+
+  /** Infer JSON Schema from response bodies in trace events. Default: false. */
+  inferSchema: boolean;
+
+  /** Always truncate arrays in trace bodies (not just >1MB). Default: false. */
+  truncateArrays: boolean;
 }
 
 /** Minimal safe defaults. */
@@ -46,6 +52,8 @@ export const SHARED_RUN_DEFAULTS: SharedRunConfig = {
   perTestTimeoutMs: 30_000,
   concurrency: 1,
   emitFullTrace: false,
+  inferSchema: false,
+  truncateArrays: false,
 };
 
 /** CLI/MCP preset: same as shared defaults (local development). */

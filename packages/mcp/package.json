@@ -1,6 +1,6 @@
 {
   "name": "@glubean/mcp",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "bin": {
     "glubean-mcp": "./bin/mcp.js"

@@ -52,6 +52,8 @@ interface RunOptions {
   failAfter?: number;
   resultJson?: boolean | string;
   emitFullTrace?: boolean;
+  inferSchema?: boolean;
+  truncateArrays?: boolean;
   configFiles?: string[];
   inspectBrk?: number | boolean;
   reporter?: string;
@@ -327,6 +329,8 @@ export async function runCommand(
     pretty: options.pretty,
     logFile: options.logFile,
     emitFullTrace: options.emitFullTrace,
+    inferSchema: options.inferSchema,
+    truncateArrays: options.truncateArrays,
     envFile: options.envFile,
     failFast: options.failFast,
     failAfter: options.failAfter,

@@ -7,6 +7,7 @@
  */
 
 import { parseArgs } from "node:util";
+import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
 
 /* eslint-disable no-var */
 declare global {
@@ -85,12 +86,18 @@ const { values: args } = parseArgs({
     exportName: { type: "string" },
     exportNames: { type: "string" },
     emitFullTrace: { type: "boolean", default: false },
+    inferSchema: { type: "boolean", default: false },
+    truncateArrays: { type: "boolean", default: false },
   },
   strict: false,
 });
 
 /** When true, auto-trace includes request/response headers and bodies. */
 const emitFullTrace = args.emitFullTrace ?? false;
+/** When true, infer JSON Schema from response bodies. */
+const inferSchema = args.inferSchema ?? false;
+/** When true, always truncate arrays in trace bodies (not just >1MB). */
+const truncateArrays = args.truncateArrays ?? false;
 
 const testUrl = args.testUrl as string | undefined;
 const testId = args.testId as string | undefined;
@@ -1162,14 +1169,29 @@ const kyInstance = ky.create({
           try {
             const cloned = response.clone();
             const contentType = response.headers.get("content-type") || "";
+            let parsedBody: unknown;
+
             if (contentType.includes("json")) {
-              traceData.responseBody = truncateBody(await cloned.json());
+              parsedBody = await cloned.json();
             } else if (
               contentType.includes("text") ||
               contentType.includes("xml")
             ) {
-              const text = await cloned.text();
-              traceData.responseBody = truncateBody(text);
+              parsedBody = await cloned.text();
+            }
+
+            if (parsedBody !== undefined) {
+              // Schema inference runs on the FULL body before any truncation
+              if (inferSchema && typeof parsedBody === "object" && parsedBody !== null) {
+                traceData.responseSchema = inferJsonSchema(parsedBody);
+              }
+
+              // Truncate body: aggressive (truncateArrays) or default (>1MB only)
+              if (truncateArrays) {
+                traceData.responseBody = truncateDeep(parsedBody);
+              } else {
+                traceData.responseBody = truncateBody(parsedBody);
+              }
             }
             // Binary content types are intentionally skipped
           } catch {

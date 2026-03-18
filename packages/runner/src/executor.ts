@@ -197,6 +197,8 @@ export interface ExecutorOptions {
   v8Flags?: string[];
   cwd?: string;
   emitFullTrace?: boolean;
+  inferSchema?: boolean;
+  truncateArrays?: boolean;
   inspectBrk?: number | boolean;
 }
 
@@ -232,6 +234,8 @@ export class TestExecutor {
   ): TestExecutor {
     return new TestExecutor({
       emitFullTrace: shared.emitFullTrace,
+      inferSchema: shared.inferSchema,
+      truncateArrays: shared.truncateArrays,
       ...overrides,
     });
   }
@@ -287,6 +291,12 @@ export class TestExecutor {
     }
     if (this.options.emitFullTrace) {
       args.push("--emitFullTrace");
+    }
+    if (this.options.inferSchema) {
+      args.push("--inferSchema");
+    }
+    if (this.options.truncateArrays) {
+      args.push("--truncateArrays");
     }
 
     // Build env

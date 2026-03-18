@@ -82,6 +82,8 @@ program
   .option("--fail-after <count>", "Stop after N test failures")
   .option("--result-json [path]", "Write structured results to .result.json (or custom path)")
   .option("--emit-full-trace", "Include full request/response headers and bodies in HTTP traces")
+  .option("--infer-schema", "Infer JSON Schema from response bodies in traces")
+  .option("--truncate-arrays", "Always truncate arrays in trace bodies for AI-friendly output")
   .option("--config <paths>", "Config file(s), comma-separated or repeatable", collect, [])
   .option("--pick <keys>", "Select specific test.pick example(s) by key (comma-separated)")
   .option("--inspect-brk [port]", "Enable V8 Inspector for debugging (pauses until debugger attaches)")
@@ -137,6 +139,8 @@ program
       failAfter: options.failAfter ? parseInt(options.failAfter, 10) : undefined,
       resultJson,
       emitFullTrace: options.emitFullTrace,
+      inferSchema: options.inferSchema,
+      truncateArrays: options.truncateArrays,
       configFiles,
       inspectBrk: options.inspectBrk,
       reporter,
