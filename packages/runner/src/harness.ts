@@ -578,8 +578,9 @@ const ctx = {
         type: "assertion",
         passed,
         message,
-        actual,
-        expected,
+        // Truncate actual/expected on pass to save tokens; keep full on fail for debugging
+        actual: passed && truncateArrays ? truncateDeep(actual) : actual,
+        expected: passed && truncateArrays ? truncateDeep(expected) : expected,
         ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
       }),
     );
