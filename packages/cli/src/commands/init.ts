@@ -470,6 +470,7 @@ export interface InitOptions {
   minimal?: boolean;
   hooks?: boolean;
   githubActions?: boolean;
+  aiTools?: boolean;
   interactive?: boolean;
   overwrite?: boolean;
   overwriteHooks?: boolean;
@@ -490,7 +491,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   const forceInteractive = process.env["GLUBEAN_FORCE_INTERACTIVE"] === "1";
   if (interactive && !isInteractive() && !forceInteractive) {
     console.error(
-      "Interactive init requires a TTY. Use --no-interactive and pass --hooks/--github-actions flags.",
+      "Interactive init requires a TTY. Use --no-interactive and pass --ai-tools/--hooks/--github-actions flags.",
     );
     process.exit(1);
   }
@@ -597,82 +598,61 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     );
   }
 
-  // ── Step 3/3 — Git & CI ──────────────────────────────────────────────────
+  // ── Step 3/3 — AI Tools ─────────────────────────────────────────────────
 
-  let enableHooks = options.hooks;
-  let enableActions = options.githubActions;
-  let hasGit = await fileExists(".git");
+  let enableAiTools = options.aiTools;
+  let aiTarget: "claude-code" | "codex" | "cursor" | "skip" = "skip";
 
   if (interactive) {
     console.log(
-      `\n${colors.dim}━━━ Step 3/3 — Git & CI ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
+      `\n${colors.dim}━━━ Step 3/3 — AI Tools ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
 
-    if (!hasGit) {
-      console.log(
-        `  ${colors.yellow}⚠${colors.reset} No Git repository detected\n`,
-      );
-      const initGit = await promptYesNo(
-        "Initialize Git repository? (recommended — enables hooks and CI)",
+    if (enableAiTools === undefined) {
+      enableAiTools = await promptYesNo(
+        "Configure AI coding tool? (installs MCP server + test-writing skill)",
         true,
-      );
-      if (initGit) {
-        const success = await new Promise<boolean>((res) => {
-          execFile("git", ["init"], { encoding: "utf-8" }, (error) => {
-            res(!error);
-          });
-        });
-        if (success) {
-          hasGit = true;
-          console.log(
-            `\n  ${colors.green}✓${colors.reset} Git repository initialized\n`,
-          );
-        } else {
-          console.log(
-            `\n  ${colors.yellow}⚠${colors.reset} Failed to initialize Git — skipping hooks and actions\n`,
-          );
-        }
-      } else {
-        console.log(
-          `\n  ${colors.dim}Skipping Git hooks and GitHub Actions${colors.reset}`,
-        );
-        console.log(
-          `  ${colors.dim}Run "git init && glubean init --hooks --github-actions" later${colors.reset}\n`,
-        );
-      }
-    } else {
-      console.log(
-        `  ${colors.green}✓${colors.reset} Git repository detected\n`,
       );
     }
 
-    if (hasGit) {
-      if (enableHooks === undefined) {
-        enableHooks = await promptYesNo(
-          "Enable Git hooks? (auto-updates metadata.json on commit)",
-          true,
-        );
+    if (enableAiTools) {
+      const { select } = await import("@inquirer/prompts");
+      aiTarget = await select({
+        message: "Which AI tool do you use?",
+        choices: [
+          { name: "Claude Code", value: "claude-code" as const },
+          { name: "Codex (OpenAI)", value: "codex" as const },
+          { name: "Cursor", value: "cursor" as const },
+          { name: "Skip for now", value: "skip" as const },
+        ],
+      });
+
+      if (aiTarget !== "skip") {
+        try {
+          const { configMcpCommand } = await import("./config_mcp.js");
+          const { configSkillCommand } = await import("./config_skill.js");
+          await configMcpCommand({ target: aiTarget === "codex" ? "codex" : aiTarget });
+          await configSkillCommand({ target: aiTarget });
+        } catch (err) {
+          console.log(
+            `\n  ${colors.yellow}⚠${colors.reset} Failed to configure AI tools — run "glubean config mcp" and "glubean config skill" later\n`,
+          );
+        }
       }
-      if (enableActions === undefined) {
-        enableActions = await promptYesNo(
-          "Enable GitHub Actions? (CI verifies metadata.json on PR)",
-          true,
-        );
-      }
-    } else {
-      enableHooks = false;
-      enableActions = false;
     }
   } else {
-    // Non-interactive mode
-    if (enableHooks && !hasGit) {
-      console.error(
-        "Error: --hooks requires a Git repository. Run `git init` first.",
-      );
-      process.exit(1);
-    }
-    if (enableHooks === undefined) enableHooks = false;
-    if (enableActions === undefined) enableActions = false;
+    if (enableAiTools === undefined) enableAiTools = false;
+  }
+
+  // Legacy flags — still supported for backward compatibility
+  let enableHooks = options.hooks ?? false;
+  let enableActions = options.githubActions ?? false;
+  const hasGit = await fileExists(".git");
+  if (enableHooks && !hasGit) {
+    console.error(
+      "Error: --hooks requires a Git repository. Run `git init` first.",
+    );
+    process.exit(1);
   }
 
   // ── Create files ─────────────────────────────────────────────────────────
@@ -786,11 +766,6 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       path: "AGENTS.md",
       content: () => readCliTemplate("AI-INSTRUCTIONS.md"),
       description: "AI instructions (Codex, other agents)",
-    },
-    {
-      path: ".claude/skills/gb/SKILL.md",
-      content: () => readCliTemplate("claude-skill-glubean-test.md"),
-      description: "Claude Code skill — /gb test generator",
     },
   ];
 
@@ -986,11 +961,6 @@ async function initMinimal(overwrite: boolean): Promise<void> {
       path: "AGENTS.md",
       content: () => readCliTemplate("AI-INSTRUCTIONS.md"),
       description: "AI instructions (Codex, other agents)",
-    },
-    {
-      path: ".claude/skills/gb/SKILL.md",
-      content: () => readCliTemplate("claude-skill-glubean-test.md"),
-      description: "Claude Code skill — /gb test generator",
     },
   ];
 

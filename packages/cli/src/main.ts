@@ -44,6 +44,7 @@ program
   .command("init")
   .description("Initialize a new test project (interactive wizard)")
   .option("--minimal", "Scaffold minimal explore-only project (GET, POST, pick)")
+  .option("--ai-tools", "Configure MCP server + AI skill for your editor")
   .option("--hooks", "Install git hooks (pre-commit, pre-push)")
   .option("--github-actions", "Scaffold GitHub Actions workflow")
   .option("--base-url <url>", "API base URL for .env")
@@ -54,6 +55,7 @@ program
   .action(async (options) => {
     await initCommand({
       minimal: options.minimal,
+      aiTools: options.aiTools,
       hooks: options.hooks,
       githubActions: options.githubActions,
       baseUrl: options.baseUrl,
