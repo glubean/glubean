@@ -356,7 +356,8 @@ test("ctx.fail - can be caught in try/catch (user choice)", async () => {
     { vars: {}, secrets: {} },
   );
 
-  expect(result.success).toBe(true);
+  // ctx.fail() emits a failed assertion even when caught — test correctly fails
+  expect(result.success).toBe(false);
 
   const assertions = getAssertions(result.events);
   const passedAssertion = assertions.find(
@@ -1308,8 +1309,7 @@ test("ctx.validate - fails with invalid data (severity: error)", async () => {
     { vars: {}, secrets: {} },
   );
 
-  // TODO: should be false once executor events include assertion events from harness
-  expect(result.success).toBe(true);
+  expect(result.success).toBe(false);
 
   const validations = getSchemaValidations(result.events);
   expect(validations.length).toBe(1);
@@ -1374,8 +1374,7 @@ test("ctx.validate - parse fallback (no safeParse)", async () => {
     { vars: {}, secrets: {} },
   );
 
-  // TODO: should be false once executor events include assertion events from harness
-  expect(result.success).toBe(true);
+  expect(result.success).toBe(false);
   expect(result.failedAssertionCount > 0).toBe(true);
 
   const validations = getSchemaValidations(result.events);
@@ -1546,8 +1545,7 @@ test("HTTP schema - query validation fails with invalid params", async () => {
     { vars: {}, secrets: {} },
   );
 
-  // TODO: should be false once executor events include assertion events from harness
-  expect(result.success).toBe(true);
+  expect(result.success).toBe(false);
   expect(result.failedAssertionCount).toBeGreaterThan(0);
 
   const validations = getSchemaValidations(result.events);
@@ -1582,8 +1580,7 @@ test("HTTP schema - request body validation fails", async () => {
     { vars: {}, secrets: {} },
   );
 
-  // TODO: should be false once executor events include assertion events from harness
-  expect(result.success).toBe(true);
+  expect(result.success).toBe(false);
   expect(result.failedAssertionCount).toBeGreaterThan(0);
 
   const validations = getSchemaValidations(result.events);
