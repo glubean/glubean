@@ -1,4 +1,4 @@
-export { TestExecutor } from "./executor.js";
+export { deriveFailureFromEvents, TestExecutor } from "./executor.js";
 export type {
   EventHandler,
   ExecutionBatchResult,
