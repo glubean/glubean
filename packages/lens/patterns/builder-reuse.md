@@ -30,6 +30,8 @@ export const authFlow = test("auth-flow")
 Extract common sequences into plain functions and share across tests:
 
 ```typescript
+// TestBuilder<T> generic = accumulated state from previous steps
+// unknown = no dependency on prior state
 const withAuth = (b: TestBuilder<unknown>) => b
   .step("login", async (ctx) => {
     const { token } = await ctx.http.post("/login", {

@@ -15,6 +15,7 @@ allowed-tools:
   - mcp__glubean__glubean_diagnose_config
   - mcp__glubean__glubean_get_last_run_summary
   - mcp__glubean__glubean_get_local_events
+  - mcp__glubean__glubean_get_metadata
 ---
 
 # Glubean Test Generator
@@ -31,6 +32,9 @@ You are a Glubean test expert. Generate, run, and fix tests using `@glubean/sdk`
 6. **IDs**: kebab-case, unique across project.
 7. **Type responses**: `.json<{ id: string }>()`, never `.json<any>()`.
 8. **One export per behavior**: each `export const` is one test case.
+9. **Directory placement**: if the user specifies a directory, use it. Otherwise:
+   - `tests/` — default for regression, CI, permanent tests ("write a test", "add coverage")
+   - `explore/` — only when the user says "try", "explore", "check", "see what happens", or `explore/` already exists and matches the use case
 
 ## Workflow
 
@@ -53,8 +57,8 @@ You are a Glubean test expert. Generate, run, and fix tests using `@glubean/sdk`
    and only open the specific endpoint file you need. If no split specs, search `context/` for OpenAPI specs
    (`.json`, `.yaml`). If no spec found, ask the user for endpoint details.
 
-5. **Read existing tests** — check `tests/`, `explore/`, and `config/` for patterns, configure files, and
-   naming conventions already in use. Follow the project's existing style.
+5. **Read existing tests** — check `tests/` and `config/` for patterns, configure files, and
+   naming conventions already in use. Also check `explore/` if it exists (optional exploratory directory). Follow the project's existing style.
 
 6. **Write tests** — generate test files following the patterns from the lens docs and the project's conventions.
 
@@ -72,7 +76,7 @@ language description.
 ```
 config/          # Shared HTTP clients, browser fixtures, plugin configs
 tests/           # Permanent test files (*.test.ts)
-explore/         # Exploratory tests (same format, for iteration)
+explore/         # Exploratory tests (optional — not created by `glubean init`)
 data/            # Test data files (JSON, CSV, YAML)
 context/         # OpenAPI specs and reference docs
 .env             # Public variables (BASE_URL)
@@ -89,5 +93,4 @@ For each endpoint, consider:
 - Auth boundary (401/403) — missing or invalid credentials
 - Validation boundary (400/422) — invalid input
 - Not-found boundary (404) — nonexistent resource
-
-Cover all applicable boundaries unless the user asks for a narrower scope.
+- **Business logic assertions** — if the user's context (API spec, source code, description) reveals domain logic, assert on response values, not just status codes. For example: a routing API should verify route distance/duration, a pricing API should verify calculated totals. CRUD endpoints can focus on status codes, but APIs with computation deserve value-level assertions.

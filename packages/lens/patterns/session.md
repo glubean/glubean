@@ -6,23 +6,23 @@ Share state (auth tokens, IDs) across test files without re-authenticating.
 
 ```typescript
 // session.ts (or configure in package.json "glubean.session")
-import { configure } from "@glubean/sdk";
+import { defineSession, configure } from "@glubean/sdk";
 
 const { http } = configure({
-  http: { prefixUrl: "DUMMYJSON_API" },
+  http: { prefixUrl: "{{DUMMYJSON_API}}" },
 });
 
 // This runs once before all files that use session state
-export async function setup() {
-  const res = await http.post("auth/login", {
-    json: { username: "emilys", password: "emilyspass" },
-  }).json<{ accessToken: string; id: number }>();
+export default defineSession({
+  async setup(ctx) {
+    const res = await http.post("auth/login", {
+      json: { username: "emilys", password: "emilyspass" },
+    }).json<{ accessToken: string; id: number }>();
 
-  return {
-    authToken: res.accessToken,
-    userId: res.id,
-  };
-}
+    ctx.session.set("authToken", res.accessToken);
+    ctx.session.set("userId", res.id);
+  },
+});
 ```
 
 ## Using session state in tests
@@ -32,7 +32,7 @@ export async function setup() {
 import { test, configure } from "@glubean/sdk";
 
 const { http } = configure({
-  http: { prefixUrl: "DUMMYJSON_API" },
+  http: { prefixUrl: "{{DUMMYJSON_API}}" },
 });
 
 export const getOwnProfile = test("get-own-profile", async (ctx) => {
@@ -56,7 +56,7 @@ export const getOwnProfile = test("get-own-profile", async (ctx) => {
 import { test, configure } from "@glubean/sdk";
 
 const { http } = configure({
-  http: { prefixUrl: "DUMMYJSON_API" },
+  http: { prefixUrl: "{{DUMMYJSON_API}}" },
 });
 
 export const cartWorkflow = test("cart-workflow")
@@ -79,12 +79,14 @@ export const cartWorkflow = test("cart-workflow")
       headers: { Authorization: `Bearer ${token}` },
     });
     ctx.expect(res).toHaveStatus(200);
-  })
-  .build();
+  });
 ```
 
 ## Key points
 
 - `ctx.session.require("key")` — get session value (throws if missing)
+- `ctx.session.set("key", value)` — set session value in setup
+- `ctx.session.get("key")` — get session value (returns undefined if missing)
+- Use `defineSession()` with `export default` — the runner auto-discovers `session.ts`
 - Session setup runs once, state is injected into all test files
 - Use for: auth tokens, user IDs, shared resources that are expensive to create

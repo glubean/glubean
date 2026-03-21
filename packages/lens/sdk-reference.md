@@ -5,7 +5,7 @@ Quick reference for `@glubean/sdk` and `@glubean/browser`. For full type details
 ## Imports
 
 ```typescript
-import { test, configure, definePlugin, fromDir, fromCsv, fromYaml, fromJsonl } from "@glubean/sdk";
+import { test, configure, definePlugin, defineSession, fromDir, fromCsv, fromYaml, fromJsonl } from "@glubean/sdk";
 import { browser } from "@glubean/browser";
 import type { InstrumentedPage } from "@glubean/browser";
 ```
@@ -79,13 +79,15 @@ export const tests = test.pick(cases)(
 ### test.extend (fixtures)
 
 ```typescript
-const myTest = test.extend({
-  page: async (ctx, use) => {
-    const pg = await createPage();
-    try { await use(pg); }
-    finally { await pg.close(); }
-  },
-});
+import { test, type ExtensionFn } from "@glubean/sdk";
+
+const pageFixture: ExtensionFn<Page> = async (ctx, use) => {
+  const pg = await createPage();
+  try { await use(pg); }
+  finally { await pg.close(); }
+};
+
+const myTest = test.extend({ page: pageFixture });
 
 export const t = myTest({ id: "..." }, async ({ page }) => {
   // page is available here
@@ -210,10 +212,10 @@ File-level setup. Binds env vars, creates HTTP client, registers plugins.
 
 ```typescript
 const { http, vars, secrets } = configure({
-  vars: { user: "GITHUB_USER" },       // Map property → env var name
-  secrets: { token: "API_KEY" },        // Map property → secret name
+  vars: { user: "{{GITHUB_USER}}" },    // {{KEY}} → resolved from .env
+  secrets: { token: "{{API_KEY}}" },   // {{KEY}} → resolved from .env.secrets
   http: {
-    prefixUrl: "BASE_URL",             // Env var name (resolved at runtime)
+    prefixUrl: "{{BASE_URL}}",         // {{KEY}} → resolved at runtime
     headers: {
       Authorization: "Bearer {{API_KEY}}",  // {{var}} interpolation
       Accept: "application/json",
@@ -232,7 +234,7 @@ const { http, vars, secrets } = configure({
 
 ```typescript
 const { http, chrome } = configure({
-  http: { prefixUrl: "BASE_URL" },
+  http: { prefixUrl: "{{BASE_URL}}" },
   plugins: {
     chrome: browser({ launch: true, launchOptions: { headless: true } }),
   },
@@ -259,9 +261,9 @@ const { myPlugin: instance } = configure({
 ## Data Loading
 
 ```typescript
-// Directory: one JSON file = one row
+// Directory: one JSON/YAML file = one row
 const rows = await fromDir<T>("data/users/");
-// Returns: [{ username: "alice" }, { username: "bob" }]
+// Returns: [{ username: "alice", _name: "alice", _path: "data/users/alice.json" }, ...]
 
 // Directory: merge shared + *.local.json overrides
 const cases = await fromDir.merge<T>("data/search/");
@@ -272,9 +274,12 @@ const items = await fromDir.concat<T>("data/items/");
 
 // CSV
 const rows = await fromCsv<T>("data/file.csv");
+const rows = await fromCsv<T>("data/file.tsv", { separator: "\t" });
+const rows = await fromCsv<T>("data/file.csv", { headers: false }); // numeric keys
 
 // YAML
 const rows = await fromYaml<T>("data/file.yaml");
+const rows = await fromYaml<T>("data/nested.yaml", { pick: "data.testCases" }); // dot-path to array
 
 // JSONL (one JSON object per line)
 const rows = await fromJsonl<T>("data/file.jsonl");
@@ -286,7 +291,35 @@ const rows = await fromJsonl<T>("data/file.jsonl");
 - Prefer bare `data/...` paths for shared project data
 - `shared.json` for committed defaults
 - `*.local.json` for personal overrides (gitignored)
-- Each JSON file in `fromDir()` becomes one test case; filename = case name
+- Each JSON or YAML file in `fromDir()` becomes one test case; filename = case name (default extensions: `.json`, `.yaml`, `.yml`)
+
+---
+
+## defineSession()
+
+Define session setup/teardown for cross-file state sharing. Place in `session.ts` at your test root — the runner auto-discovers it.
+
+```typescript
+import { defineSession } from "@glubean/sdk";
+
+export default defineSession({
+  async setup(ctx) {
+    const { access_token } = await ctx.http
+      .post("/auth/login", {
+        json: { user: ctx.vars.require("USER"), pass: ctx.secrets.require("PASS") },
+      })
+      .json<{ access_token: string }>();
+    ctx.session.set("token", access_token);
+  },
+  async teardown(ctx) {
+    await ctx.http.post("/auth/logout", {
+      headers: { Authorization: `Bearer ${ctx.session.get("token")}` },
+    });
+  },
+});
+```
+
+In tests, read session values with `ctx.session.require("key")` or `ctx.session.get("key")`.
 
 ---
 
@@ -305,7 +338,7 @@ export const { chrome } = configure({
     chrome: browser({
       launch: true,
       launchOptions: { headless: true },
-      baseUrl: "APP_URL",              // Env var for relative URLs
+      baseUrl: "{{APP_URL}}",           // {{KEY}} → resolved from .env
       screenshot: "on-failure",        // "off" | "on-failure" | "every-step"
       networkTrace: true,              // Auto-capture HTTP traces
     }),

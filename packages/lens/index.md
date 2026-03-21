@@ -22,9 +22,8 @@ Quick lookup for AI agents. Read this first, then open only the files you need.
 | [polling.md](patterns/polling.md) | Async jobs, `pollUntil`, eventual consistency |
 | [schema.md](patterns/schema.md) | Zod schema validation on API responses |
 | [metrics.md](patterns/metrics.md) | Custom performance metrics, duration tracking |
-| [session.md](patterns/session.md) | Cross-file shared state via `ctx.session` (auth token reuse, workflow chains) |
+| [session.md](patterns/session.md) | Cross-file shared state via `defineSession()` + `ctx.session` (auth token reuse, workflow chains) |
 | [browser.md](patterns/browser.md) | Browser testing — setup, navigation, forms, scraping, dynamic elements |
-| [ai-contracts.md](patterns/ai-contracts.md) | Testing AI/LLM endpoints — schema validation, consistency, regression |
 
 ## Plugins
 
@@ -36,7 +35,7 @@ Quick lookup for AI agents. Read this first, then open only the files you need.
 ## Rules (always follow)
 
 1. **Secrets → `.env.secrets`**, public vars → `.env`. NEVER inline as `const`.
-2. **Use `configure()`** for HTTP clients — never raw `fetch()`.
+2. **Use `configure()`** for HTTP clients — never raw `fetch()`. Use `{{KEY}}` for env references, bare strings for literals.
 3. **Tags on every test** — `["smoke"]`, `["api"]`, `["e2e"]`, etc.
 4. **Teardown** any test that creates resources.
 5. **IDs**: kebab-case, unique across project.

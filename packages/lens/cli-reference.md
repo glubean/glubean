@@ -10,7 +10,13 @@
 | `glubean trigger` | Trigger a remote run on Cloud |
 | `glubean login` | Authenticate with Glubean Cloud |
 | `glubean init` | Initialize a new test project (interactive wizard) |
-| `glubean upgrade` | Upgrade CLI to latest version |
+| `glubean docs pull` | Download SDK lens docs to `~/.glubean/docs/` for AI agents |
+| `glubean redact` | Preview redaction on a result JSON file |
+| `glubean config mcp` | Configure MCP server for AI coding tools (Claude Code, Cursor, Windsurf) |
+| `glubean config skill` | Install Glubean test-writing skill for AI coding tools |
+| `glubean spec split` | Dereference $refs and split OpenAPI spec into per-endpoint files |
+| `glubean patch` | Merge an OpenAPI spec with its `.patch.yaml` overlay |
+| `glubean validate-metadata` | Validate metadata.json against local test files |
 
 ---
 
@@ -132,6 +138,88 @@ glubean init                             # Start wizard in current directory
 ```
 
 Creates: `package.json`, `config/`, `tests/`, `.env.example`, `.env.secrets.example`, `AGENTS.md`.
+
+---
+
+## glubean docs pull
+
+Download `@glubean/lens` (SDK reference + patterns) to `~/.glubean/docs/` for AI agent consumption.
+
+```bash
+glubean docs pull                       # Pull latest lens docs
+```
+
+---
+
+## glubean redact
+
+Preview redaction on a result JSON file. Applies configured redaction rules to see what would be masked.
+
+```bash
+glubean redact                           # Redact default glubean-run.result.json
+glubean redact -i results.json           # Redact specific file
+glubean redact --stdout                  # Output to stdout
+```
+
+---
+
+## glubean config mcp
+
+Configure the Glubean MCP server for AI coding tools.
+
+```bash
+glubean config mcp                       # Auto-detect tool
+glubean config mcp --target claude-code  # Configure for Claude Code
+glubean config mcp --target cursor       # Configure for Cursor
+glubean config mcp --remove              # Remove MCP configuration
+```
+
+---
+
+## glubean config skill
+
+Install the Glubean test-writing skill for AI coding tools.
+
+```bash
+glubean config skill                     # Auto-detect tool
+glubean config skill --target claude-code
+glubean config skill --remove            # Remove skill
+```
+
+---
+
+## glubean spec split
+
+Dereference `$ref`s and split an OpenAPI spec into per-endpoint files for AI consumption.
+
+```bash
+glubean spec split openapi.yaml          # Split to <name>-endpoints/ directory
+glubean spec split openapi.yaml -o out/  # Custom output directory
+```
+
+---
+
+## glubean patch
+
+Merge an OpenAPI spec with its `.patch.yaml` overlay and write the complete spec.
+
+```bash
+glubean patch openapi.yaml               # Auto-discover .patch.yaml
+glubean patch openapi.yaml --patch custom.patch.yaml
+glubean patch openapi.yaml -o merged.json
+glubean patch openapi.yaml --stdout      # Write to stdout
+```
+
+---
+
+## glubean validate-metadata
+
+Validate metadata.json against local test files to detect drift.
+
+```bash
+glubean validate-metadata                # Validate in current directory
+glubean validate-metadata -d ./tests     # Specify project root
+```
 
 ---
 
