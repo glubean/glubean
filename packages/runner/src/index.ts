@@ -1,4 +1,5 @@
 export { generateSummary, TestExecutor } from "./executor.js";
+export { buildRunContext } from "./run_context.js";
 export type {
   EventHandler,
   ExecutionBatchResult,

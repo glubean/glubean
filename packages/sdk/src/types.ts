@@ -2265,3 +2265,33 @@ export interface RegisteredTestMeta {
    */
   groupId?: string;
 }
+
+// =============================================================================
+// Execution Context
+// =============================================================================
+
+/**
+ * Runtime context captured when a test run is executed.
+ * Included in result.json so a single file can answer:
+ * "what ran, how, and why it failed."
+ */
+export interface RunContext {
+  /** ISO 8601 timestamp of the run */
+  timestamp: string;
+  /** Node.js version (process.version) */
+  nodeVersion: string;
+  /** @glubean/sdk version */
+  sdkVersion: string;
+  /** @glubean/runner version */
+  runnerVersion: string;
+  /** Operating system (process.platform) */
+  platform: string;
+  /** CPU architecture (process.arch) */
+  arch: string;
+  /** How the run was triggered: CLI command string, "vscode-play", "vscode-debug", "mcp" */
+  command?: string;
+  /** Working directory */
+  cwd?: string;
+  /** Which .env file was used */
+  envFile?: string;
+}

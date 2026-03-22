@@ -8,6 +8,7 @@ import {
   RunOrchestrator,
   TestExecutor,
   toSingleExecutionOptions,
+  buildRunContext,
 } from "@glubean/runner";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { stat, readdir, readFile, writeFile, mkdir, rm } from "node:fs/promises";
@@ -1224,7 +1225,15 @@ export async function runCommand(
   }
 
   // ── Result JSON output ───────────────────────────────────────────────────
+  const runContext = {
+    ...buildRunContext(),
+    command: process.argv.slice(2).join(" "),
+    cwd: process.cwd(),
+    ...(effectiveRun.envFile && { envFile: effectiveRun.envFile }),
+  };
+
   const resultPayload = {
+    context: runContext,
     target,
     files: testFiles.map((f) => relative(process.cwd(), f)),
     runAt: runStartLocal,

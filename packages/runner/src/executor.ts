@@ -4,9 +4,10 @@ import { readFile, writeFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
 import { createRequire } from "node:module";
-import type { ApiTrace, GlubeanAction, GlubeanEvent } from "@glubean/sdk";
+import type { ApiTrace, GlubeanAction, GlubeanEvent, RunContext } from "@glubean/sdk";
 import type { SharedRunConfig } from "./config.js";
 import { generateSummary } from "./generate_summary.js";
+import { buildRunContext } from "./run_context.js";
 
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -175,6 +176,7 @@ export interface ExecutionResult {
   failedAssertionCount: number;
   peakMemoryBytes?: number;
   peakMemoryMB?: string;
+  context?: RunContext;
 }
 
 export interface ExecutionOptions {
@@ -633,6 +635,7 @@ export class TestExecutor {
       success, testId, testName, suiteId, suiteName, events, error, stack,
       duration: Date.now() - startTime, retryCount, assertionCount, failedAssertionCount,
       peakMemoryBytes, peakMemoryMB,
+      context: buildRunContext(),
     };
   }
 
