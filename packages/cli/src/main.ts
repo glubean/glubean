@@ -15,13 +15,10 @@ import { loadConfig } from "./lib/config.js";
 import { initCommand } from "./commands/init.js";
 import { runCommand } from "./commands/run.js";
 import { scanCommand } from "./commands/scan.js";
-import { syncCommand } from "./commands/sync.js";
-import { triggerCommand } from "./commands/trigger.js";
 import { validateMetadataCommand } from "./commands/validate_metadata.js";
 import { loginCommand } from "./commands/login.js";
 import { patchCommand } from "./commands/patch.js";
 import { specSplitCommand } from "./commands/spec_split.js";
-import { workerCommand } from "./commands/worker.js";
 import { redactCommand } from "./commands/redact.js";
 import { configMcpCommand } from "./commands/config_mcp.js";
 import { configSkillCommand } from "./commands/config_skill.js";
@@ -194,52 +191,6 @@ program
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// sync command
-// ─────────────────────────────────────────────────────────────────────────────
-program
-  .command("sync")
-  .description("Sync tests to Glubean Cloud")
-  .option("-p, --project <id>", "Target project ID (required)")
-  .option("-t, --tag <version>", "Version tag (default: timestamp)")
-  .option("-d, --dir <path>", "Directory to scan", ".")
-  .option("--api-url <url>", "API server URL")
-  .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
-  .option("--dry-run", "Generate bundle without uploading")
-  .action(async (options) => {
-    await syncCommand({
-      project: options.project,
-      version: options.tag,
-      dir: options.dir,
-      apiUrl: options.apiUrl,
-      token: options.token,
-      dryRun: options.dryRun,
-    });
-  });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// trigger command
-// ─────────────────────────────────────────────────────────────────────────────
-program
-  .command("trigger")
-  .description("Trigger a remote run on Glubean Cloud")
-  .option("-p, --project <id>", "Target project ID (required)")
-  .option("-b, --bundle <id>", "Bundle ID (uses latest if not specified)")
-  .option("-j, --job <id>", "Job ID")
-  .option("-F, --follow", "Tail logs until run completes")
-  .option("--api-url <url>", "API server URL")
-  .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
-  .action(async (options) => {
-    await triggerCommand({
-      project: options.project,
-      bundle: options.bundle,
-      job: options.job,
-      apiUrl: options.apiUrl,
-      token: options.token,
-      follow: options.follow,
-    });
-  });
-
-// ─────────────────────────────────────────────────────────────────────────────
 // login command
 // ─────────────────────────────────────────────────────────────────────────────
 program
@@ -288,43 +239,6 @@ specCmd
   .option("-o, --output <dir>", "Output directory (default: <name>-endpoints/ next to spec)")
   .action(async (spec, options) => {
     await specSplitCommand(spec, { output: options.output });
-  });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// worker command (with subcommands)
-// ─────────────────────────────────────────────────────────────────────────────
-const workerCmd = program
-  .command("worker")
-  .description("Self-hosted worker management");
-
-workerCmd
-  .command("start")
-  .description("Start worker instance(s)")
-  .option("-n, --instances <count>", "Number of instances (or 'auto')", "1")
-  .option("--config <path>", "Worker config file (JSON)")
-  .option("--api-url <url>", "Control plane URL")
-  .option("--token <token>", "Worker token (or GLUBEAN_WORKER_TOKEN env)")
-  .option("--log-level <level>", "Log level")
-  .option("--worker-id <id>", "Base worker ID (auto-generated if not set)")
-  .action(async (options) => {
-    let instances: number | "auto" | undefined;
-    if (options.instances === "auto") {
-      instances = "auto";
-    } else {
-      const parsed = parseInt(options.instances, 10);
-      if (!isNaN(parsed) && parsed >= 1) {
-        instances = parsed;
-      }
-    }
-
-    await workerCommand("start", {
-      instances,
-      config: options.config,
-      apiUrl: options.apiUrl,
-      token: options.token,
-      logLevel: options.logLevel,
-      workerId: options.workerId,
-    });
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
