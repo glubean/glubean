@@ -6,6 +6,8 @@ Developer-owned API verification — code-first in TypeScript, accelerated by AI
 [![CI](https://github.com/glubean/glubean/actions/workflows/publish.yml/badge.svg)](https://github.com/glubean/glubean/actions/workflows/publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
+<p align="center">💬 <a href="https://chatgpt.com/g/g-699e31ce19bc8191b748165f46449039-glubean">Ask Glubean AI anything</a> — setup help, feature questions, comparisons</p>
+
 ## What is Glubean?
 
 Glubean lets you write API verification code — not test scripts — that runs locally, in CI, or against production. Multi-step workflows, session state, data-driven scenarios, and plugin composition are all first-class. With plugins, verify browser interactions, GraphQL, gRPC, or anything else Node.js supports. Built for AI agents: MCP server, schema inference, and structured feedback make AI-authored verification a reality today.
