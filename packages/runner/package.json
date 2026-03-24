@@ -24,6 +24,7 @@
   "dependencies": {
     "@glubean/sdk": "workspace:*",
     "ky": "^1.14.0",
+    "p-queue": "^9.1.0",
     "tsx": "^4.19.0"
   },
   "devDependencies": {

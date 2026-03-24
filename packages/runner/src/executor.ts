@@ -243,7 +243,7 @@ export class TestExecutor {
     testUrl: string,
     testId: string,
     context: ExecutionContext,
-    options?: { timeout?: number; exportName?: string; testIds?: string[]; exportNames?: Record<string, string>; signal?: AbortSignal },
+    options?: { timeout?: number; exportName?: string; testIds?: string[]; exportNames?: Record<string, string>; signal?: AbortSignal; concurrency?: number },
   ): AsyncGenerator<ExecutionEvent> {
     const args: string[] = [this.harnessPath];
 
@@ -296,6 +296,9 @@ export class TestExecutor {
     }
     if (this.options.truncateArrays) {
       args.push("--truncateArrays");
+    }
+    if (options?.concurrency && options.concurrency > 1) {
+      args.push(`--concurrency=${options.concurrency}`);
     }
 
     // Build env

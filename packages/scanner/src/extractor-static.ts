@@ -296,12 +296,20 @@ function parseTestDeclaration(
   let variant: "each" | "pick" | undefined;
 
   // Check for .each() or .pick() — may appear on same line or next line
+  let parallel = false;
   const dataMatch = rest.match(/^\s*\.\s*(each|pick)\s*\(/);
   if (dataMatch) {
     variant = dataMatch[1] as "each" | "pick";
     const openIndex = rest.indexOf("(", dataMatch.index!);
     const closeIndex = findCloseParen(rest, openIndex);
     if (closeIndex === -1) return null;
+    // Check for { parallel: true } in .each() args
+    if (variant === "each") {
+      const eachArgs = rest.substring(openIndex + 1, closeIndex);
+      if (/parallel\s*:\s*true/.test(eachArgs)) {
+        parallel = true;
+      }
+    }
     rest = rest.substring(closeIndex + 1);
   }
 
@@ -360,6 +368,7 @@ function parseTestDeclaration(
   if (timeout !== undefined) result.timeout = timeout;
   if (variant) result.variant = variant;
   if (steps.length > 0) result.steps = steps;
+  if (parallel) result.parallel = true;
 
   return result;
 }

@@ -410,6 +410,29 @@ test("test.each - registers all tests to registry", () => {
   expect(registry[0].type).toBe("simple");
 });
 
+test("test.each - parallel option sets groupId and parallel in registry", () => {
+  clearRegistry();
+  glubeanTest.each([{ id: 1 }, { id: 2 }], { parallel: true })(
+    "case-$id",
+    async (_ctx, _data) => {},
+  );
+
+  const registry = getRegistry();
+  expect(registry.length).toBe(2);
+  expect(registry[0].groupId).toBe("case-$id");
+  expect(registry[0].parallel).toBe(true);
+  expect(registry[1].groupId).toBe("case-$id");
+  expect(registry[1].parallel).toBe(true);
+});
+
+test("test.each - without parallel option has no parallel field", () => {
+  clearRegistry();
+  glubeanTest.each([{ id: 1 }])("case-$id", async (_ctx, _data) => {});
+
+  const registry = getRegistry();
+  expect(registry[0].parallel).toBeUndefined();
+});
+
 test("test.each - supports $index interpolation", () => {
   clearRegistry();
   const tests = glubeanTest.each([{ name: "a" }, { name: "b" }, { name: "c" }])(

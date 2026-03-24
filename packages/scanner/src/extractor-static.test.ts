@@ -205,6 +205,35 @@ export const scenarioTests = test
   expect(result[0].steps).toEqual([{ name: "send request" }, { name: "log result" }]);
 });
 
+test("extracts test.each() with parallel option", () => {
+  const content = `
+import { test, fromCsv } from "@glubean/sdk";
+
+export const statusTests = test.each(await fromCsv("./data.csv"), { parallel: true })(
+  "status-$id",
+  async (ctx, row) => {
+    ctx.assert(true, "ok");
+  }
+);
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  expect(result[0].id).toBe("status-$id");
+  expect(result[0].parallel).toBe(true);
+});
+
+test("test.each() without parallel option has no parallel field", () => {
+  const content = `
+export const tests = test.each(data)(
+  "case-$id",
+  async (ctx, row) => {}
+);
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  expect(result[0].parallel).toBeUndefined();
+});
+
 // =============================================================================
 // test.pick() — example selection
 // =============================================================================

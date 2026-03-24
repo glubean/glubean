@@ -43,6 +43,8 @@ export interface ExportMeta {
   location?: { line: number; col: number };
   /** Steps for builder-style flows (visualization only) */
   steps?: { name: string; group?: string }[];
+  /** Whether this test's .each() group allows parallel execution */
+  parallel?: boolean;
 }
 
 /** File metadata in scan result */

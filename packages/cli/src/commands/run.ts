@@ -185,6 +185,7 @@ interface DiscoveredTestMeta {
   skip?: boolean;
   only?: boolean;
   groupId?: string;
+  parallel?: boolean;
 }
 
 interface DiscoveredTest {
@@ -205,6 +206,7 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
       skip: m.skip,
       only: m.only,
       groupId: m.groupId,
+      parallel: m.parallel,
     },
   }));
 }
@@ -836,6 +838,11 @@ export async function runCommand(
           timeout: batchTimeout,
           testIds,
           exportNames,
+          // Pass concurrency to harness when the batch has parallel-marked tests.
+          // The harness uses p-queue to run them concurrently within a single process.
+          ...(fileTests.some((ft) => ft.test.meta.parallel) && shared.concurrency > 1
+            ? { concurrency: shared.concurrency }
+            : {}),
         },
       )
     ) {

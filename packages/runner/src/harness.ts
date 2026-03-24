@@ -77,6 +77,7 @@ const { values: args } = parseArgs({
     testIds: { type: "string" },
     exportName: { type: "string" },
     exportNames: { type: "string" },
+    concurrency: { type: "string" },
     emitFullTrace: { type: "boolean", default: false },
     inferSchema: { type: "boolean", default: false },
     truncateArrays: { type: "boolean", default: false },
@@ -99,6 +100,12 @@ const testId = args.testId as string | undefined;
  * module-level state (e.g. shared `let` variables between tests).
  */
 const testIds = args.testIds ? (args.testIds as string).split(",") : undefined;
+/**
+ * Max concurrency for parallel batch mode.
+ * When > 1 and testIds is set, parallel-marked tests run concurrently via p-queue.
+ * Default 1 (sequential).
+ */
+const batchConcurrency = Math.max(1, parseInt(args.concurrency as string, 10) || 1);
 /** Optional export name for fallback lookup (used by test.pick/test.each). */
 const exportName = args.exportName as string | undefined;
 /** Optional testId→exportName mapping for batch mode fallback (test.pick). */
@@ -1190,15 +1197,14 @@ try {
 
   if (testIds) {
     // ── File-level batch mode ──
-    // Run multiple tests sequentially in a single process.
-    // Module-level state (let variables) is preserved between tests.
+    // Runs multiple tests in a single process, preserving module-level state.
+    // When batchConcurrency > 1, tests run concurrently via p-queue
+    // (opt-in via test.each({ parallel: true }) + --concurrency flag).
     let hasFailure = false;
-    for (const id of testIds) {
+
+    const runOneTest = async (id: string): Promise<void> => {
       resetTestCounters();
       let testObj = findTestById(userModule, id);
-      // Fallback for non-deterministic tests (test.pick): the testId from
-      // discovery may differ from this run's random selection. Use the stable
-      // exportName to locate the test.
       if (!testObj && exportNamesMap[id]) {
         testObj = findTestByExport(userModule, exportNamesMap[id]);
       }
@@ -1206,7 +1212,7 @@ try {
         console.log(JSON.stringify({ type: "start", id, name: id, testId: id }));
         console.log(JSON.stringify({ type: "status", status: "failed", id, testId: id, error: `Test "${id}" not found in module` }));
         hasFailure = true;
-        continue;
+        return;
       }
       try {
         await executeNewTest(testObj);
@@ -1222,7 +1228,21 @@ try {
           }));
         }
       }
+    };
+
+    if (batchConcurrency > 1) {
+      const { default: PQueue } = await import("p-queue");
+      const queue = new PQueue({ concurrency: batchConcurrency });
+      for (const id of testIds) {
+        void queue.add(() => runOneTest(id));
+      }
+      await queue.onIdle();
+    } else {
+      for (const id of testIds) {
+        await runOneTest(id);
+      }
     }
+
     process.exit(hasFailure ? 1 : 0);
   }
 

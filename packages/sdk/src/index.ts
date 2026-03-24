@@ -623,7 +623,8 @@ export class EachBuilder<
   
   private _steps: { meta: StepMeta; fn: EachStepFunction<any, T, Ctx> }[] = [];
   private _built = false;
-  
+  private _parallel: boolean;
+
   _fixtures?: Record<string, ExtensionFn<any>>;
 
   /**
@@ -634,12 +635,13 @@ export class EachBuilder<
   constructor(
     baseMeta: TestMeta,
     table: readonly T[],
-    
     fixtures?: Record<string, ExtensionFn<any>>,
+    parallel = false,
   ) {
     this._baseMeta = baseMeta;
     this._table = table;
     this._fixtures = fixtures;
+    this._parallel = parallel;
     // Auto-finalize after all synchronous chaining completes.
     queueMicrotask(() => this._finalize());
   }
@@ -875,6 +877,7 @@ export class EachBuilder<
     }));
     const table = this._filteredTable();
     const isPick = table.length > 0 && "_pick" in table[0];
+    const hasGroup = isPick || this._parallel;
     for (let i = 0; i < table.length; i++) {
       const row = table[i];
       const id = interpolateTemplate(this._baseMeta.id, row, i);
@@ -889,7 +892,8 @@ export class EachBuilder<
         steps: stepMetas,
         hasSetup: !!this._setup,
         hasTeardown: !!this._teardown,
-        ...(isPick ? { groupId: this._baseMeta.id } : {}),
+        ...(hasGroup ? { groupId: this._baseMeta.id } : {}),
+        ...(this._parallel ? { parallel: true } : {}),
       });
     }
   }
@@ -1019,6 +1023,7 @@ export interface ExtendedTest<Ctx extends TestContext> {
   /** Data-driven tests with augmented context. */
   each<T extends Record<string, unknown>>(
     table: readonly T[],
+    options?: test.EachOptions,
   ): {
     (
       idOrMeta: string | TestMeta,
@@ -1167,7 +1172,8 @@ function createExtendedTest<Ctx extends TestContext>(
   };
 
   // .each() — data-driven with fixtures
-  extTest.each = <T extends Record<string, unknown>>(table: readonly T[]) => {
+  extTest.each = <T extends Record<string, unknown>>(table: readonly T[], options?: test.EachOptions) => {
+    const parallel = options?.parallel ?? false;
     return ((
       idOrMeta: string | TestMeta,
       fn?: (ctx: Ctx, data: T) => Promise<void>,
@@ -1175,7 +1181,7 @@ function createExtendedTest<Ctx extends TestContext>(
       const baseMeta = resolveBaseMeta(idOrMeta);
 
       if (!fn) {
-        return new EachBuilder<unknown, T, Ctx>(baseMeta, table, allFixtures);
+        return new EachBuilder<unknown, T, Ctx>(baseMeta, table, allFixtures, parallel);
       }
 
       // Simple mode with fixtures
@@ -1185,6 +1191,7 @@ function createExtendedTest<Ctx extends TestContext>(
       const tagFieldNames = toArray(baseMeta.tagFields);
       const staticTags = toArray(baseMeta.tags);
       const isPick = filteredTable.length > 0 && "_pick" in filteredTable[0];
+      const hasGroup = isPick || parallel;
 
       return filteredTable.map((row, index) => {
         const id = interpolateTemplate(baseMeta.id, row, index);
@@ -1217,7 +1224,8 @@ function createExtendedTest<Ctx extends TestContext>(
           type: "simple",
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
-          ...(isPick ? { groupId: baseMeta.id } : {}),
+          ...(hasGroup ? { groupId: baseMeta.id } : {}),
+          ...(parallel ? { parallel: true } : {}),
         });
 
         return testDef;
@@ -1294,8 +1302,25 @@ export namespace test {
     return fn ? test(metaWithSkip, fn) : test<S>(metaWithSkip);
   }
 
+  /**
+   * Options for `test.each()`.
+   */
+  export interface EachOptions {
+    /**
+     * Allow data rows to run in parallel.
+     * Actual concurrency level is controlled externally (e.g. `--concurrency` CLI flag).
+     *
+     * When true, rows execute concurrently in a single process via an async work queue.
+     * Safe for IO-bound tests. Avoid if rows share mutable state across await points.
+     *
+     * @default false
+     */
+    parallel?: boolean;
+  }
+
   export function each<T extends Record<string, unknown>>(
     table: readonly T[],
+    options?: EachOptions,
   ): {
     // Simple mode: with callback → Test[]
     (idOrMeta: string, fn: EachTestFunction<T>): Test[];
@@ -1304,6 +1329,7 @@ export namespace test {
     (idOrMeta: string): EachBuilder<unknown, T>;
     (idOrMeta: TestMeta): EachBuilder<unknown, T>;
   } {
+    const parallel = options?.parallel ?? false;
     return ((
       idOrMeta: string | TestMeta,
       fn?: EachTestFunction<T>,
@@ -1312,7 +1338,7 @@ export namespace test {
 
       // Builder mode: no callback → return EachBuilder
       if (!fn) {
-        return new EachBuilder<unknown, T>(baseMeta, table);
+        return new EachBuilder<unknown, T>(baseMeta, table, undefined, parallel);
       }
 
       // Apply filter if present
@@ -1323,6 +1349,7 @@ export namespace test {
       const tagFieldNames = toArray(baseMeta.tagFields);
       const staticTags = toArray(baseMeta.tags);
       const isPick = filteredTable.length > 0 && "_pick" in filteredTable[0];
+      const hasGroup = isPick || parallel;
 
       // Simple mode: with callback → return Test[]
       return filteredTable.map((row, index) => {
@@ -1357,7 +1384,8 @@ export namespace test {
           type: "simple",
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
-          ...(isPick ? { groupId: baseMeta.id } : {}),
+          ...(hasGroup ? { groupId: baseMeta.id } : {}),
+          ...(parallel ? { parallel: true } : {}),
         });
 
         return testDef;

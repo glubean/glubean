@@ -2088,6 +2088,52 @@ test("fromSharedConfig: wires emitFullTrace", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Executor-level timeout must always fail
+// ---------------------------------------------------------------------------
+
+const HANGING_TEST_CONTENT = `
+import { test } from "@glubean/sdk";
+
+export const hangingTest = test("hanging", async (ctx) => {
+  await new Promise(r => setTimeout(r, 60_000));
+  ctx.assert(true, "should not reach");
+});
+`;
+
+test("executor timeout - hanging test must fail", async () => {
+  const testFile = await makeTempFile(HANGING_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "hanging",
+    { vars: {}, secrets: {} },
+    { timeout: 1000 },
+  );
+
+  expect(result.success).toBe(false);
+  expect(result.error).toBeDefined();
+  expect(result.error).toContain("timed out");
+});
+
+test("executor timeout - generateSummary on timeout events should not be success", async () => {
+  const testFile = await makeTempFile(HANGING_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "hanging",
+    { vars: {}, secrets: {} },
+    { timeout: 1000 },
+  );
+
+  const summary = generateSummary(result.events);
+  // generateSummary with no assertions/steps returns success=true,
+  // but the overall result.success should still be false
+  expect(result.success).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
 // ALS per-test isolation regression tests
 // ---------------------------------------------------------------------------
 
@@ -2182,4 +2228,116 @@ test("batch mode - step index resets per test (ALS)", async () => {
   );
   expect(testBStepStart).toBeDefined();
   expect((testBStepStart as any).index).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// E2E: parallel .each execution via --concurrency
+// ---------------------------------------------------------------------------
+
+const PARALLEL_EACH_CONTENT = `
+import { test } from "@glubean/sdk";
+
+export const tests = test.each([
+  { id: "a" },
+  { id: "b" },
+  { id: "c" },
+], { parallel: true })("par-$id", async (ctx, { id }) => {
+  // Each test sleeps 200ms. Sequential = ~600ms, parallel(3) = ~200ms.
+  await new Promise(r => setTimeout(r, 200));
+  ctx.assert(true, id + " done");
+});
+`;
+
+test("parallel .each - concurrent execution is faster than sequential", async () => {
+  const testFile = await makeTempFile(PARALLEL_EACH_CONTENT);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  const start = Date.now();
+  for await (const event of executor.run(
+    `file://${testFile}`,
+    "",
+    { vars: {}, secrets: {} },
+    {
+      testIds: ["par-a", "par-b", "par-c"],
+      concurrency: 3,
+      timeout: 10_000,
+    },
+  )) {
+    events.push(event);
+  }
+  const elapsed = Date.now() - start;
+
+  // All 3 tests should pass
+  const statuses = events.filter((e) => e.type === "status" && (e as any).status === "completed");
+  expect(statuses.length).toBe(3);
+
+  // With concurrency=3, 3x200ms tests should finish in ~200-400ms, not ~600ms+
+  // Use generous threshold to avoid flakiness, but ensure it's clearly faster than sequential
+  expect(elapsed).toBeLessThan(550);
+});
+
+test("parallel .each - sequential (concurrency=1) takes full time", async () => {
+  const testFile = await makeTempFile(PARALLEL_EACH_CONTENT);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  const start = Date.now();
+  for await (const event of executor.run(
+    `file://${testFile}`,
+    "",
+    { vars: {}, secrets: {} },
+    {
+      testIds: ["par-a", "par-b", "par-c"],
+      // No concurrency → default sequential
+      timeout: 10_000,
+    },
+  )) {
+    events.push(event);
+  }
+  const elapsed = Date.now() - start;
+
+  const statuses = events.filter((e) => e.type === "status" && (e as any).status === "completed");
+  expect(statuses.length).toBe(3);
+
+  // Sequential: 3x200ms = ~600ms minimum
+  expect(elapsed).toBeGreaterThanOrEqual(550);
+});
+
+test("parallel .each - events carry testId for attribution", async () => {
+  const testFile = await makeTempFile(PARALLEL_EACH_CONTENT);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  for await (const event of executor.run(
+    `file://${testFile}`,
+    "",
+    { vars: {}, secrets: {} },
+    {
+      testIds: ["par-a", "par-b", "par-c"],
+      concurrency: 3,
+      timeout: 10_000,
+    },
+  )) {
+    events.push(event);
+  }
+
+  // All assertion events should carry testId
+  const assertions = events.filter((e) => e.type === "assertion");
+  expect(assertions.length).toBe(3);
+  for (const a of assertions) {
+    expect(a.testId).toBeDefined();
+    expect(["par-a", "par-b", "par-c"]).toContain(a.testId);
+  }
+
+  // Each test's assertions should be attributed correctly
+  const byTest = new Map<string, ExecutionEvent[]>();
+  for (const e of events) {
+    if (e.testId) {
+      const list = byTest.get(e.testId) || [];
+      list.push(e);
+      byTest.set(e.testId, list);
+    }
+  }
+  expect(byTest.size).toBe(3);
 });

@@ -2264,6 +2264,12 @@ export interface RegisteredTestMeta {
    * pick variants land in one directory for easy diffing.
    */
   groupId?: string;
+  /**
+   * Whether this test can run in parallel with other tests in the same group.
+   * Only meaningful when `groupId` is set.
+   * Actual concurrency level is controlled externally (e.g. `--concurrency` CLI flag).
+   */
+  parallel?: boolean;
 }
 
 // =============================================================================
