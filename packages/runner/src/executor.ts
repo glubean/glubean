@@ -112,15 +112,6 @@ export type ExecutionEvent =
 
 // ── Execution Context ───────────────────────────────────────────────────────
 
-export interface ExecutionNetworkPolicy {
-  mode: "shared_serverless";
-  maxRequests: number;
-  maxConcurrentRequests: number;
-  requestTimeoutMs: number;
-  maxResponseBytes: number;
-  allowedPorts: number[];
-}
-
 export interface ExecutionContext {
   vars: Record<string, string>;
   secrets: Record<string, string>;
@@ -132,7 +123,6 @@ export interface ExecutionContext {
     tags?: string[];
   };
   retryCount?: number;
-  networkPolicy?: ExecutionNetworkPolicy;
 }
 
 // ── Timeline Events ─────────────────────────────────────────────────────────

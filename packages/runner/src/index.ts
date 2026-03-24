@@ -6,7 +6,6 @@ export type {
   Summary,
   ExecutionContext,
   ExecutionEvent,
-  ExecutionNetworkPolicy,
   ExecutionOptions,
   ExecutionResult,
   ExecutorOptions,
