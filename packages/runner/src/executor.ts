@@ -14,7 +14,12 @@ const DEFAULT_TIMEOUT_MS = 30000;
 
 // ── Event Types ─────────────────────────────────────────────────────────────
 
-export type ExecutionEvent =
+/**
+ * Events emitted by the harness subprocess during test execution.
+ * All test-scoped events carry an optional `testId` field for attribution
+ * (always present when emitted inside a test context via emitEvent()).
+ */
+export type ExecutionEvent = { testId?: string } & (
   | {
     type: "start";
     id: string;
@@ -108,7 +113,8 @@ export type ExecutionEvent =
       stepFailed: number;
       stepSkipped: number;
     };
-  };
+  }
+);
 
 // ── Execution Context ───────────────────────────────────────────────────────
 

@@ -1162,20 +1162,16 @@ try {
         } else if (sessionMode === "teardown" && typeof def.teardown === "function") {
           await def.teardown(sessionCtx);
         }
-        console.log(
-          JSON.stringify({ type: "status", status: "completed" }),
-        );
+        emitEvent({ type: "status", status: "completed" });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const stack = err instanceof Error ? err.stack : undefined;
-        console.log(
-          JSON.stringify({
-            type: "status",
-            status: "failed",
-            error: message,
-            ...(stack && { stack }),
-          }),
-        );
+        emitEvent({
+          type: "status",
+          status: "failed",
+          error: message,
+          ...(stack && { stack }),
+        });
       }
     });
     process.exit(0);
@@ -1207,48 +1203,23 @@ try {
         testObj = findTestByExport(userModule, exportNamesMap[id]);
       }
       if (!testObj) {
-        console.log(
-          JSON.stringify({
-            type: "start",
-            id,
-            name: id,
-          }),
-        );
-        console.log(
-          JSON.stringify({
-            type: "status",
-            status: "failed",
-            id,
-            error: `Test "${id}" not found in module`,
-          }),
-        );
+        console.log(JSON.stringify({ type: "start", id, name: id, testId: id }));
+        console.log(JSON.stringify({ type: "status", status: "failed", id, testId: id, error: `Test "${id}" not found in module` }));
         hasFailure = true;
         continue;
       }
       try {
         await executeNewTest(testObj);
       } catch (error) {
-
         if (error instanceof SkipError) {
-          console.log(
-            JSON.stringify({
-              type: "status",
-              status: "skipped",
-              id,
-              reason: error.reason,
-            }),
-          );
+          console.log(JSON.stringify({ type: "status", status: "skipped", id, testId: id, reason: error.reason }));
         } else {
           hasFailure = true;
-          console.log(
-            JSON.stringify({
-              type: "status",
-              status: "failed",
-              id,
-              error: error instanceof Error ? error.message : String(error),
-              stack: error instanceof Error ? error.stack : undefined,
-            }),
-          );
+          console.log(JSON.stringify({
+            type: "status", status: "failed", id, testId: id,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          }));
         }
       }
     }
@@ -1271,10 +1242,10 @@ try {
       } catch (error) {
 
         if (error instanceof SkipError) {
-          console.log(JSON.stringify({ type: "status", status: "skipped", id: resolved.id, reason: (error as SkipError).reason }));
+          console.log(JSON.stringify({ type: "status", status: "skipped", id: resolved.id, testId: resolved.id, reason: (error as SkipError).reason }));
         } else {
           hasFailure = true;
-          console.log(JSON.stringify({ type: "status", status: "failed", id: resolved.id, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }));
+          console.log(JSON.stringify({ type: "status", status: "failed", id: resolved.id, testId: resolved.id, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }));
         }
       }
     }
@@ -1301,12 +1272,16 @@ try {
     );
   }
 } catch (error) {
+  // Include testId when known (single test mode)
+  const tid = testId && testId !== "*" ? testId : undefined;
+
   // Check if this is a skip error
   if (error instanceof SkipError) {
     console.log(
       JSON.stringify({
         type: "status",
         status: "skipped",
+        ...(tid && { testId: tid }),
         reason: error.reason,
       }),
     );
@@ -1318,6 +1293,7 @@ try {
     JSON.stringify({
       type: "status",
       status: "failed",
+      ...(tid && { testId: tid }),
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
     }),
