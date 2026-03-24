@@ -233,6 +233,20 @@ function incrAssertions(passed: boolean): void {
   }
 }
 
+/**
+ * Emit a JSON event to stdout, auto-injecting `testId` when inside a test context.
+ * Use this for all test-scoped event output to ensure concurrent events can be
+ * attributed to the correct test.
+ */
+function emitEvent(event: Record<string, unknown>): void {
+  const trc = currentTestCtx();
+  if (trc) {
+    console.log(JSON.stringify({ ...event, testId: trc.testId }));
+  } else {
+    console.log(JSON.stringify(event));
+  }
+}
+
 
 /**
  * Start monitoring memory usage.
@@ -396,16 +410,14 @@ function runSchemaValidation<T>(
   }
 
   // Emit schema_validation event (always, regardless of success/severity)
-  console.log(
-    JSON.stringify({
-      type: "schema_validation",
-      label,
-      success,
-      severity,
-      ...(issues.length > 0 && { issues }),
-      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-    }),
-  );
+  emitEvent({
+    type: "schema_validation",
+    label,
+    success,
+    severity,
+    ...(issues.length > 0 && { issues }),
+    ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+  });
 
   if (!success) {
     const issuesSummary = issues
@@ -497,23 +509,19 @@ const ctx = {
     },
     set: (key: string, value: unknown) => {
       sessionData[key] = value;
-      console.log(
-        JSON.stringify({ type: "session:set", key, value, ts: Date.now() }),
-      );
+      emitEvent({ type: "session:set", key, value, ts: Date.now() });
     },
     entries: () => ({ ...sessionData }),
   },
 
   // Logging function
   log: (message: string, data?: unknown) => {
-    console.log(
-      JSON.stringify({
-        type: "log",
-        message,
-        data,
-        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-      }),
-    );
+    emitEvent({
+      type: "log",
+      message,
+      data,
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+    });
   },
 
   // Assertion function with overloads
@@ -551,17 +559,15 @@ const ctx = {
     // Track per-step assertion stats (used for step retry logic + step_end event)
     incrAssertions(passed);
 
-    console.log(
-      JSON.stringify({
-        type: "assertion",
-        passed,
-        message,
-        // Truncate actual/expected on pass to save tokens; keep full on fail for debugging
-        actual: passed && truncateArrays ? truncateDeep(actual) : actual,
-        expected: passed && truncateArrays ? truncateDeep(expected) : expected,
-        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-      }),
-    );
+    emitEvent({
+      type: "assertion",
+      passed,
+      message,
+      // Truncate actual/expected on pass to save tokens; keep full on fail for debugging
+      actual: passed && truncateArrays ? truncateDeep(actual) : actual,
+      expected: passed && truncateArrays ? truncateDeep(expected) : expected,
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+    });
   },
 
   // Fluent assertion API (Jest-style, soft-by-default)
@@ -582,14 +588,12 @@ const ctx = {
   // Warning function — soft check, never affects test pass/fail.
   // condition=true means OK; condition=false triggers warning.
   warn: (condition: boolean, message: string) => {
-    console.log(
-      JSON.stringify({
-        type: "warning",
-        condition,
-        message,
-        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-      }),
-    );
+    emitEvent({
+      type: "warning",
+      condition,
+      message,
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+    });
   },
 
   // Schema validation function
@@ -610,13 +614,11 @@ const ctx = {
 
   // API tracing function
   trace: (request: ApiTrace) => {
-    console.log(
-      JSON.stringify({
-        type: "trace",
-        data: request,
-        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-      }),
-    );
+    emitEvent({
+      type: "trace",
+      data: request,
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+    });
     // Backward compat: also emit as a typed action for timeline/filtering
     let pathname: string;
     try {
@@ -635,38 +637,32 @@ const ctx = {
 
   // Action recording function
   action: (a: GlubeanAction) => {
-    console.log(
-      JSON.stringify({
-        type: "action",
-        data: a,
-        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-      }),
-    );
+    emitEvent({
+      type: "action",
+      data: a,
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+    });
   },
 
   // Structured event emission
   event: (ev: GlubeanEvent) => {
-    console.log(
-      JSON.stringify({
-        type: "event",
-        data: ev,
-        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-      }),
-    );
+    emitEvent({
+      type: "event",
+      data: ev,
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+    });
   },
 
   // Metric reporting function
   metric: (name: string, value: number, options?: MetricOptions) => {
-    console.log(
-      JSON.stringify({
-        type: "metric",
-        name,
-        value,
-        unit: options?.unit,
-        tags: options?.tags,
-        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
-      }),
-    );
+    emitEvent({
+      type: "metric",
+      name,
+      value,
+      unit: options?.unit,
+      tags: options?.tags,
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
+    });
   },
 
   /**
@@ -685,13 +681,11 @@ const ctx = {
    */
   fail: (message: string): never => {
     // Emit a failed assertion so the failure reason appears in events
-    console.log(
-      JSON.stringify({
-        type: "assertion",
-        passed: false,
-        message,
-      }),
-    );
+    emitEvent({
+      type: "assertion",
+      passed: false,
+      message,
+    });
     throw new FailError(message);
   },
 
@@ -737,12 +731,7 @@ const ctx = {
    * @param ms Timeout in milliseconds
    */
   setTimeout: (ms: number) => {
-    console.log(
-      JSON.stringify({
-        type: "timeout_update",
-        timeout: ms,
-      }),
-    );
+    emitEvent({ type: "timeout_update", timeout: ms });
   },
 
   /**
@@ -1116,7 +1105,15 @@ globalThis.__glubeanRuntime = {
   vars: withEnvFallback(rawVars),
   secrets: withEnvFallback(rawSecrets),
   http: wrappedHttp,
-  test: runtimeTest,
+  // Getter: returns per-test metadata from ALS when inside a test,
+  // falls back to the initial runtimeTest (module load phase).
+  get test() {
+    return currentTestCtx()?.testMeta ?? runtimeTest;
+  },
+  set test(value) {
+    const trc = currentTestCtx();
+    if (trc) trc.testMeta = value;
+  },
   action: ctx.action,
   event: ctx.event,
   log: ctx.log,
@@ -1439,17 +1436,14 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
   // the per-test state via currentTestCtx().
   await testContext.run(trc, async () => {
 
-  // Keep runtime metadata aligned with the actual resolved test before user code runs.
-  globalThis.__glubeanRuntime.test = testMeta;
-  console.log(
-    JSON.stringify({
-      type: "start",
-      id: test.meta.id,
-      name: test.meta.name || test.meta.id,
-      tags: testTags,
-      ...(retryCount > 0 && { retryCount }),
-    }),
-  );
+  // Runtime metadata is now served via ALS getter on __glubeanRuntime.test
+  emitEvent({
+    type: "start",
+    id: test.meta.id,
+    name: test.meta.name || test.meta.id,
+    tags: testTags,
+    ...(retryCount > 0 && { retryCount }),
+  });
 
   // Start memory monitoring
   startMemoryMonitoring();
@@ -1467,12 +1461,10 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
         let stepFailed = false;
         try {
           if (test.setup) {
-            console.log(
-              JSON.stringify({
-                type: "log",
-                message: "Running setup...",
-              }),
-            );
+            emitEvent({
+              type: "log",
+              message: "Running setup...",
+            });
             state = await test.setup(effectiveCtx);
           }
           if (test.steps) {
@@ -1481,17 +1473,15 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
               // If a previous step failed, skip remaining steps
               if (stepFailed) {
-                console.log(
-                  JSON.stringify({
-                    type: "step_end",
-                    index: i,
-                    name: step.meta.name,
-                    status: "skipped",
-                    durationMs: 0,
-                    assertions: 0,
-                    failedAssertions: 0,
-                  }),
-                );
+                emitEvent({
+                  type: "step_end",
+                  index: i,
+                  name: step.meta.name,
+                  status: "skipped",
+                  durationMs: 0,
+                  assertions: 0,
+                  failedAssertions: 0,
+                });
                 continue;
               }
 
@@ -1499,14 +1489,12 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
               { const trc = currentTestCtx()!; trc.stepFailedAssertions = 0; trc.stepAssertionTotal = 0; trc.currentStepIndex = i; }
               const stepStart = performance.now();
 
-              console.log(
-                JSON.stringify({
-                  type: "step_start",
-                  index: i,
-                  name: step.meta.name,
-                  total: test.steps.length,
-                }),
-              );
+              emitEvent({
+                type: "step_start",
+                index: i,
+                name: step.meta.name,
+                total: test.steps.length,
+              });
 
               let stepError: string | undefined;
               let stepReturnState: unknown = undefined;
@@ -1577,15 +1565,13 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
                 if (attempt < maxAttempts) {
                   const reason = stepError ? stepError : `${getStepFailedAssertions()} failed assertion(s)`;
-                  console.log(
-                    JSON.stringify({
-                      type: "log",
-                      stepIndex: i,
-                      message: `Retrying step "${step.meta.name}" (${
-                        attempt + 1
-                      }/${maxAttempts}) after failure: ${reason}`,
-                    }),
-                  );
+                  emitEvent({
+                    type: "log",
+                    stepIndex: i,
+                    message: `Retrying step "${step.meta.name}" (${
+                      attempt + 1
+                    }/${maxAttempts}) after failure: ${reason}`,
+                  });
                 }
               }
 
@@ -1607,23 +1593,21 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 }
               }
 
-              console.log(
-                JSON.stringify({
-                  type: "step_end",
-                  index: i,
-                  name: step.meta.name,
-                  status: failed ? "failed" : "passed",
-                  durationMs,
-                  assertions: lastAssertions,
-                  failedAssertions: lastFailedAssertions,
-                  attempts: attemptsUsed,
-                  retriesUsed: Math.max(0, attemptsUsed - 1),
-                  ...(stepError && { error: stepError }),
-                  ...(returnStatePayload !== undefined && {
-                    returnState: returnStatePayload,
-                  }),
+              emitEvent({
+                type: "step_end",
+                index: i,
+                name: step.meta.name,
+                status: failed ? "failed" : "passed",
+                durationMs,
+                assertions: lastAssertions,
+                failedAssertions: lastFailedAssertions,
+                attempts: attemptsUsed,
+                retriesUsed: Math.max(0, attemptsUsed - 1),
+                ...(stepError && { error: stepError }),
+                ...(returnStatePayload !== undefined && {
+                  returnState: returnStatePayload,
                 }),
-              );
+              });
 
               currentTestCtx()!.currentStepIndex = null;
 
@@ -1636,22 +1620,18 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
         } finally {
           if (test.teardown) {
             try {
-              console.log(
-                JSON.stringify({
-                  type: "log",
-                  message: "Running teardown...",
-                }),
-              );
+              emitEvent({
+                type: "log",
+                message: "Running teardown...",
+              });
               await test.teardown(effectiveCtx, state);
             } catch (teardownError) {
-              console.log(
-                JSON.stringify({
-                  type: "log",
-                  message: `Teardown error: ${
-                    teardownError instanceof Error ? teardownError.message : String(teardownError)
-                  }`,
-                }),
-              );
+              emitEvent({
+                type: "log",
+                message: `Teardown error: ${
+                  teardownError instanceof Error ? teardownError.message : String(teardownError)
+                }`,
+              });
             }
           }
         }
@@ -1673,15 +1653,13 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
     // Stop monitoring and get peak memory
     const peakBytes = stopMemoryMonitoring();
 
-    console.log(
-      JSON.stringify({
-        type: "status",
-        status: "completed",
-        id: test.meta.id,
-        peakMemoryBytes: peakBytes,
-        peakMemoryMB: (peakBytes / 1024 / 1024).toFixed(2),
-      }),
-    );
+    emitEvent({
+      type: "status",
+      status: "completed",
+      id: test.meta.id,
+      peakMemoryBytes: peakBytes,
+      peakMemoryMB: (peakBytes / 1024 / 1024).toFixed(2),
+    });
   } catch (error) {
     stopMemoryMonitoring();
     throw error;
