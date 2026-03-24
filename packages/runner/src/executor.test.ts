@@ -2086,3 +2086,100 @@ test("fromSharedConfig: wires emitFullTrace", () => {
   const opts = (executor as unknown as { options: ExecutorOptions }).options;
   expect(opts.emitFullTrace).toBe(true);
 });
+
+// ---------------------------------------------------------------------------
+// ALS per-test isolation regression tests
+// ---------------------------------------------------------------------------
+
+const ALS_BATCH_ASSERTIONS_CONTENT = `
+import { test } from "@glubean/sdk";
+
+export const testA = test("testA", async (ctx) => {
+  ctx.assert(true, "a-pass-1");
+  ctx.assert(true, "a-pass-2");
+  ctx.assert(false, "a-fail-1");
+});
+
+export const testB = test("testB", async (ctx) => {
+  ctx.assert(true, "b-pass-1");
+});
+`;
+
+test("batch mode - assertion counters isolate per test (ALS)", async () => {
+  const testFile = await makeTempFile(ALS_BATCH_ASSERTIONS_CONTENT);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  for await (const event of executor.run(
+    `file://${testFile}`,
+    "",
+    { vars: {}, secrets: {} },
+    { testIds: ["testA", "testB"], timeout: 10_000 },
+  )) {
+    events.push(event);
+  }
+
+  // testA should have 3 assertions (2 pass + 1 fail)
+  const testAAssertions = events.filter(
+    (e) => e.type === "assertion" && (e as any).message?.startsWith("a-"),
+  );
+  expect(testAAssertions.length).toBe(3);
+
+  // testB should have 1 assertion — its counter must NOT carry over from testA
+  const testBAssertions = events.filter(
+    (e) => e.type === "assertion" && (e as any).message?.startsWith("b-"),
+  );
+  expect(testBAssertions.length).toBe(1);
+
+  // testB should pass (its single assertion passes)
+  const testBStatus = events.find(
+    (e) => e.type === "status" && (e as any).id === "testB",
+  );
+  expect(testBStatus).toBeDefined();
+  expect((testBStatus as any).status).toBe("completed");
+});
+
+const ALS_BATCH_STEPS_CONTENT = `
+import { test } from "@glubean/sdk";
+
+export const testA = test("testA")
+  .step("a-step1", async (ctx) => {
+    ctx.assert(true, "a-s1");
+  })
+  .step("a-step2", async (ctx) => {
+    ctx.assert(true, "a-s2");
+  });
+
+export const testB = test("testB")
+  .step("b-only", async (ctx) => {
+    ctx.assert(true, "b-s1");
+  });
+`;
+
+test("batch mode - step index resets per test (ALS)", async () => {
+  const testFile = await makeTempFile(ALS_BATCH_STEPS_CONTENT);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  for await (const event of executor.run(
+    `file://${testFile}`,
+    "",
+    { vars: {}, secrets: {} },
+    { testIds: ["testA", "testB"], timeout: 10_000 },
+  )) {
+    events.push(event);
+  }
+
+  // testA has 2 step_start events
+  const testAStepStarts = events.filter(
+    (e) => e.type === "step_start" && (e as any).name?.startsWith("a-"),
+  );
+  expect(testAStepStarts.length).toBe(2);
+
+  // testB's step should start at index 0, not 2
+  const testBStepStart = events.find(
+    (e) => e.type === "step_start" && (e as any).name === "b-only",
+  );
+  expect(testBStepStart).toBeDefined();
+  expect((testBStepStart as any).index).toBe(0);
+});

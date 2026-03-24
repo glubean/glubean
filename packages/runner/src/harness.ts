@@ -7,6 +7,7 @@
  */
 
 import { parseArgs } from "node:util";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
 
 /* eslint-disable no-var */
@@ -214,18 +215,76 @@ function parseNetworkPolicy(
 
 const networkPolicy = parseNetworkPolicy(contextData.networkPolicy);
 
-// Memory monitoring state
+// Memory monitoring state (per-process — not isolated per-test)
 let peakMemoryBytes = 0;
 let memoryCheckInterval: number | undefined;
 
-// Step-level assertion tracking.
-// Reset before each step, incremented by ctx.assert on failure.
-let stepFailedAssertions = 0;
-let stepAssertionTotal = 0;
+// ---------------------------------------------------------------------------
+// Per-test execution context via AsyncLocalStorage
+// ---------------------------------------------------------------------------
 
-// Current step index (null when not inside a step).
-// Used to tag log/assertion/trace/metric events with their containing step.
-let currentStepIndex: number | null = null;
+/**
+ * Holds all mutable state scoped to a single test execution.
+ * Accessed via `testContext.getStore()!` from anywhere in the async call chain
+ * (ky hooks, globalFetch override, ctx.assert, etc.) without explicit passing.
+ *
+ * Analogous to Java's ThreadLocal but tracks Node.js async continuations.
+ */
+class TestRunContext {
+  // Step-level assertion tracking
+  stepFailedAssertions = 0;
+  stepAssertionTotal = 0;
+  currentStepIndex: number | null = null;
+
+  // HTTP request counters
+  httpRequestTotal = 0;
+  httpErrorTotal = 0;
+
+  // Network policy counters
+  networkRequestCount = 0;
+  networkInFlightCount = 0;
+  networkResponseBytes = 0;
+  networkWarningCounts = new Map<string, number>();
+
+  // Runtime identity
+  testMeta: { id: string; tags: string[] };
+
+  constructor(
+    readonly testId: string,
+    meta: { id: string; tags: string[] },
+  ) {
+    this.testMeta = meta;
+  }
+}
+
+const testContext = new AsyncLocalStorage<TestRunContext>();
+
+/**
+ * Get the current test's execution context.
+ * Returns undefined when not inside a test (e.g., module load phase).
+ */
+function currentTestCtx(): TestRunContext | undefined {
+  return testContext.getStore();
+}
+
+// Accessor helpers — read from ALS when inside a test, safe defaults otherwise.
+// These replace direct reads of the old global variables.
+function getStepIndex(): number | null {
+  return currentTestCtx()?.currentStepIndex ?? null;
+}
+function getStepAssertionTotal(): number {
+  return currentTestCtx()?.stepAssertionTotal ?? 0;
+}
+function getStepFailedAssertions(): number {
+  return currentTestCtx()?.stepFailedAssertions ?? 0;
+}
+function incrAssertions(passed: boolean): void {
+  const trc = currentTestCtx();
+  if (trc) {
+    trc.stepAssertionTotal++;
+    if (!passed) trc.stepFailedAssertions++;
+  }
+}
 
 
 /**
@@ -397,7 +456,7 @@ function runSchemaValidation<T>(
       success,
       severity,
       ...(issues.length > 0 && { issues }),
-      ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+      ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
     }),
   );
 
@@ -505,7 +564,7 @@ const ctx = {
         type: "log",
         message,
         data,
-        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
       }),
     );
   },
@@ -543,10 +602,7 @@ const ctx = {
     }
 
     // Track per-step assertion stats (used for step retry logic + step_end event)
-    stepAssertionTotal++;
-    if (!passed) {
-      stepFailedAssertions++;
-    }
+    incrAssertions(passed);
 
     console.log(
       JSON.stringify({
@@ -556,7 +612,7 @@ const ctx = {
         // Truncate actual/expected on pass to save tokens; keep full on fail for debugging
         actual: passed && truncateArrays ? truncateDeep(actual) : actual,
         expected: passed && truncateArrays ? truncateDeep(expected) : expected,
-        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
       }),
     );
   },
@@ -584,7 +640,7 @@ const ctx = {
         type: "warning",
         condition,
         message,
-        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
       }),
     );
   },
@@ -611,7 +667,7 @@ const ctx = {
       JSON.stringify({
         type: "trace",
         data: request,
-        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
       }),
     );
     // Backward compat: also emit as a typed action for timeline/filtering
@@ -636,7 +692,7 @@ const ctx = {
       JSON.stringify({
         type: "action",
         data: a,
-        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
       }),
     );
   },
@@ -647,7 +703,7 @@ const ctx = {
       JSON.stringify({
         type: "event",
         data: ev,
-        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
       }),
     );
   },
@@ -661,7 +717,7 @@ const ctx = {
         value,
         unit: options?.unit,
         tags: options?.tags,
-        ...(currentStepIndex !== null && { stepIndex: currentStepIndex }),
+        ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
       }),
     );
   },
@@ -770,8 +826,6 @@ const ctx = {
 // because ky may clone/recreate the Request object between beforeRequest and
 // afterResponse hooks, breaking reference equality in a WeakMap.
 let lastRequestStartTime = 0;
-let httpRequestTotal = 0;
-let httpErrorTotal = 0;
 
 // Captured in beforeRequest when emitFullTrace is on
 
@@ -823,24 +877,22 @@ function truncateBody(body: unknown): unknown {
  * Reset per-test counters for file-level batch mode.
  * Called before each test when running multiple tests in a single process.
  */
+/**
+ * Reset per-process state between tests in batch mode.
+ * Per-test state is now handled by TestRunContext via AsyncLocalStorage —
+ * each test gets a fresh instance, so no reset is needed for those.
+ */
 function resetTestCounters() {
-  stepFailedAssertions = 0;
-  stepAssertionTotal = 0;
-  currentStepIndex = null;
-  httpRequestTotal = 0;
-  httpErrorTotal = 0;
   peakMemoryBytes = 0;
 }
 
 const MAX_NETWORK_WARNINGS_PER_CODE = 3;
-const networkWarningCounts = new Map<string, number>();
-let networkRequestCount = 0;
-let networkInFlightCount = 0;
-let networkResponseBytes = 0;
 
 function emitNetworkWarning(code: string, message: string): void {
-  const nextCount = (networkWarningCounts.get(code) ?? 0) + 1;
-  networkWarningCounts.set(code, nextCount);
+  const trc = currentTestCtx();
+  const warnCounts = trc?.networkWarningCounts ?? new Map<string, number>();
+  const nextCount = (warnCounts.get(code) ?? 0) + 1;
+  warnCounts.set(code, nextCount);
   if (nextCount <= MAX_NETWORK_WARNINGS_PER_CODE) {
     ctx.warn(false, `[network_guard:${code}] ${message}`);
   } else if (nextCount === MAX_NETWORK_WARNINGS_PER_CODE + 1) {
@@ -953,7 +1005,11 @@ globalThis.fetch = async (input, init) => {
 
   const requestUrl = toRequestUrl(input);
 
-  if (networkRequestCount >= networkPolicy.maxRequests) {
+  const trc = currentTestCtx();
+  const reqCount = trc?.networkRequestCount ?? 0;
+  const inflightCount = trc?.networkInFlightCount ?? 0;
+
+  if (reqCount >= networkPolicy.maxRequests) {
     emitNetworkWarning(
       "request_limit_exceeded",
       `Request limit exceeded (${networkPolicy.maxRequests})`,
@@ -962,7 +1018,7 @@ globalThis.fetch = async (input, init) => {
       `Network policy exceeded max outbound requests (${networkPolicy.maxRequests}).`,
     );
   }
-  if (networkInFlightCount >= networkPolicy.maxConcurrentRequests) {
+  if (inflightCount >= networkPolicy.maxConcurrentRequests) {
     emitNetworkWarning(
       "concurrency_limit_exceeded",
       `In-flight request limit exceeded (${networkPolicy.maxConcurrentRequests})`,
@@ -974,8 +1030,7 @@ globalThis.fetch = async (input, init) => {
 
   // Reserve counters before await to avoid TOCTOU races when user code issues
   // concurrent requests in a single Promise.all frame.
-  networkRequestCount++;
-  networkInFlightCount++;
+  if (trc) { trc.networkRequestCount++; trc.networkInFlightCount++; }
 
   const timeoutController = new AbortController();
   let timedOutByPolicy = false;
@@ -1014,9 +1069,9 @@ globalThis.fetch = async (input, init) => {
     return applyResponseByteBudget(response, {
       requestUrl,
       maxResponseBytes: networkPolicy.maxResponseBytes,
-      getUsedResponseBytes: () => networkResponseBytes,
+      getUsedResponseBytes: () => currentTestCtx()?.networkResponseBytes ?? 0,
       addUsedResponseBytes: (delta) => {
-        networkResponseBytes += delta;
+        const t = currentTestCtx(); if (t) t.networkResponseBytes += delta;
       },
       emitWarning: emitNetworkWarning,
     });
@@ -1034,7 +1089,7 @@ globalThis.fetch = async (input, init) => {
     if (parentSignal) {
       parentSignal.removeEventListener("abort", onParentAbort);
     }
-    networkInFlightCount = Math.max(0, networkInFlightCount - 1);
+    { const t = currentTestCtx(); if (t) t.networkInFlightCount = Math.max(0, t.networkInFlightCount - 1); }
   }
 };
 
@@ -1057,10 +1112,7 @@ const kyInstance = ky.create({
         const duration = Math.round(performance.now() - lastRequestStartTime);
 
         // Increment HTTP counters for summary
-        httpRequestTotal++;
-        if (response.status >= 400) {
-          httpErrorTotal++;
-        }
+        { const t = currentTestCtx(); if (t) { t.httpRequestTotal++; if (response.status >= 400) t.httpErrorTotal++; } }
 
         // Build trace data — enriched when emitFullTrace is on
         
@@ -1359,27 +1411,32 @@ try {
       log: ctx.log,
     };
 
-    try {
-      if (sessionMode === "setup") {
-        await def.setup(sessionCtx);
-      } else if (sessionMode === "teardown" && typeof def.teardown === "function") {
-        await def.teardown(sessionCtx);
+    // Session setup/teardown needs an ALS context so network policy
+    // counters (in globalFetch override) work correctly.
+    const sessionTrc = new TestRunContext("__session__", { id: "__session__", tags: [] });
+    await testContext.run(sessionTrc, async () => {
+      try {
+        if (sessionMode === "setup") {
+          await def.setup(sessionCtx);
+        } else if (sessionMode === "teardown" && typeof def.teardown === "function") {
+          await def.teardown(sessionCtx);
+        }
+        console.log(
+          JSON.stringify({ type: "status", status: "completed" }),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const stack = err instanceof Error ? err.stack : undefined;
+        console.log(
+          JSON.stringify({
+            type: "status",
+            status: "failed",
+            error: message,
+            ...(stack && { stack }),
+          }),
+        );
       }
-      console.log(
-        JSON.stringify({ type: "status", status: "completed" }),
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const stack = err instanceof Error ? err.stack : undefined;
-      console.log(
-        JSON.stringify({
-          type: "status",
-          status: "failed",
-          error: message,
-          ...(stack && { stack }),
-        }),
-      );
-    }
+    });
     process.exit(0);
   }
 
@@ -1630,12 +1687,16 @@ async function withFixtures(
  */
 async function executeNewTest(test: Test<unknown>): Promise<void> {
   const testTags = normalizeTestTags(test.meta.tags);
+  const testMeta = { id: test.meta.id, tags: testTags };
+  const trc = new TestRunContext(test.meta.id, testMeta);
+
+  // Run the test body inside an AsyncLocalStorage context so all
+  // downstream code (ctx.assert, ky hooks, globalFetch) can access
+  // the per-test state via currentTestCtx().
+  await testContext.run(trc, async () => {
+
   // Keep runtime metadata aligned with the actual resolved test before user code runs.
-  
-  globalThis.__glubeanRuntime.test = {
-    id: test.meta.id,
-    tags: testTags,
-  };
+  globalThis.__glubeanRuntime.test = testMeta;
   console.log(
     JSON.stringify({
       type: "start",
@@ -1691,9 +1752,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
               }
 
               // Reset per-step assertion counters and set step scope
-              stepFailedAssertions = 0;
-              stepAssertionTotal = 0;
-              currentStepIndex = i;
+              { const trc = currentTestCtx()!; trc.stepFailedAssertions = 0; trc.stepAssertionTotal = 0; trc.currentStepIndex = i; }
               const stepStart = performance.now();
 
               console.log(
@@ -1726,8 +1785,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 attemptsUsed = attempt;
                 stepError = undefined;
                 stepReturnState = undefined;
-                stepFailedAssertions = 0;
-                stepAssertionTotal = 0;
+                { const trc = currentTestCtx()!; trc.stepFailedAssertions = 0; trc.stepAssertionTotal = 0; }
                 timeoutFailure = false;
                 let stepTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
@@ -1759,10 +1817,10 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                   }
                 }
 
-                lastFailedAssertions = stepFailedAssertions;
-                lastAssertions = stepAssertionTotal;
+                lastFailedAssertions = getStepFailedAssertions();
+                lastAssertions = getStepAssertionTotal();
 
-                const attemptFailed = !!stepError || stepFailedAssertions > 0;
+                const attemptFailed = !!stepError || getStepFailedAssertions() > 0;
                 if (!attemptFailed) {
                   break;
                 }
@@ -1774,7 +1832,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 }
 
                 if (attempt < maxAttempts) {
-                  const reason = stepError ? stepError : `${stepFailedAssertions} failed assertion(s)`;
+                  const reason = stepError ? stepError : `${getStepFailedAssertions()} failed assertion(s)`;
                   console.log(
                     JSON.stringify({
                       type: "log",
@@ -1823,7 +1881,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 }),
               );
 
-              currentStepIndex = null;
+              currentTestCtx()!.currentStepIndex = null;
 
               if (failed) {
                 stepFailed = true;
@@ -1884,4 +1942,6 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
     stopMemoryMonitoring();
     throw error;
   }
+
+  }); // end testContext.run()
 }
