@@ -769,14 +769,15 @@ const ctx = {
 // ---------------------------------------------------------------------------
 // Auto-tracing HTTP client (ctx.http) — powered by ky
 // ---------------------------------------------------------------------------
-// Track request start time. We use a simple variable instead of a WeakMap
-// because ky may clone/recreate the Request object between beforeRequest and
-// afterResponse hooks, breaking reference equality in a WeakMap.
-let lastRequestStartTime = 0;
-
-// Captured in beforeRequest when emitFullTrace is on
-
-let lastRequestBody: unknown = undefined;
+// Per-request state stored in a WeakMap keyed by the ky NormalizedOptions
+// object (which IS the same reference in beforeRequest and afterResponse).
+// This avoids the read-await-write race that global variables had when
+// multiple requests were in flight (e.g. Promise.all).
+interface RequestTraceState {
+  startTime: number;
+  body?: unknown;
+}
+const requestTraceMap = new WeakMap<NormalizedOptions, RequestTraceState>();
 
 /** Max serialized body size (chars) to include in trace events. */
 const TRACE_BODY_MAX_SIZE = 1_048_576; // 1MB
@@ -840,17 +841,19 @@ const kyInstance = ky.create({
     beforeRequest: [
       
       (_request: Request, options: NormalizedOptions) => {
-        lastRequestStartTime = performance.now();
-        if (emitFullTrace) {
-          // Capture request body from ky options before the request is sent
-          lastRequestBody = (options as unknown as Record<string, unknown>).json ?? options.body ?? undefined;
-        }
+        requestTraceMap.set(options, {
+          startTime: performance.now(),
+          body: emitFullTrace
+            ? ((options as unknown as Record<string, unknown>).json ?? options.body ?? undefined)
+            : undefined,
+        });
       },
     ],
     afterResponse: [
       
       async (request: Request, _options: NormalizedOptions, response: Response) => {
-        const duration = Math.round(performance.now() - lastRequestStartTime);
+        const trace = requestTraceMap.get(_options);
+        const duration = Math.round(performance.now() - (trace?.startTime ?? performance.now()));
 
         // Increment HTTP counters for summary
         { const t = currentTestCtx(); if (t) { t.httpRequestTotal++; if (response.status >= 400) t.httpErrorTotal++; } }
@@ -874,8 +877,8 @@ const kyInstance = ky.create({
           traceData.requestHeaders = Object.fromEntries(
             request.headers.entries(),
           );
-          if (lastRequestBody !== undefined) {
-            traceData.requestBody = truncateBody(lastRequestBody);
+          if (trace?.body !== undefined) {
+            traceData.requestBody = truncateBody(trace.body);
           }
           traceData.responseHeaders = Object.fromEntries(
             response.headers.entries(),
@@ -913,7 +916,7 @@ const kyInstance = ky.create({
           } catch {
             // Ignore clone/parse errors — trace still emits without body
           }
-          lastRequestBody = undefined;
+          // Per-request state is on the options object; no global cleanup needed.
         }
 
         ctx.trace(traceData as unknown as ApiTrace);
