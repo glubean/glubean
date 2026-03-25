@@ -28,8 +28,9 @@ glubean config mcp
    Data-driven (`test.each`/`test.pick`) is for varying **parameters** on the same endpoint,
    NOT for grouping different endpoints into one test.
 9. **Directory placement**: if the user specifies a directory, use it. Otherwise:
-   - `tests/` — default for regression, CI, permanent tests
-   - `explore/` — only when the user says "try", "explore", "check", "see what happens"
+   - `tests/` — regression, CI, permanent tests. Workflows, CRUD lifecycles, and tests with teardown typically go here.
+   - `explore/` — interactive development: "try", "explore", "check", "see what happens". Mostly single-endpoint tests, but workflows are fine too.
+   - The two are **complementary, not exclusive**. The same endpoint can appear in both (e.g. smoke in `explore/`, full workflow in `tests/`).
 
 ## Workflow
 
