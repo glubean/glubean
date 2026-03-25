@@ -23,6 +23,7 @@ import { redactCommand } from "./commands/redact.js";
 import { configMcpCommand } from "./commands/config_mcp.js";
 import { configSkillCommand } from "./commands/config_skill.js";
 import { docsPullCommand } from "./commands/docs_pull.js";
+import { envShowCommand, envUseCommand, envResetCommand, envListCommand } from "./commands/env.js";
 import { abortUpdateCheck, checkForUpdates } from "./update_check.js";
 
 const program = new Command();
@@ -308,6 +309,38 @@ docsCmd
   .description("Download @glubean/lens (SDK reference + patterns) to ~/.glubean/docs/")
   .action(async (options) => {
     await docsPullCommand({ dir: options.dir });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// env command (with subcommands)
+// ─────────────────────────────────────────────────────────────────────────────
+const envCmd = program
+  .command("env")
+  .description("Manage active environment for test runs")
+  .action(async () => {
+    await envShowCommand();
+  });
+
+envCmd
+  .command("use <name>")
+  .description("Set active environment (e.g. staging, production)")
+  .action(async (name) => {
+    await envUseCommand(name);
+  });
+
+envCmd
+  .command("reset")
+  .description("Clear active environment (use default .env)")
+  .action(async () => {
+    await envResetCommand();
+  });
+
+envCmd
+  .command("list")
+  .alias("ls")
+  .description("List available .env.<name> files")
+  .action(async () => {
+    await envListCommand();
   });
 
 // ─────────────────────────────────────────────────────────────────────────────

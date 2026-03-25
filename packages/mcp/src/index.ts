@@ -82,6 +82,30 @@ export function deriveSecretsPath(envPath: string): string {
   return resolve(dirname(envPath), `${basename(envPath)}.secrets`);
 }
 
+/**
+ * Read the active environment from `.glubean/active-env` in the project root.
+ * Returns `undefined` if not set.
+ */
+async function readActiveEnv(projectRoot: string): Promise<string | undefined> {
+  try {
+    const content = await readFile(resolve(projectRoot, ".glubean", "active-env"), "utf-8");
+    const env = content.trim();
+    return env || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the env file path, checking `.glubean/active-env` when no explicit envFile is given.
+ */
+async function resolveEnvPath(projectRoot: string, envFile?: string): Promise<string> {
+  if (envFile) return resolve(envFile);
+  const activeEnv = await readActiveEnv(projectRoot);
+  if (activeEnv) return resolve(projectRoot, `.env.${activeEnv}`);
+  return resolve(projectRoot, ".env");
+}
+
 function normalizeFilePath(path: string): string {
   return path.replaceAll("\\", "/");
 }
@@ -342,7 +366,7 @@ export async function diagnoseProjectConfig(args: {
   const rootDir = resolveRootDir(args.dir);
   const projectRoot = await findProjectRoot(rootDir);
   const packageJsonPath = resolve(projectRoot, "package.json");
-  const envPath = args.envFile ? resolve(args.envFile) : resolve(projectRoot, ".env");
+  const envPath = await resolveEnvPath(projectRoot, args.envFile);
   const secretsPath = deriveSecretsPath(envPath);
 
   const [packageJsonExists, envExists, secretsExists, testsDirExists, exploreDirExists] = await Promise.all([
@@ -419,7 +443,7 @@ export async function runLocalTestsFromFile(args: {
   const testDir = dirname(absolutePath);
   const projectRoot = await findProjectRoot(testDir);
 
-  const envPath = args.envFile ? resolve(args.envFile) : resolve(projectRoot, ".env");
+  const envPath = await resolveEnvPath(projectRoot, args.envFile);
   const secretsPath = deriveSecretsPath(envPath);
 
   const [vars, secrets] = await Promise.all([

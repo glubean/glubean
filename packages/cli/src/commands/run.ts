@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import { glob } from "node:fs/promises";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
 import { loadEnvFile } from "../lib/env.js";
+import { resolveEnvFileName } from "../lib/active_env.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
 import { extractFromSource } from "@glubean/scanner/static";
@@ -344,9 +345,12 @@ export async function runCommand(
     console.log(`${colors.dim}Log file: ${logPath}${colors.reset}`);
   }
 
-  const envFileName = effectiveRun.envFile || ".env";
-  const envPath = resolve(rootDir, envFileName);
+  // Resolve env file: --env-file flag > .glubean/active-env > config default > .env
   const userSpecifiedEnvFile = !!options.envFile;
+  const envFileName = userSpecifiedEnvFile
+    ? effectiveRun.envFile!
+    : await resolveEnvFileName(rootDir);
+  const envPath = resolve(rootDir, envFileName);
 
   if (userSpecifiedEnvFile) {
     try {
