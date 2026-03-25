@@ -47,8 +47,8 @@ test("init --no-interactive creates basic project files", async () => {
     expect(await fileExists(join(dir, "tests/pick.test.ts"))).toBe(true);
     expect(await fileExists(join(dir, "data/create-user.json"))).toBe(true);
     expect(await fileExists(join(dir, "data/search-examples.json"))).toBe(true);
-    expect(await fileExists(join(dir, "CLAUDE.md"))).toBe(true);
-    expect(await fileExists(join(dir, "AGENTS.md"))).toBe(true);
+    expect(await fileExists(join(dir, "GLUBEAN.md"))).toBe(true);
+    expect(await fileExists(join(dir, "local/README.md"))).toBe(true);
 
     // Explore files
     expect(await fileExists(join(dir, "explore/api.test.ts"))).toBe(true);
@@ -309,8 +309,8 @@ test("init --minimal creates minimal files", async () => {
     expect(await fileExists(join(dir, "explore/auth.test.ts"))).toBe(true);
     expect(await fileExists(join(dir, "data/search-examples.json"))).toBe(true);
     expect(await fileExists(join(dir, "tests/demo.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "CLAUDE.md"))).toBe(true);
-    expect(await fileExists(join(dir, "AGENTS.md"))).toBe(true);
+    expect(await fileExists(join(dir, "GLUBEAN.md"))).toBe(true);
+    expect(await fileExists(join(dir, "local/README.md"))).toBe(true);
     expect(await fileExists(join(dir, ".env.staging"))).toBe(true);
     expect(await fileExists(join(dir, ".env.staging.secrets"))).toBe(true);
 

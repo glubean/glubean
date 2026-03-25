@@ -279,6 +279,14 @@ const GITIGNORE = `# Secrets (all env-specific secrets files)
 .env.secrets
 .env.*.secrets
 
+# Local overrides (personal config, not shared)
+*.local.json
+*.local.yaml
+*.local.yml
+
+# Personal explore directory
+local/
+
 # Log files
 *.log
 
@@ -312,6 +320,19 @@ const GLUBEAN_MD_TEMPLATE = `# Project Test Conventions
 
 ## Notes
 <!-- Any other conventions the AI should follow -->
+`;
+
+const LOCAL_README = `# Local Tests
+
+This directory is for **personal** exploratory tests — gitignored by default.
+
+Use it to try things out without affecting the team's test suite.
+When a test is ready to share, move it to \`explore/\` or \`tests/\`.
+
+\`\`\`bash
+# Run a local test
+npx glubean run local/my-test.test.ts
+\`\`\`
 `;
 
 const PRE_COMMIT_HOOK = `#!/bin/sh
@@ -780,19 +801,14 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       description: "Search examples for test.pick",
     },
     {
-      path: "CLAUDE.md",
-      content: () => readCliTemplate("AI-INSTRUCTIONS.md"),
-      description: "AI instructions (Claude Code, Cursor)",
-    },
-    {
-      path: "AGENTS.md",
-      content: () => readCliTemplate("AI-INSTRUCTIONS.md"),
-      description: "AI instructions (Codex, other agents)",
-    },
-    {
       path: "GLUBEAN.md",
       content: GLUBEAN_MD_TEMPLATE,
       description: "Project-specific test conventions for AI skill",
+    },
+    {
+      path: "local/README.md",
+      content: LOCAL_README,
+      description: "Personal explore directory (gitignored)",
     },
   ];
 
@@ -898,7 +914,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       `  3. Run ${colors.cyan}npm run explore${colors.reset} to run explore/ tests`,
     );
     console.log(
-      `  4. Keep ${colors.cyan}CLAUDE.md${colors.reset} or ${colors.cyan}AGENTS.md${colors.reset} — delete whichever you don't need`,
+      `  4. Run ${colors.cyan}npx @glubean/skill${colors.reset} to install AI test-writing guidance`,
     );
     console.log(
       `  5. Drop your OpenAPI spec in ${colors.cyan}context/${colors.reset} for AI-assisted test writing`,
@@ -980,14 +996,14 @@ async function initMinimal(overwrite: boolean): Promise<void> {
       description: "Search parameters for pick examples",
     },
     {
-      path: "CLAUDE.md",
-      content: () => readCliTemplate("AI-INSTRUCTIONS.md"),
-      description: "AI instructions (Claude Code, Cursor)",
+      path: "GLUBEAN.md",
+      content: GLUBEAN_MD_TEMPLATE,
+      description: "Project-specific test conventions for AI skill",
     },
     {
-      path: "AGENTS.md",
-      content: () => readCliTemplate("AI-INSTRUCTIONS.md"),
-      description: "AI instructions (Codex, other agents)",
+      path: "local/README.md",
+      content: LOCAL_README,
+      description: "Personal explore directory (gitignored)",
     },
   ];
 
