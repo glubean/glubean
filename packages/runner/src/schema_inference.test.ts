@@ -36,7 +36,6 @@ describe("inferJsonSchema", () => {
         name: { type: "string" },
         age: { type: "integer" },
       },
-      required: ["name", "age"],
     });
   });
 
@@ -53,10 +52,8 @@ describe("inferJsonSchema", () => {
             name: { type: "string" },
             active: { type: "boolean" },
           },
-          required: ["name", "active"],
         },
       },
-      required: ["user"],
     });
   });
 
@@ -75,7 +72,6 @@ describe("inferJsonSchema", () => {
           id: { type: "integer" },
           title: { type: "string" },
         },
-        required: ["id", "title"],
       },
     });
   });
@@ -96,8 +92,23 @@ describe("inferJsonSchema", () => {
         name: { type: "string" },
         bio: { type: "null" },
       },
-      required: ["name"],
     });
+  });
+
+  it("never includes required field (let AI decide)", () => {
+    const schema = inferJsonSchema({
+      name: "Alice",
+      age: 30,
+      address: { city: "NYC", zip: null },
+      tags: ["a", "b"],
+    });
+    // Top level
+    expect(schema).not.toHaveProperty("required");
+    // Nested object
+    expect((schema.properties as any).address).not.toHaveProperty("required");
+    // Array items
+    const items = inferJsonSchema([{ id: 1, title: "X" }]);
+    expect((items as any).items).not.toHaveProperty("required");
   });
 
   it("handles deeply nested (respects depth limit)", () => {

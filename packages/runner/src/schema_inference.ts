@@ -13,7 +13,7 @@ const MAX_DEPTH = 10;
 /**
  * Infer a JSON Schema from a runtime value.
  *
- * - Objects → `{ type: "object", properties, required }`
+ * - Objects → `{ type: "object", properties }` (no `required` — let AI decide)
  * - Arrays → `{ type: "array", items: <schema of first item>, _itemCount }`
  * - Primitives → `{ type: "string" | "number" | "boolean" | "null" }`
  * - Depth-limited to prevent pathological inputs.
@@ -62,19 +62,14 @@ export function inferJsonSchema(
     const obj = value as Record<string, unknown>;
     const keys = Object.keys(obj);
     const properties: Record<string, unknown> = {};
-    const required: string[] = [];
 
     for (const key of keys) {
       properties[key] = inferJsonSchema(obj[key], depth + 1);
-      if (obj[key] !== null && obj[key] !== undefined) {
-        required.push(key);
-      }
     }
 
     return {
       type: "object",
       properties,
-      ...(required.length > 0 ? { required } : {}),
     };
   }
 
