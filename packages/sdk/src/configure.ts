@@ -261,6 +261,16 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
       extendOptions.headers = resolvedHeaders;
     }
 
+    if (httpOptions.searchParams) {
+      const resolvedParams: Record<string, string> = {};
+      for (const [name, template] of Object.entries(httpOptions.searchParams)) {
+        resolvedParams[name] = resolveTemplate(
+          template, runtime.vars, runtime.secrets,
+        );
+      }
+      extendOptions.searchParams = resolvedParams;
+    }
+
     if (httpOptions.timeout !== undefined) {
       extendOptions.timeout = httpOptions.timeout;
     }

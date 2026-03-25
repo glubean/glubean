@@ -55,13 +55,19 @@ glubean config mcp
 5. **Read existing tests** — check `tests/` and `config/` for patterns, configure files, and
    naming conventions already in use. Also check `explore/` if it exists. Follow the project's existing style.
 
-6. **Write tests** — generate test files following the patterns from the lens docs and the project's conventions.
+6. **Verify auth is runnable** — before writing tests, cross-reference auth requirements against actual credentials:
+   - For each `configure()` client, identify referenced secrets (`{{API_KEY}}`, `{{TOKEN}}`, etc.)
+   - Check `.env.secrets`: are those secrets populated or empty/placeholder?
+   - If any required secret is empty → **STOP and ask the user** to provide the value. Do NOT write tests with broken auth.
+   - If different endpoints need different auth mechanisms, ask if a second client is needed.
 
-7. **Run tests** — prefer MCP, fall back to CLI:
+7. **Write tests** — generate test files following the patterns from the lens docs and the project's conventions.
+
+8. **Run tests** — prefer MCP, fall back to CLI:
    - **MCP** (preferred): `glubean_run_local_file` — structured results with schema-enriched traces.
    - **CLI** (fallback): `npx glubean run <file> --verbose`
 
-8. **Fix failures** — read the structured failure output, fix the test code, and rerun. Repeat until green.
+9. **Fix failures** — read the structured failure output, fix the test code, and rerun. Repeat until green.
 
 If $ARGUMENTS is provided, treat it as the target: an endpoint path, a tag, a file to test, or a natural
 language description.

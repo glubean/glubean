@@ -619,6 +619,29 @@ test("http - header without template placeholders passed as-is", () => {
   }
 });
 
+test("http - searchParams with {{KEY}} template resolution", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    {},
+    { API_KEY: "secret-key-123" },
+    mockHttp,
+  );
+  try {
+    const { http } = configure({
+      http: {
+        searchParams: { key: "{{API_KEY}}", format: "json" },
+      },
+    });
+    http.get("https://example.com");
+    const params = extendCalls[0].options.searchParams as Record<string, string>;
+    expect(params.key).toBe("secret-key-123");
+    expect(params.format).toBe("json");
+  } finally {
+    cleanup();
+  }
+});
+
 test("http - resolves hyphenated {{X-API-KEY}} template placeholders", () => {
   const extendCalls: { options: HttpRequestOptions }[] = [];
   const mockHttp = createMockHttp(extendCalls);

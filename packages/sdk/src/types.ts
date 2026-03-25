@@ -939,6 +939,17 @@ export interface ConfigureHttpOptions {
    */
   headers?: Record<string, string>;
 
+  /**
+   * Default query parameters appended to every request.
+   * Values may contain `{{key}}` placeholders resolved from vars and secrets.
+   *
+   * @example API key via query param
+   * ```ts
+   * searchParams: { key: "{{API_KEY}}" }
+   * ```
+   */
+  searchParams?: Record<string, string>;
+
   /** Default request timeout in milliseconds. */
   timeout?: number | false;
 
