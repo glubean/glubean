@@ -1,11 +1,9 @@
 {
   "name": "@glubean/skill",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "AI coding skill for Glubean — installs test-writing guidance for Claude Code, Cursor, Codex, and Windsurf",
   "type": "module",
-  "bin": {
-    "glubean-skill": "./dist/index.js"
-  },
+  "bin": "./dist/index.js",
   "scripts": {
     "build": "tsc"
   },
