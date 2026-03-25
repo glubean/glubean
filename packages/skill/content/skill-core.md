@@ -50,8 +50,11 @@ glubean config mcp
    and only open the specific endpoint file you need. If no split specs, search `context/` for OpenAPI specs
    (`.json`, `.yaml`). If no spec found, ask the user for endpoint details.
 
-5. **Read existing tests** — check `tests/` and `config/` for patterns, configure files, and
-   naming conventions already in use. Also check `explore/` if it exists. Follow the project's existing style.
+5. **Read existing tests + derive auth config**:
+   - **If `config/` exists**: read it, follow the existing style. Check `tests/` and `explore/` for conventions.
+   - **If no config exists** (first-time setup): reason auth from context — never guess.
+     Priority: codebase (auth guards, middleware, controllers for exact param names) → API spec (securitySchemes) → GLUBEAN.md → ask the user.
+     Use exact param/header names from the source. Never use placeholder names.
 
 6. **Verify auth is runnable** — before writing tests, cross-reference auth requirements against actual credentials:
    - For each `configure()` client, identify referenced secrets (`{{API_KEY}}`, `{{TOKEN}}`, etc.)
