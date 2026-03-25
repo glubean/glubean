@@ -629,7 +629,7 @@ server.registerTool(
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify({ tests }, null, 2),
+          text: JSON.stringify({ tests }),
         },
       ],
     };
@@ -714,7 +714,7 @@ server.registerTool(
     };
 
     return {
-      content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
+      content: [{ type: "text" as const, text: JSON.stringify(safe) }],
     };
   },
 );
@@ -741,7 +741,7 @@ server.registerTool(
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify(buildLastRunSummary(lastLocalRunSnapshot), null, 2),
+        text: JSON.stringify(buildLastRunSummary(lastLocalRunSnapshot)),
       }],
     };
   },
@@ -881,7 +881,7 @@ server.registerTool(
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify(diagnostics, null, 2),
+        text: JSON.stringify(diagnostics),
       }],
     };
   },
@@ -970,7 +970,7 @@ server.registerTool(
       headers: { "Content-Type": "application/json", ...bearerHeaders(token) },
       body: JSON.stringify(body),
     });
-    return { content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }] };
+    return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
   },
 );
 
@@ -991,7 +991,7 @@ server.registerTool(
       method: "GET",
       headers: bearerHeaders(token),
     });
-    return { content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }] };
+    return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
   },
 );
 
@@ -1043,7 +1043,7 @@ server.registerTool(
       method: "GET",
       headers: bearerHeaders(token),
     });
-    return { content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }] };
+    return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
   },
 );
 
