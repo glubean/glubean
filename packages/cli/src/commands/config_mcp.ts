@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 
 const MCP_SERVER_NAME = "glubean";
 const MCP_COMMAND = "npx";
-const MCP_ARGS = ["-y", "@glubean/mcp"];
+const MCP_ARGS = ["-y", "@glubean/mcp@latest"];
 
 type Target = "claude-code" | "codex" | "cursor" | "windsurf";
 

@@ -292,6 +292,28 @@ node_modules/
 .glubean/
 `;
 
+const GLUBEAN_MD_TEMPLATE = `# Project Test Conventions
+
+<!-- This file is read by the Glubean AI skill before generating tests. -->
+<!-- Customize it to teach the AI your project's specific patterns. -->
+<!-- Run \`npx @glubean/skill\` to install/update the AI skill. -->
+
+## Auth
+<!-- How should tests authenticate? e.g. "Use OAuth2 client credentials via configure()" -->
+
+## Naming
+<!-- e.g. "All test IDs start with the service name: user-xxx, order-xxx" -->
+
+## Tags
+<!-- e.g. "Always include team tag: team:payments" -->
+
+## Structure
+<!-- e.g. "Shared clients go in config/, tests in tests/{service}/" -->
+
+## Notes
+<!-- Any other conventions the AI should follow -->
+`;
+
 const PRE_COMMIT_HOOK = `#!/bin/sh
 set -e
 
@@ -766,6 +788,11 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       path: "AGENTS.md",
       content: () => readCliTemplate("AI-INSTRUCTIONS.md"),
       description: "AI instructions (Codex, other agents)",
+    },
+    {
+      path: "GLUBEAN.md",
+      content: GLUBEAN_MD_TEMPLATE,
+      description: "Project-specific test conventions for AI skill",
     },
   ];
 

@@ -287,11 +287,11 @@ configCmd
 configCmd
   .command("skill")
   .description("Install Glubean test-writing skill for AI coding tools")
-  .option("--target <tool>", "AI tool: claude-code, codex, or cursor")
+  .option("--target <tool>", "AI tool: claude-code, cursor, codex, or windsurf")
   .option("--remove", "Remove skill")
   .action(async (options) => {
     await configSkillCommand({
-      target: options.target as "claude-code" | "codex" | "cursor" | undefined,
+      target: options.target as "claude-code" | "cursor" | "codex" | "windsurf" | undefined,
       remove: options.remove,
     });
   });
