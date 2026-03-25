@@ -31,6 +31,7 @@ glubean config mcp
    - `tests/` — regression, CI, permanent tests. Workflows, CRUD lifecycles, and tests with teardown typically go here.
    - `explore/` — interactive development: "try", "explore", "check", "see what happens". Mostly single-endpoint tests, but workflows are fine too.
    - The two are **complementary, not exclusive**. The same endpoint can appear in both (e.g. smoke in `explore/`, full workflow in `tests/`).
+10. **Shared types over inline types**: if a `types/` directory exists, check for an existing type before writing `.json<{ ... }>()` inline. If no match, create one in `types/<service>.ts` and import it. Only use inline types for one-off responses.
 
 ## Workflow
 
@@ -66,6 +67,8 @@ glubean config mcp
    - If different endpoints need different auth mechanisms, ask if a second client is needed.
 
 7. **Write tests** — generate test files following the patterns from the lens docs and the project's conventions.
+   Before typing responses inline, check `types/` for existing shared types. If a response type
+   doesn't exist yet, create it in `types/<service>.ts` and import it.
 
 8. **Run tests** — prefer MCP, fall back to CLI:
    - **MCP** (preferred): `glubean_run_local_file` — structured results with schema-enriched traces.

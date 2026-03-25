@@ -136,6 +136,22 @@ http.delete(url, options?).json<T>()
 // Also: .text(), .blob(), .arrayBuffer()
 ```
 
+### Response typing
+
+Prefer importing shared types over inline:
+
+```typescript
+// ✅ Shared type — reusable, stays in sync
+import type { DirectionsResponse } from "../types/directions.ts";
+const res = await api.get("directions/json").json<DirectionsResponse>();
+
+// ❌ Inline type — duplicated across tests, drifts over time
+const res = await api.get("directions/json")
+  .json<{ status: string; routes: { geometry: string; distance: number }[] }>();
+```
+
+Check `types/` for existing types before creating inline ones.
+
 ### Options
 
 ```typescript
