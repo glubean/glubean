@@ -1,5 +1,27 @@
 # CRUD with Setup/Teardown
 
+## When to use builder mode
+
+Use builder mode (`.setup()` / `.step()` / `.teardown()`) when your test:
+- Creates resources that must be cleaned up
+- Has multiple sequential steps that depend on each other
+
+For simple read-only tests, quick mode (callback) is fine.
+
+## Quick mode has NO teardown
+
+```typescript
+// ❌ WRONG: teardown does not exist on TestContext — crashes at runtime
+export const createThing = test("create", async ({ teardown }) => {
+  const res = await api.post("things", { json: { name: "test" } }).json<{ id: string }>();
+  teardown(async () => { await api.delete(`things/${res.id}`); }); // undefined!
+});
+
+// ✅ RIGHT: use builder mode for cleanup
+```
+
+## Full CRUD example (builder mode)
+
 Multi-step test: create a resource, verify, update, then always clean up.
 
 ```typescript

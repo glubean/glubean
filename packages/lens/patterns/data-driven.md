@@ -1,5 +1,53 @@
 # Data-Driven Tests
 
+## When NOT to use data-driven
+
+Data-driven is for testing **the same endpoint** with varying input parameters.
+If your cases hit **different endpoints**, write a separate `export const` for each — do not
+put different endpoints into a data file and loop over them with `test.each`/`test.pick`.
+
+**Anti-pattern** — different endpoints crammed into one test:
+```typescript
+// ❌ WRONG: each case is a different endpoint
+const cases = await fromDir.merge<{ endpoint: string; body: object }>("data/billing/");
+export const billing = test.pick(cases)(
+  { id: "billing-$_pick", tags: ["explore"] },
+  async ({ expect }, { endpoint, body }) => {
+    const res = await api.post(endpoint, { json: body }).json<Record<string, unknown>>();
+    expect(res).toBeDefined();
+  },
+);
+```
+
+**Correct** — separate export per endpoint, data-driven only for parameter variations:
+```typescript
+// ✅ RIGHT: each endpoint is its own test
+export const invoicesChart = test(
+  { id: "billing-invoices-chart", tags: ["explore", "billing"] },
+  async ({ expect }) => {
+    const res = await api.post("billing.invoices-chart.get").json<{ data: unknown[] }>();
+    expect(res.data).toBeDefined();
+  },
+);
+
+export const invoicesList = test(
+  { id: "billing-invoices-list", tags: ["explore", "billing"] },
+  async ({ expect }) => {
+    const res = await api.post("billing.invoices.list").json<{ items: unknown[] }>();
+    expect(res.items).toBeDefined();
+  },
+);
+
+// ✅ Data-driven: same endpoint, different search params
+export const invoiceSearch = test.each([
+  { q: "paid", minResults: 1 },
+  { q: "overdue", minResults: 0 },
+])("invoice-search-$q", async ({ expect }, { q, minResults }) => {
+  const res = await api.post("billing.invoices.list", { json: { q } }).json<{ total: number }>();
+  expect(res.total).toBeGreaterThanOrEqual(minResults);
+});
+```
+
 ## Which one to use?
 
 | | `test.each` | `test.pick` |

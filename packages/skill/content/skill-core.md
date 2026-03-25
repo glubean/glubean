@@ -21,10 +21,12 @@ glubean config mcp
 2. **Use `configure()`** for HTTP clients — never raw `fetch()`.
 3. **All values use `{{KEY}}`** for env references, bare strings for literals.
 4. **Tags on every test** — `["smoke"]`, `["api"]`, `["e2e"]`, etc.
-5. **Teardown** any test that creates resources.
+5. **Teardown** tests that create resources needing cleanup. Teardown is **builder mode only** (`.teardown()`). Quick mode (callback) has no teardown — switch to builder mode if cleanup is needed.
 6. **IDs**: kebab-case, unique across project.
 7. **Type responses**: `.json<{ id: string }>()`, never `.json<any>()`.
-8. **One export per behavior**: each `export const` is one test case.
+8. **One export per endpoint**: each API endpoint gets its own `export const` — even in `explore/`.
+   Data-driven (`test.each`/`test.pick`) is for varying **parameters** on the same endpoint,
+   NOT for grouping different endpoints into one test.
 9. **Directory placement**: if the user specifies a directory, use it. Otherwise:
    - `tests/` — default for regression, CI, permanent tests
    - `explore/` — only when the user says "try", "explore", "check", "see what happens"

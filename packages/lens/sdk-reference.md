@@ -117,6 +117,9 @@ ctx.pollUntil({ timeoutMs, intervalMs? }, fn)      // Poll until fn returns trut
 ctx.setTimeout(ms)                    // Override timeout
 ```
 
+> **Not available in quick mode:** `setup()`, `step()`, `teardown()` are builder-mode-only APIs.
+> If your test needs cleanup, use builder mode — see `patterns/crud.md`.
+
 ---
 
 ## HTTP Client
