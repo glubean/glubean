@@ -24,7 +24,9 @@ glubean config mcp
 5. **Teardown** any test that creates resources.
 6. **IDs**: kebab-case, unique across project.
 7. **Type responses**: `.json<{ id: string }>()`, never `.json<any>()`.
-8. **One export per behavior**: each `export const` is one test case.
+8. **Data shapes use `type`, not `interface`** — `fromDir`/`fromCsv` generics require index signatures.
+9. **`.each`/`.pick` with tags**: use `{ id: "...", tags: [...] }` as first arg, not a separate object.
+10. **One export per behavior**: each `export const` is one test case.
 9. **Directory placement**: if the user specifies a directory, use it. Otherwise:
    - `tests/` — default for regression, CI, permanent tests ("write a test", "add coverage")
    - `explore/` — only when the user says "try", "explore", "check", "see what happens", or `explore/` already exists and matches the use case

@@ -26,16 +26,26 @@ data/users/
 import { test, fromDir } from "@glubean/sdk";
 import { api } from "../../config/api.ts";
 
-interface UserCase {
+// ⚠️ Use `type`, not `interface` — fromDir generics require an index signature.
+type UserCase = {
   username: string;
   expectedStatus: number;
-}
+};
 
 const users = await fromDir<UserCase>("data/users/");
 
-// Quick mode
+// Quick mode — string ID
 export const userLookup = test.each(users)(
   "user-lookup-$username",              // $field interpolates from row
+  async ({ expect }, { username, expectedStatus }) => {
+    const res = await api.get(`users/${username}`);
+    expect(res).toHaveStatus(expectedStatus);
+  },
+);
+
+// Quick mode — TestMeta object (with tags)
+export const userLookupTagged = test.each(users)(
+  { id: "user-lookup-$username", tags: ["smoke", "api"] },
   async ({ expect }, { username, expectedStatus }) => {
     const res = await api.get(`users/${username}`);
     expect(res).toHaveStatus(expectedStatus);
@@ -69,8 +79,20 @@ import { api } from "../../config/api.ts";
 
 const queries = await fromDir.merge<{ q: string; min: number }>("data/search/");
 
+// String ID
 export const searchTests = test.pick(queries)(
   "search-$_pick",                      // $_pick = case name
+  async ({ expect }, { q, min }) => {
+    const res = await api
+      .get("products/search", { searchParams: { q } })
+      .json<{ total: number }>();
+    expect(res.total).toBeGreaterThanOrEqual(min);
+  },
+);
+
+// TestMeta object (with tags)
+export const searchTagged = test.pick(queries)(
+  { id: "search-$_pick", name: "Search: $_pick", tags: ["api"] },
   async ({ expect }, { q, min }) => {
     const res = await api
       .get("products/search", { searchParams: { q } })
@@ -83,17 +105,29 @@ export const searchTests = test.pick(queries)(
 ## Inline data (no files needed)
 
 ```typescript
-// test.each — array of objects
+// test.each — string ID
 test.each([
   { id: 1, expected: 200 },
   { id: 999, expected: 404 },
 ])("get-user-$id", async (ctx, { id, expected }) => { ... });
 
-// test.pick — object with named keys
+// test.each — TestMeta object (with tags)
+test.each([
+  { id: 1, expected: 200 },
+  { id: 999, expected: 404 },
+])({ id: "get-user-$id", tags: ["smoke"] }, async (ctx, { id, expected }) => { ... });
+
+// test.pick — string ID
 test.pick({
   "normal":    { name: "Alice", age: 25 },
   "edge-case": { name: "", age: -1 },
 })("create-user-$_pick", async (ctx, data) => { ... });
+
+// test.pick — TestMeta object (with tags)
+test.pick({
+  "normal":    { name: "Alice", age: 25 },
+  "edge-case": { name: "", age: -1 },
+})({ id: "create-user-$_pick", tags: ["api"] }, async (ctx, data) => { ... });
 ```
 
 ## Advanced: Structured Test Data
@@ -137,12 +171,12 @@ empty-query:
 ```typescript
 import { fromYaml, test } from "@glubean/sdk";
 
-// Each value is a structured object — destructure freely.
-interface SearchCase {
+// Use `type`, not `interface`, for data shapes.
+type SearchCase = {
   description: string;
   request: { q: string };
   expect: { minResults: number };
-}
+};
 
 const cases = await fromYaml<Record<string, SearchCase>>(
   "data/search-queries.yaml",
