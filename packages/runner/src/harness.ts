@@ -1041,7 +1041,9 @@ function wrapResponseWithSchema(
 
 type KyFn = (input: string | URL | Request, options?: KyOptions) => ReturnType<KyInstance["get"]>;
 
-function wrapKy(instance: KyInstance): Record<string, unknown> {
+const glubeanDebug = !!process.env["GLUBEAN_DEBUG"];
+
+function wrapKy(instance: KyInstance, label = "base"): Record<string, unknown> {
   const methods = ["get", "post", "put", "patch", "delete", "head"] as const;
 
   function callWithSchema(
@@ -1060,6 +1062,9 @@ function wrapKy(instance: KyInstance): Record<string, unknown> {
     } else {
       kyOptions = normalized;
     }
+    if (glubeanDebug) {
+      process.stderr.write(`[glubean:debug] ky.call [${label}] url=${String(input)} per-call-options=${JSON.stringify(kyOptions ?? null)}\n`);
+    }
     const responsePromise = kyFn(normalizeUrl(input), kyOptions);
     return wrapResponseWithSchema(responsePromise, normalized?.schema);
   }
@@ -1075,8 +1080,13 @@ function wrapKy(instance: KyInstance): Record<string, unknown> {
       callWithSchema(instance[method].bind(instance) as KyFn, input, options);
   }
 
-  wrapped.extend = (options?: KyOptionsWithSchema) =>
-    wrapKy(instance.extend(normalizeOptions(options) as KyOptions));
+  wrapped.extend = (options?: KyOptionsWithSchema) => {
+    const normalized = normalizeOptions(options) as KyOptions;
+    if (glubeanDebug) {
+      process.stderr.write(`[glubean:debug] wrapKy.extend [${label}] options=${JSON.stringify(normalized ?? null)}\n`);
+    }
+    return wrapKy(instance.extend(normalized), `${label}>extend`);
+  };
 
   return wrapped;
 }

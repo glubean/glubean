@@ -85,15 +85,31 @@ export function generateSummary(events: TimelineEvent[]): Summary {
       ? Math.round((httpErrorTotal / httpRequestTotal) * 10000) / 10000
       : 0;
 
-  // Derive success — same logic as the old deriveFailureFromEvents:
-  // If there are step_end events, use them as the authority;
-  // otherwise fall back to assertion results.
+  // Derive success:
+  // 1. Any error/status event → failure (crash, timeout, process exit)
+  //    These event types are not in TimelineEvent but may be present
+  //    when callers pass ExecutionEvent[] or GlubeanEvent[] via `as any`.
+  // 2. If step_end events exist, use them as authority
+  // 3. Otherwise fall back to assertion results
   let success: boolean;
-  const hasStepEnds = events.some((e) => e.type === "step_end");
-  if (hasStepEnds) {
-    success = stepFailed === 0;
+  const hasHardFailure = events.some((e) => {
+    const t = (e as { type: string }).type;
+    if (t === "error") return true;
+    if (t === "status") {
+      const s = (e as { status?: string }).status;
+      return s !== "completed" && s !== "skipped";
+    }
+    return false;
+  });
+  if (hasHardFailure) {
+    success = false;
   } else {
-    success = assertionFailed === 0;
+    const hasStepEnds = events.some((e) => e.type === "step_end");
+    if (hasStepEnds) {
+      success = stepFailed === 0;
+    } else {
+      success = assertionFailed === 0;
+    }
   }
 
   return {

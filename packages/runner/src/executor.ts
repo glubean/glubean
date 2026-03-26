@@ -363,7 +363,7 @@ export class TestExecutor {
     const child = spawn("node", [resolveTsxPath(), ...tsxArgs, ...args], {
       cwd,
       env,
-      stdio: ["pipe", "pipe", inspectBrk ? "inherit" : "pipe"],
+      stdio: ["pipe", "pipe", (inspectBrk || env["GLUBEAN_DEBUG"]) ? "inherit" : "pipe"],
     });
 
     // Write context to stdin

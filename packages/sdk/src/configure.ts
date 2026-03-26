@@ -287,6 +287,10 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
       extendOptions.hooks = httpOptions.hooks;
     }
 
+    if (typeof process !== "undefined" && process.env?.["GLUBEAN_DEBUG"]) {
+      process.stderr.write(`[glubean:debug] configure.getClient extendOptions=${JSON.stringify({ ...extendOptions, headers: "..." })}\n`);
+    }
+
     client = runtime.http.extend(extendOptions);
     cache.set(runtime, client);
     return client;
