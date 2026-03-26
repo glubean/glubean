@@ -27,11 +27,16 @@ glubean config mcp
 8. **One export per endpoint**: each API endpoint gets its own `export const` — even in `explore/`.
    Data-driven (`test.each`/`test.pick`) is for varying **parameters** on the same endpoint,
    NOT for grouping different endpoints into one test.
-9. **Directory placement**: if the user specifies a directory, use it. Otherwise:
+9. **Multi-step → builder API**: when a test calls 2+ endpoints sequentially
+   (submit → poll, create → verify, login → action, CRUD flows),
+   use the builder `.step()` chain so each endpoint is a named step with typed state passing.
+   Never put sequential endpoint calls in a single callback.
+   Ref: `builder-reuse.md`.
+10. **Directory placement**: if the user specifies a directory, use it. Otherwise:
    - `tests/` — regression, CI, permanent tests. Workflows, CRUD lifecycles, and tests with teardown typically go here.
    - `explore/` — interactive development: "try", "explore", "check", "see what happens". Mostly single-endpoint tests, but workflows are fine too.
    - The two are **complementary, not exclusive**. The same endpoint can appear in both (e.g. smoke in `explore/`, full workflow in `tests/`).
-10. **Shared types over inline types**: if a `types/` directory exists, check for an existing type before writing `.json<{ ... }>()` inline. If no match, create one in `types/<service>.ts` and import it. Only use inline types for one-off responses.
+11. **Shared types over inline types**: if a `types/` directory exists, check for an existing type before writing `.json<{ ... }>()` inline. If no match, create one in `types/<service>.ts` and import it. Only use inline types for one-off responses.
 
 ## Workflow
 

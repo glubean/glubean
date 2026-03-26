@@ -40,3 +40,4 @@ Quick lookup for AI agents. Read this first, then open only the files you need.
 4. **Teardown** any test that creates resources.
 5. **IDs**: kebab-case, unique across project.
 6. **Type your responses**: `.json<{ id: string }>()`, never `.json<any>()`.
+7. **One export per endpoint**: data-driven (`test.each`/`test.pick`) is for varying **parameters** on the same endpoint, not for grouping different endpoints.

@@ -16,6 +16,33 @@ export const healthCheck = test(
 );
 ```
 
+## Exploring multiple endpoints
+
+When exploring several endpoints in the same domain, write one export per endpoint in a single file.
+Do NOT use data-driven patterns to loop over different endpoints.
+
+```typescript
+// explore/billing.test.ts
+import { test } from "@glubean/sdk";
+import { api } from "../../config/api.ts";
+
+export const invoicesChart = test(
+  { id: "billing-invoices-chart", tags: ["explore", "billing"] },
+  async ({ expect }) => {
+    const res = await api.post("billing.invoices-chart.get").json<{ data: unknown[] }>();
+    expect(res.data).toBeDefined();
+  },
+);
+
+export const cardsList = test(
+  { id: "billing-cards-list", tags: ["explore", "billing"] },
+  async ({ expect }) => {
+    const res = await api.post("billing.cards.list").json<{ items: unknown[] }>();
+    expect(res.items).toBeDefined();
+  },
+);
+```
+
 ## Smoke with multiple checks
 
 ```typescript
