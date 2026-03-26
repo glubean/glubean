@@ -37,6 +37,7 @@ glubean config mcp
    - `explore/` — interactive development: "try", "explore", "check", "see what happens". Mostly single-endpoint tests, but workflows are fine too.
    - The two are **complementary, not exclusive**. The same endpoint can appear in both (e.g. smoke in `explore/`, full workflow in `tests/`).
 11. **Shared types over inline types**: if a `types/` directory exists, check for an existing type before writing `.json<{ ... }>()` inline. If no match, create one in `types/<service>.ts` and import it. Only use inline types for one-off responses.
+12. **No type parameters on data loaders**: never write `fromYaml<{...}>()` or `fromJson.map<{...}>()`. Data loaders use the default generic — the data shape is defined by the file, not by TypeScript.
 
 ## Workflow
 
