@@ -9,7 +9,7 @@ put different endpoints into a data file and loop over them with `test.each`/`te
 **Anti-pattern** — different endpoints crammed into one test:
 ```typescript
 // ❌ WRONG: each case is a different endpoint
-const cases = await fromDir.merge<{ endpoint: string; body: object }>("data/billing/");
+const cases = await fromDir.merge("data/billing/");
 export const billing = test.pick(cases)(
   { id: "billing-$_pick", tags: ["explore"] },
   async ({ expect }, { endpoint, body }) => {
@@ -54,7 +54,7 @@ export const invoiceSearch = test.each([
 |---|---|---|
 | **Runs** | **All** cases | **One selected** case |
 | **Use case** | Regression, coverage | Explore, debug, ad-hoc |
-| **Data source** | Array, `fromDir`, `fromCsv`, `fromYaml` | Object map, `fromDir.merge`, `fromYaml` + `.local.json` |
+| **Data source** | Array: `fromYaml`, `fromJson`, `fromCsv`, `fromDir` | Object map: `fromYaml.map`, `fromJson.map`, `fromDir.merge` |
 | **Filter** | `--filter` by test id | `--pick` to select by key |
 
 **Rule of thumb:** need to run every case → `.each`. Need to pick one and iterate → `.pick`.
@@ -80,7 +80,7 @@ type UserCase = {
   expectedStatus: number;
 };
 
-const users = await fromDir<UserCase>("data/users/");
+const users = await fromDir("data/users/");
 
 // Quick mode — string ID
 export const userLookup = test.each(users)(
@@ -125,7 +125,7 @@ data/search/
 import { test, fromDir } from "@glubean/sdk";
 import { api } from "../../config/api.ts";
 
-const queries = await fromDir.merge<{ q: string; min: number }>("data/search/");
+const queries = await fromDir.merge("data/search/");
 
 // String ID
 export const searchTests = test.pick(queries)(
@@ -219,21 +219,10 @@ empty-query:
 ```typescript
 import { fromYaml, test } from "@glubean/sdk";
 
-// Use `type`, not `interface`, for data shapes.
-type SearchCase = {
-  description: string;
-  request: { q: string };
-  expect: { minResults: number };
-};
+const cases = await fromYaml.map("data/search-queries.yaml");
 
-const cases = await fromYaml<Record<string, SearchCase>>(
-  "data/search-queries.yaml",
-);
-
-export const search = test.each(Object.entries(cases).map(
-  ([key, c]) => ({ _key: key, ...c }),
-))(
-  "search-$_key",
+export const search = test.pick(cases)(
+  { id: "search-$_pick", tags: ["api"] },
   async (ctx, { description, request, expect: exp }) => {
     ctx.log(description);
 
@@ -257,8 +246,15 @@ export const search = test.each(Object.entries(cases).map(
 ## Other data loaders
 
 ```typescript
-const rows = await fromCsv<T>("data/file.csv");
-const rows = await fromYaml<T>("data/file.yaml");
-const rows = await fromJsonl<T>("data/file.jsonl");
-const items = await fromDir.concat<T>("data/items/");  // Concatenate arrays from files
+// Array loaders — for test.each
+const rows = await fromCsv("data/file.csv");
+const rows = await fromYaml("data/file.yaml");
+const rows = await fromJson("data/file.json");
+const rows = await fromJsonl("data/file.jsonl");
+const items = await fromDir.concat("data/items/");
+
+// Map loaders — for test.pick
+const cases = await fromYaml.map("data/scenarios.yaml");
+const cases = await fromJson.map("data/scenarios.json");
+const cases = await fromDir.merge("data/scenarios/");
 ```

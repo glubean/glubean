@@ -5,7 +5,7 @@ Quick reference for `@glubean/sdk` and `@glubean/browser`. For full type details
 ## Imports
 
 ```typescript
-import { test, configure, definePlugin, defineSession, fromDir, fromCsv, fromYaml, fromJsonl } from "@glubean/sdk";
+import { test, configure, definePlugin, defineSession, fromDir, fromCsv, fromJson, fromYaml, fromJsonl } from "@glubean/sdk";
 import { browser } from "@glubean/browser";
 import type { InstrumentedPage } from "@glubean/browser";
 ```
