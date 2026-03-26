@@ -1530,8 +1530,8 @@ export * from "./types.js";
 
 // Re-export data loaders for convenience
 // Users can also import from "@glubean/sdk/data" directly
-export { fromCsv, fromDir, fromJsonl, fromYaml, toArray } from "./data.js";
-export type { FromCsvOptions, FromDirConcatOptions, FromDirOptions, FromYamlOptions } from "./data.js";
+export { fromCsv, fromDir, fromJson, fromJsonl, fromYaml, toArray } from "./data.js";
+export type { FromCsvOptions, FromDirConcatOptions, FromDirOptions, FromJsonOptions, FromYamlOptions } from "./data.js";
 
 // Re-export configure API
 export { configure, resolveTemplate } from "./configure.js";

@@ -1033,3 +1033,57 @@ export const batchTest = test.pick(batches)(
     path: "/project/tests/api/batches/",
   });
 });
+
+test("extractPickExamples detects fromYaml.map", () => {
+  const content = `
+const scenarios = await fromYaml.map("./data/scenarios.yaml");
+
+export const searchTest = test.pick(scenarios)(
+  "search-$_pick",
+  async (ctx, data) => {},
+);`;
+  const picks = extractPickExamples(content, {
+    filePath: "/project/tests/api/search.test.ts",
+  });
+  expect(picks.length).toBe(1);
+  expect(picks[0].dataSource).toEqual({
+    type: "yaml-map",
+    path: "/project/tests/api/data/scenarios.yaml",
+  });
+});
+
+test("extractPickExamples detects fromJson", () => {
+  const content = `
+const cases = await fromJson("./data/cases.json");
+
+export const caseTest = test.pick(cases)(
+  "case-$_pick",
+  async (ctx, data) => {},
+);`;
+  const picks = extractPickExamples(content, {
+    filePath: "/project/tests/api/case.test.ts",
+  });
+  expect(picks.length).toBe(1);
+  expect(picks[0].dataSource).toEqual({
+    type: "json-loader",
+    path: "/project/tests/api/data/cases.json",
+  });
+});
+
+test("extractPickExamples detects fromJson.map", () => {
+  const content = `
+const scenarios = await fromJson.map("./data/scenarios.json");
+
+export const scenarioTest = test.pick(scenarios)(
+  "scenario-$_pick",
+  async (ctx, data) => {},
+);`;
+  const picks = extractPickExamples(content, {
+    filePath: "/project/tests/api/scenario.test.ts",
+  });
+  expect(picks.length).toBe(1);
+  expect(picks[0].dataSource).toEqual({
+    type: "json-map",
+    path: "/project/tests/api/data/scenarios.json",
+  });
+});

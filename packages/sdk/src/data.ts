@@ -361,6 +361,127 @@ export async function fromYaml<
   return extractArray<T>(data, options?.pick, resolved);
 }
 
+/**
+ * Load a YAML file as a keyed object for `test.pick()`.
+ *
+ * The file must contain a top-level object (not an array).
+ *
+ * @param path Path to the YAML file, relative to project root
+ * @returns A keyed object suitable for `test.pick()`
+ *
+ * @example
+ * ```ts
+ * // scenarios.yaml:
+ * // normal:
+ * //   q: "hello"
+ * //   expected: 200
+ * // edge:
+ * //   q: ""
+ * //   expected: 400
+ *
+ * import { test, fromYaml } from "@glubean/sdk";
+ * export const tests = test.pick(await fromYaml.map("./data/scenarios.yaml"))
+ *   ("search-$_pick", async (ctx, data) => { ... });
+ * ```
+ */
+fromYaml.map = async function fromYamlMap<
+  T extends Record<string, unknown> = Record<string, unknown>,
+>(path: string): Promise<Record<string, T>> {
+  const resolved = resolveLoaderPath(path);
+  const content = await readTextFileWithContext(resolved);
+  const data = parseYaml(content);
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(
+      `${resolved}: expected a top-level object for fromYaml.map(), got ${Array.isArray(data) ? "array" : typeof data}`,
+    );
+  }
+  return data as Record<string, T>;
+};
+
+// =============================================================================
+// JSON loader
+// =============================================================================
+
+/**
+ * Options for loading JSON files.
+ */
+export interface FromJsonOptions {
+  /**
+   * Dot-path to the array inside the JSON document.
+   * Required when the root is not an array.
+   *
+   * @example "data"
+   * @example "results.items"
+   */
+  pick?: string;
+}
+
+/**
+ * Load test data from a JSON file.
+ *
+ * The file must contain a top-level array, or use the `pick` option
+ * to specify the dot-path to an array within the document.
+ *
+ * While Node.js supports `import data from "./file.json" with { type: "json" }`,
+ * this function provides consistent path resolution and error messages.
+ *
+ * @param path Path to the JSON file, relative to project root
+ * @param options JSON loading options
+ * @returns Array of row objects
+ *
+ * @example
+ * ```ts
+ * import { test, fromJson } from "@glubean/sdk";
+ * export const tests = test.each(await fromJson("./data/cases.json"))
+ *   ("case-$id", async (ctx, row) => { ... });
+ * ```
+ *
+ * @example Nested array with pick
+ * ```ts
+ * const data = await fromJson("./data/response.json", { pick: "results" });
+ * ```
+ */
+export async function fromJson<
+  T extends Record<string, unknown> = Record<string, unknown>,
+>(path: string, options?: FromJsonOptions): Promise<T[]> {
+  const resolved = resolveLoaderPath(path);
+  const content = await readTextFileWithContext(resolved);
+  const data = parseJsonWithContext(resolved, content);
+  return extractArray<T>(data, options?.pick, resolved);
+}
+
+/**
+ * Load a JSON file as a keyed object for `test.pick()`.
+ *
+ * The file must contain a top-level object (not an array).
+ *
+ * @param path Path to the JSON file, relative to project root
+ * @returns A keyed object suitable for `test.pick()`
+ *
+ * @example
+ * ```ts
+ * // scenarios.json:
+ * // { "normal": { "q": "hello" }, "edge": { "q": "" } }
+ *
+ * import { test, fromJson } from "@glubean/sdk";
+ * export const tests = test.pick(await fromJson.map("./data/scenarios.json"))
+ *   ("search-$_pick", async (ctx, data) => { ... });
+ * ```
+ */
+fromJson.map = async function fromJsonMap<
+  T extends Record<string, unknown> = Record<string, unknown>,
+>(path: string): Promise<Record<string, T>> {
+  const resolved = resolveLoaderPath(path);
+  const content = await readTextFileWithContext(resolved);
+  const data = parseJsonWithContext(resolved, content);
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(
+      `${resolved}: expected a top-level object for fromJson.map(), got ${Array.isArray(data) ? "array" : typeof data}`,
+    );
+  }
+  return data as Record<string, T>;
+};
+
 // =============================================================================
 // JSONL loader
 // =============================================================================

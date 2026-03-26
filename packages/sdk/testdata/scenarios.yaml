@@ -1,0 +1,9 @@
+normal:
+  q: hello
+  expected: 200
+edge:
+  q: ""
+  expected: 400
+missing:
+  q: null
+  expected: 404

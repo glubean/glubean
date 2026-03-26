@@ -3,7 +3,7 @@
  */
 
 import { test, expect } from "vitest";
-import { fromCsv, fromDir, fromJsonl, fromYaml, toArray } from "./data.js";
+import { fromCsv, fromDir, fromJson, fromJsonl, fromYaml, toArray } from "./data.js";
 import { test as gbTest } from "./index.js";
 import { clearRegistry, getRegistry } from "./internal.js";
 import { loadCsvFromHelper } from "./test-helpers/relative-loader.js";
@@ -372,6 +372,67 @@ test(
     }
   },
 );
+
+// =============================================================================
+// fromYaml.map
+// =============================================================================
+
+test("fromYaml.map - loads top-level object", async () => {
+  const data = await fromYaml.map(td("scenarios.yaml"));
+  expect(Object.keys(data).sort()).toEqual(["edge", "missing", "normal"]);
+  expect(data["normal"]).toEqual({ q: "hello", expected: 200 });
+  expect(data["edge"]).toEqual({ q: "", expected: 400 });
+});
+
+test("fromYaml.map - throws on array root", async () => {
+  await expect(
+    () => fromYaml.map(td("cases.yaml")),
+  ).rejects.toThrow("expected a top-level object for fromYaml.map()");
+});
+
+// =============================================================================
+// fromJson
+// =============================================================================
+
+test("fromJson - loads top-level array", async () => {
+  const data = await fromJson(td("cases.json"));
+  expect(data.length).toBe(3);
+  expect(data[0]).toEqual({ id: 1, country: "US", expected: 200 });
+});
+
+test("fromJson - loads nested array with pick", async () => {
+  const data = await fromJson(td("nested.json"), { pick: "requests" });
+  expect(data.length).toBe(2);
+  expect(data[0]).toEqual({ method: "GET", url: "/users/1", expected: 200 });
+});
+
+test("fromJson - throws on non-array root without pick", async () => {
+  await expect(
+    () => fromJson(td("nested.json")),
+  ).rejects.toThrow("root is an object, not an array");
+});
+
+test("fromJson - nonexistent file throws with context", async () => {
+  await expect(
+    () => fromJson("./nonexistent.json"),
+  ).rejects.toThrow("Failed to read file");
+});
+
+// =============================================================================
+// fromJson.map
+// =============================================================================
+
+test("fromJson.map - loads top-level object", async () => {
+  const data = await fromJson.map(td("scenarios.json"));
+  expect(Object.keys(data).sort()).toEqual(["edge", "missing", "normal"]);
+  expect(data["normal"]).toEqual({ q: "hello", expected: 200 });
+});
+
+test("fromJson.map - throws on array root", async () => {
+  await expect(
+    () => fromJson.map(td("cases.json")),
+  ).rejects.toThrow("expected a top-level object for fromJson.map()");
+});
 
 // =============================================================================
 // test.each - filter callback

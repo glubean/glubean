@@ -516,18 +516,24 @@ export interface PickMeta {
     | { type: "json-import"; path: string }
     | { type: "dir-merge"; path: string }
     | { type: "dir"; path: string }
-    | { type: "dir-concat"; path: string };
+    | { type: "dir-concat"; path: string }
+    | { type: "yaml-map"; path: string }
+    | { type: "json-loader"; path: string }
+    | { type: "json-map"; path: string };
 }
 
 /**
  * Extract test.pick() metadata from TypeScript source for CodeLens rendering.
  *
- * Handles three data source patterns:
+ * Handles data source patterns:
  * 1. Inline object literal: `test.pick({ "key1": ..., "key2": ... })`
  * 2. JSON import variable: `import X from "./data.json"` then `test.pick(X)`
  * 3. fromDir.merge variable: `const X = await fromDir.merge("./dir/")` then `test.pick(X)`
  * 4. fromDir variable: `const X = await fromDir("./dir/")` then `test.pick(X)`
  * 5. fromDir.concat variable: `const X = await fromDir.concat("./dir/")` then `test.pick(X)`
+ * 6. fromYaml.map variable: `const X = await fromYaml.map("./file.yaml")` then `test.pick(X)`
+ * 7. fromJson variable: `const X = await fromJson("./file.json")` then `test.each(X)`
+ * 8. fromJson.map variable: `const X = await fromJson.map("./file.json")` then `test.pick(X)`
  *
  * For other patterns (dynamic vars, etc.), returns keys: null.
  *
@@ -592,6 +598,36 @@ export function extractPickExamples(
   let dirConcatMatch: RegExpExecArray | null;
   while ((dirConcatMatch = dirConcatPattern.exec(content)) !== null) {
     dirConcatSources.set(dirConcatMatch[1], dirConcatMatch[2]);
+  }
+
+  // Build a map of fromYaml.map assignments: variable name → file path
+  const yamlMapSources = new Map<string, string>();
+  const yamlMapPattern =
+    /(?:const|let)\s+(\w+)\s*=\s*await\s+fromYaml\.map\s*(?:<[^>]*>)?\s*\(\s*["']([^"']+)["']/g;
+  let yamlMapMatch: RegExpExecArray | null;
+  while ((yamlMapMatch = yamlMapPattern.exec(content)) !== null) {
+    yamlMapSources.set(yamlMapMatch[1], yamlMapMatch[2]);
+  }
+
+  // Build a map of fromJson assignments: variable name → file path
+  const jsonLoaderSources = new Map<string, string>();
+  const jsonLoaderPattern =
+    /(?:const|let)\s+(\w+)\s*=\s*await\s+fromJson\s*(?:<[^>]*>)?\s*\(\s*["']([^"']+)["']/g;
+  let jsonLoaderMatch: RegExpExecArray | null;
+  while ((jsonLoaderMatch = jsonLoaderPattern.exec(content)) !== null) {
+    // Exclude fromJson.map which is matched separately
+    if (!jsonLoaderMatch[0].includes("fromJson.map")) {
+      jsonLoaderSources.set(jsonLoaderMatch[1], jsonLoaderMatch[2]);
+    }
+  }
+
+  // Build a map of fromJson.map assignments: variable name → file path
+  const jsonMapSources = new Map<string, string>();
+  const jsonMapPattern =
+    /(?:const|let)\s+(\w+)\s*=\s*await\s+fromJson\.map\s*(?:<[^>]*>)?\s*\(\s*["']([^"']+)["']/g;
+  let jsonMapMatch: RegExpExecArray | null;
+  while ((jsonMapMatch = jsonMapPattern.exec(content)) !== null) {
+    jsonMapSources.set(jsonMapMatch[1], jsonMapMatch[2]);
   }
 
   // ── Pattern 1: Inline object literal ────────────────────────────────────
@@ -716,6 +752,63 @@ export function extractPickExamples(
         dataSource: {
           type: "dir-concat",
           path: resolveDataPath(dirConcatPath, {
+            filePath,
+            projectRoot,
+          }).resolvedPath,
+        },
+      });
+      continue;
+    }
+
+    // Check fromYaml.map
+    const yamlMapPath = yamlMapSources.get(varName);
+    if (yamlMapPath) {
+      results.push({
+        testId,
+        line,
+        exportName,
+        keys: null,
+        dataSource: {
+          type: "yaml-map",
+          path: resolveDataPath(yamlMapPath, {
+            filePath,
+            projectRoot,
+          }).resolvedPath,
+        },
+      });
+      continue;
+    }
+
+    // Check fromJson
+    const jsonLoaderPath = jsonLoaderSources.get(varName);
+    if (jsonLoaderPath) {
+      results.push({
+        testId,
+        line,
+        exportName,
+        keys: null,
+        dataSource: {
+          type: "json-loader",
+          path: resolveDataPath(jsonLoaderPath, {
+            filePath,
+            projectRoot,
+          }).resolvedPath,
+        },
+      });
+      continue;
+    }
+
+    // Check fromJson.map
+    const jsonMapPath = jsonMapSources.get(varName);
+    if (jsonMapPath) {
+      results.push({
+        testId,
+        line,
+        exportName,
+        keys: null,
+        dataSource: {
+          type: "json-map",
+          path: resolveDataPath(jsonMapPath, {
             filePath,
             projectRoot,
           }).resolvedPath,
