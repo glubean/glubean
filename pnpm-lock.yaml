@@ -184,7 +184,11 @@ importers:
         specifier: ^22.0.0
         version: 22.19.15
 
-  packages/skill: {}
+  packages/skill:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.15
+        version: 22.19.15
 
   test-project:
     dependencies:
