@@ -304,7 +304,7 @@ const GLUBEAN_MD_TEMPLATE = `# Project Test Conventions
 
 <!-- This file is read by the Glubean AI skill before generating tests. -->
 <!-- Customize it to teach the AI your project's specific patterns. -->
-<!-- Run \`npx @glubean/skill\` to install/update the AI skill. -->
+<!-- Run \`npx skills add glubean/skill\` to install/update the AI skill. -->
 
 ## Auth
 <!-- How should tests authenticate? e.g. "Use OAuth2 client credentials via configure()" -->
@@ -673,12 +673,13 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       if (aiTarget !== "skip") {
         try {
           const { configMcpCommand } = await import("./config_mcp.js");
-          const { configSkillCommand } = await import("./config_skill.js");
           await configMcpCommand({ target: aiTarget === "codex" ? "codex" : aiTarget });
-          await configSkillCommand({ target: aiTarget });
+          console.log(
+            `\n  ${colors.cyan}ℹ${colors.reset} Install the AI skill: ${colors.cyan}npx skills add glubean/skill${colors.reset}\n`,
+          );
         } catch (err) {
           console.log(
-            `\n  ${colors.yellow}⚠${colors.reset} Failed to configure AI tools — run "glubean config mcp" and "glubean config skill" later\n`,
+            `\n  ${colors.yellow}⚠${colors.reset} Failed to configure MCP — run "glubean config mcp" later\n`,
           );
         }
       }
@@ -914,7 +915,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       `  3. Run ${colors.cyan}npm run explore${colors.reset} to run explore/ tests`,
     );
     console.log(
-      `  4. Run ${colors.cyan}npx @glubean/skill${colors.reset} to install AI test-writing guidance`,
+      `  4. Run ${colors.cyan}npx skills add glubean/skill${colors.reset} to install AI test-writing guidance`,
     );
     console.log(
       `  5. Drop your OpenAPI spec in ${colors.cyan}context/${colors.reset} for AI-assisted test writing`,

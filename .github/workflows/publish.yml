@@ -95,15 +95,4 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # Content packages (independent update cycle)
-      - name: Publish @glubean/lens
-        continue-on-error: true
-        run: pnpm --filter @glubean/lens publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @glubean/skill
-        continue-on-error: true
-        run: pnpm --filter @glubean/skill publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # lens and skill removed — now in glubean/skill repo (Agent Skills standard)

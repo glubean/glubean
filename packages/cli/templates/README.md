@@ -95,7 +95,7 @@ If you ran `glubean init` with AI tools configured, you already have the `/glube
 ```
 
 The skill will:
-1. Pull SDK reference docs (if not cached)
+1. Read bundled SDK reference docs
 2. Explore your API via MCP to understand response schemas
 3. Write tests following project conventions
 4. Run and fix until green
@@ -114,7 +114,7 @@ MCP returns structured results with `responseSchema` (inferred JSON Schema) so t
 
 ```bash
 npx glubean config mcp      # configure MCP server
-npx glubean config skill    # install AI test-writing skill
+npx skills add glubean/skill # install AI test-writing skill
 ```
 
 Supports Claude Code, Codex, and Cursor.

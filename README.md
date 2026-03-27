@@ -50,7 +50,7 @@ npx glubean run
 | [@glubean/auth](packages/auth) | Auth plugins — bearer, apiKey, OAuth |
 | [@glubean/mcp](packages/mcp) | MCP server for AI tools |
 | [@glubean/browser](packages/browser) | Browser automation plugin |
-| [@glubean/lens](packages/lens) | AI cheatsheet — SDK patterns & reference |
+| [Agent Skill](https://github.com/glubean/skill) | AI skill — docs, patterns, test-writing guidance |
 | [@glubean/graphql](packages/graphql) | GraphQL plugin |
 | [@glubean/grpc](packages/grpc) | gRPC plugin |
 | [@glubean/redaction](packages/redaction) | Sensitive data redaction |

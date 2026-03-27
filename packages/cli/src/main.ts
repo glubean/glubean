@@ -21,8 +21,7 @@ import { patchCommand } from "./commands/patch.js";
 import { specSplitCommand } from "./commands/spec_split.js";
 import { redactCommand } from "./commands/redact.js";
 import { configMcpCommand } from "./commands/config_mcp.js";
-import { configSkillCommand } from "./commands/config_skill.js";
-import { docsPullCommand } from "./commands/docs_pull.js";
+
 import { envShowCommand, envUseCommand, envResetCommand, envListCommand } from "./commands/env.js";
 import { abortUpdateCheck, checkForUpdates } from "./update_check.js";
 
@@ -285,31 +284,7 @@ configCmd
     });
   });
 
-configCmd
-  .command("skill")
-  .description("Install Glubean test-writing skill for AI coding tools")
-  .option("--target <tool>", "AI tool: claude-code, cursor, codex, or windsurf")
-  .option("--remove", "Remove skill")
-  .action(async (options) => {
-    await configSkillCommand({
-      target: options.target as "claude-code" | "cursor" | "codex" | "windsurf" | undefined,
-      remove: options.remove,
-    });
-  });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// docs command
-// ─────────────────────────────────────────────────────────────────────────────
-const docsCmd = program
-  .command("docs")
-  .description("Manage SDK documentation for AI agents");
-
-docsCmd
-  .command("pull")
-  .description("Download @glubean/lens (SDK reference + patterns) to ~/.glubean/docs/")
-  .action(async (options) => {
-    await docsPullCommand({ dir: options.dir });
-  });
+// `config skill` and `docs pull` removed — use `npx skills add glubean/skill` instead.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // env command (with subcommands)
