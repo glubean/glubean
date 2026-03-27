@@ -322,6 +322,34 @@ const GLUBEAN_MD_TEMPLATE = `# Project Test Conventions
 <!-- Any other conventions the AI should follow -->
 `;
 
+const TYPES_README = `# Shared Response Types
+
+Define reusable TypeScript types for API responses here.
+Tests import from this directory instead of writing inline types.
+
+## Convention
+
+One file per service or API domain:
+
+\`\`\`
+types/
+├── users.ts      # { id: string; name: string; email: string }
+├── products.ts   # { id: number; title: string; price: number }
+└── common.ts     # Pagination, error responses, etc.
+\`\`\`
+
+## Usage
+
+\`\`\`ts
+import type { User } from "../types/users.js";
+
+const user = await ctx.http.get("/users/1").json<User>();
+\`\`\`
+
+When the AI skill writes tests, it checks this directory first
+before creating inline types. Keep types here to avoid duplication.
+`;
+
 const LOCAL_README = `# Local Tests
 
 This directory is for **personal** exploratory tests — gitignored by default.
@@ -802,6 +830,11 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       description: "Search examples for test.pick",
     },
     {
+      path: "types/README.md",
+      content: TYPES_README,
+      description: "Shared response types directory",
+    },
+    {
       path: "GLUBEAN.md",
       content: GLUBEAN_MD_TEMPLATE,
       description: "Project-specific test conventions for AI skill",
@@ -995,6 +1028,11 @@ async function initMinimal(overwrite: boolean): Promise<void> {
       path: "data/search-examples.json",
       content: () => readCliTemplate("data/search-examples.json"),
       description: "Search parameters for pick examples",
+    },
+    {
+      path: "types/README.md",
+      content: TYPES_README,
+      description: "Shared response types directory",
     },
     {
       path: "GLUBEAN.md",
