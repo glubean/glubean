@@ -1595,13 +1595,17 @@ export interface HttpClient {
 export interface SchemaLike<T> {
   /** Preferred — returns a result object without throwing. */
   safeParse?: (data: unknown) =>
-    | { success: true; data: T }
+    | { success: true; data: T; [key: string]: unknown }
     | {
-      success: false;
-      error: {
-        issues: Array<{ message: string; path?: Array<string | number> }>;
+        success: false;
+        error: {
+          issues: ReadonlyArray<{
+            message: string;
+            path?: ReadonlyArray<PropertyKey>;
+          }>;
+        };
+        [key: string]: unknown;
       };
-    };
   /** Fallback — throws on failure, returns parsed value on success. */
   parse?: (data: unknown) => T;
 }
@@ -1613,7 +1617,7 @@ export interface SchemaIssue {
   /** Human-readable error message */
   message: string;
   /** Property path (e.g., ["user", "email"]) */
-  path?: Array<string | number>;
+  path?: ReadonlyArray<PropertyKey>;
 }
 
 /**

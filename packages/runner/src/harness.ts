@@ -396,10 +396,10 @@ function runSchemaValidation<T>(
     } catch (err: unknown) {
       // Try to extract structured issues from the error
       
-      const errObj = err as { issues?: Array<{ message?: string; path?: Array<string | number> }> };
+      const errObj = err as { issues?: ReadonlyArray<{ message?: string; path?: ReadonlyArray<PropertyKey> }> };
       if (errObj?.issues && Array.isArray(errObj.issues)) {
         issues = errObj.issues.map(
-          (i: { message?: string; path?: Array<string | number> }) => ({
+          (i: { message?: string; path?: ReadonlyArray<PropertyKey> }) => ({
             message: i.message ?? String(i),
             ...(i.path && { path: i.path }),
           }),
