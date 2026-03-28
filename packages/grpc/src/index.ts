@@ -441,3 +441,57 @@ export function grpc(options: GrpcPluginOptions): PluginFactory<GrpcClient> {
     );
   });
 }
+
+// ── Redaction Scopes ──────────────────────────────────────────────────────
+
+/**
+ * Redaction scope declarations for gRPC traces.
+ *
+ * Pass these as `pluginScopes` when compiling redaction scopes so that
+ * gRPC metadata (which may contain auth tokens) is redacted.
+ *
+ * @example
+ * ```ts
+ * import { GRPC_REDACTION_SCOPES } from "@glubean/grpc";
+ * import { compileScopes, BUILTIN_SCOPES, DEFAULT_GLOBAL_RULES } from "@glubean/redaction";
+ *
+ * const compiled = compileScopes({
+ *   builtinScopes: BUILTIN_SCOPES,
+ *   pluginScopes: GRPC_REDACTION_SCOPES,
+ *   globalRules: DEFAULT_GLOBAL_RULES,
+ * });
+ * ```
+ */
+export const GRPC_REDACTION_SCOPES = [
+  {
+    id: "grpc.metadata",
+    name: "gRPC call metadata",
+    event: "trace" as const,
+    target: "data.metadata",
+    handler: "json" as const,
+    rules: {
+      sensitiveKeys: [
+        "authorization",
+        "cookie",
+        "token",
+        "api_key",
+        "apikey",
+        "secret",
+      ],
+    },
+  },
+  {
+    id: "grpc.request",
+    name: "gRPC request body",
+    event: "trace" as const,
+    target: "data.requestBody",
+    handler: "json" as const,
+  },
+  {
+    id: "grpc.response",
+    name: "gRPC response body",
+    event: "trace" as const,
+    target: "data.responseBody",
+    handler: "json" as const,
+  },
+];
