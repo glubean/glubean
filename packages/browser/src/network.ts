@@ -12,10 +12,17 @@ import type { CDPSession, Page } from "puppeteer-core";
 
 /** Callback shape matching `ctx.trace()`. */
 export type TraceFn = (trace: {
+  protocol: "http";
+  target: string;
+  durationMs: number;
+  ok: boolean;
   name?: string;
+  /** @deprecated Use target/metadata instead */
   method: string;
+  /** @deprecated Use target/metadata instead */
   url: string;
   status: number;
+  /** @deprecated Use durationMs instead */
   duration: number;
   requestBody?: unknown;
   responseBody?: unknown;
@@ -209,6 +216,10 @@ export async function attachNetworkTracer(
     }
 
     trace({
+      protocol: "http",
+      target: `${req.method} ${shortPath(req.url)}`,
+      durationMs: duration,
+      ok: status < 400,
       name: `[browser] ${req.method} ${shortPath(req.url)}`,
       method: req.method,
       url: req.url,
