@@ -1,0 +1,36 @@
+{
+  "name": "@glubean/oauth-code",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@glubean/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "vitest": "^3.2.1",
+    "typescript": "^5.8.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glubean/glubean.git",
+    "directory": "packages/oauth-code"
+  }
+}

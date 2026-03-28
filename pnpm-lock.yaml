@@ -138,6 +138,22 @@ importers:
         specifier: ^22.0.0
         version: 22.19.15
 
+  packages/oauth-code:
+    dependencies:
+      '@glubean/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.1
+        version: 3.2.4(@types/node@22.19.15)(tsx@4.21.0)(yaml@2.8.2)
+
   packages/redaction:
     devDependencies:
       '@types/node':
