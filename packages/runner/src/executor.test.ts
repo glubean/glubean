@@ -2134,6 +2134,41 @@ test("executor timeout - generateSummary on timeout events should not be success
 });
 
 // ---------------------------------------------------------------------------
+// Open handles (e.g. TCP server) must not prevent process exit
+// ---------------------------------------------------------------------------
+
+const OPEN_HANDLE_TEST_CONTENT = `
+import { test } from "@glubean/sdk";
+import * as net from "node:net";
+
+// Module-level TCP server — keeps the event loop alive unless process.exit() is called
+const server = net.createServer();
+await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+export const openHandleTest = test("open-handle", (ctx) => {
+  ctx.assert(true, "passes immediately");
+});
+`;
+
+test("single-test mode exits even with open handles (no 30s timeout)", async () => {
+  const testFile = await makeTempFile(OPEN_HANDLE_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const start = Date.now();
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "open-handle",
+    { vars: {}, secrets: {} },
+    { timeout: 5000 },
+  );
+  const elapsed = Date.now() - start;
+
+  expect(result.success).toBe(true);
+  // Should complete well under the timeout, not hang for 5s
+  expect(elapsed).toBeLessThan(4000);
+});
+
+// ---------------------------------------------------------------------------
 // ALS per-test isolation regression tests
 // ---------------------------------------------------------------------------
 

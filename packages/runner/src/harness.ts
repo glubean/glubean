@@ -1292,6 +1292,7 @@ try {
   }
   if (testObj) {
     await executeNewTest(testObj);
+    process.exit(0);
   } else {
     throw new Error(
       `Test "${testId}" not found. Available exports: ${
