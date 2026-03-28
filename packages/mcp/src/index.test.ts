@@ -1,16 +1,21 @@
 import { test, expect } from "vitest";
 import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import {
   buildLastRunSummary,
   diagnoseProjectConfig,
   filterLocalDebugEvents,
+  runLocalTestsFromFile,
   type LocalRunSnapshot,
   MCP_TOOL_NAMES,
   toLocalDebugEvents,
 } from "./index.js";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 test("mcp runtime version constants align with package version", async () => {
   const { createRequire } = await import("node:module");
@@ -156,3 +161,94 @@ test("diagnoseProjectConfig emits recommendations for missing files", async () =
     await rm(dir, { recursive: true });
   }
 });
+
+// ── Session lifecycle integration tests ─────────────────────────────────
+// These tests create temp dirs under @glubean/runner so @glubean/sdk resolves.
+
+const RUNNER_ROOT = resolve(__dirname, "../../runner");
+const SESSION_TMP_DIR = join(RUNNER_ROOT, ".tmp-mcp-session-test");
+let sessionSeq = 0;
+
+async function makeSessionTempDir(): Promise<string> {
+  const dir = join(SESSION_TMP_DIR, String(sessionSeq++));
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+import { afterAll, beforeAll } from "vitest";
+
+beforeAll(async () => {
+  await rm(SESSION_TMP_DIR, { recursive: true, force: true }).catch(() => {});
+  await mkdir(SESSION_TMP_DIR, { recursive: true });
+  // Create a package.json so findProjectRoot stops here
+  await writeFile(join(SESSION_TMP_DIR, "package.json"), "{}");
+  await writeFile(join(SESSION_TMP_DIR, ".env"), "BASE_URL=https://example.com\n");
+  await writeFile(join(SESSION_TMP_DIR, ".env.secrets"), "");
+});
+
+afterAll(async () => {
+  await rm(SESSION_TMP_DIR, { recursive: true, force: true }).catch(() => {});
+});
+
+test("runLocalTestsFromFile discovers session.ts and injects session state", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+
+  // session.ts sets a token
+  await writeFile(
+    join(dir, "tests", "session.ts"),
+    `import { defineSession } from "@glubean/sdk";
+export default defineSession({
+  async setup(ctx) {
+    ctx.session.set("token", "session-abc-123");
+    ctx.log("session setup");
+  },
+  async teardown(ctx) {
+    ctx.log("session teardown");
+  },
+});`,
+  );
+
+  // Test reads session token
+  await writeFile(
+    join(dir, "tests", "check.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const sessionCheck = test("session-check", (ctx) => {
+  const token = ctx.session.get("token");
+  ctx.assert(token === "session-abc-123", "session token set");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "check.test.ts"),
+    includeLogs: true,
+  });
+
+  expect(result.error).toBeUndefined();
+  expect(result.summary.total).toBe(1);
+  expect(result.summary.passed).toBe(1);
+  expect(result.summary.failed).toBe(0);
+  expect(result.results[0].success).toBe(true);
+}, 15_000);
+
+test("runLocalTestsFromFile works without session.ts", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+
+  await writeFile(
+    join(dir, "tests", "simple.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const simple = test("simple-test", (ctx) => {
+  ctx.assert(true, "always passes");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "simple.test.ts"),
+    includeLogs: true,
+  });
+
+  expect(result.error).toBeUndefined();
+  expect(result.summary.total).toBe(1);
+  expect(result.summary.passed).toBe(1);
+}, 15_000);

@@ -18,8 +18,8 @@ import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-import { LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
-import type { SharedRunConfig } from "@glubean/runner";
+import { LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions, discoverSessionFile, RunOrchestrator, createContextWithSession } from "@glubean/runner";
+import type { SharedRunConfig, ExecutionContext } from "@glubean/runner";
 import { createScanner, extractFromSource, scan } from "@glubean/scanner";
 import type { BundleMetadata, ExportMeta, FileMeta, ScanResult } from "@glubean/scanner";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
@@ -498,6 +498,52 @@ export async function runLocalTestsFromFile(args: {
     cwd: projectRoot,
   });
 
+  // ── Session lifecycle ──────────────────────────────────────────────────
+  const sessionFile = discoverSessionFile(testDir, projectRoot);
+  const orchestrator = new RunOrchestrator(executor);
+  const sessionState: Record<string, unknown> = {};
+
+  if (sessionFile) {
+    let sessionFailed = false;
+    for await (const event of orchestrator.runSessionSetup(
+      sessionFile,
+      { vars, secrets },
+      toSingleExecutionOptions(shared),
+    )) {
+      if (event.type === "session:set") {
+        sessionState[event.key] = event.value;
+      } else if (event.type === "status" && event.status === "failed") {
+        sessionFailed = true;
+      }
+    }
+
+    if (sessionFailed) {
+      // Best-effort teardown before returning
+      for await (const _event of orchestrator.runSessionTeardown(
+        sessionFile,
+        { vars, secrets },
+        sessionState,
+        toSingleExecutionOptions(shared),
+      )) {
+        // consume events
+      }
+      return {
+        fileUrl,
+        projectRoot,
+        vars,
+        secrets,
+        results: [],
+        summary: { total: 0, passed: 0, failed: 0 },
+        error: "Session setup failed. All tests skipped.",
+      };
+    }
+  }
+
+  const baseContext: Pick<ExecutionContext, "vars" | "secrets"> = { vars, secrets };
+  const testContext = Object.keys(sessionState).length > 0
+    ? createContextWithSession(baseContext, sessionState)
+    : { vars, secrets };
+
   const concurrency = shared.concurrency;
   const stopOnFailure = shared.failFast;
 
@@ -522,10 +568,7 @@ export async function runLocalTestsFromFile(args: {
       let errorStack: string | undefined;
 
       for await (
-        const event of executor.run(fileUrl, test.id, {
-          vars,
-          secrets,
-        }, { ...toSingleExecutionOptions(shared), exportName: test.exportName })
+        const event of executor.run(fileUrl, test.id, testContext, { ...toSingleExecutionOptions(shared), exportName: test.exportName })
       ) {
         switch (event.type) {
           case "log":
@@ -583,6 +626,18 @@ export async function runLocalTestsFromFile(args: {
     () => runNext(),
   );
   await Promise.all(workers);
+
+  // ── Session teardown ─────────────────────────────────────────────────
+  if (sessionFile) {
+    for await (const _event of orchestrator.runSessionTeardown(
+      sessionFile,
+      { vars, secrets },
+      sessionState,
+      toSingleExecutionOptions(shared),
+    )) {
+      // consume events
+    }
+  }
 
   const passed = results.filter((r) => r.success).length;
   const failed = results.filter((r) => !r.success).length;
