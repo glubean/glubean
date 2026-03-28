@@ -289,9 +289,11 @@ export async function runCommand(
 
   const traceCollector: Array<{
     testId: string;
-    method: string;
-    url: string;
-    status: number;
+    protocol?: string;
+    target?: string;
+    method?: string;
+    url?: string;
+    status: number | string;
   }> = [];
 
   console.log(
@@ -668,9 +670,11 @@ export async function runCommand(
     }
   };
 
-  const colorStatus = (status: number): string => {
-    if (status >= 500) return `${colors.red}${status}${colors.reset}`;
-    if (status >= 400) return `${colors.yellow}${status}${colors.reset}`;
+  const colorStatus = (status: number | string): string => {
+    const n = typeof status === "number" ? status : Number.NaN;
+    if (n >= 500) return `${colors.red}${status}${colors.reset}`;
+    if (n >= 400) return `${colors.yellow}${status}${colors.reset}`;
+    if (Number.isNaN(n)) return `${colors.dim}${status}${colors.reset}`;
     return `${colors.green}${status}${colors.reset}`;
   };
 
@@ -919,19 +923,25 @@ export async function runCommand(
           break;
 
         case "trace": {
-          const traceMsg = `${event.data.method} ${event.data.url} → ${event.data.status} (${event.data.duration}ms)`;
+          const traceTarget = event.data.target ?? `${event.data.method ?? "?"} ${event.data.url ?? "?"}`;
+          const traceDuration = event.data.durationMs ?? event.data.duration ?? 0;
+          const traceProtocol = event.data.protocol ?? "http";
+          const traceMsg = `${traceTarget} → ${event.data.status} (${traceDuration}ms)`;
           addLogEntry("trace", traceMsg, event.data);
           traceCollector.push({
             testId,
+            protocol: traceProtocol,
+            target: traceTarget,
             method: event.data.method,
             url: event.data.url,
             status: event.data.status,
           });
-          const compactTrace = `${colors.dim}${event.data.method}${colors.reset} ${
-            compactUrl(event.data.url)
-          } ${colors.dim}→${colors.reset} ${
+          const displayTarget = event.data.method && event.data.url
+            ? `${colors.dim}${event.data.method}${colors.reset} ${compactUrl(event.data.url)}`
+            : `${colors.dim}${traceTarget}${colors.reset}`;
+          const compactTrace = `${displayTarget} ${colors.dim}→${colors.reset} ${
             colorStatus(event.data.status)
-          } ${colors.dim}${event.data.duration}ms${colors.reset}`;
+          } ${colors.dim}${traceDuration}ms${colors.reset}`;
           stepTraceLines.push(compactTrace);
           console.log(
             `      ${colors.dim}↳${colors.reset} ${compactTrace}`,
@@ -1507,14 +1517,14 @@ async function writeTraceFiles(
       const d = event.data;
       pairs.push({
         request: {
-          method: d.method,
-          url: d.url,
+          method: d.method ?? "?",
+          url: d.url ?? d.target ?? "?",
           ...(d.requestHeaders && Object.keys(d.requestHeaders).length > 0 ? { headers: d.requestHeaders } : {}),
           ...(d.requestBody !== undefined ? { body: d.requestBody } : {}),
         },
         response: {
-          status: d.status,
-          durationMs: d.duration,
+          status: typeof d.status === "number" ? d.status : 0,
+          durationMs: d.durationMs ?? d.duration ?? 0,
           ...(d.responseHeaders && Object.keys(d.responseHeaders).length > 0 ? { headers: d.responseHeaders } : {}),
           ...(d.responseBody !== undefined ? { body: d.responseBody } : {}),
         },
