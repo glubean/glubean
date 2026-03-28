@@ -125,7 +125,7 @@ const { http } = configure({
 
 The local server still listens on `127.0.0.1:9876`; ngrok tunnels the HTTPS callback back to it.
 
-> **Note:** Postman solves this differently — it hosts its own cloud relay at `oauth.pstmn.io/callback` so users never need a tunnel. A similar Glubean Cloud relay may be added in the future.
+> **Note:** Postman solves this differently — it hosts its own cloud relay at `oauth.pstmn.io/callback` so users never need a tunnel. A similar Glubean Cloud relay might be added in the future, though this introduces a security trade-off: the relay becomes a credential intermediary that handles authorization codes on behalf of users, significantly expanding the trust boundary.
 
 ## Promoting to CI
 
