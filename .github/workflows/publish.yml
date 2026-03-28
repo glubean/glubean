@@ -95,4 +95,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Publish @glubean/oauth-code
+        continue-on-error: true
+        run: pnpm --filter @glubean/oauth-code publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       # lens and skill removed — now in glubean/skill repo (Agent Skills standard)
