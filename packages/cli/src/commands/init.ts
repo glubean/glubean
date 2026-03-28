@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { confirm, input, select } from "@inquirer/prompts";
+import { confirm, select } from "@inquirer/prompts";
 import { CLI_VERSION } from "../version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -567,13 +567,13 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // ── Step 1/2 — Project Type ──────────────────────────────────────────────
+  // ── Project Type ─────────────────────────────────────────────────────────
 
   let isMinimal = options.minimal ?? false;
 
   if (interactive && !options.minimal) {
     console.log(
-      `${colors.dim}━━━ Step 1/2 — Project Type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
+      `${colors.dim}━━━ Project Type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
     const choice = await promptChoice(
       "What would you like to create?",
@@ -613,53 +613,6 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
         );
       }
     }
-  }
-
-  // ── Step 2/2 — AI Tools ──────────────────────────────────────────────────
-
-  let enableAiTools = options.aiTools;
-  let aiTarget: "claude-code" | "codex" | "cursor" | "skip" = "skip";
-
-  if (interactive) {
-    console.log(
-      `\n${colors.dim}━━━ Step 2/2 — AI Tools ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
-    );
-
-    if (enableAiTools === undefined) {
-      enableAiTools = await promptYesNo(
-        "Configure AI coding tool? (installs MCP server + test-writing skill)",
-        true,
-      );
-    }
-
-    if (enableAiTools) {
-      const { select } = await import("@inquirer/prompts");
-      aiTarget = await select({
-        message: "Which AI tool do you use?",
-        choices: [
-          { name: "Claude Code", value: "claude-code" as const },
-          { name: "Codex (OpenAI)", value: "codex" as const },
-          { name: "Cursor", value: "cursor" as const },
-          { name: "Skip for now", value: "skip" as const },
-        ],
-      });
-
-      if (aiTarget !== "skip") {
-        try {
-          const { configMcpCommand } = await import("./config_mcp.js");
-          await configMcpCommand({ target: aiTarget === "codex" ? "codex" : aiTarget });
-          console.log(
-            `\n  ${colors.cyan}ℹ${colors.reset} Install the AI skill: ${colors.cyan}npx skills add glubean/skill${colors.reset}\n`,
-          );
-        } catch (err) {
-          console.log(
-            `\n  ${colors.yellow}⚠${colors.reset} Failed to configure MCP — run "glubean config mcp" later\n`,
-          );
-        }
-      }
-    }
-  } else {
-    if (enableAiTools === undefined) enableAiTools = false;
   }
 
   if (isMinimal) {
@@ -893,20 +846,17 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     await installDependencies();
 
     console.log(`${colors.bold}Next steps:${colors.reset}`);
+    console.log(`\n  Connect AI  ${colors.dim}(run once)${colors.reset}`);
+    console.log(`    ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
+    console.log(`    ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}\n`);
     console.log(
       `  1. Run ${colors.cyan}npm test${colors.reset} to run all tests in tests/`,
     );
     console.log(
-      `  2. Run ${colors.cyan}npm run test:verbose${colors.reset} for detailed output`,
+      `  2. Run ${colors.cyan}npm run explore${colors.reset} to run explore/ tests`,
     );
     console.log(
-      `  3. Run ${colors.cyan}npm run explore${colors.reset} to run explore/ tests`,
-    );
-    console.log(
-      `  4. Run ${colors.cyan}npx skills add glubean/skill${colors.reset} to install AI test-writing guidance`,
-    );
-    console.log(
-      `  5. Drop your OpenAPI spec in ${colors.cyan}context/${colors.reset} for AI-assisted test writing`,
+      `  3. Drop your OpenAPI spec in ${colors.cyan}context/${colors.reset} for AI-assisted test writing`,
     );
     console.log(
       `\n  ${colors.dim}Tip: install CLI globally for convenience:${colors.reset} ${colors.cyan}npm install -g @glubean/cli${colors.reset}\n`,
@@ -1043,6 +993,9 @@ async function initMinimal(overwrite: boolean): Promise<void> {
     await installDependencies();
 
     console.log(`${colors.bold}Next steps:${colors.reset}`);
+    console.log(`\n  Connect AI  ${colors.dim}(run once)${colors.reset}`);
+    console.log(`    ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
+    console.log(`    ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}\n`);
     console.log(
       `  1. Run ${colors.cyan}npm run explore${colors.reset} to run all explore tests`,
     );
@@ -1050,13 +1003,10 @@ async function initMinimal(overwrite: boolean): Promise<void> {
       `  2. Open ${colors.cyan}explore/api.test.ts${colors.reset} — GET and POST basics`,
     );
     console.log(
-      `  3. Open ${colors.cyan}explore/search.test.ts${colors.reset} — pick examples with external data`,
+      `  3. Open ${colors.cyan}explore/auth.test.ts${colors.reset} — multi-step auth flow with state`,
     );
     console.log(
-      `  4. Open ${colors.cyan}explore/auth.test.ts${colors.reset} — multi-step flow with state`,
-    );
-    console.log(
-      `  5. Read ${colors.cyan}README.md${colors.reset} for links and next steps\n`,
+      `  4. Read ${colors.cyan}README.md${colors.reset} for links and next steps\n`,
     );
   }
 }
