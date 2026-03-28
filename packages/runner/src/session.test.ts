@@ -264,3 +264,160 @@ export const writeSession = test("write-session", async (ctx) => {
   // But the test should still pass
   expect(result.success).toBe(true);
 }, 15_000);
+
+// ── withSession() + finalize() ──────────────────────────────────────────────
+
+test("withSession auto-discovers session.ts, runs setup, injects state", async () => {
+  const dir = await makeTempDir();
+
+  // session.ts that sets a token
+  await writeFile(
+    join(dir, "session.ts"),
+    `
+import { defineSession } from "@glubean/sdk";
+export default defineSession({
+  async setup(ctx) {
+    ctx.session.set("token", "auto-session-abc");
+    ctx.log("session setup done");
+  },
+  async teardown(ctx) {
+    ctx.log("session teardown done");
+  },
+});
+`,
+  );
+
+  // test that reads the session token
+  const testFile = join(dir, "check.test.ts");
+  await writeFile(
+    testFile,
+    `
+import { test } from "@glubean/sdk";
+export const check = test("check-session", (ctx) => {
+  const token = ctx.session.get("token");
+  ctx.assert(token === "auto-session-abc", "session token injected");
+});
+`,
+  );
+
+  const executor = TestExecutor.fromSharedConfig(
+    { failFast: false, emitFullTrace: false },
+    { cwd: RUNNER_ROOT },
+  ).withSession(dir);
+
+  const events: ExecutionEvent[] = [];
+  for await (const event of executor.run(
+    pathToFileURL(testFile).href,
+    "check-session",
+    { vars: {}, secrets: {} },
+  )) {
+    events.push(event);
+  }
+
+  expect(executor.sessionReady).toBe(true);
+  expect(executor.sessionState).toEqual({ token: "auto-session-abc" });
+
+  const statuses = events.filter((e) => e.type === "status");
+  expect(statuses).toContainEqual(
+    expect.objectContaining({ status: "completed" }),
+  );
+
+  // finalize runs teardown
+  const teardownEvents: ExecutionEvent[] = [];
+  for await (const event of executor.finalize()) {
+    teardownEvents.push(event);
+  }
+  const teardownLogs = teardownEvents.filter(
+    (e) => e.type === "log" && e.message.includes("teardown"),
+  );
+  expect(teardownLogs.length).toBeGreaterThan(0);
+}, 15_000);
+
+test("withSession works when no session.ts exists", async () => {
+  const dir = await makeTempDir();
+
+  const testFile = join(dir, "simple.test.ts");
+  await writeFile(
+    testFile,
+    `
+import { test } from "@glubean/sdk";
+export const simple = test("simple", (ctx) => {
+  ctx.assert(true, "always passes");
+});
+`,
+  );
+
+  const executor = TestExecutor.fromSharedConfig(
+    { failFast: false, emitFullTrace: false },
+    { cwd: RUNNER_ROOT },
+  ).withSession(dir);
+
+  const events: ExecutionEvent[] = [];
+  for await (const event of executor.run(
+    pathToFileURL(testFile).href,
+    "simple",
+    { vars: {}, secrets: {} },
+  )) {
+    events.push(event);
+  }
+
+  expect(executor.sessionReady).toBe(true);
+  expect(Object.keys(executor.sessionState)).toHaveLength(0);
+
+  const statuses = events.filter((e) => e.type === "status");
+  expect(statuses).toContainEqual(
+    expect.objectContaining({ status: "completed" }),
+  );
+
+  // finalize is a no-op — no session file found
+  const teardownEvents: ExecutionEvent[] = [];
+  for await (const event of executor.finalize()) {
+    teardownEvents.push(event);
+  }
+  expect(teardownEvents).toHaveLength(0);
+}, 15_000);
+
+test("finalize is safe to call multiple times", async () => {
+  const dir = await makeTempDir();
+
+  await writeFile(
+    join(dir, "session.ts"),
+    `
+import { defineSession } from "@glubean/sdk";
+export default defineSession({
+  async setup(ctx) { ctx.session.set("k", "v"); },
+  async teardown(ctx) { ctx.log("teardown"); },
+});
+`,
+  );
+
+  const testFile = join(dir, "t.test.ts");
+  await writeFile(
+    testFile,
+    `
+import { test } from "@glubean/sdk";
+export const t = test("t", (ctx) => { ctx.assert(true, "ok"); });
+`,
+  );
+
+  const executor = TestExecutor.fromSharedConfig(
+    { failFast: false, emitFullTrace: false },
+    { cwd: RUNNER_ROOT },
+  ).withSession(dir);
+
+  for await (const _event of executor.run(
+    pathToFileURL(testFile).href,
+    "t",
+    { vars: {}, secrets: {} },
+  )) {}
+
+  // First finalize runs teardown
+  let count = 0;
+  for await (const _event of executor.finalize()) { count++; }
+  expect(count).toBeGreaterThan(0);
+
+  // Second finalize is a no-op
+  let count2 = 0;
+  for await (const _event of executor.finalize()) { count2++; }
+  expect(count2).toBe(0);
+}, 15_000);

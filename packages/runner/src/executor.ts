@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, writeFile, rm } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve, join } from "node:path";
 import { createRequire } from "node:module";
 import type { ApiTrace, GlubeanAction, GlubeanEvent, RunContext } from "@glubean/sdk";
 import type { SharedRunConfig } from "./config.js";
 import { generateSummary } from "./generate_summary.js";
 import { buildRunContext } from "./run_context.js";
+import { discoverSessionFile, createContextWithSession } from "./orchestrator.js";
 
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -221,6 +222,15 @@ export class TestExecutor {
   private harnessPath: string;
   private options: ExecutorOptions;
 
+  // ── Session state (opt-in via .withSession()) ─────────────────────────
+  private _sessionEnabled = false;
+  private _sessionRootDir?: string;
+  private _sessionFile?: string;
+  private _sessionState: Record<string, unknown> = {};
+  private _sessionSetupDone = false;
+  private _sessionSetupFailed = false;
+  private _sessionSetupPromise?: Promise<void>;
+
   constructor(options: ExecutorOptions = {}) {
     // Use .js (compiled) — works with tsx and matches npm-published dist/
     this.harnessPath = resolve(__dirname, "harness.js");
@@ -239,12 +249,123 @@ export class TestExecutor {
     });
   }
 
+  /**
+   * Enable auto-session discovery and lifecycle.
+   *
+   * When enabled, the first `run()` call discovers the nearest `session.ts`
+   * (walking up from the test file's directory to `rootDir`), runs setup,
+   * and injects session state into all subsequent `run()` calls.
+   *
+   * Call `finalize()` when all tests are done to run teardown.
+   *
+   * @param rootDir  Stop directory for session discovery (defaults to `cwd`).
+   */
+  withSession(rootDir?: string): this {
+    this._sessionEnabled = true;
+    this._sessionRootDir = rootDir ?? this.options.cwd;
+    return this;
+  }
+
+  /** True if session setup has completed (successfully or not). */
+  get sessionReady(): boolean {
+    return this._sessionSetupDone;
+  }
+
+  /** Accumulated session state from setup. */
+  get sessionState(): Readonly<Record<string, unknown>> {
+    return this._sessionState;
+  }
+
+  /**
+   * Run session teardown if a session was set up.
+   * Safe to call multiple times — only runs once.
+   * Yields session lifecycle events (log, status).
+   */
+  async *finalize(): AsyncGenerator<ExecutionEvent> {
+    if (!this._sessionFile || !this._sessionSetupDone) return;
+    const sessionUrl = pathToFileURL(this._sessionFile).href;
+    const ctx: ExecutionContext = {
+      ...createContextWithSession(
+        { vars: {}, secrets: {} },
+        this._sessionState,
+      ),
+      sessionMode: "teardown",
+    };
+
+    try {
+      for await (const event of this.run(sessionUrl, "__session__", ctx)) {
+        yield event;
+      }
+    } catch (err) {
+      yield {
+        type: "log",
+        message: `Session teardown error: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    } finally {
+      // Prevent double teardown
+      this._sessionFile = undefined;
+    }
+  }
+
+  /**
+   * Internal: ensure session setup has run exactly once.
+   * Concurrent callers share the same setup promise.
+   */
+  private async _ensureSessionSetup(testDir: string): Promise<void> {
+    if (this._sessionSetupDone) return;
+
+    if (!this._sessionSetupPromise) {
+      this._sessionSetupPromise = (async () => {
+        const rootDir = this._sessionRootDir ?? this.options.cwd;
+        const sessionFile = discoverSessionFile(testDir, rootDir);
+        if (!sessionFile) {
+          this._sessionSetupDone = true;
+          return;
+        }
+
+        this._sessionFile = sessionFile;
+        const sessionUrl = pathToFileURL(sessionFile).href;
+        const ctx: ExecutionContext = {
+          ...createContextWithSession({ vars: {}, secrets: {} }, {}),
+          sessionMode: "setup",
+        };
+
+        for await (const event of this.run(sessionUrl, "__session__", ctx)) {
+          if (event.type === "session:set") {
+            this._sessionState[event.key] = event.value;
+          } else if (event.type === "status" && event.status === "failed") {
+            this._sessionSetupFailed = true;
+          }
+        }
+
+        this._sessionSetupDone = true;
+      })();
+    }
+
+    await this._sessionSetupPromise;
+  }
+
   async *run(
     testUrl: string,
     testId: string,
     context: ExecutionContext,
     options?: { timeout?: number; exportName?: string; testIds?: string[]; exportNames?: Record<string, string>; signal?: AbortSignal; concurrency?: number },
   ): AsyncGenerator<ExecutionEvent> {
+    // Auto-session: run setup on first call (skip for __session__ calls to avoid recursion)
+    if (this._sessionEnabled && testId !== "__session__") {
+      const testDir = dirname(fileURLToPath(testUrl));
+      await this._ensureSessionSetup(testDir);
+
+      if (this._sessionSetupFailed) {
+        yield { type: "status", status: "failed", error: "Session setup failed. Test skipped." };
+        return;
+      }
+
+      // Inject session state into context if setup produced values
+      if (Object.keys(this._sessionState).length > 0 && !context.session) {
+        context = createContextWithSession(context, this._sessionState);
+      }
+    }
     const args: string[] = [this.harnessPath];
 
     // V8 flags via NODE_OPTIONS
