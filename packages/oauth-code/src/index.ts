@@ -24,6 +24,26 @@ export interface OAuthCodeOptions {
   pkce?: boolean;
   /** Token cache directory (default: ".glubean/tokens") */
   cacheDir?: string;
+  /**
+   * Override the redirect URI sent to the provider.
+   * Use with `port` for providers that reject `http://127.0.0.1` (e.g., Slack, Twitter/X).
+   * The local callback server still listens on 127.0.0.1; set this to the external URL
+   * that tunnels traffic back (e.g., an ngrok HTTPS URL).
+   *
+   * @example ngrok tunnel
+   * ```ts
+   * // 1. Run: ngrok http 9876
+   * // 2. Register https://abc123.ngrok.io/callback with the provider
+   * oauthCode({
+   *   redirectUri: "https://abc123.ngrok.io/callback",
+   *   port: 9876,
+   *   ...
+   * })
+   * ```
+   */
+  redirectUri?: string;
+  /** Fixed port for the local callback server (default: random). Required when using `redirectUri` with a tunnel. */
+  port?: number;
   /** Extra query parameters for the authorize URL */
   authorizeParams?: Record<string, string>;
   /** Custom function to open a URL in the browser (default: system browser via `open`/`xdg-open`) */
@@ -112,7 +132,7 @@ interface CallbackServer {
   close(): void;
 }
 
-function startCallbackServer(): Promise<CallbackServer> {
+function startCallbackServer(port?: number): Promise<CallbackServer> {
   return new Promise((resolveServer) => {
     let resolveCode!: (code: string) => void;
     let rejectCode!: (err: Error) => void;
@@ -159,7 +179,7 @@ function startCallbackServer(): Promise<CallbackServer> {
       resolveCode(code);
     });
 
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(port ?? 0, "127.0.0.1", () => {
       const addr = server.address() as { port: number };
       resolveServer({
         port: addr.port,
@@ -378,8 +398,8 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
     }
 
     // 4. Browser flow
-    const { port, waitForCode, close } = await startCallbackServer();
-    const redirectUri = `http://127.0.0.1:${port}/callback`;
+    const server = await startCallbackServer(opts.port);
+    const redirectUri = opts.redirectUri ?? `http://127.0.0.1:${server.port}/callback`;
     const state = randomBytes(16).toString("hex");
 
     const authUrl = new URL(m.authorizeUrl);
@@ -409,7 +429,7 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
     open(authUrl.toString());
 
     try {
-      const code = await waitForCode(state);
+      const code = await server.waitForCode(state);
       const data = await exchangeCode({
         tokenUrl: m.tokenUrl,
         code,
@@ -422,7 +442,7 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
       await writeCache(cacheDir, key, cached);
       return cached;
     } finally {
-      close();
+      server.close();
     }
   }
 

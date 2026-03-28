@@ -70,11 +70,14 @@ Returns `ConfigureHttpOptions` for use with `configure({ http })`. All string op
 | `scopes` | `string[]?` | — | OAuth scopes |
 | `pkce` | `boolean` | `true` | Enable PKCE with S256 challenge |
 | `cacheDir` | `string` | `".glubean/tokens"` | Token cache directory |
+| `redirectUri` | `string?` | — | Override redirect URI (for tunnel setups, see below) |
+| `port` | `number?` | random | Fixed port for callback server (required with `redirectUri`) |
 | `authorizeParams` | `Record<string, string>?` | — | Extra query parameters for authorize URL |
+| `openBrowser` | `(url: string) => void` | system default | Custom browser opener |
 
 ## Token Caching
 
-Tokens are cached to `{cacheDir}/{hash}.json` (default: `.glubean/tokens/`). The hash is derived from `clientId + authorizeUrl` to avoid collisions between providers.
+Tokens are cached to `{cacheDir}/{hash}.json` (default: `.glubean/tokens/`). The hash is derived from `clientId + authorizeUrl + scopes` to avoid collisions between providers or different scope sets.
 
 Cache files are written with `0600` permissions (owner read/write only).
 
@@ -86,14 +89,43 @@ PKCE (S256) is enabled by default. This is required by some providers (e.g., Twi
 
 ## Provider Compatibility
 
-| Provider | Localhost redirect | Notes |
-|----------|-------------------|-------|
-| GitHub | `127.0.0.1` ✅ | Port-flexible |
-| Google | `127.0.0.1` ✅ | Port > 1024 |
-| Microsoft | `127.0.0.1` ✅ | Port ignored in matching |
-| Spotify | `127.0.0.1` ✅ | Port-flexible |
-| Twitter/X | ❌ | Does not support loopback redirect |
-| Slack | ❌ | Requires HTTPS for all redirect URIs |
+| Provider | Localhost redirect | Tunnel needed | Notes |
+|----------|-------------------|---------------|-------|
+| GitHub | `127.0.0.1` ✅ | No | Port-flexible |
+| Google | `127.0.0.1` ✅ | No | Port > 1024 |
+| Microsoft | `127.0.0.1` ✅ | No | Port ignored in matching |
+| Spotify | `127.0.0.1` ✅ | No | Port-flexible |
+| Twitter/X | ❌ | Yes | No loopback redirect support |
+| Slack | ❌ | Yes | Requires HTTPS for all redirect URIs |
+
+### Providers that require a tunnel (Twitter/X, Slack)
+
+These providers reject `http://127.0.0.1` as a redirect URI. Use an HTTPS tunnel like [ngrok](https://ngrok.com) to forward traffic to the local callback server:
+
+```bash
+# 1. Start a tunnel on a fixed port
+ngrok http 9876
+# → https://abc123.ngrok-free.app
+```
+
+```ts
+// 2. Register the ngrok URL as a redirect URI with the provider, then:
+const { http } = configure({
+  http: oauthCode({
+    prefixUrl: "https://api.x.com/2",
+    authorizeUrl: "https://twitter.com/i/oauth2/authorize",
+    tokenUrl: "https://api.x.com/2/oauth2/token",
+    clientId: "{{TWITTER_CLIENT_ID}}",
+    scopes: ["tweet.read", "users.read"],
+    redirectUri: "https://abc123.ngrok-free.app/callback",
+    port: 9876,
+  }),
+});
+```
+
+The local server still listens on `127.0.0.1:9876`; ngrok tunnels the HTTPS callback back to it.
+
+> **Note:** Postman solves this differently — it hosts its own cloud relay at `oauth.pstmn.io/callback` so users never need a tunnel. A similar Glubean Cloud relay may be added in the future.
 
 ## Promoting to CI
 
