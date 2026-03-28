@@ -183,7 +183,7 @@ function buildMetadata(
 
 /** Hooks for Glubean runtime instrumentation. */
 export interface GrpcHooks {
-  event?: (ev: { type: string; data: Record<string, unknown> }) => void;
+  trace?: (t: import("@glubean/sdk").Trace) => void;
 }
 
 /**
@@ -282,19 +282,20 @@ export function createGrpcClient(
                 }
               }
 
-              hooks?.event?.({
-                type: "trace",
-                data: {
-                  protocol: "grpc",
-                  target,
-                  status: status.code,
-                  durationMs,
-                  ok: false,
+              hooks?.trace?.({
+                protocol: "grpc",
+                target,
+                status: status.code,
+                durationMs,
+                ok: false,
+                requestBody: request,
+                responseBody: response,
+                metadata: {
                   service: options.service,
                   method,
                   peer: options.address,
-                  request,
-                  metadata: mergedMetadata,
+                  requestMetadata: mergedMetadata,
+                  responseMetadata,
                 },
               });
 
@@ -309,20 +310,20 @@ export function createGrpcClient(
               return;
             }
 
-            hooks?.event?.({
-              type: "trace",
-              data: {
-                protocol: "grpc",
-                target,
-                status: grpcJs.status.OK,
-                durationMs,
-                ok: true,
+            hooks?.trace?.({
+              protocol: "grpc",
+              target,
+              status: grpcJs.status.OK,
+              durationMs,
+              ok: true,
+              requestBody: request,
+              responseBody: response,
+              metadata: {
                 service: options.service,
                 method,
                 peer: options.address,
-                request,
-                response,
-                metadata: mergedMetadata,
+                requestMetadata: mergedMetadata,
+                responseMetadata,
               },
             });
 
@@ -435,7 +436,7 @@ export function grpc(options: GrpcPluginOptions): PluginFactory<GrpcClient> {
         deadlineMs: options.deadlineMs,
       },
       {
-        event: (ev) => runtime.event(ev),
+        trace: (t) => runtime.trace(t),
       },
     );
   });

@@ -175,6 +175,7 @@ function createMockRuntime(
         return val;
       });
     },
+    trace() {},
     action() {},
     event() {},
     log() {},
@@ -268,10 +269,10 @@ test("createGrpcClient - wrong package name throws", () => {
   ).toThrow('Package "nonexistent.package" not found');
 });
 
-test("createGrpcClient - emits trace event on success", async () => {
+test("createGrpcClient - emits trace on success", async () => {
   testServer = await startTestServer();
 
-  const events: any[] = [];
+  const traces: any[] = [];
   client = createGrpcClient(
     {
       proto: PROTO_PATH,
@@ -279,27 +280,26 @@ test("createGrpcClient - emits trace event on success", async () => {
       package: "test.greeter.v1",
       service: "GreeterService",
     },
-    { event: (ev) => events.push(ev) },
+    { trace: (t) => traces.push(t) },
   );
 
   await client.call("SayHello", { name: "Trace" });
 
-  expect(events.length).toBe(1);
-  expect(events[0].type).toBe("trace");
-  expect(events[0].data.protocol).toBe("grpc");
-  expect(events[0].data.target).toBe("GreeterService/SayHello");
-  expect(events[0].data.ok).toBe(true);
-  expect(events[0].data.status).toBe(0);
-  expect(events[0].data.durationMs).toBeGreaterThanOrEqual(0);
-  expect(events[0].data.service).toBe("GreeterService");
-  expect(events[0].data.method).toBe("SayHello");
-  expect(events[0].data.peer).toBe(testServer.address);
-  expect(events[0].data.request).toEqual({ name: "Trace" });
-  expect(events[0].data.response.message).toBe("Hello, Trace!");
+  expect(traces.length).toBe(1);
+  expect(traces[0].protocol).toBe("grpc");
+  expect(traces[0].target).toBe("GreeterService/SayHello");
+  expect(traces[0].ok).toBe(true);
+  expect(traces[0].status).toBe(0);
+  expect(traces[0].durationMs).toBeGreaterThanOrEqual(0);
+  expect(traces[0].metadata.service).toBe("GreeterService");
+  expect(traces[0].metadata.method).toBe("SayHello");
+  expect(traces[0].metadata.peer).toBe(testServer.address);
+  expect(traces[0].requestBody).toEqual({ name: "Trace" });
+  expect(traces[0].responseBody.message).toBe("Hello, Trace!");
 });
 
-test("createGrpcClient - emits trace event with ok=false on error", async () => {
-  const events: any[] = [];
+test("createGrpcClient - emits trace with ok=false on error", async () => {
+  const traces: any[] = [];
   client = createGrpcClient(
     {
       proto: PROTO_PATH,
@@ -308,15 +308,14 @@ test("createGrpcClient - emits trace event with ok=false on error", async () => 
       service: "GreeterService",
       deadlineMs: 500,
     },
-    { event: (ev) => events.push(ev) },
+    { trace: (t) => traces.push(t) },
   );
 
   const res = await client.call("SayHello", { name: "Fail" });
 
   expect(res.status.code).not.toBe(0);
-  expect(events.length).toBe(1);
-  expect(events[0].type).toBe("trace");
-  expect(events[0].data.ok).toBe(false);
+  expect(traces.length).toBe(1);
+  expect(traces[0].ok).toBe(false);
 });
 
 // =============================================================================
@@ -356,7 +355,7 @@ test("createGrpcClient - per-call metadata merges with static", async () => {
 
 test("createGrpcClient - trace includes merged metadata (static + per-call)", async () => {
   testServer = await startTestServer();
-  const events: any[] = [];
+  const traces: any[] = [];
   client = createGrpcClient(
     {
       proto: PROTO_PATH,
@@ -365,14 +364,14 @@ test("createGrpcClient - trace includes merged metadata (static + per-call)", as
       service: "GreeterService",
       metadata: { "x-static": "base" },
     },
-    { event: (ev) => events.push(ev) },
+    { trace: (t) => traces.push(t) },
   );
 
   await client.call("SayHello", { name: "Meta" }, {
     metadata: { "x-dynamic": "extra" },
   });
 
-  expect(events[0].data.metadata).toEqual({
+  expect(traces[0].metadata.requestMetadata).toEqual({
     "x-static": "base",
     "x-dynamic": "extra",
   });
@@ -456,9 +455,9 @@ test("grpc() - resolves metadata templates from secrets", async () => {
   expect(res.status.code).toBe(0);
 });
 
-test("grpc() - plugin factory wires event hook for trace", async () => {
+test("grpc() - plugin factory wires trace hook", async () => {
   testServer = await startTestServer();
-  const events: any[] = [];
+  const traces: any[] = [];
 
   const factory = grpc({
     proto: PROTO_PATH,
@@ -468,16 +467,15 @@ test("grpc() - plugin factory wires event hook for trace", async () => {
   });
 
   const runtime = createMockRuntime({ GREETER_ADDR: testServer.address });
-  runtime.event = (ev: any) => events.push(ev);
+  runtime.trace = (t: any) => traces.push(t);
   const grpcClient = factory.create(runtime);
   client = grpcClient;
 
   await grpcClient.call("SayHello", { name: "Action" });
 
-  expect(events.length).toBe(1);
-  expect(events[0].type).toBe("trace");
-  expect(events[0].data.protocol).toBe("grpc");
-  expect(events[0].data.ok).toBe(true);
+  expect(traces.length).toBe(1);
+  expect(traces[0].protocol).toBe("grpc");
+  expect(traces[0].ok).toBe(true);
 });
 
 // =============================================================================
@@ -575,7 +573,7 @@ test("auth - plugin factory resolves auth from secrets", async () => {
 
 test("trace - emits trace with ok=false on auth error", async () => {
   testServer = await startAuthServer("Bearer correct");
-  const events: any[] = [];
+  const traces: any[] = [];
   client = createGrpcClient(
     {
       proto: PROTO_PATH,
@@ -583,13 +581,12 @@ test("trace - emits trace with ok=false on auth error", async () => {
       package: "test.greeter.v1",
       service: "GreeterService",
     },
-    { event: (ev) => events.push(ev) },
+    { trace: (t) => traces.push(t) },
   );
 
   await client.call("SayHello", { name: "Fail" });
 
-  expect(events.length).toBe(1);
-  expect(events[0].type).toBe("trace");
-  expect(events[0].data.ok).toBe(false);
-  expect(events[0].data.status).toBe(16); // UNAUTHENTICATED
+  expect(traces.length).toBe(1);
+  expect(traces[0].ok).toBe(false);
+  expect(traces[0].status).toBe(16); // UNAUTHENTICATED
 });
