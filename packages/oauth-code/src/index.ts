@@ -103,9 +103,17 @@ interface CachedToken {
   expiresAt: number;
 }
 
-function cacheKey(clientId: string, authorizeUrl: string, scopes?: string): string {
+function cacheKey(
+  clientId: string,
+  authorizeUrl: string,
+  scopes?: string,
+  authorizeParams?: Record<string, string>,
+): string {
+  const paramsStr = authorizeParams
+    ? Object.keys(authorizeParams).sort().map((k) => `${k}=${authorizeParams[k]}`).join("&")
+    : "";
   return createHash("sha256")
-    .update(`${clientId}:${authorizeUrl}:${scopes ?? ""}`)
+    .update(`${clientId}:${authorizeUrl}:${scopes ?? ""}:${paramsStr}`)
     .digest("hex")
     .slice(0, 12);
 }
@@ -359,7 +367,7 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
 
   async function acquireToken(request: Request): Promise<CachedToken> {
     const m = readMarkers(request);
-    const key = cacheKey(m.clientId, m.authorizeUrl, scopes);
+    const key = cacheKey(m.clientId, m.authorizeUrl, scopes, opts.authorizeParams);
 
     // 1. Memory cache — still valid
     if (cached && cached.expiresAt > Date.now() + 30_000) {
@@ -488,7 +496,7 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
           if (!refreshed) return;
 
           cached = refreshed;
-          const key = cacheKey(m.clientId, m.authorizeUrl, scopes);
+          const key = cacheKey(m.clientId, m.authorizeUrl, scopes, opts.authorizeParams);
           await writeCache(cacheDir, key, cached);
 
           // Retry the original request with new token
