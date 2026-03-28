@@ -58,6 +58,7 @@ import type {
   GlubeanAction,
   GlubeanEvent,
   GlubeanRuntime,
+  Trace,
   HttpClient,
   HttpRequestOptions,
   PluginActivation,
@@ -84,6 +85,7 @@ export interface InternalRuntime {
   secrets: Record<string, string>;
   http: HttpClient;
   test?: GlubeanRuntime["test"];
+  trace?(t: Trace): void;
   action?(a: GlubeanAction): void;
   event?(ev: GlubeanEvent): void;
   log?(message: string, data?: unknown): void;
@@ -550,6 +552,7 @@ function resolvePlugin(
     requireVar,
     requireSecret,
     resolveTemplate: (template: string) => resolveTemplate(template, runtime.vars, runtime.secrets),
+    trace: runtime.trace?.bind(runtime) ?? noop,
     action: runtime.action?.bind(runtime) ?? noop,
     event: runtime.event?.bind(runtime) ?? noop,
     log: runtime.log?.bind(runtime) ?? noop,
