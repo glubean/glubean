@@ -567,13 +567,13 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // ── Step 1/3 — Project Type ──────────────────────────────────────────────
+  // ── Step 1/2 — Project Type ──────────────────────────────────────────────
 
   let isMinimal = options.minimal ?? false;
 
   if (interactive && !options.minimal) {
     console.log(
-      `${colors.dim}━━━ Step 1/3 — Project Type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
+      `${colors.dim}━━━ Step 1/2 — Project Type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
     const choice = await promptChoice(
       "What would you like to create?",
@@ -615,68 +615,14 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     }
   }
 
-  if (isMinimal) {
-    await initMinimal(options.overwrite ?? false);
-    return;
-  }
-
-  // ── Step 2/3 — API Setup ─────────────────────────────────────────────────
-
-  let baseUrl = options.baseUrl ? validateBaseUrlOrExit(options.baseUrl, "--base-url") : DEFAULT_BASE_URL;
-
-  if (interactive) {
-    console.log(
-      `\n${colors.dim}━━━ Step 2/3 — API Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
-    );
-
-    if (useFancyPrompts()) {
-      const urlInput = await input({
-        message: "Your API base URL",
-        default: DEFAULT_BASE_URL,
-        validate: (value) => {
-          if (!value.trim()) return true;
-          const result = validateBaseUrl(value);
-          return result.ok || result.reason;
-        },
-      });
-      if (urlInput.trim() && urlInput !== DEFAULT_BASE_URL) {
-        const validated = validateBaseUrl(urlInput);
-        if (validated.ok) baseUrl = validated.value;
-      }
-    } else {
-      while (true) {
-        const urlInput = await readLine(
-          `  Your API base URL ${colors.dim}(Enter for ${DEFAULT_BASE_URL})${colors.reset}`,
-        );
-        if (!urlInput.trim()) break;
-
-        const validated = validateBaseUrl(urlInput);
-        if (validated.ok) {
-          baseUrl = validated.value;
-          break;
-        }
-
-        console.log(
-          `  ${colors.yellow}⚠${colors.reset} Invalid URL: ${validated.reason}`,
-        );
-        console.log(
-          `  ${colors.dim}Try something like: https://api.example.com${colors.reset}\n`,
-        );
-      }
-    }
-    console.log(
-      `\n  ${colors.green}✓${colors.reset} Base URL: ${colors.cyan}${baseUrl}${colors.reset}`,
-    );
-  }
-
-  // ── Step 3/3 — AI Tools ─────────────────────────────────────────────────
+  // ── Step 2/2 — AI Tools ──────────────────────────────────────────────────
 
   let enableAiTools = options.aiTools;
   let aiTarget: "claude-code" | "codex" | "cursor" | "skip" = "skip";
 
   if (interactive) {
     console.log(
-      `\n${colors.dim}━━━ Step 3/3 — AI Tools ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
+      `\n${colors.dim}━━━ Step 2/2 — AI Tools ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
 
     if (enableAiTools === undefined) {
@@ -715,6 +661,15 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   } else {
     if (enableAiTools === undefined) enableAiTools = false;
   }
+
+  if (isMinimal) {
+    await initMinimal(options.overwrite ?? false);
+    return;
+  }
+
+  // ── Best Practice — API Setup (no prompt, uses default) ──────────────────
+
+  const baseUrl = options.baseUrl ? validateBaseUrlOrExit(options.baseUrl, "--base-url") : DEFAULT_BASE_URL;
 
   // Legacy flags — still supported for backward compatibility
   let enableHooks = options.hooks ?? false;
