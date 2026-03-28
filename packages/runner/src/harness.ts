@@ -17,6 +17,7 @@ declare global {
     secrets: Record<string, string>;
     http: Record<string, unknown>;
     test: Record<string, unknown>;
+    trace: (t: import("@glubean/sdk").Trace) => void;
     action: (a: import("@glubean/sdk").GlubeanAction) => void;
     event: (ev: import("@glubean/sdk").GlubeanEvent) => void;
     log: (message: string, data?: unknown) => void;
@@ -25,7 +26,7 @@ declare global {
 /* eslint-enable no-var */
 import ky, { type KyInstance, type Options as KyOptions, type NormalizedOptions } from "ky";
 import type {
-  ApiTrace,
+  Trace,
   AssertionDetails,
   AssertionResultInput,
   GlubeanAction,
@@ -619,26 +620,32 @@ const ctx = {
     return result.success ? result.data : undefined;
   },
 
-  // API tracing function
-  trace: (request: ApiTrace) => {
+  // Protocol tracing function (HTTP, gRPC, WebSocket, etc.)
+  trace: (request: Trace) => {
     emitEvent({
       type: "trace",
       data: request,
       ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
     });
-    // Backward compat: also emit as a typed action for timeline/filtering
-    let pathname: string;
-    try {
-      pathname = new URL(request.url).pathname;
-    } catch {
-      pathname = request.url;
-    }
+    // Also emit as a typed action for timeline/filtering
+    const protocol = request.protocol ?? "http";
+    const actionTarget = request.target ?? (request.method && request.url
+      ? `${request.method} ${(() => { try { return new URL(request.url).pathname; } catch { return request.url; } })()}`
+      : "unknown");
+    const actionDuration = request.durationMs ?? request.duration ?? 0;
+    const actionOk = request.ok ?? (typeof request.status === "number" && request.status < 400);
     ctx.action({
-      category: "http:request",
-      target: `${request.method} ${pathname}`,
-      duration: request.duration,
-      status: request.status >= 400 ? "error" : "ok",
-      detail: { method: request.method, url: request.url, httpStatus: request.status },
+      category: `${protocol}:request`,
+      target: actionTarget,
+      duration: actionDuration,
+      status: actionOk ? "ok" : "error",
+      detail: {
+        protocol,
+        target: request.target,
+        status: request.status,
+        ...(request.method && { method: request.method }),
+        ...(request.url && { url: request.url }),
+      },
     });
   },
 
@@ -854,9 +861,17 @@ const kyInstance = ky.create({
         // Increment HTTP counters for summary
         { const t = currentTestCtx(); if (t) { t.httpRequestTotal++; if (response.status >= 400) t.httpErrorTotal++; } }
 
-        // Build trace data — enriched when emitFullTrace is on
-        
+        // Build trace data — new unified fields + deprecated HTTP fields for backward compat
+        let pathname: string;
+        try { pathname = new URL(request.url).pathname; } catch { pathname = request.url; }
+
         const traceData: Record<string, unknown> = {
+          // New unified fields
+          protocol: "http",
+          target: `${request.method} ${pathname}`,
+          durationMs: duration,
+          ok: response.status < 400,
+          // Deprecated HTTP fields (backward compat)
           method: request.method,
           url: request.url,
           status: response.status,
@@ -915,7 +930,7 @@ const kyInstance = ky.create({
           // Per-request state is on the options object; no global cleanup needed.
         }
 
-        ctx.trace(traceData as unknown as ApiTrace);
+        ctx.trace(traceData as unknown as Trace);
 
         // Auto-metric for response time
         try {
@@ -1131,6 +1146,7 @@ globalThis.__glubeanRuntime = {
     const trc = currentTestCtx();
     if (trc) trc.testMeta = value;
   },
+  trace: ctx.trace,
   action: ctx.action,
   event: ctx.event,
   log: ctx.log,

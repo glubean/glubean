@@ -4,7 +4,7 @@ import { readFile, writeFile, rm } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve, join } from "node:path";
 import { createRequire } from "node:module";
-import type { ApiTrace, GlubeanAction, GlubeanEvent, RunContext } from "@glubean/sdk";
+import type { Trace, GlubeanAction, GlubeanEvent, RunContext } from "@glubean/sdk";
 import type { SharedRunConfig } from "./config.js";
 import { generateSummary } from "./generate_summary.js";
 import { buildRunContext } from "./run_context.js";
@@ -39,7 +39,7 @@ export type ExecutionEvent = { testId?: string } & (
     expected?: unknown;
     stepIndex?: number;
   }
-  | { type: "trace"; data: ApiTrace; stepIndex?: number }
+  | { type: "trace"; data: Trace; stepIndex?: number }
   | { type: "action"; data: GlubeanAction; stepIndex?: number }
   | { type: "event"; data: GlubeanEvent; stepIndex?: number }
   | {
@@ -139,7 +139,7 @@ export type TimelineEvent =
   | { type: "assertion"; ts: number; testId?: string; stepIndex?: number; passed: boolean; message: string; actual?: unknown; expected?: unknown }
   | { type: "warning"; ts: number; testId?: string; stepIndex?: number; condition: boolean; message: string }
   | { type: "schema_validation"; ts: number; testId?: string; stepIndex?: number; label: string; success: boolean; severity: "error" | "warn" | "fatal"; issues?: Array<{ message: string; path?: Array<string | number> }> }
-  | { type: "trace"; ts: number; testId?: string; stepIndex?: number; data: ApiTrace }
+  | { type: "trace"; ts: number; testId?: string; stepIndex?: number; data: Trace }
   | { type: "action"; ts: number; testId?: string; stepIndex?: number; data: GlubeanAction }
   | { type: "event"; ts: number; testId?: string; stepIndex?: number; data: GlubeanEvent }
   | { type: "metric"; ts: number; testId?: string; stepIndex?: number; name: string; value: number; unit?: string; tags?: Record<string, string> }
