@@ -13,8 +13,9 @@
  * is extracted. All other files are treated as plain glubean config JSON.
  */
 
-import { resolve } from "node:path";
+import { resolve, extname } from "node:path";
 import { readFile } from "node:fs/promises";
+import { parse as parseYaml } from "yaml";
 import { DEFAULT_CONFIG, BUILTIN_SCOPES } from "@glubean/redaction";
 import type { RedactionConfig } from "@glubean/redaction";
 import { LOCAL_RUN_DEFAULTS } from "@glubean/runner";
@@ -134,7 +135,10 @@ export async function readSingleConfig(
   filePath: string,
 ): Promise<GlubeanConfigInput> {
   const content = await readFile(filePath, "utf-8");
-  const parsed = JSON.parse(content);
+  const ext = extname(filePath).toLowerCase();
+  const parsed = (ext === ".yaml" || ext === ".yml")
+    ? parseYaml(content)
+    : JSON.parse(content);
 
   if (isPackageConfig(filePath)) {
     return (parsed.glubean as GlubeanConfigInput) ?? {};

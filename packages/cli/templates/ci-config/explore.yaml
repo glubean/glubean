@@ -1,0 +1,5 @@
+# Explore run config — used by: npm run explore
+run:
+  exploreDir: ./explore
+  verbose: false
+  pretty: true

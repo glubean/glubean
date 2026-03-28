@@ -1,0 +1,13 @@
+# CI run config — used by: npm run test:ci
+# Optimized for CI pipelines: fail fast, structured output, no pretty-print
+run:
+  testDir: ./tests
+  failFast: true
+  pretty: false
+  # Emit full HTTP trace in results (useful for debugging CI failures)
+  emitFullTrace: false
+  # Stop after N failures (uncomment to enable)
+  # failAfter: 5
+
+redaction:
+  replacementFormat: simple

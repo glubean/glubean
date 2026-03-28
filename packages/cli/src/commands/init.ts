@@ -216,30 +216,15 @@ function makePackageJson(_baseUrl: string): string {
         version: "0.1.0",
         type: "module",
         scripts: {
-          test: "glubean run",
-          "test:verbose": "glubean run --verbose",
-          "test:staging": "glubean run --env-file .env.staging",
-          "test:log": "glubean run --log-file",
-          "test:ci": "glubean run --ci --result-json",
-          explore: "glubean run --explore",
-          "explore:verbose": "glubean run --explore --verbose",
+          test: "glubean run --config ci-config/default.yaml",
+          "test:staging": "glubean run --config ci-config/staging.yaml",
+          "test:ci": "glubean run --config ci-config/ci.yaml",
+          explore: "glubean run --config ci-config/explore.yaml",
           scan: "glubean scan",
           "validate-metadata": "glubean validate-metadata",
         },
         dependencies: {
           "@glubean/sdk": SDK_VERSION,
-        },
-        glubean: {
-          run: {
-            verbose: false,
-            pretty: true,
-            emitFullTrace: false,
-            testDir: "./tests",
-            exploreDir: "./explore",
-          },
-          redaction: {
-            replacementFormat: "simple",
-          },
         },
       },
       null,
@@ -666,6 +651,26 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       path: ".env.staging.secrets",
       content: ENV_STAGING_SECRETS,
       description: "Staging secret variables",
+    },
+    {
+      path: "ci-config/default.yaml",
+      content: () => readCliTemplate("ci-config/default.yaml"),
+      description: "Default run config",
+    },
+    {
+      path: "ci-config/ci.yaml",
+      content: () => readCliTemplate("ci-config/ci.yaml"),
+      description: "CI run config",
+    },
+    {
+      path: "ci-config/staging.yaml",
+      content: () => readCliTemplate("ci-config/staging.yaml"),
+      description: "Staging run config",
+    },
+    {
+      path: "ci-config/explore.yaml",
+      content: () => readCliTemplate("ci-config/explore.yaml"),
+      description: "Explore run config",
     },
     {
       path: ".gitignore",
