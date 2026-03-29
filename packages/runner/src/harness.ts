@@ -627,26 +627,6 @@ const ctx = {
       data: request,
       ...(getStepIndex() !== null && { stepIndex: getStepIndex() }),
     });
-    // Also emit as a typed action for timeline/filtering
-    const protocol = request.protocol ?? "http";
-    const actionTarget = request.target ?? (request.method && request.url
-      ? `${request.method} ${(() => { try { return new URL(request.url).pathname; } catch { return request.url; } })()}`
-      : "unknown");
-    const actionDuration = request.durationMs ?? request.duration ?? 0;
-    const actionOk = request.ok ?? (typeof request.status === "number" && request.status < 400);
-    ctx.action({
-      category: `${protocol}:request`,
-      target: actionTarget,
-      duration: actionDuration,
-      status: actionOk ? "ok" : "error",
-      detail: {
-        protocol,
-        target: request.target,
-        status: request.status,
-        ...(request.method && { method: request.method }),
-        ...(request.url && { url: request.url }),
-      },
-    });
   },
 
   // Action recording function
