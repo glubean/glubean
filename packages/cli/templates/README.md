@@ -173,6 +173,16 @@ npx glubean run --upload
 
 4. View results in the dashboard.
 
+## Learn from examples
+
+Clone the [cookbook](https://github.com/glubean/cookbook) to see real-world patterns — CRUD flows, auth strategies, data-driven tests, polling, browser testing, and more:
+
+```bash
+git clone https://github.com/glubean/cookbook.git
+```
+
+Use it as a reference when writing your own tests.
+
 ## Notes
 
 - `.env.secrets` should stay local and must not be committed.

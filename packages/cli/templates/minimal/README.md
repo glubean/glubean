@@ -20,6 +20,16 @@ Edit the files, change the URLs, hit play. That's it.
 
 ---
 
+## Learn from examples
+
+Clone the [cookbook](https://github.com/glubean/cookbook) for real-world patterns — CRUD flows, auth, data-driven tests, polling, and more:
+
+```bash
+git clone https://github.com/glubean/cookbook.git
+```
+
+---
+
 ## Ready for real work?
 
 This playground is for trying things out. When you're ready to build a real test suite — with AI writing and running
