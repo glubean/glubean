@@ -1923,14 +1923,14 @@ export type ApiTrace = Trace;
  * });
  * ```
  *
- * @example HTTP request (auto-emitted by ctx.trace())
+ * @example Protocol trace action (auto-emitted by ctx.trace())
  * ```ts
  * ctx.action({
  *   category: "http:request",
  *   target: "POST /api/auth/login",
  *   duration: 350,
  *   status: "ok",
- *   detail: { method: "POST", url: "/api/auth/login", httpStatus: 200 },
+ *   detail: { status: 201 },
  * });
  * ```
  */

@@ -639,13 +639,7 @@ const ctx = {
       target: actionTarget,
       duration: actionDuration,
       status: actionOk ? "ok" : "error",
-      detail: {
-        protocol,
-        target: request.target,
-        status: request.status,
-        ...(request.method && { method: request.method }),
-        ...(request.url && { url: request.url }),
-      },
+      detail: { status: request.status },
     });
   },
 
