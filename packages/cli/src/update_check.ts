@@ -95,7 +95,7 @@ export async function checkForUpdates(
       if (cache.latest && isNewer(cache.latest, currentVersion)) {
         console.error(
           `Update available: glubean v${cache.latest} (current v${currentVersion}). ` +
-            "Run: npm install -g glubean@latest",
+            "Run: glubean upgrade",
         );
       }
       return;
@@ -129,7 +129,7 @@ export async function checkForUpdates(
     if (latest && isNewer(latest, currentVersion)) {
       console.error(
         `Update available: glubean v${latest} (current v${currentVersion}). ` +
-          "Run: npm install -g glubean@latest",
+          "Run: glubean upgrade",
       );
     }
   } catch {

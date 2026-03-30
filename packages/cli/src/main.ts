@@ -21,6 +21,7 @@ import { patchCommand } from "./commands/patch.js";
 import { specSplitCommand } from "./commands/spec_split.js";
 import { redactCommand } from "./commands/redact.js";
 import { configMcpCommand } from "./commands/config_mcp.js";
+import { upgradeCommand } from "./commands/upgrade.js";
 
 import { envShowCommand, envUseCommand, envResetCommand, envListCommand } from "./commands/env.js";
 import { abortUpdateCheck, checkForUpdates } from "./update_check.js";
@@ -263,6 +264,16 @@ program
       stdout: options.stdout,
       config: configFiles,
     });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// upgrade command
+// ─────────────────────────────────────────────────────────────────────────────
+program
+  .command("upgrade")
+  .description("Upgrade Glubean CLI to the latest version")
+  .action(async () => {
+    await upgradeCommand(CLI_VERSION);
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
