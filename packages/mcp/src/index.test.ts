@@ -252,3 +252,52 @@ export const simple = test("simple-test", (ctx) => {
   expect(result.summary.total).toBe(1);
   expect(result.summary.passed).toBe(1);
 }, 15_000);
+
+test("runLocalTestsFromFile strips trace headers, keeping only content-type/set-cookie/location/authorization", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+
+  // Write a package.json with NO custom mcp config — use defaults
+  await writeFile(join(dir, "package.json"), "{}");
+
+  await writeFile(
+    join(dir, "tests", "http.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const httpTest = test("http-test", async (ctx) => {
+  const res = await ctx.http.get("https://dummyjson.com/products/1");
+  ctx.expect(res.status).toBe(200);
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "http.test.ts"),
+    includeTraces: true,
+  });
+
+  expect(result.summary.total).toBe(1);
+  expect(result.summary.passed).toBe(1);
+
+  // Should have at least one trace
+  const traces = result.results.flatMap((r) => r.traces);
+  expect(traces.length).toBeGreaterThan(0);
+
+  for (const trace of traces) {
+    const t = trace as Record<string, unknown>;
+    // Response headers should only contain kept headers (if any)
+    if (t.responseHeaders) {
+      const respHeaders = Object.keys(t.responseHeaders as Record<string, string>);
+      const allowed = ["content-type", "set-cookie", "location"];
+      for (const h of respHeaders) {
+        expect(allowed).toContain(h.toLowerCase());
+      }
+    }
+    // Request headers should only contain kept headers (if any)
+    if (t.requestHeaders) {
+      const reqHeaders = Object.keys(t.requestHeaders as Record<string, string>);
+      const allowed = ["content-type", "authorization"];
+      for (const h of reqHeaders) {
+        expect(allowed).toContain(h.toLowerCase());
+      }
+    }
+  }
+}, 15_000);

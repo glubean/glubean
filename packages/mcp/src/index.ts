@@ -27,6 +27,69 @@ import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
 type Vars = Record<string, string>;
 const METADATA_SCHEMA_VERSION = "1";
 
+// ── MCP trace header stripping ──────────────────────────────────────────────
+
+interface McpTraceConfig {
+  keepRequestHeaders: string[];
+  keepResponseHeaders: string[];
+}
+
+const DEFAULT_MCP_TRACE_CONFIG: McpTraceConfig = {
+  keepRequestHeaders: ["content-type", "authorization"],
+  keepResponseHeaders: ["content-type", "set-cookie", "location"],
+};
+
+let _mcpTraceConfig: McpTraceConfig | undefined;
+
+async function loadMcpTraceConfig(projectRoot: string): Promise<McpTraceConfig> {
+  if (_mcpTraceConfig) return _mcpTraceConfig;
+  try {
+    const pkgPath = resolve(projectRoot, "package.json");
+    const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
+    const userConfig = pkg.glubean?.mcp?.trace;
+    if (userConfig) {
+      _mcpTraceConfig = {
+        keepRequestHeaders: userConfig.keepRequestHeaders ?? DEFAULT_MCP_TRACE_CONFIG.keepRequestHeaders,
+        keepResponseHeaders: userConfig.keepResponseHeaders ?? DEFAULT_MCP_TRACE_CONFIG.keepResponseHeaders,
+      };
+    } else {
+      _mcpTraceConfig = DEFAULT_MCP_TRACE_CONFIG;
+    }
+  } catch {
+    _mcpTraceConfig = DEFAULT_MCP_TRACE_CONFIG;
+  }
+  return _mcpTraceConfig;
+}
+
+function filterHeaders(
+  headers: Record<string, string> | undefined,
+  keepList: string[],
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const keep = new Set(keepList.map((h) => h.toLowerCase()));
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (keep.has(key.toLowerCase())) {
+      result[key] = value;
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function stripTraceHeaders(trace: unknown, config: McpTraceConfig): unknown {
+  if (!trace || typeof trace !== "object") return trace;
+  const t = trace as Record<string, unknown>;
+  return {
+    ...t,
+    ...(t.requestHeaders !== undefined && {
+      requestHeaders: filterHeaders(t.requestHeaders as Record<string, string>, config.keepRequestHeaders),
+    }),
+    ...(t.responseHeaders !== undefined && {
+      responseHeaders: filterHeaders(t.responseHeaders as Record<string, string>, config.keepResponseHeaders),
+    }),
+  };
+}
+
 export async function findProjectRoot(startDir: string): Promise<string> {
   let dir = startDir;
   while (true) {
@@ -442,6 +505,7 @@ export async function runLocalTestsFromFile(args: {
   const absolutePath = resolve(args.filePath);
   const testDir = dirname(absolutePath);
   const projectRoot = await findProjectRoot(testDir);
+  const traceConfig = await loadMcpTraceConfig(projectRoot);
 
   const envPath = await resolveEnvPath(projectRoot, args.envFile);
   const secretsPath = deriveSecretsPath(envPath);
@@ -542,7 +606,7 @@ export async function runLocalTestsFromFile(args: {
             });
             break;
           case "trace":
-            if (includeTraces) traces.push(event.data);
+            if (includeTraces) traces.push(stripTraceHeaders(event.data, traceConfig));
             break;
           case "status":
             statusSuccess = event.status === "completed";
