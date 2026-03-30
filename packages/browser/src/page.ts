@@ -636,6 +636,65 @@ export class GlubeanPage {
   }
 
   /**
+   * Locate an element by its `data-testid` attribute.
+   *
+   * @example
+   * ```ts
+   * await page.byTestId("submit-btn").click();
+   * await page.byTestId("email").type("user@test.com");
+   * ```
+   */
+  byTestId(id: string): WrappedLocator {
+    return this.locator(`[data-testid="${id}"]`);
+  }
+
+  /**
+   * Locate an element by its visible text content.
+   *
+   * Uses Puppeteer's built-in text selector (`::-p-text()`).
+   *
+   * @example
+   * ```ts
+   * await page.byText("Sign in").click();
+   * ```
+   */
+  byText(text: string): WrappedLocator {
+    return this.locator(`::-p-text(${text})`);
+  }
+
+  /**
+   * Locate an element by its ARIA role (and optionally accessible name).
+   *
+   * Uses Puppeteer's built-in ARIA selector (`::-p-aria()`).
+   *
+   * @example
+   * ```ts
+   * await page.byRole("button", { name: "Submit" }).click();
+   * await page.byRole("navigation").hover();
+   * ```
+   */
+  byRole(role: string, options?: { name?: string }): WrappedLocator {
+    if (options?.name) {
+      return this.locator(`::-p-aria(${options.name}[role="${role}"])`);
+    }
+    return this.locator(`[role="${role}"]`);
+  }
+
+  /**
+   * Locate an element by its accessible name (ARIA label).
+   *
+   * Uses Puppeteer's built-in ARIA selector (`::-p-aria()`).
+   *
+   * @example
+   * ```ts
+   * await page.byLabel("Email address").type("user@test.com");
+   * ```
+   */
+  byLabel(label: string): WrappedLocator {
+    return this.locator(`::-p-aria(${label})`);
+  }
+
+  /**
    * Click an element matching the selector.
    *
    * Delegates to Puppeteer's Locator API for auto-waiting (attached, visible,
