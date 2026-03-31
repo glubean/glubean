@@ -684,6 +684,15 @@ export const stepTimeoutTerminal = test("step-timeout-terminal")
   .step("timeout terminal", { timeout: 80, retries: 1 }, async () => {
     await new Promise((resolve) => setTimeout(resolve, 140));
   });
+
+export const stepRetryBackoff = test("step-retry-backoff")
+  .setup(async () => ({ attempts: 0, timestamps: [] as number[] }))
+  .step("backoff step", { retries: 2, retryDelay: 200, backoff: 2 }, async (ctx, state) => {
+    state.attempts += 1;
+    state.timestamps.push(Date.now());
+    ctx.assert(state.attempts >= 3, "pass on 3rd attempt");
+    return state;
+  });
 `;
 
 test("builder without .build() is auto-resolved by runner", async () => {
@@ -838,6 +847,30 @@ test("step timeout - is terminal even when retries are configured", async () => 
     logs.some((l) => l.message.includes('Retrying step "timeout terminal"')),
   ).toBe(false);
 });
+
+test("step retries - backoff delays between retries", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const start = Date.now();
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "step-retry-backoff",
+    { vars: {}, secrets: {} },
+  );
+  const elapsed = Date.now() - start;
+
+  // retryDelay: 200, backoff: 2 → delays: 200ms, 400ms = 600ms total
+  expect(result.success).toBe(true);
+  expect(elapsed).toBeGreaterThanOrEqual(500); // at least 500ms of delay
+  expect(elapsed).toBeLessThan(3000); // but not unreasonably long
+
+  const logs = result.events.filter(
+    (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
+  );
+  expect(logs.some((l) => l.message.includes("waiting 200ms"))).toBe(true);
+  expect(logs.some((l) => l.message.includes("waiting 400ms"))).toBe(true);
+}, 10_000);
 
 // =============================================================================
 // Step event tests — duration, pass/fail/skip, assertion counting

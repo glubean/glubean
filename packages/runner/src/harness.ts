@@ -1519,6 +1519,12 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
               const configuredRetries = typeof retries === "number" && Number.isFinite(retries)
                 ? Math.max(0, Math.floor(retries))
                 : 0;
+              const retryDelayMs = typeof step.meta.retryDelay === "number" && Number.isFinite(step.meta.retryDelay)
+                ? Math.max(0, step.meta.retryDelay)
+                : (configuredRetries > 0 ? 1000 : 0);
+              const backoffMultiplier = typeof step.meta.backoff === "number" && Number.isFinite(step.meta.backoff)
+                ? Math.max(1, step.meta.backoff)
+                : 1;
               const stepTimeout = step.meta.timeout;
               const configuredStepTimeout = typeof stepTimeout === "number" && Number.isFinite(stepTimeout)
                 ? Math.floor(stepTimeout)
@@ -1581,14 +1587,18 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 }
 
                 if (attempt < maxAttempts) {
+                  const delay = Math.min(retryDelayMs * backoffMultiplier ** (attempt - 1), 30_000);
                   const reason = stepError ? stepError : `${getStepFailedAssertions()} failed assertion(s)`;
                   emitEvent({
                     type: "log",
                     stepIndex: i,
                     message: `Retrying step "${step.meta.name}" (${
                       attempt + 1
-                    }/${maxAttempts}) after failure: ${reason}`,
+                    }/${maxAttempts}) after failure: ${reason}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`,
                   });
+                  if (delay > 0) {
+                    await new Promise<void>((r) => setTimeout(r, delay));
+                  }
                 }
               }
 

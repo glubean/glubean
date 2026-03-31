@@ -2116,6 +2116,36 @@ export interface StepMeta {
   /** Number of retries for this step (default: 0) */
   retries?: number;
   /**
+   * Delay before each retry in ms (default: 1000).
+   * This is the base delay for the first retry.
+   * Combined with `backoff` to control subsequent delays.
+   *
+   * @example Fixed 2-second delay
+   * ```ts
+   * .step("sync", { retries: 3, retryDelay: 2000 }, fn)
+   * // delays: 2s, 2s, 2s
+   * ```
+   */
+  retryDelay?: number;
+  /**
+   * Multiplier applied to retryDelay after each retry (default: 1 = fixed delay).
+   * Set to 2 for classic doubling backoff.
+   *
+   * Formula: `delay = retryDelay * backoff^attempt`
+   * Capped at 30 seconds.
+   *
+   * @example Doubling: 2s, 4s, 8s
+   * ```ts
+   * .step("flaky", { retries: 3, retryDelay: 2000, backoff: 2 }, fn)
+   * ```
+   *
+   * @example Gentle: 1s, 1.5s, 2.25s
+   * ```ts
+   * .step("poll", { retries: 3, retryDelay: 1000, backoff: 1.5 }, fn)
+   * ```
+   */
+  backoff?: number;
+  /**
    * Logical group this step belongs to (set by `.group()`).
    * Used for visual grouping in reports and dashboards.
    */
