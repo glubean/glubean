@@ -290,11 +290,11 @@ test("init --no-interactive --hooks --github-actions creates both", async () => 
   }
 });
 
-test("init --minimal creates minimal files", async () => {
+test("init --contract-first creates contract-first project", async () => {
   const dir = await createTempDir();
   try {
     const { code } = await runCli(
-      ["init", "--minimal", "--no-interactive"],
+      ["init", "--contract-first", "--no-interactive"],
       { cwd: dir },
     );
     expect(code).toBe(0);
@@ -303,28 +303,18 @@ test("init --minimal creates minimal files", async () => {
     expect(await fileExists(join(dir, ".env"))).toBe(true);
     expect(await fileExists(join(dir, ".env.secrets"))).toBe(true);
     expect(await fileExists(join(dir, ".gitignore"))).toBe(true);
-    expect(await fileExists(join(dir, "README.md"))).toBe(true);
-    expect(await fileExists(join(dir, "explore/api.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "explore/search.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "explore/auth.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "data/search-examples.json"))).toBe(true);
-    expect(await fileExists(join(dir, "tests/demo.test.ts"))).toBe(true);
+    expect(await fileExists(join(dir, "product/README.md"))).toBe(true);
+    expect(await fileExists(join(dir, "contracts/README.md"))).toBe(true);
+    expect(await fileExists(join(dir, "types/README.md"))).toBe(true);
+    expect(await fileExists(join(dir, "schemas/README.md"))).toBe(true);
+    expect(await fileExists(join(dir, "ci-config/default.yaml"))).toBe(true);
+    expect(await fileExists(join(dir, "ci-config/ci.yaml"))).toBe(true);
     expect(await fileExists(join(dir, "GLUBEAN.md"))).toBe(true);
-    expect(await fileExists(join(dir, "local/README.md"))).toBe(true);
-    expect(await fileExists(join(dir, ".env.staging"))).toBe(true);
-    expect(await fileExists(join(dir, ".env.staging.secrets"))).toBe(true);
 
-    // Verify package.json has explore and test scripts
+    // Verify package.json has contract scripts
     const pkgJson = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
-    expect(typeof pkgJson.scripts?.explore).toBe("string");
-    expect(pkgJson.scripts?.test).toBe("glubean run");
-    expect(pkgJson.scripts?.["test:staging"]).toBe("glubean run --env-file .env.staging");
-    expect(pkgJson.scripts?.["test:ci"]).toBe("glubean run --ci --result-json");
-    expect(pkgJson.glubean?.run?.testDir).toBe("./tests");
-
-    // Verify .env has DummyJSON
-    const envContent = await readFile(join(dir, ".env"), "utf-8");
-    expect(envContent).toContain("dummyjson.com");
+    expect(pkgJson.scripts?.["contract:run"]).toBe("glubean run contracts/");
+    expect(pkgJson.dependencies?.zod).toBeDefined();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

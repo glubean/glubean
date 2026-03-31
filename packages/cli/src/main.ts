@@ -41,7 +41,6 @@ program
 program
   .command("init")
   .description("Initialize a new Glubean project (interactive wizard)")
-  .option("--minimal", "Scaffold explore-only project")
   .option("--contract-first", "Scaffold contract-first project (product/, contracts/, tests/)")
   .option("--ai-tools", "Configure MCP server + AI skill for your editor")
   .option("--hooks", "Install git hooks (pre-commit, pre-push)")
@@ -53,7 +52,6 @@ program
   .option("--overwrite-actions", "Overwrite GitHub Actions workflow")
   .action(async (options) => {
     await initCommand({
-      minimal: options.minimal,
       contractFirst: options.contractFirst,
       aiTools: options.aiTools,
       hooks: options.hooks,

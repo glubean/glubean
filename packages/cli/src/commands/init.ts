@@ -20,6 +20,7 @@ const colors = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
+  red: "\x1b[31m",
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   cyan: "\x1b[36m",
@@ -432,66 +433,6 @@ jobs:
 `;
 
 // ---------------------------------------------------------------------------
-// Templates — Minimal project
-// ---------------------------------------------------------------------------
-
-function makeMinimalPackageJson(): string {
-  return JSON.stringify(
-    {
-      name: "my-glubean-tests",
-      version: "0.1.0",
-      type: "module",
-      scripts: {
-        test: "glubean run",
-        "test:verbose": "glubean run --verbose",
-        "test:staging": "glubean run --env-file .env.staging",
-        "test:ci": "glubean run --ci --result-json",
-        explore: "glubean run --explore --verbose",
-        scan: "glubean scan",
-      },
-      dependencies: {
-        "@glubean/sdk": SDK_VERSION,
-      },
-      glubean: {
-        run: {
-          verbose: true,
-          pretty: true,
-          testDir: "./tests",
-          exploreDir: "./explore",
-        },
-      },
-    },
-    null,
-    2,
-  ) + "\n";
-}
-
-const MINIMAL_ENV = `# Environment variables
-# Tip: switch environments from the VS Code status bar — one click to toggle
-# between default, staging, and any custom .env.* file.
-BASE_URL=https://dummyjson.com
-`;
-
-const MINIMAL_ENV_SECRETS = `# Secrets (add this file to .gitignore)
-# DummyJSON test credentials (public, safe to use)
-USERNAME=emilys
-PASSWORD=emilyspass
-`;
-
-const MINIMAL_ENV_STAGING = `# Staging environment variables
-# Usage: glubean run --env-file .env.staging
-# Tip: or switch to "staging" from the VS Code status bar — no CLI flags needed.
-BASE_URL=https://staging.dummyjson.com
-`;
-
-const MINIMAL_ENV_STAGING_SECRETS = `# Staging secrets (gitignored)
-# Usage: auto-loaded when --env-file .env.staging is used
-# API_KEY=your-staging-api-key
-USERNAME=
-PASSWORD=
-`;
-
-// ---------------------------------------------------------------------------
 // Dependency installation
 // ---------------------------------------------------------------------------
 
@@ -522,7 +463,7 @@ async function installDependencies(): Promise<void> {
 // Options
 // ---------------------------------------------------------------------------
 
-export type InitWorkflow = "explore" | "test" | "contract-first";
+export type InitWorkflow = "try" | "test" | "contract-first";
 
 export interface InitOptions {
   minimal?: boolean;
@@ -559,11 +500,9 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
   let workflow: InitWorkflow = options.contractFirst
     ? "contract-first"
-    : options.minimal
-      ? "explore"
-      : "test";
+    : "test";
 
-  if (interactive && !options.minimal && !options.contractFirst) {
+  if (interactive && !options.contractFirst) {
     console.log(
       `${colors.dim}━━━ What kind of project? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
@@ -572,12 +511,12 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       [
         {
           key: "1",
-          label: "Explore / play with an API",
-          desc: "Lightweight — explore folder with examples",
+          label: "Try Glubean",
+          desc: "Clone cookbook — 35+ runnable examples, ready in 30 seconds",
         },
         {
           key: "2",
-          label: "Write tests for an existing API",
+          label: "Test an existing API",
           desc: "Full project — tests, CI config, types, schemas",
         },
         {
@@ -588,7 +527,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       ],
       "1",
     );
-    workflow = choice === "3" ? "contract-first" : choice === "2" ? "test" : "explore";
+    workflow = choice === "3" ? "contract-first" : choice === "2" ? "test" : "try";
   }
 
   if (interactive && !options.overwrite) {
@@ -612,8 +551,8 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     }
   }
 
-  if (workflow === "explore") {
-    await initMinimal(options.overwrite ?? false);
+  if (workflow === "try") {
+    await initTryCookbook();
     return;
   }
 
@@ -887,150 +826,50 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal init
+// Try Glubean (clone cookbook)
 // ---------------------------------------------------------------------------
 
-async function initMinimal(overwrite: boolean): Promise<void> {
-  console.log(
-    `${colors.dim}  Quick start — explore APIs with GET, POST, and pick examples${colors.reset}\n`,
-  );
+async function initTryCookbook(): Promise<void> {
+  const targetDir = "cookbook";
+  const repoUrl = "https://github.com/glubean/cookbook.git";
 
-  const files: FileEntry[] = [
-    {
-      path: "package.json",
-      content: makeMinimalPackageJson(),
-      description: "Package config with explore scripts",
-    },
-    {
-      path: ".env",
-      content: MINIMAL_ENV,
-      description: "Environment variables",
-    },
-    {
-      path: ".env.secrets",
-      content: MINIMAL_ENV_SECRETS,
-      description: "Secret variables (placeholder)",
-    },
-    {
-      path: ".env.staging",
-      content: MINIMAL_ENV_STAGING,
-      description: "Staging environment variables",
-    },
-    {
-      path: ".env.staging.secrets",
-      content: MINIMAL_ENV_STAGING_SECRETS,
-      description: "Staging secret variables",
-    },
-    {
-      path: ".gitignore",
-      content: GITIGNORE,
-      description: "Git ignore rules",
-    },
-    {
-      path: "README.md",
-      content: () => readCliTemplate("minimal/README.md"),
-      description: "Project README",
-    },
-    {
-      path: "tests/demo.test.ts",
-      content: () => readCliTemplate("demo.test.ts.tpl"),
-      description: "Demo tests (GET, POST, auth flow, pagination)",
-    },
-    {
-      path: "explore/api.test.ts",
-      content: () => readCliTemplate("minimal-api.test.ts.tpl"),
-      description: "GET and POST examples",
-    },
-    {
-      path: "explore/search.test.ts",
-      content: () => readCliTemplate("minimal-search.test.ts.tpl"),
-      description: "Parameterized search with test.pick",
-    },
-    {
-      path: "explore/auth.test.ts",
-      content: () => readCliTemplate("minimal-auth.test.ts.tpl"),
-      description: "Multi-step auth flow (login → profile)",
-    },
-    {
-      path: "data/search-examples.json",
-      content: () => readCliTemplate("data/search-examples.json"),
-      description: "Search parameters for pick examples",
-    },
-    {
-      path: "types/README.md",
-      content: TYPES_README,
-      description: "Shared response types directory",
-    },
-    {
-      path: "GLUBEAN.md",
-      content: GLUBEAN_MD_TEMPLATE,
-      description: "Project-specific test conventions for AI skill",
-    },
-    {
-      path: "local/README.md",
-      content: LOCAL_README,
-      description: "Personal explore directory (gitignored)",
-    },
-  ];
-
-  let created = 0;
-  let skipped = 0;
-  let overwritten = 0;
-
-  for (const file of files) {
-    const existedBefore = await fileExists(file.path);
-    if (existedBefore && !overwrite) {
-      console.log(
-        `  ${colors.dim}skip${colors.reset}  ${file.path} (already exists)`,
-      );
-      skipped++;
-      continue;
-    }
-
-    const parentDir = file.path.substring(0, file.path.lastIndexOf("/"));
-    if (parentDir) {
-      await mkdir(parentDir, { recursive: true });
-    }
-    const content = await resolveContent(file.content);
-    await writeFile(file.path, content, "utf-8");
-
-    if (existedBefore) {
-      console.log(
-        `  ${colors.yellow}overwrite${colors.reset} ${file.path} - ${file.description}`,
-      );
-      overwritten++;
-    } else {
-      console.log(
-        `  ${colors.green}create${colors.reset} ${file.path} - ${file.description}`,
-      );
-      created++;
-    }
+  if (await fileExists(targetDir)) {
+    console.log(
+      `  ${colors.yellow}⚠${colors.reset} ${colors.cyan}${targetDir}/${colors.reset} already exists. cd into it and run ${colors.cyan}npm install${colors.reset}.\n`,
+    );
+    return;
   }
 
   console.log(
-    `\n${colors.bold}Summary:${colors.reset} ${created} created, ${overwritten} overwritten, ${skipped} skipped\n`,
+    `${colors.dim}  Cloning cookbook — 35+ runnable examples across 11 API patterns${colors.reset}\n`,
   );
 
-  if (created > 0) {
-    await installDependencies();
-
-    console.log(`${colors.bold}Next steps:${colors.reset}`);
-    console.log(`\n  Connect AI  ${colors.dim}(run once)${colors.reset}`);
-    console.log(`    ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
-    console.log(`    ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}\n`);
-    console.log(
-      `  1. Run ${colors.cyan}npm run explore${colors.reset} to run all explore tests`,
+  try {
+    const { execSync } = await import("node:child_process");
+    execSync(`git clone ${repoUrl} ${targetDir}`, { stdio: "inherit" });
+    console.log("");
+    execSync("npm install", { cwd: targetDir, stdio: "inherit" });
+  } catch {
+    console.error(
+      `\n${colors.red}Failed to clone cookbook.${colors.reset} Try manually:\n  git clone ${repoUrl}\n  cd ${targetDir} && npm install\n`,
     );
-    console.log(
-      `  2. Open ${colors.cyan}explore/api.test.ts${colors.reset} — GET and POST basics`,
-    );
-    console.log(
-      `  3. Open ${colors.cyan}explore/auth.test.ts${colors.reset} — multi-step auth flow with state`,
-    );
-    console.log(
-      `  4. Read ${colors.cyan}README.md${colors.reset} for links and next steps\n`,
-    );
+    process.exit(1);
   }
+
+  console.log(`\n${colors.bold}Next steps:${colors.reset}`);
+  console.log(`\n  ${colors.cyan}cd ${targetDir}${colors.reset}\n`);
+  console.log(`  Connect AI  ${colors.dim}(run once)${colors.reset}`);
+  console.log(`    ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
+  console.log(`    ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}\n`);
+  console.log(
+    `  1. Run ${colors.cyan}npx glubean run explore --tag smoke${colors.reset} to see tests pass`,
+  );
+  console.log(
+    `  2. Browse ${colors.cyan}explore/${colors.reset} — 11 patterns (REST, auth, GraphQL, gRPC, SSE, WebSocket...)`,
+  );
+  console.log(
+    `  3. When ready for your own project: ${colors.cyan}glubean init${colors.reset} in a new directory\n`,
+  );
 }
 
 // ---------------------------------------------------------------------------
