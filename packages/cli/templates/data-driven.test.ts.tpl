@@ -3,7 +3,7 @@
  *
  * Three patterns are shown:
  *
- * 1. JSON import (native) — simplest, no SDK helper needed
+ * 1. JSON loader — use fromJson() for structured data
  * 2. CSV loader — use fromCsv() for spreadsheet-style data
  * 3. YAML loader — use fromYaml() for human-friendly data
  *
@@ -12,13 +12,19 @@
  *
  * Run: glubean run data-driven.test.ts
  */
-import { fromCsv, fromYaml, test } from "@glubean/sdk";
-
-// Import JSON data natively (recommended for JSON files)
-import users from "../data/users.json" with { type: "json" };
+import { fromCsv, fromJson, fromYaml, test } from "@glubean/sdk";
+import type { User, Endpoint, Scenario } from "../types/data-driven.ts";
 
 // ---------------------------------------------------------------------------
-// Pattern 1: JSON import → test.each
+// Load data (independent const — never inline await in test.each)
+// ---------------------------------------------------------------------------
+
+const users = await fromJson<User>("data/users.json");
+const endpoints = await fromCsv<Endpoint>("data/endpoints.csv");
+const scenarios = await fromYaml<Scenario>("data/scenarios.yaml");
+
+// ---------------------------------------------------------------------------
+// Pattern 1: JSON → test.each
 // ---------------------------------------------------------------------------
 
 /**
@@ -55,16 +61,14 @@ export const userTests = test.each(users)(
 );
 
 // ---------------------------------------------------------------------------
-// Pattern 2: CSV loader → test.each
+// Pattern 2: CSV → test.each
 // ---------------------------------------------------------------------------
 
 /**
  * One test per row in endpoints.csv.
  * CSV values are always strings — cast as needed.
  */
-export const endpointTests = test.each(
-  await fromCsv("./data/endpoints.csv"),
-)(
+export const endpointTests = test.each(endpoints)(
   {
     id: "endpoint-$method-$path",
     name: "$method $path → $expected",
@@ -83,16 +87,14 @@ export const endpointTests = test.each(
 );
 
 // ---------------------------------------------------------------------------
-// Pattern 3: YAML loader → test.each (builder mode)
+// Pattern 3: YAML → test.each (builder mode)
 // ---------------------------------------------------------------------------
 
 /**
  * Multi-step test per scenario in scenarios.yaml.
  * Builder mode gives you setup/steps/teardown with full metadata.
  */
-export const scenarioTests = test.each(
-  await fromYaml("./data/scenarios.yaml"),
-)(
+export const scenarioTests = test.each(scenarios)(
   {
     id: "scenario-$id",
     name: "$description",
@@ -112,7 +114,6 @@ export const scenarioTests = test.each(
 
     return { status: res.status };
   })
-  // eslint-disable-next-line @typescript-eslint/require-await
   .step("log result", async (ctx, state, row) => {
     ctx.log(`${row.method} ${row.path} → ${state.status}`);
   });

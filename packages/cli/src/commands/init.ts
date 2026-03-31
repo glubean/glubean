@@ -704,6 +704,11 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       description: "Shared response types directory",
     },
     {
+      path: "types/data-driven.ts",
+      content: () => readCliTemplate("types/data-driven.ts"),
+      description: "Types for data-driven test data",
+    },
+    {
       path: "GLUBEAN.md",
       content: GLUBEAN_MD_TEMPLATE,
       description: "Project-specific test conventions for AI skill",
