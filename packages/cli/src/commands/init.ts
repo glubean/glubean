@@ -522,8 +522,11 @@ async function installDependencies(): Promise<void> {
 // Options
 // ---------------------------------------------------------------------------
 
+export type InitWorkflow = "explore" | "test" | "contract-first";
+
 export interface InitOptions {
   minimal?: boolean;
+  contractFirst?: boolean;
   hooks?: boolean;
   githubActions?: boolean;
   aiTools?: boolean;
@@ -552,31 +555,40 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // ── Project Type ─────────────────────────────────────────────────────────
+  // ── Workflow ─────────────────────────────────────────────────────────────
 
-  let isMinimal = options.minimal ?? false;
+  let workflow: InitWorkflow = options.contractFirst
+    ? "contract-first"
+    : options.minimal
+      ? "explore"
+      : "test";
 
-  if (interactive && !options.minimal) {
+  if (interactive && !options.minimal && !options.contractFirst) {
     console.log(
-      `${colors.dim}━━━ Project Type ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
+      `${colors.dim}━━━ What kind of project? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
     );
     const choice = await promptChoice(
-      "What would you like to create?",
+      "What are you doing?",
       [
         {
           key: "1",
-          label: "Best Practice",
-          desc: "Full project with tests, CI, multi-env, and examples",
+          label: "Explore / play with an API",
+          desc: "Lightweight — explore folder with examples",
         },
         {
           key: "2",
-          label: "Minimal",
-          desc: "Quick start — explore folder with GET, POST, and pick examples",
+          label: "Write tests for an existing API",
+          desc: "Full project — tests, CI config, types, schemas",
+        },
+        {
+          key: "3",
+          label: "Build contract-first for a new API",
+          desc: "Define behavior before implementing — contracts, tests, types",
         },
       ],
       "1",
     );
-    isMinimal = choice === "2";
+    workflow = choice === "3" ? "contract-first" : choice === "2" ? "test" : "explore";
   }
 
   if (interactive && !options.overwrite) {
@@ -600,8 +612,13 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     }
   }
 
-  if (isMinimal) {
+  if (workflow === "explore") {
     await initMinimal(options.overwrite ?? false);
+    return;
+  }
+
+  if (workflow === "contract-first") {
+    await initContractFirst(options.overwrite ?? false);
     return;
   }
 
@@ -1012,6 +1029,204 @@ async function initMinimal(overwrite: boolean): Promise<void> {
     );
     console.log(
       `  4. Read ${colors.cyan}README.md${colors.reset} for links and next steps\n`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Contract-first init
+// ---------------------------------------------------------------------------
+
+const PRODUCT_README = `# Product Intent
+
+This directory holds the upstream business requirements, user stories, and
+acceptance criteria that drive the contracts in \`contracts/\`.
+
+The agent reads these files to understand what the API should do.
+Write them in whatever format your team uses — markdown, bullet lists,
+copy-pasted issue descriptions, or structured PRDs.
+
+## Tips
+
+- One file per feature or resource (e.g. \`coupons.md\`, \`auth.md\`)
+- Include expected error cases and edge conditions
+- Reference specific status codes and field names when you know them
+- When requirements conflict, note both versions — the agent will escalate
+`;
+
+const CONTRACTS_README = `# Contracts
+
+Executable API contracts — the source of truth for how the API should behave.
+
+Files here are Glubean tests written in contract-first style:
+- \`ctx.validate(zodSchema)\` defines response shape contracts
+- \`.step()\` chains define cross-endpoint workflow contracts
+- \`ctx.expect\` assertions define key business values
+
+These contracts are NOT exploratory tests. They define the target behavior.
+
+## Lifecycle
+
+1. Draft: agent writes contract from product intent
+2. Review: human confirms the contract matches intent
+3. Red: implementation does not satisfy the contract yet
+4. Green: implementation passes all contracts
+5. Promote: stable contracts move to \`tests/\` for regression
+
+## Rules
+
+- Do not modify contracts to make failing implementations pass
+- Fix the implementation, not the contract
+- Only change a contract when the business requirement changes
+`;
+
+const CONTRACT_FIRST_PACKAGE_JSON = (sdkVersion: string) =>
+  JSON.stringify(
+    {
+      name: "my-glubean-project",
+      version: "0.1.0",
+      type: "module",
+      scripts: {
+        "contract:run": "glubean run contracts/",
+        "contract:verbose": "glubean run contracts/ --verbose",
+        test: "glubean run --config ci-config/default.yaml",
+        "test:ci": "glubean run --config ci-config/ci.yaml",
+        explore: "glubean run --config ci-config/explore.yaml",
+        scan: "glubean scan",
+      },
+      dependencies: {
+        "@glubean/sdk": sdkVersion,
+        zod: "^4.0.0",
+      },
+    },
+    null,
+    2,
+  ) + "\n";
+
+async function initContractFirst(overwrite: boolean): Promise<void> {
+  console.log(
+    `${colors.dim}  Contract-first — define API behavior before implementing${colors.reset}\n`,
+  );
+
+  const files: FileEntry[] = [
+    {
+      path: "package.json",
+      content: CONTRACT_FIRST_PACKAGE_JSON(SDK_VERSION),
+      description: "Package config with contract + test scripts",
+    },
+    {
+      path: ".env",
+      content: `# Environment variables\n# Set BASE_URL to your API server once it's running\nBASE_URL=http://localhost:3000\n`,
+      description: "Environment variables",
+    },
+    {
+      path: ".env.secrets",
+      content: "# Secrets (add to .gitignore)\n",
+      description: "Secret variables",
+    },
+    {
+      path: ".gitignore",
+      content: GITIGNORE,
+      description: "Git ignore rules",
+    },
+    {
+      path: "product/README.md",
+      content: PRODUCT_README,
+      description: "Product intent directory",
+    },
+    {
+      path: "contracts/README.md",
+      content: CONTRACTS_README,
+      description: "Executable contracts directory",
+    },
+    {
+      path: "types/README.md",
+      content: TYPES_README,
+      description: "Shared response types directory",
+    },
+    {
+      path: "schemas/README.md",
+      content: "# Schemas\n\nReusable Zod schemas for API response validation.\n",
+      description: "Shared Zod schemas directory",
+    },
+    {
+      path: "ci-config/default.yaml",
+      content: () => readCliTemplate("ci-config/default.yaml"),
+      description: "Default run config",
+    },
+    {
+      path: "ci-config/ci.yaml",
+      content: () => readCliTemplate("ci-config/ci.yaml"),
+      description: "CI run config",
+    },
+    {
+      path: "ci-config/explore.yaml",
+      content: () => readCliTemplate("ci-config/explore.yaml"),
+      description: "Explore run config",
+    },
+    {
+      path: "GLUBEAN.md",
+      content: GLUBEAN_MD_TEMPLATE,
+      description: "Project conventions for AI skill",
+    },
+  ];
+
+  let created = 0;
+  let skipped = 0;
+  let overwritten = 0;
+
+  for (const file of files) {
+    const existedBefore = await fileExists(file.path);
+    if (existedBefore && !overwrite) {
+      console.log(
+        `  ${colors.dim}skip${colors.reset}  ${file.path} (already exists)`,
+      );
+      skipped++;
+      continue;
+    }
+
+    const parentDir = file.path.substring(0, file.path.lastIndexOf("/"));
+    if (parentDir) {
+      await mkdir(parentDir, { recursive: true });
+    }
+    const content = await resolveContent(file.content);
+    await writeFile(file.path, content, "utf-8");
+
+    if (existedBefore) {
+      console.log(
+        `  ${colors.yellow}overwrite${colors.reset} ${file.path} - ${file.description}`,
+      );
+      overwritten++;
+    } else {
+      console.log(
+        `  ${colors.green}create${colors.reset} ${file.path} - ${file.description}`,
+      );
+      created++;
+    }
+  }
+
+  console.log(
+    `\n${colors.bold}Summary:${colors.reset} ${created} created, ${overwritten} overwritten, ${skipped} skipped\n`,
+  );
+
+  if (created > 0) {
+    await installDependencies();
+
+    console.log(`${colors.bold}Next steps:${colors.reset}`);
+    console.log(`\n  Connect AI  ${colors.dim}(run once)${colors.reset}`);
+    console.log(`    ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
+    console.log(`    ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}\n`);
+    console.log(
+      `  1. Write your API requirements in ${colors.cyan}product/${colors.reset}`,
+    );
+    console.log(
+      `  2. Ask your AI agent to write contracts in ${colors.cyan}contracts/${colors.reset}`,
+    );
+    console.log(
+      `  3. Implement the API, then run ${colors.cyan}npm run contract:run${colors.reset}`,
+    );
+    console.log(
+      `  4. Iterate until green, then promote to ${colors.cyan}tests/${colors.reset}\n`,
     );
   }
 }
