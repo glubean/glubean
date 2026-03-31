@@ -490,6 +490,54 @@ test("test.each - filter with all excluded returns empty", () => {
 });
 
 // =============================================================================
+// test.each - map input (Record<string, T>)
+// =============================================================================
+
+test("test.each - accepts map input and injects _pick", () => {
+  clearRegistry();
+  const map = {
+    alice: { role: "admin", expected: 200 },
+    bob: { role: "user", expected: 200 },
+  };
+  const tests = gbTest.each(map)(
+    { id: "user-$_pick", tags: "smoke" },
+    async () => {},
+  );
+
+  expect(tests.length).toBe(2);
+  expect(tests[0].meta.id).toBe("user-alice");
+  expect(tests[1].meta.id).toBe("user-bob");
+
+  const registry = getRegistry();
+  expect(registry.length).toBe(2);
+  expect(registry[0].id).toBe("user-alice");
+  expect(registry[1].id).toBe("user-bob");
+});
+
+test("test.each - map input works with builder mode", () => {
+  clearRegistry();
+  const map = {
+    "us-east": { region: "us", expected: 200 },
+    "eu-west": { region: "eu", expected: 200 },
+  };
+  gbTest.each(map)({ id: "region-$_pick" })
+    .step("check", async () => {})
+    .build();
+
+  const registry = getRegistry();
+  expect(registry.length).toBe(2);
+  expect(registry[0].id).toBe("region-us-east");
+  expect(registry[1].id).toBe("region-eu-west");
+});
+
+test("test.each - map input rejects non-plain objects", () => {
+  clearRegistry();
+  expect(() => {
+    gbTest.each(new Date() as any)("bad-$id", async () => {});
+  }).toThrow("plain object");
+});
+
+// =============================================================================
 // test.each - tagFields
 // =============================================================================
 

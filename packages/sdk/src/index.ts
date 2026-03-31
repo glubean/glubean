@@ -508,6 +508,30 @@ function resolveBaseMeta(idOrMeta: string | TestMeta): TestMeta {
   return typeof idOrMeta === "string" ? { id: idOrMeta, name: idOrMeta } : { name: idOrMeta.id, ...idOrMeta };
 }
 
+/**
+ * Normalize table input for test.each: accepts array or plain object (map).
+ *
+ * - Array: returned as-is
+ * - Plain object: converted to array with `_pick` key injected per entry
+ *
+ * @internal
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function normalizeEachTable<T extends Record<string, unknown>>(
+  table: readonly T[] | Record<string, T>,
+): (T & { _pick?: string })[] {
+  if (Array.isArray(table)) return table as (T & { _pick?: string })[];
+  if (!isPlainObject(table)) {
+    throw new Error("test.each() expects an array or a plain object (map).");
+  }
+  return Object.entries(table).map(([key, val]) => ({ ...val, _pick: key }));
+}
+
 // =============================================================================
 // EachBuilder — data-driven builder with step support
 // =============================================================================
@@ -1172,7 +1196,8 @@ function createExtendedTest<Ctx extends TestContext>(
   };
 
   // .each() — data-driven with fixtures
-  extTest.each = <T extends Record<string, unknown>>(table: readonly T[], options?: test.EachOptions) => {
+  extTest.each = <T extends Record<string, unknown>>(table: readonly T[] | Record<string, T>, options?: test.EachOptions) => {
+    const rows = normalizeEachTable(table);
     const legacyParallel = options?.parallel ?? false;
     return ((
       idOrMeta: string | TestMeta,
@@ -1182,13 +1207,13 @@ function createExtendedTest<Ctx extends TestContext>(
       const parallel = baseMeta.parallel ?? legacyParallel;
 
       if (!fn) {
-        return new EachBuilder<unknown, T, Ctx>(baseMeta, table, allFixtures, parallel);
+        return new EachBuilder<unknown, T, Ctx>(baseMeta, rows, allFixtures, parallel);
       }
 
       // Simple mode with fixtures
       const filteredTable = baseMeta.filter
-        ? table.filter((row, i) => baseMeta.filter!(row as Record<string, unknown>, i))
-        : table;
+        ? rows.filter((row, i) => baseMeta.filter!(row as Record<string, unknown>, i))
+        : rows;
       const tagFieldNames = toArray(baseMeta.tagFields);
       const staticTags = toArray(baseMeta.tags);
       const isPick = filteredTable.length > 0 && "_pick" in filteredTable[0];
@@ -1312,7 +1337,7 @@ export namespace test {
   }
 
   export function each<T extends Record<string, unknown>>(
-    table: readonly T[],
+    table: readonly T[] | Record<string, T>,
     /** @deprecated Pass `parallel` in TestMeta instead. */
     options?: EachOptions,
   ): {
@@ -1323,6 +1348,7 @@ export namespace test {
     (idOrMeta: string): EachBuilder<unknown, T>;
     (idOrMeta: TestMeta): EachBuilder<unknown, T>;
   } {
+    const rows = normalizeEachTable(table);
     const legacyParallel = options?.parallel ?? false;
     return ((
       idOrMeta: string | TestMeta,
@@ -1333,13 +1359,13 @@ export namespace test {
 
       // Builder mode: no callback → return EachBuilder
       if (!fn) {
-        return new EachBuilder<unknown, T>(baseMeta, table, undefined, parallel);
+        return new EachBuilder<unknown, T>(baseMeta, rows, undefined, parallel);
       }
 
       // Apply filter if present
       const filteredTable = baseMeta.filter
-        ? table.filter((row, index) => baseMeta.filter!(row as Record<string, unknown>, index))
-        : table;
+        ? rows.filter((row, index) => baseMeta.filter!(row as Record<string, unknown>, index))
+        : rows;
 
       const tagFieldNames = toArray(baseMeta.tagFields);
       const staticTags = toArray(baseMeta.tags);
