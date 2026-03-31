@@ -20,8 +20,13 @@ auth, browser, graphql, mcp
 - Each plugin has its own version. Bump only the plugin you changed.
 - Bump command (example): `pnpm --filter @glubean/browser exec -- npm version 0.2.X --no-git-tag-version`
 
-### Release flow
-- Commit bump → `git tag v0.1.X` → `git push && git push origin v0.1.X`
+### Release cadence
+- **Batch releases every 2-7 days.** Accumulate commits on main, then bump + tag + publish as one release.
+- **Do NOT bump/tag/publish after every commit.** Version inflation wastes version numbers and creates noisy changelogs.
+- **Exception: urgent bugfixes.** Ask the user before publishing an urgent fix outside the normal cadence.
+- When ready to release: bump changed packages → commit → `git tag v0.1.X` → `git push && git push origin v0.1.X`
+
+### Release mechanics
 - Never publish a version that already exists on npm. Always bump before tagging.
 - CI publishes all packages on tag. Already-published versions are skipped (`continue-on-error`).
 
