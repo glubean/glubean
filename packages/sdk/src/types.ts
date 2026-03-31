@@ -2103,6 +2103,27 @@ export interface TestMeta {
    * to track it in Grafana. Defaults to false to avoid cardinality explosion.
    */
   enableMetrics?: boolean;
+
+  /**
+   * Allow data rows to run in parallel (data-driven only).
+   * Actual concurrency level is controlled by `--concurrency` CLI flag.
+   *
+   * When true, rows execute concurrently via an async work queue.
+   * Safe for IO-bound tests. Avoid if rows share mutable state.
+   *
+   * Ignored for non-data-driven tests.
+   *
+   * @default false
+   *
+   * @example
+   * ```ts
+   * test.each(users)(
+   *   { id: "user-$id", tags: "smoke", parallel: true },
+   *   async (ctx, row) => { ... },
+   * );
+   * ```
+   */
+  parallel?: boolean;
 }
 
 /**

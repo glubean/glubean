@@ -1173,12 +1173,13 @@ function createExtendedTest<Ctx extends TestContext>(
 
   // .each() — data-driven with fixtures
   extTest.each = <T extends Record<string, unknown>>(table: readonly T[], options?: test.EachOptions) => {
-    const parallel = options?.parallel ?? false;
+    const legacyParallel = options?.parallel ?? false;
     return ((
       idOrMeta: string | TestMeta,
       fn?: (ctx: Ctx, data: T) => Promise<void>,
     ): Test[] | EachBuilder<unknown, T, Ctx> => {
       const baseMeta = resolveBaseMeta(idOrMeta);
+      const parallel = baseMeta.parallel ?? legacyParallel;
 
       if (!fn) {
         return new EachBuilder<unknown, T, Ctx>(baseMeta, table, allFixtures, parallel);
@@ -1303,23 +1304,16 @@ export namespace test {
   }
 
   /**
-   * Options for `test.each()`.
+   * @deprecated Use `parallel` in TestMeta instead:
+   * `test.each(table)({ id: "...", parallel: true }, fn)`
    */
   export interface EachOptions {
-    /**
-     * Allow data rows to run in parallel.
-     * Actual concurrency level is controlled externally (e.g. `--concurrency` CLI flag).
-     *
-     * When true, rows execute concurrently in a single process via an async work queue.
-     * Safe for IO-bound tests. Avoid if rows share mutable state across await points.
-     *
-     * @default false
-     */
     parallel?: boolean;
   }
 
   export function each<T extends Record<string, unknown>>(
     table: readonly T[],
+    /** @deprecated Pass `parallel` in TestMeta instead. */
     options?: EachOptions,
   ): {
     // Simple mode: with callback → Test[]
@@ -1329,12 +1323,13 @@ export namespace test {
     (idOrMeta: string): EachBuilder<unknown, T>;
     (idOrMeta: TestMeta): EachBuilder<unknown, T>;
   } {
-    const parallel = options?.parallel ?? false;
+    const legacyParallel = options?.parallel ?? false;
     return ((
       idOrMeta: string | TestMeta,
       fn?: EachTestFunction<T>,
     ): Test[] | EachBuilder<unknown, T> => {
       const baseMeta = resolveBaseMeta(idOrMeta);
+      const parallel = baseMeta.parallel ?? legacyParallel;
 
       // Builder mode: no callback → return EachBuilder
       if (!fn) {
