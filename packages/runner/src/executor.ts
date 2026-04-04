@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, writeFile, rm } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve, join } from "node:path";
@@ -231,6 +231,13 @@ export class TestExecutor {
   private _sessionSetupFailed = false;
   private _sessionSetupPromise?: Promise<void>;
 
+  // ── Zero-project state (scratch mode) ─────────────────────────────────
+  private _zeroProjectSetup = false;
+  private _zeroProjectTsxArgs: string[] = [];
+  private _zeroProjectEnv: Record<string, string> = {};
+  private _tempPackageJson: "created" | "patched" | false = false;
+  private _originalPackageJson?: string;
+
   constructor(options: ExecutorOptions = {}) {
     // Use .js (compiled) — works with tsx and matches npm-published dist/
     this.harnessPath = resolve(__dirname, "harness.js");
@@ -282,29 +289,33 @@ export class TestExecutor {
    * Yields session lifecycle events (log, status).
    */
   async *finalize(): AsyncGenerator<ExecutionEvent> {
-    if (!this._sessionFile || !this._sessionSetupDone) return;
-    const sessionUrl = pathToFileURL(this._sessionFile).href;
-    const ctx: ExecutionContext = {
-      ...createContextWithSession(
-        { vars: {}, secrets: {} },
-        this._sessionState,
-      ),
-      sessionMode: "teardown",
-    };
-
-    try {
-      for await (const event of this.run(sessionUrl, "__session__", ctx)) {
-        yield event;
-      }
-    } catch (err) {
-      yield {
-        type: "log",
-        message: `Session teardown error: ${err instanceof Error ? err.message : String(err)}`,
+    // Session teardown
+    if (this._sessionFile && this._sessionSetupDone) {
+      const sessionUrl = pathToFileURL(this._sessionFile).href;
+      const ctx: ExecutionContext = {
+        ...createContextWithSession(
+          { vars: {}, secrets: {} },
+          this._sessionState,
+        ),
+        sessionMode: "teardown",
       };
-    } finally {
-      // Prevent double teardown
-      this._sessionFile = undefined;
+
+      try {
+        for await (const event of this.run(sessionUrl, "__session__", ctx)) {
+          yield event;
+        }
+      } catch (err) {
+        yield {
+          type: "log",
+          message: `Session teardown error: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      } finally {
+        this._sessionFile = undefined;
+      }
     }
+
+    // Zero-project cleanup
+    this._cleanupZeroProject();
   }
 
   /**
@@ -343,6 +354,66 @@ export class TestExecutor {
     }
 
     await this._sessionSetupPromise;
+  }
+
+  /**
+   * Internal: set up zero-project mode once per executor instance.
+   * Creates temp package.json and resolver args if no @glubean/sdk in node_modules.
+   */
+  private async _ensureZeroProject(cwd: string): Promise<void> {
+    if (this._zeroProjectSetup) return;
+    this._zeroProjectSetup = true;
+
+    if (existsSync(join(cwd, "node_modules", "@glubean", "sdk"))) return;
+
+    const registerPath = resolve(__dirname, "zero-project-register.mjs");
+    this._zeroProjectTsxArgs.push("--import", registerPath);
+
+    const sdkUrl = import.meta.resolve("@glubean/sdk");
+    const sdkEntry = fileURLToPath(sdkUrl);
+    this._zeroProjectEnv["GLUBEAN_VENDORED_ROOT"] = resolve(dirname(sdkEntry), "../../..");
+
+    const pkgPath = join(cwd, "package.json");
+    if (!existsSync(pkgPath)) {
+      try {
+        writeFileSync(pkgPath, '{"type":"module"}\n');
+        this._tempPackageJson = "created";
+      } catch {
+        // Non-critical
+      }
+    } else {
+      try {
+        const original = readFileSync(pkgPath, "utf-8");
+        const pkg = JSON.parse(original);
+        if (pkg.type !== "module") {
+          this._originalPackageJson = original;
+          pkg.type = "module";
+          writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+          this._tempPackageJson = "patched";
+        }
+      } catch {
+        // Non-critical
+      }
+    }
+  }
+
+  /**
+   * Internal: clean up zero-project temp files.
+   */
+  private _cleanupZeroProject(): void {
+    if (!this._tempPackageJson) return;
+    const cwd = this.options.cwd || process.cwd();
+    const pkgPath = join(cwd, "package.json");
+    try {
+      if (this._tempPackageJson === "created") {
+        unlinkSync(pkgPath);
+      } else if (this._tempPackageJson === "patched" && this._originalPackageJson) {
+        writeFileSync(pkgPath, this._originalPackageJson);
+      }
+    } catch {
+      // Non-critical
+    }
+    this._tempPackageJson = false;
   }
 
   async *run(
@@ -428,60 +499,17 @@ export class TestExecutor {
       env["NODE_OPTIONS"] = nodeOptions.join(" ");
     }
 
-    // ── Zero-project mode ────────────────────────────────────────────────────
-    // If the user's cwd has no node_modules/@glubean/sdk, inject a custom
-    // ESM resolver so `import { test } from "@glubean/sdk"` resolves from
-    // the runner's own dependencies. Also create a temporary package.json
-    // with "type":"module" if none exists (so .js files are treated as ESM).
+    // ── Zero-project mode (scratch) ────────────────────────────────────────
     const cwd = this.options.cwd || process.cwd();
-    const zeroProject = !existsSync(join(cwd, "node_modules", "@glubean", "sdk"));
-    let tempPackageJson: "created" | "patched" | false = false;
-    let originalPackageJson: string | undefined;
+    await this._ensureZeroProject(cwd);
 
-    const tsxArgs: string[] = [];
-
-    if (zeroProject) {
-      const registerPath = resolve(__dirname, "zero-project-register.mjs");
-      tsxArgs.push("--import", registerPath);
-
-      // Point resolver to the node_modules that contains @glubean/sdk.
-      // import.meta.resolve works for ESM-only packages; returns a file:// URL.
-      // Walk up: dist/index.js → dist → @glubean/sdk → @glubean → node_modules
-      const sdkUrl = import.meta.resolve("@glubean/sdk");
-      const sdkEntry = fileURLToPath(sdkUrl); // .../dist/index.js
-      env["GLUBEAN_VENDORED_ROOT"] = resolve(dirname(sdkEntry), "../../..");
-
-      // Ensure .js files are treated as ESM.
-      // If no package.json → create a temp one.
-      // If package.json exists but lacks "type":"module" → patch it, restore after.
-      const pkgPath = join(cwd, "package.json");
-      if (!existsSync(pkgPath)) {
-        try {
-          const { writeFileSync } = await import("node:fs");
-          writeFileSync(pkgPath, '{"type":"module"}\n');
-          tempPackageJson = "created";
-        } catch {
-          // Non-critical — .mjs files still work
-        }
-      } else {
-        try {
-          const { readFileSync, writeFileSync } = await import("node:fs");
-          const original = readFileSync(pkgPath, "utf-8");
-          const pkg = JSON.parse(original);
-          if (pkg.type !== "module") {
-            originalPackageJson = original;
-            pkg.type = "module";
-            writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
-            tempPackageJson = "patched";
-          }
-        } catch {
-          // Non-critical
-        }
-      }
+    // Merge zero-project env vars
+    for (const [k, v] of Object.entries(this._zeroProjectEnv)) {
+      env[k] = v;
     }
 
     // Spawn tsx subprocess via node
-    const child = spawn("node", [resolveTsxPath(), ...tsxArgs, ...args], {
+    const child = spawn("node", [resolveTsxPath(), ...this._zeroProjectTsxArgs, ...args], {
       cwd,
       env,
       stdio: ["pipe", "pipe", (inspectBrk || env["GLUBEAN_DEBUG"]) ? "inherit" : "pipe"],
@@ -610,22 +638,6 @@ export class TestExecutor {
             type: "error",
             message: `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ""}`,
           });
-        }
-      }
-
-      // Clean up temporary package.json created/patched for zero-project mode
-      if (tempPackageJson) {
-        try {
-          import("node:fs").then(({ unlinkSync, writeFileSync }) => {
-            const pkgPath = join(cwd, "package.json");
-            if (tempPackageJson === "created") {
-              unlinkSync(pkgPath);
-            } else if (tempPackageJson === "patched" && originalPackageJson) {
-              writeFileSync(pkgPath, originalPackageJson);
-            }
-          }).catch(() => {});
-        } catch {
-          // Non-critical
         }
       }
 
