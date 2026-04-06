@@ -859,6 +859,40 @@ test("flow asSteps() injects steps into test builder", async () => {
   expect(built.steps![0].meta.name).toBe("ping");
 });
 
+test("flow asSteps() preserves setup and teardown", async () => {
+  clearRegistry();
+  const order: string[] = [];
+  const client = createMockClient({
+    "GET /data": { status: 200, body: {} },
+  });
+
+  const flow = contract.flow("with-lifecycle")
+    .setup(async () => {
+      order.push("setup");
+      return { token: "abc" };
+    })
+    .http("fetch", {
+      endpoint: "GET /data",
+      client,
+      expect: { status: 200 },
+      verify: async () => { order.push("fetch"); },
+    })
+    .teardown(async () => {
+      order.push("teardown");
+    })
+    .build();
+
+  // Compose into another test via asSteps()
+  const { test: glubeanTest } = await import("./index.js");
+  const built = glubeanTest("composed").use(flow.asSteps()).build();
+
+  // Should have 3 steps: setup + fetch + teardown
+  expect(built.steps).toHaveLength(3);
+  expect(built.steps![0].meta.name).toBe("with-lifecycle [setup]");
+  expect(built.steps![1].meta.name).toBe("fetch");
+  expect(built.steps![2].meta.name).toBe("with-lifecycle [teardown]");
+});
+
 test("flow body as function of state", async () => {
   clearRegistry();
   let receivedBody: unknown;

@@ -369,10 +369,26 @@ class FlowBuilder<S = unknown> {
 
     const asSteps = () => {
       const steps = test.steps!;
+      const setupFn = this._setupFn;
+      const teardownFn = this._teardownFn;
       return <B>(b: import("./index.js").TestBuilder<B>) => {
+        // Inject setup as first step if flow has one
+        if (setupFn) {
+          b.step(`${this._id} [setup]`, async (ctx) => {
+            return setupFn(ctx);
+          });
+        }
+        // Inject flow steps
         for (const s of steps) {
           b.step(s.meta.name, async (ctx, state) => {
             return s.fn(ctx, state);
+          });
+        }
+        // Inject teardown as last step if flow has one
+        if (teardownFn) {
+          b.step(`${this._id} [teardown]`, async (ctx, state) => {
+            await teardownFn(ctx, state);
+            return state;
           });
         }
         return b;
