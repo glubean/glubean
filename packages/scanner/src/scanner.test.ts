@@ -258,3 +258,147 @@ test("validate passes regardless of import content (no imports)", async () => {
   const result = await validateWithContent("// no imports");
   expect(result.valid).toBe(true);
 });
+
+// =============================================================================
+// Contract extraction in scan()
+// =============================================================================
+
+function createMockFsWithFiles(
+  files: Record<string, string>,
+  packageJson = '{ "dependencies": { "@glubean/sdk": "^0.1.27" } }',
+) {
+  const allFiles: Record<string, string> = {
+    "package.json": packageJson,
+    ...files,
+  };
+
+  return {
+    exists: (path: string) => Promise.resolve(path.endsWith("package.json")),
+    readText: (path: string) => {
+      for (const [name, content] of Object.entries(allFiles)) {
+        if (path.endsWith(name)) return Promise.resolve(content);
+      }
+      return Promise.reject(new Error(`Not found: ${path}`));
+    },
+    readBytes: (path: string) => {
+      for (const [name, content] of Object.entries(allFiles)) {
+        if (path.endsWith(name)) return Promise.resolve(new TextEncoder().encode(content));
+      }
+      return Promise.reject(new Error(`Not found: ${path}`));
+    },
+    walk: async function* (_dir: string, _opts: any) {
+      for (const name of Object.keys(allFiles)) {
+        if (name !== "package.json") yield `/project/${name}`;
+      }
+    },
+    join: (...segments: string[]) => segments.join("/"),
+    relative: (_base: string, target: string) => target.replace("/project/", ""),
+  };
+}
+
+const mockHasher = {
+  sha256: async (content: Uint8Array) => `sha256-${content.length}`,
+};
+
+test("scan() extracts contract metadata from .contract.ts files", async () => {
+  const contractSource = `
+import { contract } from "@glubean/sdk";
+export const getUser = contract.http("get-user", {
+  endpoint: "GET /users/:id",
+  client: api,
+  cases: {
+    success: {
+      expect: { status: 200 },
+    },
+    notFound: {
+      expect: { status: 404 },
+    },
+  },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/users.contract.ts": contractSource,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  expect(result.contracts).toBeDefined();
+  expect(result.contracts).toHaveLength(1);
+  expect(result.contracts![0].contractId).toBe("get-user");
+  expect(result.contracts![0].endpoint).toBe("GET /users/:id");
+  expect(result.contracts![0].protocol).toBe("http");
+  expect(result.contracts![0].cases).toHaveLength(2);
+  expect(result.contracts![0].cases[0].key).toBe("success");
+  expect(result.contracts![0].cases[1].key).toBe("notFound");
+});
+
+test("scan() flow chained syntax is not statically extractable", async () => {
+  // contract.flow() uses chained builder — not extractable by static regex.
+  // Flow metadata comes from registry at runtime, not static analysis.
+  const flowSource = `
+import { contract } from "@glubean/sdk";
+export const lifecycle = contract.flow("run-lifecycle")
+  .http("upload", { endpoint: "POST /cli-runs", client: uploadClient, expect: { status: 200 } })
+  .http("read", { endpoint: "GET /runs/:runId", client: api, expect: { status: 200 } })
+  .build();
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/runs.contract.ts": flowSource,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  expect(result.contracts).toHaveLength(0);
+});
+
+test("scan() returns empty contracts for pure test files", async () => {
+  const testSource = `
+import { test } from "@glubean/sdk";
+export const myTest = test("my-test", async (ctx) => {});
+`;
+
+  const fs = createMockFsWithFiles({
+    "tests/smoke.test.ts": testSource,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  expect(result.contracts).toBeDefined();
+  expect(result.contracts).toHaveLength(0);
+});
+
+test("scan() contracts include deferred case metadata", async () => {
+  const source = `
+import { contract } from "@glubean/sdk";
+export const deleteUser = contract.http("delete-user", {
+  endpoint: "DELETE /users/:id",
+  client: api,
+  cases: {
+    success: {
+      expect: { status: 200 },
+    },
+    viewerBlocked: {
+      expect: { status: 403 },
+      deferred: "needs VIEWER_API_KEY",
+    },
+  },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/users.contract.ts": source,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  const deferred = result.contracts![0].cases.find((c) => c.key === "viewerBlocked");
+  expect(deferred).toBeDefined();
+  expect(deferred!.deferred).toBe("needs VIEWER_API_KEY");
+  expect(deferred!.expectStatus).toBe(403);
+});

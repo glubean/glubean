@@ -102,6 +102,11 @@ export interface ScanResult {
   tags: string[];
   /** Diagnostic warnings (non-fatal issues) */
   warnings: string[];
+  /**
+   * Contract metadata extracted from .contract.ts files.
+   * Independent from test exports — consumed by projection/coverage tools.
+   */
+  contracts: import("./extractor-static.js").ContractStaticMeta[];
 }
 
 /** Options for scanning */

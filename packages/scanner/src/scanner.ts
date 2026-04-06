@@ -6,7 +6,8 @@
  */
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
-import { extractAliasesFromSource } from "./extractor-static.js";
+import { extractAliasesFromSource, extractContractCases } from "./extractor-static.js";
+import type { ContractStaticMeta } from "./extractor-static.js";
 import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.js";
 
 /** File system interface for runtime abstraction */
@@ -43,9 +44,14 @@ const DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build"];
 const DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"];
 
 const TEST_FILE_SUFFIXES = [".test.ts", ".test.js", ".test.mjs"];
+const CONTRACT_FILE_SUFFIXES = [".contract.ts", ".contract.js", ".contract.mjs"];
 
 function isTestFile(filePath: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
+}
+
+function isContractFile(filePath: string): boolean {
+  return CONTRACT_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
 }
 
 /**
@@ -220,14 +226,15 @@ export class Scanner {
     // Phase 1: collect .extend() aliases from all .ts files
     const aliases = await this.collectAliases(dir, skipDirs, extensions);
 
-    // Phase 2: collect all *.test.ts files
+    // Phase 2: collect test files and contract files
     const testFiles: string[] = [];
+    const contractFiles: string[] = [];
     for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
-      if (!isTestFile(filePath)) continue;
-      testFiles.push(filePath);
+      if (isTestFile(filePath)) testFiles.push(filePath);
+      else if (isContractFile(filePath)) contractFiles.push(filePath);
     }
 
-    // Extract metadata from each file using runtime extraction
+    // Phase 3: Extract test metadata from each test file
     for (const filePath of testFiles) {
       try {
         const exports = await this.extractor(filePath, aliases);
@@ -239,11 +246,8 @@ export class Scanner {
 
           files[relativePath] = { hash, exports };
 
-          // Count tests and collect tags
           for (const exp of exports) {
             testCount += 1;
-
-            // Collect tags
             if (exp.tags) {
               exp.tags.forEach((tag) => allTags.add(tag));
             }
@@ -251,6 +255,20 @@ export class Scanner {
         }
       } catch (err) {
         warnings.push(`Failed to extract metadata from ${filePath}: ${err}`);
+      }
+    }
+
+    // Phase 4: Extract contract metadata from contract files (static analysis)
+    const contracts: ContractStaticMeta[] = [];
+    for (const filePath of contractFiles) {
+      try {
+        const content = await this.fs.readText(filePath);
+        const extracted = extractContractCases(content);
+        for (const meta of extracted) {
+          contracts.push(meta);
+        }
+      } catch (err) {
+        warnings.push(`Failed to extract contracts from ${filePath}: ${err}`);
       }
     }
 
@@ -268,6 +286,7 @@ export class Scanner {
       fileCount: Object.keys(files).length,
       tags: Array.from(allTags),
       warnings,
+      contracts,
     };
   }
 }
