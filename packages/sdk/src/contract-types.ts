@@ -195,9 +195,7 @@ export interface ContractRegistryMeta {
 }
 
 /**
- * RegisteredTestMeta with contract extension.
- * This is what contract.http() registers to the global registry.
+ * @deprecated Use `RegisteredTestMeta` directly — it now has an optional `contract` field.
+ * Kept as an alias for backward compatibility.
  */
-export interface ContractCaseMeta extends RegisteredTestMeta {
-  contract: ContractRegistryMeta;
-}
+export type ContractCaseMeta = RegisteredTestMeta & { contract: ContractRegistryMeta };

@@ -411,6 +411,219 @@ test("asStep() skips deferred cases when no caseKey given", () => {
   // Verify it picked the right one by checking it doesn't throw
 });
 
+test("deferred case calls ctx.skip() at execution time", async () => {
+  const client = createMockClient();
+
+  const result = contract.http("deferred-exec", {
+    endpoint: "GET /test",
+    client,
+    cases: {
+      blocked: {
+        expect: { status: 403 },
+        deferred: "needs viewer credentials",
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await expect(result[0].fn!(mockCtx)).rejects.toThrow("SKIP: needs viewer credentials");
+});
+
+test("params function receives setup state", async () => {
+  let receivedPath = "";
+  const client = createMockClient();
+  // Override get to capture the resolved path
+  (client as any).get = (url: string, opts: any) => {
+    receivedPath = url;
+    return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
+  };
+
+  const result = contract.http("param-fn", {
+    endpoint: "GET /users/:id",
+    client,
+    cases: {
+      success: {
+        expect: { status: 200 },
+        setup: async () => ({ userId: "usr_42" }),
+        params: (state: { userId: string }) => ({ id: state.userId }),
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await result[0].fn!(mockCtx);
+  expect(receivedPath).toBe("/users/usr_42");
+});
+
+test("resolveParams replaces :param placeholders", async () => {
+  let receivedPath = "";
+  const client = createMockClient();
+  (client as any).delete = (url: string, opts: any) => {
+    receivedPath = url;
+    return createMockClient({ [`DELETE ${url}`]: { status: 200, body: {} } }).delete(url, opts);
+  };
+
+  const result = contract.http("resolve-test", {
+    endpoint: "DELETE /projects/:projectId/items/:itemId",
+    client,
+    cases: {
+      success: {
+        expect: { status: 200 },
+        params: { projectId: "prj_1", itemId: "item_2" },
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await result[0].fn!(mockCtx);
+  expect(receivedPath).toBe("/projects/prj_1/items/item_2");
+});
+
+test("query params are passed to request", async () => {
+  let receivedOpts: any = {};
+  const client = createMockClient();
+  (client as any).get = (url: string, opts: any) => {
+    receivedOpts = opts;
+    return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
+  };
+
+  const result = contract.http("query-test", {
+    endpoint: "GET /search",
+    client,
+    cases: {
+      success: {
+        expect: { status: 200 },
+        query: { q: "hello", limit: "10" },
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await result[0].fn!(mockCtx);
+  expect(receivedOpts.searchParams).toEqual({ q: "hello", limit: "10" });
+});
+
+test("headers are passed to request", async () => {
+  let receivedOpts: any = {};
+  const client = createMockClient();
+  (client as any).get = (url: string, opts: any) => {
+    receivedOpts = opts;
+    return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
+  };
+
+  const result = contract.http("headers-test", {
+    endpoint: "GET /data",
+    client,
+    cases: {
+      success: {
+        expect: { status: 200 },
+        headers: { "X-Custom": "value" },
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await result[0].fn!(mockCtx);
+  expect(receivedOpts.headers).toEqual({ "X-Custom": "value" });
+});
+
+test("asSteps() injects and executes steps in test builder", async () => {
+  const client = createMockClient();
+
+  const myContract = contract.http("as-steps-test", {
+    endpoint: "GET /test",
+    client,
+    cases: {
+      a: { expect: { status: 200 } },
+      b: { expect: { status: 201 } },
+    },
+  });
+
+  const { test: glubeanTest } = await import("./index.js");
+  const builder = glubeanTest("combined").use(myContract.asSteps());
+
+  expect(builder).toBeDefined();
+  const built = builder.build();
+  expect(built.type).toBe("steps");
+  expect(built.steps).toHaveLength(2);
+});
+
+test("register() adapter execute() is called at runtime", async () => {
+  clearRegistry();
+  let executeCalled = false;
+  let receivedSpec: any;
+
+  contract.register("test-proto", {
+    execute: async (_ctx, caseSpec, endpointSpec) => {
+      executeCalled = true;
+      receivedSpec = { caseSpec, endpointSpec };
+    },
+    metadata: (spec: { target: string }) => ({
+      protocol: "test-proto",
+      endpoint: spec.target,
+    }),
+  });
+
+  const tests = (contract as any)["test-proto"]("my-test", {
+    target: "my-service",
+    cases: {
+      ping: { expect: { status: 0 } },
+    },
+  }) as import("./types.js").Test[];
+
+  const mockCtx = createMockContext();
+  await tests[0].fn!(mockCtx);
+
+  expect(executeCalled).toBe(true);
+  expect(receivedSpec.endpointSpec.target).toBe("my-service");
+});
+
+test("multiple cases do not share state", async () => {
+  const states: unknown[] = [];
+  const client = createMockClient({
+    "POST /items": { status: 201, body: {} },
+  });
+
+  const result = contract.http("isolation-test", {
+    endpoint: "POST /items",
+    client,
+    cases: {
+      a: {
+        expect: { status: 201 },
+        setup: async () => { const s = { id: "a" }; states.push(s); return s; },
+      },
+      b: {
+        expect: { status: 201 },
+        setup: async () => { const s = { id: "b" }; states.push(s); return s; },
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await result[0].fn!(mockCtx);
+  await result[1].fn!(mockCtx);
+
+  expect(states).toHaveLength(2);
+  expect(states[0]).toEqual({ id: "a" });
+  expect(states[1]).toEqual({ id: "b" });
+});
+
+test("request schema is accessible on contract object", () => {
+  const client = createMockClient();
+  const schema = { safeParse: () => ({ success: true as const, data: {} }) };
+
+  const result = contract.http("req-schema", {
+    endpoint: "POST /users",
+    client,
+    request: schema,
+    cases: {
+      success: { expect: { status: 201 } },
+    },
+  });
+
+  expect(result.request).toBe(schema);
+});
+
 test("contract.register() produces executable tests via adapter", () => {
   clearRegistry();
 

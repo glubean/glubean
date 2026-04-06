@@ -47,7 +47,7 @@ function createHttpContract(
   const asStep = (caseKey?: string) => {
     const target = caseKey
       ? arr.find((t) => t.meta.id.endsWith(`.${caseKey}`))
-      : arr.find((t) => t.fn !== undefined && !(t.meta as any)._deferred);
+      : arr.find((t) => t.fn !== undefined && !t.meta.deferred);
     if (!target) throw new Error(`Case "${caseKey ?? "default"}" not found in contract "${id}"`);
 
     return <S>(b: import("./index.js").TestBuilder<S>) => {
@@ -105,11 +105,11 @@ function buildCaseTest<T, S>(
   const testId = `${contractId}.${caseKey}`;
   const testName = `${contractId} — ${caseKey}`;
 
-  const meta: TestMeta & { _deferred?: string } = {
+  const meta: TestMeta = {
     id: testId,
     name: testName,
     tags: allTags.length > 0 ? allTags : undefined,
-    ...(c.deferred ? { _deferred: c.deferred } : {}),
+    deferred: c.deferred,
   };
 
   const fn = async (ctx: import("./types.js").TestContext) => {
@@ -198,7 +198,7 @@ function buildCaseTest<T, S>(
     tags: allTags.length > 0 ? allTags : undefined,
     groupId: contractId,
     contract: registryMeta,
-  } as any);
+  });
 
   return { meta, type: "simple", fn };
 }
@@ -268,7 +268,7 @@ export const contract: {
             id: testId,
             name: testName,
             tags: allTags.length > 0 ? allTags : undefined,
-            ...(caseSpec.deferred ? { _deferred: caseSpec.deferred } : {}),
+            deferred: caseSpec.deferred,
           },
           type: "simple",
           fn: async (ctx) => {
@@ -291,7 +291,7 @@ export const contract: {
             hasSchema: false,
             deferred: caseSpec.deferred,
           },
-        } as any);
+        });
 
         return testDef;
       });
