@@ -1560,6 +1560,18 @@ export { configure, resolveTemplate } from "./configure.js";
 // Re-export plugin utilities
 export { definePlugin } from "./plugin.js";
 
+// Contract API
+export { contract } from "./contract.js";
+export type {
+  ContractCase,
+  ContractExpect,
+  HttpContractSpec,
+  HttpContract,
+  ContractProtocolAdapter,
+  ContractCaseMeta,
+  ContractRegistryMeta,
+} from "./contract-types.js";
+
 // Session API
 export { defineSession } from "./session.js";
 
