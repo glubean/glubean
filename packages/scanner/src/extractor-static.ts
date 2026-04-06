@@ -829,3 +829,145 @@ export function extractPickExamples(
 
   return results;
 }
+
+// ---------------------------------------------------------------------------
+// contract.http() extraction (for CodeLens and projection)
+// ---------------------------------------------------------------------------
+
+/** Metadata for a discovered contract case. */
+export interface ContractCaseStaticMeta {
+  /** Case key (e.g. "success", "notFound") */
+  key: string;
+  /** Source location (1-based line number) of the case key */
+  line: number;
+  /** Expected status code, or undefined if not statically extractable */
+  expectStatus?: number;
+  /** Deferred reason, or undefined if executable */
+  deferred?: string;
+}
+
+/** Metadata for a discovered contract.http() call. */
+export interface ContractStaticMeta {
+  /** Contract ID (e.g. "create-user") */
+  contractId: string;
+  /** Export variable name (e.g. "createUser") */
+  exportName: string;
+  /** Source location (1-based line number) of the export */
+  line: number;
+  /** Endpoint (e.g. "POST /users") */
+  endpoint: string;
+  /** Protocol */
+  protocol: string;
+  /** Cases */
+  cases: ContractCaseStaticMeta[];
+}
+
+/**
+ * Extract contract.http()/contract.grpc()/etc. metadata from TypeScript source.
+ *
+ * Statically extracts:
+ * - Contract ID, endpoint, export name, line number
+ * - Each case key with its line number
+ * - Expected status code (if literal number)
+ * - Deferred reason (if literal string)
+ *
+ * @param content - TypeScript source code
+ * @returns Array of ContractStaticMeta, or empty if no contract calls found
+ */
+export function extractContractCases(content: string): ContractStaticMeta[] {
+  const results: ContractStaticMeta[] = [];
+
+  // Match: export const X = contract.http("id", {
+  const contractPattern =
+    /export\s+const\s+(\w+)\s*=\s*contract\.(\w+)\s*\(\s*["']([^"']+)["']\s*,\s*\{/g;
+
+  let contractMatch: RegExpExecArray | null;
+  while ((contractMatch = contractPattern.exec(content)) !== null) {
+    const exportName = contractMatch[1];
+    const protocol = contractMatch[2];
+    const contractId = contractMatch[3];
+    const line = getLineNumber(content, contractMatch.index);
+
+    // Extract endpoint from the spec object
+    let endpoint = "";
+    const afterContract = content.slice(contractMatch.index + contractMatch[0].length);
+    const endpointMatch = afterContract.match(/endpoint\s*:\s*["']([^"']+)["']/);
+    if (endpointMatch) {
+      endpoint = endpointMatch[1];
+    }
+
+    // Find the cases: { ... } block
+    const casesStart = afterContract.indexOf("cases:");
+    if (casesStart === -1) {
+      results.push({ contractId, exportName, line, endpoint, protocol, cases: [] });
+      continue;
+    }
+
+    // Find the opening brace after "cases:"
+    const afterCases = afterContract.slice(casesStart);
+    const braceIdx = afterCases.indexOf("{");
+    if (braceIdx === -1) {
+      results.push({ contractId, exportName, line, endpoint, protocol, cases: [] });
+      continue;
+    }
+
+    // Extract top-level keys in the cases object by tracking brace depth
+    const casesContent = afterCases.slice(braceIdx);
+    const cases: ContractCaseStaticMeta[] = [];
+    const topLevelKeys: { key: string; offset: number }[] = [];
+    let depth = 0;
+
+    for (let i = 0; i < casesContent.length; i++) {
+      if (casesContent[i] === "{") {
+        if (depth === 1) {
+          // Look backward for the key name
+          const before = casesContent.slice(0, i).trimEnd();
+          const keyMatch = before.match(/["']?(\w+)["']?\s*:\s*$/);
+          if (keyMatch) {
+            topLevelKeys.push({ key: keyMatch[1], offset: i });
+          }
+        }
+        depth++;
+      } else if (casesContent[i] === "}") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+
+    for (const { key, offset } of topLevelKeys) {
+      const absoluteOffset =
+        contractMatch.index +
+        contractMatch[0].length +
+        casesStart +
+        braceIdx +
+        offset;
+      const caseLine = getLineNumber(content, absoluteOffset);
+
+      // Extract case body between matching braces
+      let caseDepth = 0;
+      let caseEnd = offset;
+      for (let i = offset; i < casesContent.length; i++) {
+        if (casesContent[i] === "{") caseDepth++;
+        else if (casesContent[i] === "}") {
+          caseDepth--;
+          if (caseDepth === 0) { caseEnd = i; break; }
+        }
+      }
+      const caseBody = casesContent.slice(offset, caseEnd + 1);
+
+      let expectStatus: number | undefined;
+      const statusMatch = caseBody.match(/status\s*:\s*(\d+)/);
+      if (statusMatch) expectStatus = parseInt(statusMatch[1], 10);
+
+      let deferred: string | undefined;
+      const deferredMatch = caseBody.match(/deferred\s*:\s*["']([^"']+)["']/);
+      if (deferredMatch) deferred = deferredMatch[1];
+
+      cases.push({ key, line: caseLine, expectStatus, deferred });
+    }
+
+    results.push({ contractId, exportName, line, endpoint, protocol, cases });
+  }
+
+  return results;
+}
