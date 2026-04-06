@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { extractAliasesFromSource, extractFromSource, extractPickExamples, isGlubeanFile } from "./extractor-static.js";
+import { extractAliasesFromSource, extractContractCases, extractFromSource, extractPickExamples, isGlubeanFile } from "./extractor-static.js";
 
 // =============================================================================
 // Empty / no-export cases
@@ -1086,4 +1086,134 @@ export const scenarioTest = test.pick(scenarios)(
     type: "json-map",
     path: "/project/tests/api/data/scenarios.json",
   });
+});
+
+// =============================================================================
+// contract.http() extraction
+// =============================================================================
+
+test("extractContractCases — basic contract with two cases", () => {
+  const source = `
+import { contract } from "@glubean/sdk";
+
+export const createUser = contract.http("create-user", {
+  endpoint: "POST /users",
+  client: api,
+  cases: {
+    success: {
+      expect: { status: 201 },
+    },
+    invalidBody: {
+      expect: { status: 400 },
+    },
+  },
+});
+`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(1);
+  expect(result[0].contractId).toBe("create-user");
+  expect(result[0].exportName).toBe("createUser");
+  expect(result[0].endpoint).toBe("POST /users");
+  expect(result[0].protocol).toBe("http");
+  expect(result[0].cases).toHaveLength(2);
+  expect(result[0].cases[0].key).toBe("success");
+  expect(result[0].cases[0].expectStatus).toBe(201);
+  expect(result[0].cases[1].key).toBe("invalidBody");
+  expect(result[0].cases[1].expectStatus).toBe(400);
+});
+
+test("extractContractCases — deferred case", () => {
+  const source = `
+export const cancelRun = contract.http("cancel-run", {
+  endpoint: "POST /runs/:runId/cancel",
+  cases: {
+    success: {
+      expect: { status: 200 },
+    },
+    viewerBlocked: {
+      expect: { status: 403 },
+      deferred: "needs VIEWER_API_KEY",
+    },
+  },
+});
+`;
+  const result = extractContractCases(source);
+  expect(result[0].cases).toHaveLength(2);
+  expect(result[0].cases[0].deferred).toBeUndefined();
+  expect(result[0].cases[1].key).toBe("viewerBlocked");
+  expect(result[0].cases[1].expectStatus).toBe(403);
+  expect(result[0].cases[1].deferred).toBe("needs VIEWER_API_KEY");
+});
+
+test("extractContractCases — multiple contracts in one file", () => {
+  const source = `
+export const getUser = contract.http("get-user", {
+  endpoint: "GET /users/:id",
+  cases: {
+    success: { expect: { status: 200 } },
+    notFound: { expect: { status: 404 } },
+  },
+});
+
+export const deleteUser = contract.http("delete-user", {
+  endpoint: "DELETE /users/:id",
+  cases: {
+    success: { expect: { status: 200 } },
+  },
+});
+`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(2);
+  expect(result[0].contractId).toBe("get-user");
+  expect(result[0].cases).toHaveLength(2);
+  expect(result[1].contractId).toBe("delete-user");
+  expect(result[1].cases).toHaveLength(1);
+});
+
+test("extractContractCases — non-http protocol", () => {
+  const source = `
+export const sayHello = contract.grpc("say-hello", {
+  endpoint: "greeter.Greeter/SayHello",
+  cases: {
+    success: { expect: { status: 0 } },
+  },
+});
+`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(1);
+  expect(result[0].protocol).toBe("grpc");
+  expect(result[0].endpoint).toBe("greeter.Greeter/SayHello");
+});
+
+test("extractContractCases — no contracts returns empty", () => {
+  const source = `
+import { test } from "@glubean/sdk";
+export const myTest = test("my-test", async (ctx) => {});
+`;
+  expect(extractContractCases(source)).toEqual([]);
+});
+
+test("extractContractCases — case line numbers are correct", () => {
+  const source = [
+    'import { contract } from "@glubean/sdk";',  // line 1
+    '',                                            // line 2
+    'export const x = contract.http("x", {',      // line 3
+    '  endpoint: "GET /x",',                       // line 4
+    '  cases: {',                                  // line 5
+    '    alpha: {',                                // line 6
+    '      expect: { status: 200 },',              // line 7
+    '    },',                                      // line 8
+    '    beta: {',                                 // line 9
+    '      expect: { status: 404 },',              // line 10
+    '    },',                                      // line 11
+    '  },',                                        // line 12
+    '});',                                         // line 13
+  ].join('\n');
+
+  const result = extractContractCases(source);
+  expect(result[0].line).toBe(3);
+  expect(result[0].cases[0].key).toBe("alpha");
+  expect(result[0].cases[0].line).toBe(6);
+  expect(result[0].cases[1].key).toBe("beta");
+  expect(result[0].cases[1].line).toBe(9);
 });
