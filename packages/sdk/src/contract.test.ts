@@ -859,7 +859,7 @@ test("flow asSteps() injects steps into test builder", async () => {
   expect(built.steps![0].meta.name).toBe("ping");
 });
 
-test("flow asSteps() preserves setup and teardown", async () => {
+test("flow asSteps() injects setup and teardown as regular steps (no finally semantics)", async () => {
   clearRegistry();
   const order: string[] = [];
   const client = createMockClient({
