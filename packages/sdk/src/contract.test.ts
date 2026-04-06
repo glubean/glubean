@@ -653,3 +653,233 @@ test("contract.register() produces executable tests via adapter", () => {
   expect((entry as any).contract.protocol).toBe("custom");
   expect((entry as any).contract.endpoint).toBe("my-service");
 });
+
+// =============================================================================
+// contract.flow() tests
+// =============================================================================
+
+test("contract.flow() produces a Test with type steps", () => {
+  clearRegistry();
+  const client = createMockClient({
+    "POST /items": { status: 201, body: { id: "item_1" } },
+    "GET /items/item_1": { status: 200, body: { id: "item_1", name: "Widget" } },
+  });
+
+  const result = contract.flow("item-lifecycle")
+    .http("create", {
+      endpoint: "POST /items",
+      client,
+      body: { name: "Widget" },
+      expect: { status: 201, schema: { safeParse: (d: unknown) => ({ success: true as const, data: d as { id: string } }) } },
+      returns: (res) => ({ itemId: res.id }),
+    })
+    .http("read", {
+      endpoint: "GET /items/:id",
+      client,
+      params: (state: { itemId: string }) => ({ id: state.itemId }),
+      expect: { status: 200 },
+    })
+    .build();
+
+  expect(result.type).toBe("steps");
+  expect(result.steps).toHaveLength(2);
+  expect(result.meta.id).toBe("item-lifecycle");
+  expect(result.flowId).toBe("item-lifecycle");
+  expect(result.flowSteps).toEqual([
+    { name: "create", endpoint: "POST /items", expectStatus: 201 },
+    { name: "read", endpoint: "GET /items/:id", expectStatus: 200 },
+  ]);
+});
+
+test("flow state threading via returns(res, state)", async () => {
+  clearRegistry();
+  const states: unknown[] = [];
+  const client = createMockClient({
+    "POST /a": { status: 200, body: { aid: "a1" } },
+    "POST /b": { status: 200, body: { bid: "b1" } },
+  });
+
+  const flow = contract.flow("state-test")
+    .http("step a", {
+      endpoint: "POST /a",
+      client,
+      expect: { status: 200 },
+      returns: (res: { aid: string }) => ({ aid: res.aid }),
+    })
+    .http("step b", {
+      endpoint: "POST /b",
+      client,
+      expect: { status: 200 },
+      returns: (res: { bid: string }, state: { aid: string }) => {
+        // Merge: keep aid from state, add bid from response
+        return { aid: state.aid, bid: res.bid };
+      },
+    })
+    .build();
+
+  // Execute step by step
+  const mockCtx = createMockContext();
+  let state: any = undefined;
+
+  // Run setup (none)
+  // Run steps
+  for (const step of flow.steps!) {
+    state = await step.fn(mockCtx, state) ?? state;
+    states.push({ ...state });
+  }
+
+  expect(states[0]).toEqual({ aid: "a1" });
+  expect(states[1]).toEqual({ aid: "a1", bid: "b1" });
+});
+
+test("flow registers to global registry with flow metadata", () => {
+  clearRegistry();
+  const client = createMockClient();
+
+  contract.flow("registered-flow")
+    .http("step1", { endpoint: "GET /a", client, expect: { status: 200 } })
+    .http("step2", { endpoint: "POST /b", client, expect: { status: 201 } })
+    .build();
+
+  const registry = getRegistry();
+  const entry = registry.find((r) => r.id === "registered-flow")!;
+
+  expect(entry).toBeDefined();
+  expect(entry.type).toBe("steps");
+  expect(entry.flow).toEqual({
+    steps: [
+      { name: "step1", endpoint: "GET /a", expectStatus: 200 },
+      { name: "step2", endpoint: "POST /b", expectStatus: 201 },
+    ],
+  });
+  expect(entry.contract).toBeUndefined();
+});
+
+test("flow with setup and teardown", async () => {
+  clearRegistry();
+  const order: string[] = [];
+  const client = createMockClient({
+    "GET /data": { status: 200, body: { value: 42 } },
+  });
+
+  const flow = contract.flow("setup-teardown")
+    .setup(async () => {
+      order.push("setup");
+      return { token: "abc" };
+    })
+    .http("fetch", {
+      endpoint: "GET /data",
+      client,
+      expect: { status: 200 },
+      verify: async () => { order.push("verify"); },
+    })
+    .teardown(async () => {
+      order.push("teardown");
+    })
+    .build();
+
+  expect(flow.setup).toBeTypeOf("function");
+  expect(flow.teardown).toBeTypeOf("function");
+
+  // Execute setup
+  const mockCtx = createMockContext();
+  const state = await flow.setup!(mockCtx);
+  expect(state).toEqual({ token: "abc" });
+
+  // Execute step
+  for (const step of flow.steps!) {
+    await step.fn(mockCtx, state);
+  }
+
+  // Execute teardown
+  await flow.teardown!(mockCtx, state);
+
+  expect(order).toEqual(["setup", "verify", "teardown"]);
+});
+
+test("flow step client falls back to flow-level default", async () => {
+  clearRegistry();
+  let requestedPath = "";
+  const defaultClient = createMockClient();
+  (defaultClient as any).get = (url: string, opts: any) => {
+    requestedPath = url;
+    return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
+  };
+
+  const flow = contract.flow("default-client", { client: defaultClient })
+    .http("fetch", {
+      endpoint: "GET /test",
+      // no step-level client — should use flow default
+      expect: { status: 200 },
+    })
+    .build();
+
+  const mockCtx = createMockContext();
+  await flow.steps![0].fn(mockCtx, undefined);
+  expect(requestedPath).toBe("/test");
+});
+
+test("flow step-level client overrides flow default", async () => {
+  clearRegistry();
+  let usedClient = "";
+  const defaultClient = createMockClient();
+  (defaultClient as any).post = () => { usedClient = "default"; return createMockClient({ "POST /x": { status: 200, body: {} } }).post("/x"); };
+  const overrideClient = createMockClient();
+  (overrideClient as any).post = () => { usedClient = "override"; return createMockClient({ "POST /x": { status: 200, body: {} } }).post("/x"); };
+
+  const flow = contract.flow("client-override", { client: defaultClient })
+    .http("with-override", {
+      endpoint: "POST /x",
+      client: overrideClient,
+      expect: { status: 200 },
+    })
+    .build();
+
+  const mockCtx = createMockContext();
+  await flow.steps![0].fn(mockCtx, undefined);
+  expect(usedClient).toBe("override");
+});
+
+test("flow asSteps() injects steps into test builder", async () => {
+  clearRegistry();
+  const client = createMockClient({
+    "GET /ping": { status: 200, body: {} },
+  });
+
+  const flow = contract.flow("composable")
+    .http("ping", { endpoint: "GET /ping", client, expect: { status: 200 } })
+    .build();
+
+  const { test: glubeanTest } = await import("./index.js");
+  const builder = glubeanTest("combined").use(flow.asSteps());
+  const built = builder.build();
+
+  expect(built.type).toBe("steps");
+  expect(built.steps).toHaveLength(1);
+  expect(built.steps![0].meta.name).toBe("ping");
+});
+
+test("flow body as function of state", async () => {
+  clearRegistry();
+  let receivedBody: unknown;
+  const client = createMockClient();
+  (client as any).post = (url: string, opts: any) => {
+    receivedBody = opts?.json;
+    return createMockClient({ [`POST ${url}`]: { status: 200, body: {} } }).post(url, opts);
+  };
+
+  const flow = contract.flow("body-fn")
+    .setup(async () => ({ name: "Alice" }))
+    .http("create", {
+      endpoint: "POST /users",
+      client,
+      body: (state: { name: string }) => ({ name: state.name, source: "flow" }),
+      expect: { status: 200 },
+    })
+    .build();
+
+  const mockCtx = createMockContext();
+  const state = await flow.setup!(mockCtx);
+  await flow.steps![0].fn(mockCtx, state);
+  expect(receivedBody).toEqual({ name: "Alice", source: "flow" });
+});

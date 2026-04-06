@@ -11,8 +11,9 @@ import type {
   ContractRegistryMeta,
   HttpContract,
   HttpContractSpec,
+  HttpFlowStepSpec,
 } from "./contract-types.js";
-import type { HttpClient, Test, TestMeta } from "./types.js";
+import type { HttpClient, Test, TestContext, TestMeta } from "./types.js";
 import { registerTest } from "./internal.js";
 
 // =============================================================================
@@ -223,6 +224,170 @@ function contractHttp<
 }
 
 // =============================================================================
+// FlowBuilder — declarative stateful endpoint chain (verification)
+// =============================================================================
+
+interface FlowStepMeta {
+  name: string;
+  endpoint: string;
+  expectStatus: number;
+}
+
+class FlowBuilder<S = unknown> {
+  private _id: string;
+  private _defaultClient?: HttpClient;
+  private _tags?: string[];
+  private _steps: Array<{
+    meta: FlowStepMeta;
+    fn: (ctx: TestContext, state: any) => Promise<any>;
+  }> = [];
+  private _setupFn?: (ctx: TestContext) => Promise<any>;
+  private _teardownFn?: (ctx: TestContext, state: any) => Promise<void>;
+
+  constructor(id: string, options?: { client?: HttpClient; tags?: string[] }) {
+    this._id = id;
+    this._defaultClient = options?.client;
+    this._tags = options?.tags;
+  }
+
+  setup<NewS>(fn: (ctx: TestContext) => Promise<NewS>): FlowBuilder<NewS> {
+    this._setupFn = fn;
+    return this as unknown as FlowBuilder<NewS>;
+  }
+
+  teardown(fn: (ctx: TestContext, state: S) => Promise<void>): FlowBuilder<S> {
+    this._teardownFn = fn;
+    return this;
+  }
+
+  http<T, NewS>(
+    name: string,
+    spec: import("./contract-types.js").HttpFlowStepSpec<T, S> & { returns: (res: T, state: S) => NewS },
+  ): FlowBuilder<NewS>;
+  http<T>(
+    name: string,
+    spec: import("./contract-types.js").HttpFlowStepSpec<T, S> & { returns?: undefined },
+  ): FlowBuilder<S>;
+  http(
+    name: string,
+    spec: import("./contract-types.js").HttpFlowStepSpec<any, any>,
+  ): FlowBuilder<any> {
+    const { method, path } = parseEndpoint(spec.endpoint);
+    const expectedStatus = spec.expect.status;
+
+    const stepFn = async (ctx: TestContext, state: any): Promise<any> => {
+      // Resolve client
+      const client: HttpClient = (spec.client ?? this._defaultClient) as HttpClient;
+      if (!client) {
+        throw new Error(`No HTTP client for flow step "${name}". Set client on the step or flow.`);
+      }
+
+      // Resolve params/query/body from state
+      const params = typeof spec.params === "function" ? spec.params(state) : spec.params;
+      const resolvedPath = resolveParams(path, params);
+      const query = typeof spec.query === "function" ? spec.query(state) : spec.query;
+      const body = typeof spec.body === "function" ? (spec.body as Function)(state) : spec.body;
+
+      // Build request options
+      const opts: Record<string, unknown> = { throwHttpErrors: false };
+      if (body !== undefined) opts.json = body;
+      if (spec.headers) opts.headers = spec.headers;
+      if (query) opts.searchParams = query;
+
+      // Send request
+      const methodLower = method.toLowerCase() as keyof HttpClient;
+      const res = await (client[methodLower] as Function)(resolvedPath, opts);
+
+      // Assert status
+      ctx.expect(res).toHaveStatus(expectedStatus);
+
+      // Validate schema + parse response
+      let parsed: any;
+      if (spec.expect.schema) {
+        const jsonBody = await res.json();
+        const validated = ctx.validate(jsonBody, spec.expect.schema, `${this._id}/${name} response`);
+        parsed = validated !== undefined ? validated : jsonBody;
+      } else if (spec.verify || spec.returns) {
+        parsed = await res.json();
+      }
+
+      // Verify callback
+      if (spec.verify) {
+        await spec.verify(ctx, parsed);
+      }
+
+      // State evolution
+      if (spec.returns) {
+        return spec.returns(parsed, state);
+      }
+      return state;
+    };
+
+    this._steps.push({
+      meta: { name, endpoint: spec.endpoint, expectStatus: expectedStatus },
+      fn: stepFn,
+    });
+
+    return this as FlowBuilder<any>;
+  }
+
+  build(): Test & {
+    readonly flowId: string;
+    readonly flowSteps: FlowStepMeta[];
+    asSteps(): <B>(b: import("./index.js").TestBuilder<B>) => import("./index.js").TestBuilder<B>;
+  } {
+    const test: Test = {
+      meta: {
+        id: this._id,
+        name: this._id,
+        tags: this._tags,
+      },
+      type: "steps",
+      setup: this._setupFn as any,
+      teardown: this._teardownFn as any,
+      steps: this._steps.map((s) => ({
+        meta: { name: s.meta.name },
+        fn: s.fn,
+      })),
+    };
+
+    const flowStepsMeta = this._steps.map((s) => s.meta);
+
+    // Register to global registry with flow metadata
+    registerTest({
+      id: this._id,
+      name: this._id,
+      type: "steps",
+      tags: this._tags,
+      steps: this._steps.map((s) => ({ name: s.meta.name })),
+      hasSetup: !!this._setupFn,
+      hasTeardown: !!this._teardownFn,
+      flow: {
+        steps: flowStepsMeta,
+      },
+    });
+
+    const asSteps = () => {
+      const steps = test.steps!;
+      return <B>(b: import("./index.js").TestBuilder<B>) => {
+        for (const s of steps) {
+          b.step(s.meta.name, async (ctx, state) => {
+            return s.fn(ctx, state);
+          });
+        }
+        return b;
+      };
+    };
+
+    return Object.assign(test, { flowId: this._id, flowSteps: flowStepsMeta, asSteps }) as any;
+  }
+}
+
+function contractFlow(id: string, options?: { client?: HttpClient; tags?: string[] }): FlowBuilder {
+  return new FlowBuilder(id, options);
+}
+
+// =============================================================================
 // contract namespace + register()
 // =============================================================================
 
@@ -237,13 +402,15 @@ const _adapters = new Map<string, ContractProtocolAdapter<any>>();
  */
 export const contract: {
   http: typeof contractHttp;
+  flow: typeof contractFlow;
   register: <Spec>(protocol: string, adapter: ContractProtocolAdapter<Spec>) => void;
   [protocol: string]: unknown;
 } = {
   http: contractHttp,
+  flow: contractFlow,
 
   register<Spec>(protocol: string, adapter: ContractProtocolAdapter<Spec>) {
-    if (protocol === "http" || protocol === "register") {
+    if (protocol === "http" || protocol === "flow" || protocol === "register") {
       throw new Error(`Cannot register reserved protocol "${protocol}"`);
     }
     _adapters.set(protocol, adapter);
