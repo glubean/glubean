@@ -155,6 +155,55 @@ export interface HttpContract extends Array<Test> {
 }
 
 // =============================================================================
+// Flow contract
+// =============================================================================
+
+/**
+ * Spec for a single HTTP step in a contract.flow() chain.
+ *
+ * Flow steps are verification, not spec: each step has one fixed expected
+ * outcome (expect), not multiple possible responses.
+ *
+ * @template T Response type (inferred from expect.schema)
+ * @template S Incoming state type from previous step
+ */
+export interface HttpFlowStepSpec<T = unknown, S = unknown> {
+  /** HTTP method + path, e.g. "POST /users" or "GET /runs/:runId" */
+  endpoint: string;
+
+  /** HTTP client for this step. Falls back to flow-level default client. */
+  client?: HttpClient;
+
+  /** Fixed expected outcome for this step */
+  expect: ContractExpect<T>;
+
+  /** URL params — static or derived from previous step's state */
+  params?: Record<string, string> | ((state: S) => Record<string, string>);
+
+  /** Query parameters */
+  query?: Record<string, string> | ((state: S) => Record<string, string>);
+
+  /** Request headers */
+  headers?: Record<string, string>;
+
+  /** Request body — static or derived from state */
+  body?: unknown | ((state: S) => unknown);
+
+  /**
+   * Business logic verification — runs after status and schema validation.
+   * Receives schema-parsed value or raw JSON.
+   */
+  verify?: (ctx: TestContext, res: T) => Promise<void>;
+
+  /**
+   * Extract state from response for the next step.
+   * Receives the response and current state. Output replaces state.
+   * If omitted, state passes through unchanged.
+   */
+  returns?: (res: T, state: S) => unknown;
+}
+
+// =============================================================================
 // Plugin protocol adapter
 // =============================================================================
 
