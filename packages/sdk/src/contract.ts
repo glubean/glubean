@@ -372,7 +372,11 @@ class FlowBuilder<S = unknown> {
       const setupFn = this._setupFn;
       const teardownFn = this._teardownFn;
       return <B>(b: import("./index.js").TestBuilder<B>) => {
-        // Inject setup as first step if flow has one
+        // Note: setup and teardown are injected as regular steps.
+        // This means teardown does NOT have finally semantics —
+        // if an earlier step fails, teardown won't run.
+        // For guaranteed cleanup, use standalone flow or add
+        // .teardown() on the outer test builder.
         if (setupFn) {
           b.step(`${this._id} [setup]`, async (ctx) => {
             return setupFn(ctx);
