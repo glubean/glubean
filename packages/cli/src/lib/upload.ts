@@ -101,6 +101,18 @@ export interface UploadResultPayload {
         skip?: boolean;
       }>;
     }>;
+    /** Contract spec metadata (from .contract.ts files) */
+    contracts?: Array<{
+      contractId: string;
+      exportName: string;
+      endpoint: string;
+      protocol: string;
+      cases: Array<{
+        key: string;
+        expectStatus?: number;
+        deferred?: string;
+      }>;
+    }>;
   };
 }
 

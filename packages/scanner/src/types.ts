@@ -2,6 +2,8 @@
  * Scanner types - shared between scanner consumers.
  */
 
+import type { ContractStaticMeta } from "./extractor-static.js";
+
 /** Export metadata for a single test export */
 export interface ExportMeta {
   type: "test";
@@ -86,6 +88,11 @@ export interface BundleMetadata {
   version?: string;
   /** Optional project id (used by CLI sync) */
   projectId?: string;
+  /**
+   * Contract metadata extracted from .contract.ts files.
+   * Independent from test exports — consumed by projection/coverage tools.
+   */
+  contracts?: ContractStaticMeta[];
 }
 
 /** Result of scanning a directory */
@@ -106,7 +113,7 @@ export interface ScanResult {
    * Contract metadata extracted from .contract.ts files.
    * Independent from test exports — consumed by projection/coverage tools.
    */
-  contracts: import("./extractor-static.js").ContractStaticMeta[];
+  contracts: ContractStaticMeta[];
 }
 
 /** Options for scanning */

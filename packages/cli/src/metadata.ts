@@ -47,12 +47,20 @@ export function deriveMetadataStats(files: Record<string, FileMeta>): {
 
 export async function computeRootHash(
   files: Record<string, FileMeta>,
+  contracts?: unknown[],
 ): Promise<string> {
   const entries = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
-  const payload = entries
-    .map(([path, meta]) => `${path}:${meta.hash}`)
-    .join("\n");
-  const hash = createHash("sha256").update(payload).digest("hex");
+  const parts: string[] = entries.map(([path, meta]) => `${path}:${meta.hash}`);
+
+  // Include contract metadata in hash so contract changes affect rootHash
+  if (contracts && contracts.length > 0) {
+    const contractHash = createHash("sha256")
+      .update(JSON.stringify(contracts))
+      .digest("hex");
+    parts.push(`__contracts__:sha256-${contractHash}`);
+  }
+
+  const hash = createHash("sha256").update(parts.join("\n")).digest("hex");
   return `sha256-${hash}`;
 }
 
@@ -67,7 +75,8 @@ export async function buildMetadata(
 ): Promise<BundleMetadata> {
   const normalizedFiles = normalizeFileMap(scanResult.files);
   const stats = deriveMetadataStats(normalizedFiles);
-  const rootHash = await computeRootHash(normalizedFiles);
+  const contracts = scanResult.contracts;
+  const rootHash = await computeRootHash(normalizedFiles, contracts);
 
   return {
     schemaVersion: METADATA_SCHEMA_VERSION,
@@ -82,5 +91,6 @@ export async function buildMetadata(
     warnings: scanResult.warnings,
     projectId: options.projectId,
     version: options.version,
+    contracts: contracts && contracts.length > 0 ? contracts : undefined,
   };
 }

@@ -148,8 +148,9 @@ export class Scanner {
       }
     }
 
-    // Check for at least one *.test.ts file
+    // Check for at least one test or contract file
     let foundTestFile = false;
+    let foundContractFile = false;
 
     try {
       for await (
@@ -158,19 +159,18 @@ export class Scanner {
           skipDirs: DEFAULT_SKIP_DIRS,
         })
       ) {
-        if (isTestFile(filePath)) {
-          foundTestFile = true;
-          break;
-        }
+        if (isTestFile(filePath)) foundTestFile = true;
+        else if (isContractFile(filePath)) foundContractFile = true;
+        if (foundTestFile || foundContractFile) break;
       }
     } catch (err) {
       errors.push(`Failed to scan directory: ${err}`);
     }
 
-    if (!foundTestFile) {
+    if (!foundTestFile && !foundContractFile) {
       errors.push(
-        "No test files found. " +
-          "Ensure your test files are named *.test.ts, *.test.js, or *.test.mjs.",
+        "No test or contract files found. " +
+          "Ensure your files are named *.test.ts or *.contract.ts.",
       );
     }
 
@@ -272,10 +272,10 @@ export class Scanner {
       }
     }
 
-    if (Object.keys(files).length === 0) {
+    if (Object.keys(files).length === 0 && contracts.length === 0) {
       warnings.push(
-        "No Glubean test files found. " +
-          "Ensure your test files are named *.test.ts, *.test.js, or *.test.mjs and export test().",
+        "No Glubean test or contract files found. " +
+          "Ensure your files are named *.test.ts or *.contract.ts.",
       );
     }
 
