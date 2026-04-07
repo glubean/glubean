@@ -109,6 +109,7 @@ function buildCaseTest<T, S>(
   const meta: TestMeta = {
     id: testId,
     name: testName,
+    description: c.description,
     tags: allTags.length > 0 ? allTags : undefined,
     deferred: c.deferred,
   };

@@ -109,9 +109,11 @@ test("contract.http() produces HttpContract extending Array<Test>", () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
       },
       notFound: {
+        description: "test",
         expect: { status: 404 },
       },
     },
@@ -139,9 +141,9 @@ test("case IDs follow contractId.caseKey pattern", () => {
     endpoint: "POST /users",
     client,
     cases: {
-      success: { expect: { status: 201 } },
-      invalidBody: { expect: { status: 400 } },
-      duplicate: { expect: { status: 409 } },
+      success: { description: "test", expect: { status: 201 } },
+      invalidBody: { description: "test", expect: { status: 400 } },
+      duplicate: { description: "test", expect: { status: 409 } },
     },
   });
 
@@ -161,10 +163,12 @@ test("tags inherit from contract-level and merge with case-level", () => {
     tags: ["users", "api"],
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
         tags: ["happy"],
       },
       noAuth: {
+        description: "test",
         expect: { status: 401 },
       },
     },
@@ -181,8 +185,8 @@ test("cases register to global registry with contract metadata", () => {
     endpoint: "GET /whoami",
     client,
     cases: {
-      success: { expect: { status: 200, schema: UserSchema } },
-      noAuth: { expect: { status: 401 }, deferred: "needs credentials" },
+      success: { description: "test", expect: { status: 200, schema: UserSchema } },
+      noAuth: { description: "test", expect: { status: 401 }, deferred: "needs credentials" },
     },
   });
 
@@ -219,9 +223,11 @@ test("case-level client overrides contract-level client", () => {
     client: defaultClient,
     cases: {
       withDefault: {
+        description: "test",
         expect: { status: 200 },
       },
       withAdmin: {
+        description: "test",
         client: adminClient,
         expect: { status: 200 },
       },
@@ -256,7 +262,7 @@ test("asSteps() and asStep() are available", () => {
     endpoint: "GET /test",
     client,
     cases: {
-      success: { expect: { status: 200 } },
+      success: { description: "test", expect: { status: 200 } },
     },
   });
 
@@ -269,7 +275,7 @@ test("throws when no client is provided", async () => {
     endpoint: "GET /test",
     // no client at contract or case level
     cases: {
-      success: { expect: { status: 200 } },
+      success: { description: "test", expect: { status: 200 } },
     },
   });
 
@@ -289,6 +295,7 @@ test("verify() receives raw JSON body when no schema provided", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
         verify: async (_ctx, res) => {
           receivedBody = res;
@@ -315,6 +322,7 @@ test("verify() receives schema-parsed value when schema provided", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200, schema: UserSchema },
         verify: async (_ctx, res) => {
           receivedBody = res;
@@ -340,6 +348,7 @@ test("setup and teardown execute in correct order", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 201 },
         setup: async () => {
           order.push("setup");
@@ -372,6 +381,7 @@ test("teardown runs even when verify throws", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
         verify: async () => {
           throw new Error("verify failed");
@@ -396,10 +406,12 @@ test("asStep() skips deferred cases when no caseKey given", () => {
     client,
     cases: {
       deferredCase: {
+        description: "test",
         expect: { status: 403 },
         deferred: "needs credentials",
       },
       runnableCase: {
+        description: "test",
         expect: { status: 200 },
       },
     },
@@ -419,6 +431,7 @@ test("deferred case calls ctx.skip() at execution time", async () => {
     client,
     cases: {
       blocked: {
+        description: "test",
         expect: { status: 403 },
         deferred: "needs viewer credentials",
       },
@@ -443,6 +456,7 @@ test("params function receives setup state", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
         setup: async () => ({ userId: "usr_42" }),
         params: (state: { userId: string }) => ({ id: state.userId }),
@@ -468,6 +482,7 @@ test("resolveParams replaces :param placeholders", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
         params: { projectId: "prj_1", itemId: "item_2" },
       },
@@ -492,6 +507,7 @@ test("query params are passed to request", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
         query: { q: "hello", limit: "10" },
       },
@@ -516,6 +532,7 @@ test("headers are passed to request", async () => {
     client,
     cases: {
       success: {
+        description: "test",
         expect: { status: 200 },
         headers: { "X-Custom": "value" },
       },
@@ -534,8 +551,8 @@ test("asSteps() injects and executes steps in test builder", async () => {
     endpoint: "GET /test",
     client,
     cases: {
-      a: { expect: { status: 200 } },
-      b: { expect: { status: 201 } },
+      a: { description: "test", expect: { status: 200 } },
+      b: { description: "test", expect: { status: 201 } },
     },
   });
 
@@ -567,7 +584,7 @@ test("register() adapter execute() is called at runtime", async () => {
   const tests = (contract as any)["test-proto"]("my-test", {
     target: "my-service",
     cases: {
-      ping: { expect: { status: 0 } },
+      ping: { description: "test", expect: { status: 0 } },
     },
   }) as import("./types.js").Test[];
 
@@ -589,10 +606,12 @@ test("multiple cases do not share state", async () => {
     client,
     cases: {
       a: {
+        description: "test",
         expect: { status: 201 },
         setup: async () => { const s = { id: "a" }; states.push(s); return s; },
       },
       b: {
+        description: "test",
         expect: { status: 201 },
         setup: async () => { const s = { id: "b" }; states.push(s); return s; },
       },
@@ -617,7 +636,7 @@ test("request schema is accessible on contract object", () => {
     client,
     request: schema,
     cases: {
-      success: { expect: { status: 201 } },
+      success: { description: "test", expect: { status: 201 } },
     },
   });
 
@@ -640,7 +659,7 @@ test("contract.register() produces executable tests via adapter", () => {
   const tests = (contract as any).custom("my-custom", {
     target: "my-service",
     cases: {
-      ping: { expect: { status: 200 } },
+      ping: { description: "test", expect: { status: 200 } },
     },
   }) as import("./types.js").Test[];
 

@@ -41,6 +41,9 @@ export interface ContractCase<T = unknown, S = void> {
    */
   client?: HttpClient;
 
+  /** Why this case exists — business logic, boundary condition, or intent. Required. */
+  description: string;
+
   /** Expected response */
   expect: ContractExpect<T>;
 
@@ -170,6 +173,9 @@ export interface HttpContract extends Array<Test> {
 export interface HttpFlowStepSpec<T = unknown, S = unknown> {
   /** HTTP method + path, e.g. "POST /users" or "GET /runs/:runId" */
   endpoint: string;
+
+  /** Optional description of this step's purpose. */
+  description?: string;
 
   /** HTTP client for this step. Falls back to flow-level default client. */
   client?: HttpClient;
