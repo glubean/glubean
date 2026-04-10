@@ -844,6 +844,10 @@ export interface ContractCaseStaticMeta {
   expectStatus?: number;
   /** Deferred reason, or undefined if executable */
   deferred?: string;
+  /** Physical capability required: "headless" | "browser" | "out-of-band" */
+  requires?: string;
+  /** Default run policy: "always" | "opt-in" */
+  defaultRun?: string;
 }
 
 /** Metadata for a discovered contract.http() call. */
@@ -963,7 +967,15 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
       const deferredMatch = caseBody.match(/deferred\s*:\s*["']([^"']+)["']/);
       if (deferredMatch) deferred = deferredMatch[1];
 
-      cases.push({ key, line: caseLine, expectStatus, deferred });
+      let requires: string | undefined;
+      const requiresMatch = caseBody.match(/requires\s*:\s*["'](headless|browser|out-of-band)["']/);
+      if (requiresMatch) requires = requiresMatch[1];
+
+      let defaultRun: string | undefined;
+      const defaultRunMatch = caseBody.match(/defaultRun\s*:\s*["'](always|opt-in)["']/);
+      if (defaultRunMatch) defaultRun = defaultRunMatch[1];
+
+      cases.push({ key, line: caseLine, expectStatus, deferred, requires, defaultRun });
     }
 
     results.push({ contractId, exportName, line, endpoint, protocol, cases });
