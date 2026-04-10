@@ -1573,7 +1573,7 @@ export type {
 } from "./contract-types.js";
 
 // Session API
-export { defineSession } from "./session.js";
+export { defineSession, session } from "./session.js";
 
 // Re-export assertion utilities
 export { Expectation, ExpectFailError } from "./expect.js";
