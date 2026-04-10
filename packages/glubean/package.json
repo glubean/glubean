@@ -1,6 +1,6 @@
 {
   "name": "glubean",
-  "version": "0.1.69",
+  "version": "0.1.70",
   "description": "Glubean CLI — test automation for APIs, browsers, and more",
   "type": "module",
   "bin": {
