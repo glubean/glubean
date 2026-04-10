@@ -265,6 +265,153 @@ export const writeSession = test("write-session", async (ctx) => {
   expect(result.success).toBe(true);
 }, 15_000);
 
+// ── Session → {{KEY}} template resolution (integration) ────────────────────
+
+test("session values resolve in configure() {{KEY}} templates", async () => {
+  const dir = await makeTempDir();
+
+  // session.ts sets AUTH_TOKEN
+  await writeFile(
+    join(dir, "session.ts"),
+    `
+import { defineSession } from "@glubean/sdk";
+
+export default defineSession({
+  async setup(ctx) {
+    ctx.session.set("AUTH_TOKEN", "session-jwt-xyz");
+  },
+});
+`,
+  );
+
+  // test file uses {{AUTH_TOKEN}} in configure headers
+  const testFile = join(dir, "api.test.ts");
+  await writeFile(
+    testFile,
+    `
+import { test, configure } from "@glubean/sdk";
+
+const { http } = configure({
+  http: {
+    prefixUrl: "https://httpbin.org",
+    headers: { Authorization: "Bearer {{AUTH_TOKEN}}" },
+  },
+});
+
+export const checkHeader = test("check-header", async (ctx) => {
+  // httpbin.org/headers returns the request headers as JSON
+  const res = await http.get("headers").json();
+  const authHeader = res.headers?.Authorization || res.headers?.authorization;
+  ctx.assert(authHeader === "Bearer session-jwt-xyz", "session token resolved in header");
+  ctx.log("resolved-header:" + authHeader);
+});
+`,
+  );
+
+  const executor = TestExecutor.fromSharedConfig(
+    { failFast: false, emitFullTrace: false },
+    { cwd: RUNNER_ROOT },
+  ).withSession(dir);
+
+  const events: ExecutionEvent[] = [];
+  for await (const event of executor.run(
+    pathToFileURL(testFile).href,
+    "check-header",
+    { vars: {}, secrets: {} },
+  )) {
+    events.push(event);
+  }
+
+  // Session should have been set up
+  expect(executor.sessionState).toEqual({ AUTH_TOKEN: "session-jwt-xyz" });
+
+  // Test should pass — meaning {{AUTH_TOKEN}} resolved from session
+  const statuses = events.filter((e) => e.type === "status");
+  expect(statuses).toContainEqual(
+    expect.objectContaining({ status: "completed" }),
+  );
+
+  const assertions = events.filter((e) => e.type === "assertion");
+  expect(assertions).toContainEqual(
+    expect.objectContaining({ passed: true, message: "session token resolved in header" }),
+  );
+}, 15_000);
+
+test("session values resolve in configure() prefixUrl template", async () => {
+  const dir = await makeTempDir();
+
+  const testFile = join(dir, "prefix.test.ts");
+  await writeFile(
+    testFile,
+    `
+import { test, configure } from "@glubean/sdk";
+
+const { http } = configure({
+  http: { prefixUrl: "{{DYNAMIC_BASE}}" },
+});
+
+export const checkPrefix = test("check-prefix", async (ctx) => {
+  // If prefixUrl resolved correctly, this should reach httpbin
+  const res = await http.get("get").json();
+  ctx.assert(res.url === "https://httpbin.org/get", "prefixUrl resolved from session");
+});
+`,
+  );
+
+  const executor = createExecutor();
+  const events = await collectEvents(
+    executor,
+    pathToFileURL(testFile).href,
+    "check-prefix",
+    { vars: {}, secrets: {}, session: { DYNAMIC_BASE: "https://httpbin.org" } },
+  );
+
+  const statuses = events.filter((e) => e.type === "status");
+  expect(statuses).toContainEqual(
+    expect.objectContaining({ status: "completed" }),
+  );
+
+  const assertions = events.filter((e) => e.type === "assertion");
+  expect(assertions).toContainEqual(
+    expect.objectContaining({ passed: true }),
+  );
+}, 15_000);
+
+test("global session accessor works in subprocess", async () => {
+  const dir = await makeTempDir();
+
+  const testFile = join(dir, "global.test.ts");
+  await writeFile(
+    testFile,
+    `
+import { test, session } from "@glubean/sdk";
+
+export const checkGlobal = test("check-global", async (ctx) => {
+  const token = session.get("MY_TOKEN");
+  ctx.assert(token === "from-session", "global session.get works");
+
+  const required = session.require("MY_TOKEN");
+  ctx.assert(required === "from-session", "global session.require works");
+
+  ctx.assert(session.has("MY_TOKEN"), "global session.has works");
+  ctx.assert(!session.has("MISSING"), "global session.has returns false for missing");
+});
+`,
+  );
+
+  const executor = createExecutor();
+  const events = await collectEvents(
+    executor,
+    pathToFileURL(testFile).href,
+    "check-global",
+    { vars: {}, secrets: {}, session: { MY_TOKEN: "from-session" } },
+  );
+
+  const assertions = events.filter((e) => e.type === "assertion");
+  expect(assertions).toHaveLength(4);
+  expect(assertions.every((a) => (a as any).passed)).toBe(true);
+}, 15_000);
+
 // ── withSession() + finalize() ──────────────────────────────────────────────
 
 test("withSession auto-discovers session.ts, runs setup, injects state", async () => {
