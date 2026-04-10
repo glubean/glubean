@@ -90,6 +90,9 @@ program
   .option("--reporter <format>", 'Output format: "junit" or "junit:/path/to/output.xml"')
   .option("--trace-limit <count>", "Max trace files to keep per test (default: 20)")
   .option("--ci", "CI mode: enables --fail-fast and --reporter junit")
+  .option("--include-browser", "Include cases that require a browser (e.g., OAuth login)")
+  .option("--include-out-of-band", "Include cases that require out-of-band channels (email, SMS)")
+  .option("--include-opt-in", "Include opt-in cases (expensive, slow, or side-effect-producing)")
   .option("--no-session", "Skip session setup/teardown")
   .option("-M, --meta <key=value>", "Custom run metadata (repeatable)", collect, [])
   .option("--upload", "Upload run results and artifacts to Glubean Cloud")
@@ -146,6 +149,9 @@ program
       reporter,
       reporterPath,
       traceLimit: options.traceLimit ? parseInt(options.traceLimit, 10) : undefined,
+      includeBrowser: options.includeBrowser,
+      includeOutOfBand: options.includeOutOfBand,
+      includeOptIn: options.includeOptIn,
       noSession: options.noSession,
       meta: options.meta?.length
         ? (options.meta as string[]).reduce((acc: Record<string, string>, item: string) => {

@@ -61,12 +61,65 @@ interface RunOptions {
   reporter?: string;
   reporterPath?: string;
   traceLimit?: number;
+  /** Include cases with requires: "browser" */
+  includeBrowser?: boolean;
+  /** Include cases with requires: "out-of-band" */
+  includeOutOfBand?: boolean;
+  /** Include cases with defaultRun: "opt-in" (headless but expensive/slow) */
+  includeOptIn?: boolean;
   upload?: boolean;
   project?: string;
   token?: string;
   apiUrl?: string;
   noSession?: boolean;
   meta?: Record<string, string>;
+}
+
+// =============================================================================
+// Capability profile — determines which cases can run
+// =============================================================================
+
+interface CapabilityProfile {
+  /** Can run browser-interactive cases */
+  browser: boolean;
+  /** Can run out-of-band cases (email, SMS, webhook) */
+  outOfBand: boolean;
+  /** Can run opt-in cases (expensive, slow) */
+  optIn: boolean;
+}
+
+/**
+ * Check if a test should be skipped based on its requires/defaultRun
+ * and the current capability profile.
+ *
+ * Returns undefined if the test should run, or a skip reason string.
+ */
+function shouldSkipTest(
+  meta: { requires?: string; defaultRun?: string },
+  profile: CapabilityProfile,
+): string | undefined {
+  const requires = meta.requires ?? "headless";
+  const defaultRun = meta.defaultRun ?? "always";
+
+  // Check requires capability
+  if (requires === "browser" && !profile.browser) {
+    return `requires: browser (use --include-browser to run)`;
+  }
+  if (requires === "out-of-band" && !profile.outOfBand) {
+    return `requires: out-of-band (use --include-out-of-band to run)`;
+  }
+
+  // Check defaultRun policy
+  if (defaultRun === "opt-in") {
+    // Non-headless opt-in: already handled by requires check above
+    // Headless opt-in: needs explicit --include-opt-in
+    if (requires === "headless" && !profile.optIn) {
+      return `defaultRun: opt-in (use --include-opt-in to run)`;
+    }
+    // Non-headless + included via --include-browser/--include-out-of-band: allow
+  }
+
+  return undefined;
 }
 
 interface CollectedTestRun {
@@ -187,6 +240,8 @@ interface DiscoveredTestMeta {
   only?: boolean;
   groupId?: string;
   parallel?: boolean;
+  requires?: string;
+  defaultRun?: string;
 }
 
 interface DiscoveredTest {
@@ -286,6 +341,28 @@ export async function runCommand(
   const runStartDate = new Date();
   const runStartTime = runStartDate.toISOString();
   const runStartLocal = localTimeString(runStartDate);
+
+  // ── Capability profile ──────────────────────────────────────────────────
+  const isCiEnv = process.env.CI === "true" || process.env.GLUBEAN_CI === "true";
+
+  // Hard fail: --include-browser/--include-out-of-band in CI
+  if (isCiEnv && (options.includeBrowser || options.includeOutOfBand)) {
+    console.error(
+      `\n${colors.red}Error: --include-browser and --include-out-of-band cannot run in CI environments.${colors.reset}`,
+    );
+    console.error(
+      `${colors.dim}CI has no browser or out-of-band channels. Remove these flags from your CI config.${colors.reset}\n`,
+    );
+    process.exit(1);
+  }
+
+  const capabilityProfile: CapabilityProfile = {
+    browser: !!options.includeBrowser && !isCiEnv,
+    outOfBand: !!options.includeOutOfBand && !isCiEnv,
+    optIn: !!options.includeOptIn,
+  };
+
+  const interactive = capabilityProfile.browser;
 
   const traceCollector: Array<{
     testId: string;
@@ -620,7 +697,7 @@ export async function runCommand(
 
     for await (const event of orchestrator.runSessionSetup(
       sessionFile,
-      { vars: envVars, secrets },
+      { vars: envVars, secrets, interactive },
       toSingleExecutionOptions(shared),
     )) {
       if (event.type === "session:set") {
@@ -695,17 +772,45 @@ export async function runCommand(
       continue;
     }
 
-    const testIds = fileTests.map((ft) => ft.test.meta.id);
-    const exportNames: Record<string, string> = {};
+    // ── Skip tests based on requires/defaultRun capability profile ──
+    const runnableTests: typeof fileTests = [];
     for (const ft of fileTests) {
+      const skipReason = shouldSkipTest(ft.test.meta, capabilityProfile);
+      if (skipReason) {
+        skipped++;
+        const name = ft.test.meta.name || ft.test.meta.id;
+        console.log(
+          `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${skipReason})${colors.reset}`,
+        );
+        // Record as a skipped test run for result output
+        collectedRuns.push({
+          testId: ft.test.meta.id,
+          testName: name,
+          tags: ft.test.meta.tags as string[] | undefined,
+          filePath: groupFilePath,
+          events: [{ type: "status", status: "skipped", reason: skipReason } as ExecutionEvent],
+          success: true,
+          durationMs: 0,
+          groupId: ft.test.meta.groupId,
+        });
+        continue;
+      }
+      runnableTests.push(ft);
+    }
+
+    if (runnableTests.length === 0) continue;
+
+    const testIds = runnableTests.map((ft) => ft.test.meta.id);
+    const exportNames: Record<string, string> = {};
+    for (const ft of runnableTests) {
       exportNames[ft.test.meta.id] = ft.exportName;
     }
     const testMap = new Map(
-      fileTests.map((ft) => [ft.test.meta.id, ft]),
+      runnableTests.map((ft) => [ft.test.meta.id, ft]),
     );
     const testFileUrl = pathToFileURL(groupFilePath).toString();
 
-    const batchTimeout = fileTests.reduce((sum, ft) => {
+    const batchTimeout = runnableTests.reduce((sum, ft) => {
       return sum +
         (normalizePositiveTimeoutMs(ft.test.meta.timeout) ??
           shared.perTestTimeoutMs ?? 30_000);
@@ -848,7 +953,7 @@ export async function runCommand(
           exportNames,
           // Pass concurrency to harness when the batch has parallel-marked tests.
           // The harness uses p-queue to run them concurrently within a single process.
-          ...(fileTests.some((ft) => ft.test.meta.parallel) && shared.concurrency > 1
+          ...(runnableTests.some((ft) => ft.test.meta.parallel) && shared.concurrency > 1
             ? { concurrency: shared.concurrency }
             : {}),
         },

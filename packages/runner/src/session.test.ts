@@ -265,6 +265,68 @@ export const writeSession = test("write-session", async (ctx) => {
   expect(result.success).toBe(true);
 }, 15_000);
 
+// ── ctx.interactive in session setup ────────────────────────────────────────
+
+test("session setup receives interactive=false by default", async () => {
+  const dir = await makeTempDir();
+  const sessionFile = join(dir, "session.ts");
+  await writeFile(
+    sessionFile,
+    `
+import { defineSession } from "@glubean/sdk";
+
+export default defineSession({
+  async setup(ctx) {
+    ctx.session.set("wasInteractive", String(ctx.interactive));
+  },
+});
+`,
+  );
+
+  const executor = createExecutor();
+  const events = await collectEvents(
+    executor,
+    pathToFileURL(sessionFile).href,
+    "__session__",
+    { vars: {}, secrets: {}, session: {}, sessionMode: "setup" },
+  );
+
+  const sessionSets = events.filter((e) => e.type === "session:set");
+  expect(sessionSets).toContainEqual(
+    expect.objectContaining({ key: "wasInteractive", value: "false" }),
+  );
+}, 15_000);
+
+test("session setup receives interactive=true when passed in context", async () => {
+  const dir = await makeTempDir();
+  const sessionFile = join(dir, "session.ts");
+  await writeFile(
+    sessionFile,
+    `
+import { defineSession } from "@glubean/sdk";
+
+export default defineSession({
+  async setup(ctx) {
+    ctx.session.set("wasInteractive", String(ctx.interactive));
+  },
+});
+`,
+  );
+
+  const executor = createExecutor();
+  const events = await collectEvents(
+    executor,
+    pathToFileURL(sessionFile).href,
+    "__session__",
+    { vars: {}, secrets: {}, session: {}, sessionMode: "setup", interactive: true },
+  );
+
+  const sessionSets = events.filter((e) => e.type === "session:set");
+  expect(sessionSets).toContainEqual(
+    expect.objectContaining({ key: "wasInteractive", value: "true" }),
+  );
+}, 15_000);
+
 // ── Session → {{KEY}} template resolution (integration) ────────────────────
 
 test("session values resolve in configure() {{KEY}} templates", async () => {

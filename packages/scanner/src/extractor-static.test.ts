@@ -1217,3 +1217,95 @@ test("extractContractCases — case line numbers are correct", () => {
   expect(result[0].cases[1].key).toBe("beta");
   expect(result[0].cases[1].line).toBe(9);
 });
+
+// ── requires / defaultRun extraction ────────────────────────────────────────
+
+test("extractContractCases — requires: browser", () => {
+  const source = `
+export const googleAuth = contract.http("google-auth", {
+  endpoint: "POST /auth/google/callback",
+  cases: {
+    success: {
+      description: "Real Google login",
+      requires: "browser",
+      expect: { status: 200 },
+    },
+    invalid: {
+      description: "Bad token",
+      expect: { status: 401 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result[0].cases[0].requires).toBe("browser");
+  expect(result[0].cases[0].defaultRun).toBeUndefined(); // not statically set
+  expect(result[0].cases[1].requires).toBeUndefined();
+  expect(result[0].cases[1].defaultRun).toBeUndefined();
+});
+
+test("extractContractCases — requires: out-of-band", () => {
+  const source = `
+export const magicLink = contract.http("magic-link", {
+  endpoint: "POST /auth/magic-link",
+  cases: {
+    send: {
+      description: "Send magic link",
+      requires: "out-of-band",
+      expect: { status: 200 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result[0].cases[0].requires).toBe("out-of-band");
+});
+
+test("extractContractCases — defaultRun: opt-in", () => {
+  const source = `
+export const sms = contract.http("sms-send", {
+  endpoint: "POST /send-sms",
+  cases: {
+    realSend: {
+      description: "Real Twilio SMS",
+      defaultRun: "opt-in",
+      expect: { status: 202 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result[0].cases[0].defaultRun).toBe("opt-in");
+  expect(result[0].cases[0].requires).toBeUndefined();
+});
+
+test("extractContractCases — requires + defaultRun together", () => {
+  const source = `
+export const checkout = contract.http("checkout", {
+  endpoint: "POST /checkout",
+  cases: {
+    pay: {
+      description: "Stripe checkout",
+      requires: "browser",
+      defaultRun: "opt-in",
+      expect: { status: 200 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result[0].cases[0].requires).toBe("browser");
+  expect(result[0].cases[0].defaultRun).toBe("opt-in");
+});
+
+test("extractContractCases — no requires/defaultRun returns undefined", () => {
+  const source = `
+export const simple = contract.http("simple", {
+  endpoint: "GET /health",
+  cases: {
+    check: {
+      description: "Health check",
+      expect: { status: 200 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result[0].cases[0].requires).toBeUndefined();
+  expect(result[0].cases[0].defaultRun).toBeUndefined();
+});

@@ -1570,6 +1570,8 @@ export type {
   ContractProtocolAdapter,
   ContractCaseMeta,
   ContractRegistryMeta,
+  CaseRequires,
+  CaseDefaultRun,
 } from "./contract-types.js";
 
 // Session API

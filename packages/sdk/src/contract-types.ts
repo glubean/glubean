@@ -10,6 +10,30 @@ import type { SchemaLike } from "./types.js";
 import type { Test, TestContext, RegisteredTestMeta, HttpClient } from "./types.js";
 
 // =============================================================================
+// Case execution boundary (dual-axis model)
+// =============================================================================
+
+/**
+ * Physical capability required by a case or flow.
+ *
+ * - `"headless"` — fully automated, no human in loop (default)
+ * - `"browser"` — needs a real browser (OAuth code flow, checkout, captcha)
+ * - `"out-of-band"` — needs an out-of-band channel (email, SMS, push, webhook tunnel)
+ */
+export type CaseRequires = "headless" | "browser" | "out-of-band";
+
+/**
+ * Default run policy for a case or flow.
+ *
+ * - `"always"` — run whenever the runner satisfies `requires` (default)
+ * - `"opt-in"` — skip unless explicitly requested (e.g. `--include-opt-in`)
+ *
+ * Use `"opt-in"` for cases that are expensive, have real side effects,
+ * or are slow (Twilio SMS, Stripe charges, long stress tests).
+ */
+export type CaseDefaultRun = "always" | "opt-in";
+
+// =============================================================================
 // Case definition
 // =============================================================================
 
@@ -88,6 +112,35 @@ export interface ContractCase<T = unknown, S = void> {
 
   /** Additional tags for this case (merged with contract-level tags) */
   tags?: string[];
+
+  /**
+   * Physical capability this case requires to execute.
+   *
+   * Default: `"headless"` — fully automated, no human in loop.
+   *
+   * When set to `"browser"` or `"out-of-band"`, the runner will skip this case
+   * unless the corresponding `--include-browser` / `--include-out-of-band` flag
+   * is passed. Skipped cases are reported explicitly with reason.
+   *
+   * Note: setting `requires` to a non-headless value automatically implies
+   * `defaultRun: "opt-in"`.
+   */
+  requires?: CaseRequires;
+
+  /**
+   * Default run policy — should this case run automatically, or only when
+   * explicitly requested?
+   *
+   * Default: `"always"` — run whenever the runner satisfies `requires`.
+   *
+   * Set to `"opt-in"` for cases that are expensive (real Twilio SMS),
+   * have real side effects (Stripe charges), or are slow (stress tests).
+   * Opt-in cases require `--include-opt-in` to run, even locally.
+   *
+   * Note: when `requires !== "headless"`, `defaultRun` is automatically
+   * set to `"opt-in"` if not explicitly provided.
+   */
+  defaultRun?: CaseDefaultRun;
 }
 
 // =============================================================================

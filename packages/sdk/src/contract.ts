@@ -106,12 +106,24 @@ function buildCaseTest<T, S>(
   const testId = `${contractId}.${caseKey}`;
   const testName = `${contractId} — ${caseKey}`;
 
+  // Auto-imply: non-headless requires → defaultRun: "opt-in"
+  const requires = c.requires ?? "headless";
+  const defaultRun = c.defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
+
+  // Auto-tag: requires:browser, requires:out-of-band, default-run:opt-in
+  const runtimeTags: string[] = [];
+  if (requires !== "headless") runtimeTags.push(`requires:${requires}`);
+  if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
+  const finalTags = [...allTags, ...runtimeTags];
+
   const meta: TestMeta = {
     id: testId,
     name: testName,
     description: c.description,
-    tags: allTags.length > 0 ? allTags : undefined,
+    tags: finalTags.length > 0 ? finalTags : undefined,
     deferred: c.deferred,
+    requires,
+    defaultRun,
   };
 
   const fn = async (ctx: import("./types.js").TestContext) => {
@@ -197,8 +209,10 @@ function buildCaseTest<T, S>(
     id: testId,
     name: testName,
     type: "simple",
-    tags: allTags.length > 0 ? allTags : undefined,
+    tags: finalTags.length > 0 ? finalTags : undefined,
     groupId: contractId,
+    requires,
+    defaultRun,
     contract: registryMeta,
   });
 
@@ -238,6 +252,8 @@ class FlowBuilder<S = unknown> {
   private _id: string;
   private _defaultClient?: HttpClient;
   private _tags?: string[];
+  private _requires?: import("./contract-types.js").CaseRequires;
+  private _defaultRun?: import("./contract-types.js").CaseDefaultRun;
   private _steps: Array<{
     meta: FlowStepMeta;
     fn: (ctx: TestContext, state: any) => Promise<any>;
@@ -245,10 +261,19 @@ class FlowBuilder<S = unknown> {
   private _setupFn?: (ctx: TestContext) => Promise<any>;
   private _teardownFn?: (ctx: TestContext, state: any) => Promise<void>;
 
-  constructor(id: string, options?: { client?: HttpClient; tags?: string[] }) {
+  constructor(id: string, options?: {
+    client?: HttpClient;
+    tags?: string[];
+    /** Physical capability this flow requires. Default: "headless". */
+    requires?: import("./contract-types.js").CaseRequires;
+    /** Default run policy. Default: "always". Non-headless implies "opt-in". */
+    defaultRun?: import("./contract-types.js").CaseDefaultRun;
+  }) {
     this._id = id;
     this._defaultClient = options?.client;
     this._tags = options?.tags;
+    this._requires = options?.requires;
+    this._defaultRun = options?.defaultRun;
   }
 
   setup<NewS>(fn: (ctx: TestContext) => Promise<NewS>): FlowBuilder<NewS> {
@@ -337,11 +362,24 @@ class FlowBuilder<S = unknown> {
     readonly flowSteps: FlowStepMeta[];
     asSteps(): <B>(b: import("./index.js").TestBuilder<B>) => import("./index.js").TestBuilder<B>;
   } {
+    // Auto-imply: non-headless requires → defaultRun: "opt-in"
+    const requires = this._requires ?? "headless";
+    const defaultRun = this._defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
+
+    // Auto-tag
+    const baseTags = this._tags ?? [];
+    const runtimeTags: string[] = [];
+    if (requires !== "headless") runtimeTags.push(`requires:${requires}`);
+    if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
+    const finalTags = [...baseTags, ...runtimeTags];
+
     const test: Test = {
       meta: {
         id: this._id,
         name: this._id,
-        tags: this._tags,
+        tags: finalTags.length > 0 ? finalTags : undefined,
+        requires,
+        defaultRun,
       },
       type: "steps",
       setup: this._setupFn as any,
@@ -359,7 +397,9 @@ class FlowBuilder<S = unknown> {
       id: this._id,
       name: this._id,
       type: "steps",
-      tags: this._tags,
+      tags: finalTags.length > 0 ? finalTags : undefined,
+      requires,
+      defaultRun,
       steps: this._steps.map((s) => ({ name: s.meta.name })),
       hasSetup: !!this._setupFn,
       hasTeardown: !!this._teardownFn,
