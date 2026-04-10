@@ -155,6 +155,7 @@ const rawSecrets = (contextData.secrets ?? {}) as Record<string, string>;
 const retryCount = (contextData.retryCount ?? 0) as number;
 const sessionData = (contextData.session ?? {}) as Record<string, unknown>;
 const sessionMode = contextData.sessionMode as "setup" | "teardown" | undefined;
+const isInteractive = (contextData.interactive ?? false) as boolean;
 
 function normalizeTestTags(
   input: string | string[] | undefined,
@@ -1178,6 +1179,7 @@ try {
       secrets: ctx.secrets,
       http: ctx.http,
       session: ctx.session,
+      interactive: isInteractive,
       log: ctx.log,
     };
 

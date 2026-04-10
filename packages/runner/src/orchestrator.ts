@@ -190,13 +190,14 @@ export class RunOrchestrator {
    */
   async *runSessionSetup(
     sessionFile: string,
-    context: Pick<ExecutionContext, "vars" | "secrets">,
+    context: Pick<ExecutionContext, "vars" | "secrets"> & { interactive?: boolean },
     options?: SingleExecutionOptions,
   ): AsyncGenerator<ExecutionEvent> {
     const sessionUrl = pathToFileURL(sessionFile).href;
     const ctx: ExecutionContext = {
       ...createContextWithSession(context, {}),
       sessionMode: "setup",
+      interactive: context.interactive,
     };
 
     for await (const event of this.executor.run(

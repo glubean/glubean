@@ -125,6 +125,8 @@ export interface ExecutionContext {
   session?: Record<string, unknown>;
   /** When set, harness runs session.ts setup/teardown instead of tests. */
   sessionMode?: "setup" | "teardown";
+  /** Whether user opted into interactive mode (--include-browser). Passed to SessionSetupContext.interactive. */
+  interactive?: boolean;
   test?: {
     id?: string;
     tags?: string[];
