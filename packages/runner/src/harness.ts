@@ -15,6 +15,7 @@ declare global {
   var __glubeanRuntime: {
     vars: Record<string, string>;
     secrets: Record<string, string>;
+    session: Record<string, unknown>;
     http: Record<string, unknown>;
     test: Record<string, unknown>;
     trace: (t: import("@glubean/sdk").Trace) => void;
@@ -1130,6 +1131,7 @@ function withEnvFallback(
 globalThis.__glubeanRuntime = {
   vars: withEnvFallback(rawVars),
   secrets: withEnvFallback(rawSecrets),
+  session: sessionData,
   http: wrappedHttp,
   // Getter: returns per-test metadata from ALS when inside a test,
   // falls back to the initial runtimeTest (module load phase).

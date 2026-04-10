@@ -83,6 +83,8 @@ import type {
 export interface InternalRuntime {
   vars: Record<string, string>;
   secrets: Record<string, string>;
+  /** Session key-value store. Set during session setup, available to all tests. */
+  session: Record<string, unknown>;
   http: HttpClient;
   test?: GlubeanRuntime["test"];
   trace?(t: Trace): void;
@@ -165,7 +167,7 @@ function buildLazyVars<V extends Record<string, string>>(
     Object.defineProperty(obj, prop, {
       get() {
         const runtime = getRuntime();
-        return resolveTemplate(value, runtime.vars, runtime.secrets);
+        return resolveTemplate(value, runtime.vars, runtime.secrets, runtime.session);
       },
       enumerable: true,
       configurable: false,
@@ -188,7 +190,7 @@ function buildLazySecrets<S extends Record<string, string>>(
     Object.defineProperty(obj, prop, {
       get() {
         const runtime = getRuntime();
-        return resolveTemplate(value, runtime.vars, runtime.secrets);
+        return resolveTemplate(value, runtime.vars, runtime.secrets, runtime.session);
       },
       enumerable: true,
       configurable: false,
@@ -198,8 +200,15 @@ function buildLazySecrets<S extends Record<string, string>>(
 }
 
 /**
- * Resolve `{{key}}` template placeholders in a string using runtime vars and secrets.
- * Secrets take precedence over vars if both have the same key.
+ * Resolve `{{key}}` template placeholders in a string.
+ *
+ * Resolution priority (first non-empty wins):
+ * 1. Session — dynamic values set during session setup (e.g., auth tokens)
+ * 2. Secrets — from `.env.secrets`
+ * 3. Vars — from `.env`
+ *
+ * Session values must be strings to resolve in templates. Non-string session
+ * values are silently skipped (they're still accessible via `ctx.session.get()`).
  *
  * This is used internally by `buildLazyHttp()` and exposed to plugin authors
  * via `GlubeanRuntime.resolveTemplate()`.
@@ -208,14 +217,19 @@ export function resolveTemplate(
   template: string,
   vars: Record<string, string>,
   secrets: Record<string, string>,
+  session?: Record<string, unknown>,
 ): string {
   return template.replace(TEMPLATE_RE, (_match, key: string) => {
-    // Try secrets first (more likely for auth headers), then vars
-    const value = secrets[key] ?? vars[key];
+    // Session first (dynamic, from setup hooks), then secrets, then vars
+    const sessionValue = session?.[key];
+    const value =
+      (typeof sessionValue === "string" ? sessionValue : undefined) ??
+      secrets[key] ??
+      vars[key];
     if (value === undefined || value === null || value === "") {
       throw new Error(
         `Missing value for template placeholder "{{${key}}}" in configure() http headers. ` +
-          `Ensure "${key}" is available as a var or secret.`,
+          `Ensure "${key}" is available in session, as a secret, or as a var.`,
       );
     }
     return value;
@@ -248,6 +262,7 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
         httpOptions.prefixUrl,
         runtime.vars,
         runtime.secrets,
+        runtime.session,
       );
     }
 
@@ -258,6 +273,7 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
           template,
           runtime.vars,
           runtime.secrets,
+          runtime.session,
         );
       }
       extendOptions.headers = resolvedHeaders;
@@ -267,7 +283,7 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
       const resolvedParams: Record<string, string> = {};
       for (const [name, template] of Object.entries(httpOptions.searchParams)) {
         resolvedParams[name] = resolveTemplate(
-          template, runtime.vars, runtime.secrets,
+          template, runtime.vars, runtime.secrets, runtime.session,
         );
       }
       extendOptions.searchParams = resolvedParams;
@@ -551,7 +567,7 @@ function resolvePlugin(
     test: runtime.test,
     requireVar,
     requireSecret,
-    resolveTemplate: (template: string) => resolveTemplate(template, runtime.vars, runtime.secrets),
+    resolveTemplate: (template: string) => resolveTemplate(template, runtime.vars, runtime.secrets, runtime.session),
     trace: runtime.trace?.bind(runtime) ?? noop,
     action: runtime.action?.bind(runtime) ?? noop,
     event: runtime.event?.bind(runtime) ?? noop,

@@ -1,5 +1,6 @@
-import { test, expect } from "vitest";
-import { configure } from "./configure.js";
+import { test, expect, describe } from "vitest";
+import { configure, resolveTemplate } from "./configure.js";
+import { session } from "./session.js";
 import { definePlugin } from "./plugin.js";
 import type { GlubeanRuntime, HttpClient, HttpRequestOptions } from "./types.js";
 
@@ -16,11 +17,13 @@ function setRuntime(
   secrets: Record<string, string> = {},
   http?: HttpClient,
   test?: { id: string; tags: string[] },
+  session?: Record<string, unknown>,
 ) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (globalThis as any).__glubeanRuntime = {
     vars,
     secrets,
+    session: session ?? {},
     http: http ?? createMockHttp(),
     test,
   };
@@ -337,6 +340,176 @@ test("http - secrets take precedence over vars in templates", () => {
     http.get("https://example.com");
     const headers = extendCalls[0].options.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer secret-token");
+  } finally {
+    cleanup();
+  }
+});
+
+// =============================================================================
+// Session-based template resolution
+// =============================================================================
+
+test("http - resolves {{key}} from session values", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    {},
+    {},
+    mockHttp,
+    undefined,
+    { AUTH_TOKEN: "session-jwt-123" },
+  );
+  try {
+    const { http } = configure({
+      http: {
+        headers: { Authorization: "Bearer {{AUTH_TOKEN}}" },
+      },
+    });
+    http.get("https://example.com");
+    const headers = extendCalls[0].options.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer session-jwt-123");
+  } finally {
+    cleanup();
+  }
+});
+
+test("http - session takes precedence over secrets and vars", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    { token: "var-token" },
+    { token: "secret-token" },
+    mockHttp,
+    undefined,
+    { token: "session-token" },
+  );
+  try {
+    const { http } = configure({
+      http: {
+        headers: { Authorization: "Bearer {{token}}" },
+      },
+    });
+    http.get("https://example.com");
+    const headers = extendCalls[0].options.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer session-token");
+  } finally {
+    cleanup();
+  }
+});
+
+test("http - session falls through to secrets when key not in session", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    {},
+    { token: "secret-token" },
+    mockHttp,
+    undefined,
+    { OTHER_KEY: "other-value" },
+  );
+  try {
+    const { http } = configure({
+      http: {
+        headers: { Authorization: "Bearer {{token}}" },
+      },
+    });
+    http.get("https://example.com");
+    const headers = extendCalls[0].options.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer secret-token");
+  } finally {
+    cleanup();
+  }
+});
+
+test("http - non-string session values are skipped in template resolution", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    {},
+    { token: "secret-token" },
+    mockHttp,
+    undefined,
+    { token: 12345 },  // number, not string — should be skipped
+  );
+  try {
+    const { http } = configure({
+      http: {
+        headers: { Authorization: "Bearer {{token}}" },
+      },
+    });
+    http.get("https://example.com");
+    const headers = extendCalls[0].options.headers as Record<string, string>;
+    // Non-string session value skipped, falls through to secret
+    expect(headers.Authorization).toBe("Bearer secret-token");
+  } finally {
+    cleanup();
+  }
+});
+
+test("http - session resolves in prefixUrl template", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    {},
+    {},
+    mockHttp,
+    undefined,
+    { BASE_URL: "https://api.example.com" },
+  );
+  try {
+    const { http } = configure({
+      http: { prefixUrl: "{{BASE_URL}}" },
+    });
+    http.get("users");
+    expect(extendCalls[0].options.prefixUrl).toBe("https://api.example.com");
+  } finally {
+    cleanup();
+  }
+});
+
+test("http - session resolves in searchParams template", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    {},
+    {},
+    mockHttp,
+    undefined,
+    { API_KEY: "session-key-456" },
+  );
+  try {
+    const { http } = configure({
+      http: { searchParams: { apiKey: "{{API_KEY}}" } },
+    });
+    http.get("https://example.com");
+    const params = extendCalls[0].options.searchParams as Record<string, string>;
+    expect(params.apiKey).toBe("session-key-456");
+  } finally {
+    cleanup();
+  }
+});
+
+test("http - empty session does not break existing resolution", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime(
+    { base_url: "https://api.test.com" },
+    { api_key: "sk-test-789" },
+    mockHttp,
+    undefined,
+    {},  // empty session
+  );
+  try {
+    const { http } = configure({
+      http: {
+        prefixUrl: "{{base_url}}",
+        headers: { Authorization: "Bearer {{api_key}}" },
+      },
+    });
+    http.get("users");
+    expect(extendCalls[0].options.prefixUrl).toBe("https://api.test.com");
+    const headers = extendCalls[0].options.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer sk-test-789");
   } finally {
     cleanup();
   }
@@ -1096,4 +1269,194 @@ test("plugins - throws on reserved key 'http'", () => {
         plugins: { http: definePlugin((_r) => ({ x: 1 })) },
       }),
   ).toThrow('Plugin name "http" conflicts with a reserved configure() field');
+});
+
+// =============================================================================
+// resolveTemplate() — direct unit tests (session priority)
+// =============================================================================
+
+describe("resolveTemplate", () => {
+  test("session value takes highest priority", () => {
+    const result = resolveTemplate(
+      "Bearer {{token}}",
+      { token: "var-val" },
+      { token: "secret-val" },
+      { token: "session-val" },
+    );
+    expect(result).toBe("Bearer session-val");
+  });
+
+  test("falls through to secrets when session has no match", () => {
+    const result = resolveTemplate(
+      "Bearer {{token}}",
+      { token: "var-val" },
+      { token: "secret-val" },
+      { other: "session-val" },
+    );
+    expect(result).toBe("Bearer secret-val");
+  });
+
+  test("falls through to vars when session and secrets have no match", () => {
+    const result = resolveTemplate(
+      "{{base_url}}/api",
+      { base_url: "https://api.test.com" },
+      {},
+      {},
+    );
+    expect(result).toBe("https://api.test.com/api");
+  });
+
+  test("works without session parameter (backward compat)", () => {
+    const result = resolveTemplate(
+      "Bearer {{token}}",
+      {},
+      { token: "secret-val" },
+    );
+    expect(result).toBe("Bearer secret-val");
+  });
+
+  test("non-string session values are skipped", () => {
+    const result = resolveTemplate(
+      "Bearer {{token}}",
+      {},
+      { token: "secret-val" },
+      { token: 42 },
+    );
+    expect(result).toBe("Bearer secret-val");
+  });
+
+  test("null session value falls through", () => {
+    const result = resolveTemplate(
+      "Bearer {{token}}",
+      {},
+      { token: "secret-val" },
+      { token: null },
+    );
+    expect(result).toBe("Bearer secret-val");
+  });
+
+  test("multiple placeholders with mixed sources", () => {
+    const result = resolveTemplate(
+      "{{base}}/api?key={{key}}&session={{sid}}",
+      { base: "https://api.com" },
+      { key: "sk-123" },
+      { sid: "sess-456" },
+    );
+    expect(result).toBe("https://api.com/api?key=sk-123&session=sess-456");
+  });
+
+  test("throws on missing placeholder even with session", () => {
+    expect(() =>
+      resolveTemplate(
+        "Bearer {{missing}}",
+        {},
+        {},
+        { other: "value" },
+      ),
+    ).toThrow('Missing value for template placeholder "{{missing}}"');
+  });
+});
+
+// =============================================================================
+// Global session accessor
+// =============================================================================
+
+describe("session (global accessor)", () => {
+  test("get returns session value when runtime is set", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, { token: "abc" });
+    try {
+      expect(session.get("token")).toBe("abc");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("get returns undefined for missing key", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, { other: "val" });
+    try {
+      expect(session.get("token")).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("require returns session value", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, { token: "abc" });
+    try {
+      expect(session.require("token")).toBe("abc");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("require throws on missing key", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, {});
+    try {
+      expect(() => session.require("missing")).toThrow('Missing required session key: "missing"');
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("has returns true/false", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, { a: 1 });
+    try {
+      expect(session.has("a")).toBe(true);
+      expect(session.has("b")).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("entries returns snapshot", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, { x: "1", y: "2" });
+    try {
+      expect(session.entries()).toEqual({ x: "1", y: "2" });
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("set writes value readable by get", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, {});
+    try {
+      session.set("dynamic", "new-value");
+      expect(session.get("dynamic")).toBe("new-value");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("set overwrites existing value", () => {
+    const cleanup = setRuntime({}, {}, undefined, undefined, { token: "old" });
+    try {
+      expect(session.get("token")).toBe("old");
+      session.set("token", "new");
+      expect(session.get("token")).toBe("new");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("set value is readable by {{KEY}} template resolution", () => {
+    const extendCalls: { options: HttpRequestOptions }[] = [];
+    const mockHttp = createMockHttp(extendCalls);
+    const cleanup = setRuntime({}, {}, mockHttp, undefined, {});
+    try {
+      session.set("AUTH_TOKEN", "dynamic-jwt");
+      const { http } = configure({
+        http: { headers: { Authorization: "Bearer {{AUTH_TOKEN}}" } },
+      });
+      http.get("https://example.com");
+      const headers = extendCalls[0].options.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer dynamic-jwt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("throws when accessed outside runtime", () => {
+    clearRuntime();
+    expect(() => session.get("token")).toThrow("session can only be accessed during test execution");
+  });
 });
