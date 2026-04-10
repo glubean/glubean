@@ -519,3 +519,157 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
     },
   };
 }
+
+// =============================================================================
+// acquireOAuthToken — standalone token acquisition for session.ts
+// =============================================================================
+
+/**
+ * Options for standalone OAuth token acquisition.
+ * Subset of OAuthCodeOptions — no prefixUrl (not building an HTTP client).
+ */
+export interface AcquireOAuthTokenOptions {
+  /** OAuth authorization endpoint URL */
+  authorizeUrl: string;
+  /** OAuth token endpoint URL */
+  tokenUrl: string;
+  /** Client ID */
+  clientId: string;
+  /** Client secret (optional for public clients with PKCE) */
+  clientSecret?: string;
+  /** OAuth scopes */
+  scopes?: string[];
+  /** Enable PKCE with S256 (default: true) */
+  pkce?: boolean;
+  /** Token cache directory (default: ".glubean/tokens") */
+  cacheDir?: string;
+  /** Override redirect URI (for tunnel setups) */
+  redirectUri?: string;
+  /** Fixed port for callback server */
+  port?: number;
+  /** Extra authorize URL params */
+  authorizeParams?: Record<string, string>;
+  /** Custom browser opener */
+  openBrowser?: (url: string) => void;
+}
+
+/**
+ * Acquire an OAuth access token via the Authorization Code flow.
+ *
+ * Designed for use in `session.ts` setup — not tied to a ky HTTP client.
+ * Uses the same disk cache as `oauthCode()`, so tokens are shared.
+ *
+ * Behavior:
+ * 1. Check disk cache → valid token → return immediately (no browser)
+ * 2. Expired but has refresh_token → silent refresh (no browser)
+ * 3. No cache → open browser → user clicks → callback → exchange code → cache
+ *
+ * @example session.ts usage
+ * ```ts
+ * import { defineSession } from "@glubean/sdk";
+ * import { acquireOAuthToken } from "@glubean/oauth-code";
+ *
+ * export default defineSession({
+ *   async setup(ctx) {
+ *     if (ctx.interactive) {
+ *       const { access_token } = await acquireOAuthToken({
+ *         authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+ *         tokenUrl: "https://oauth2.googleapis.com/token",
+ *         clientId: ctx.secrets.require("GOOGLE_CLIENT_ID"),
+ *         clientSecret: ctx.secrets.require("GOOGLE_CLIENT_SECRET"),
+ *         scopes: ["openid", "email", "profile"],
+ *       });
+ *       ctx.session.set("AUTH_TOKEN", access_token);
+ *     } else {
+ *       // bypass path
+ *     }
+ *   },
+ * });
+ * ```
+ */
+export async function acquireOAuthToken(
+  opts: AcquireOAuthTokenOptions,
+): Promise<{ access_token: string; refresh_token?: string; expires_in?: number }> {
+  const usePkce = opts.pkce !== false;
+  const dir = opts.cacheDir ?? ".glubean/tokens";
+  const scopes = opts.scopes?.join(" ");
+  const open = opts.openBrowser ?? openBrowser;
+  const key = cacheKey(opts.clientId, opts.authorizeUrl, scopes, opts.authorizeParams);
+
+  // 1. Disk cache — still valid
+  const disk = await readCache(dir, key);
+  if (disk && disk.expiresAt > Date.now() + 30_000) {
+    return { access_token: disk.accessToken, refresh_token: disk.refreshToken, expires_in: Math.floor((disk.expiresAt - Date.now()) / 1000) };
+  }
+
+  // 2. Disk cache expired but has refresh token
+  if (disk?.refreshToken) {
+    try {
+      const data = await refreshAccessToken({
+        tokenUrl: opts.tokenUrl,
+        refreshToken: disk.refreshToken,
+        clientId: opts.clientId,
+        clientSecret: opts.clientSecret,
+      });
+      const c: CachedToken = {
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token ?? disk.refreshToken,
+        expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
+      };
+      await writeCache(dir, key, c);
+      return { access_token: c.accessToken, refresh_token: c.refreshToken, expires_in: data.expires_in };
+    } catch {
+      // Refresh failed — fall through to browser flow
+    }
+  }
+
+  // 3. Browser flow
+  const server = await startCallbackServer(opts.port);
+  const redirectUri = opts.redirectUri ?? `http://127.0.0.1:${server.port}/callback`;
+  const state = randomBytes(16).toString("hex");
+
+  const authUrl = new URL(opts.authorizeUrl);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", opts.clientId);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("state", state);
+  if (scopes) authUrl.searchParams.set("scope", scopes);
+  if (opts.authorizeParams) {
+    for (const [k, v] of Object.entries(opts.authorizeParams)) {
+      authUrl.searchParams.set(k, v);
+    }
+  }
+
+  let codeVerifier: string | undefined;
+  if (usePkce) {
+    codeVerifier = generateCodeVerifier();
+    authUrl.searchParams.set("code_challenge", generateCodeChallenge(codeVerifier));
+    authUrl.searchParams.set("code_challenge_method", "S256");
+  }
+
+  process.stderr.write(
+    `\n  OAuth login required. Opening browser...\n  ${authUrl.toString()}\n\n`,
+  );
+  open(authUrl.toString());
+
+  try {
+    const code = await server.waitForCode(state);
+    const data = await exchangeCode({
+      tokenUrl: opts.tokenUrl,
+      code,
+      redirectUri,
+      clientId: opts.clientId,
+      clientSecret: opts.clientSecret,
+      codeVerifier,
+    });
+    const c: CachedToken = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
+    };
+    await writeCache(dir, key, c);
+    return { access_token: c.accessToken, refresh_token: c.refreshToken, expires_in: data.expires_in };
+  } finally {
+    server.close();
+  }
+}

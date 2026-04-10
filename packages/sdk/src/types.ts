@@ -216,6 +216,18 @@ export interface SessionSetupContext {
   http: HttpClient;
   session: SessionAccessor;
   log(message: string, data?: unknown): void;
+
+  /**
+   * Whether the user explicitly opted into interactive mode (`--include-browser`).
+   *
+   * Use this to branch session setup logic:
+   * - `true`: user is present, browser flows are allowed (real OAuth, etc.)
+   * - `false` (default): headless mode, use dev-bypass or static tokens
+   *
+   * This is driven by the same `--include-browser` CLI flag that controls
+   * `requires: "browser"` case skip behavior — one flag, one signal.
+   */
+  interactive: boolean;
 }
 
 /**
@@ -2056,6 +2068,25 @@ export interface TestMeta {
   skip?: boolean;
 
   /**
+   * Physical capability required by this test.
+   * Set automatically by `contract.http()` and `contract.flow()`.
+   *
+   * - `"headless"` (default) — fully automated
+   * - `"browser"` — needs real browser (OAuth, captcha, checkout)
+   * - `"out-of-band"` — needs out-of-band channel (email, SMS, webhook tunnel)
+   */
+  requires?: "headless" | "browser" | "out-of-band";
+
+  /**
+   * Default run policy for this test.
+   * Set automatically by `contract.http()` and `contract.flow()`.
+   *
+   * - `"always"` (default) — run whenever runner satisfies `requires`
+   * - `"opt-in"` — skip unless explicitly requested (`--include-opt-in`)
+   */
+  defaultRun?: "always" | "opt-in";
+
+  /**
    * Filter rows before generating tests (data-driven only).
    * Return `true` to include the row, `false` to exclude.
    * Applied before test registration — excluded rows never become tests.
@@ -2385,6 +2416,12 @@ export interface RegisteredTestMeta {
    * Actual concurrency level is controlled externally (e.g. `--concurrency` CLI flag).
    */
   parallel?: boolean;
+
+  /** Physical capability required by this test. */
+  requires?: "headless" | "browser" | "out-of-band";
+
+  /** Default run policy for this test. */
+  defaultRun?: "always" | "opt-in";
 
   /**
    * Contract metadata (set by contract.http() / contract.register()).

@@ -936,3 +936,248 @@ test("flow body as function of state", async () => {
   await flow.steps![0].fn(mockCtx, state);
   expect(receivedBody).toEqual({ name: "Alice", source: "flow" });
 });
+
+// =============================================================================
+// requires / defaultRun — case execution boundary
+// =============================================================================
+
+test("contract.http - default requires is headless, defaultRun is always", () => {
+  const c = contract.http("default-runtime", {
+    endpoint: "GET /health",
+    client: createMockClient(),
+    cases: {
+      check: { description: "health check", expect: { status: 200 } },
+    },
+  });
+  expect(c[0].meta.requires).toBe("headless");
+  expect(c[0].meta.defaultRun).toBe("always");
+});
+
+test("contract.http - requires: browser auto-implies defaultRun: opt-in", () => {
+  const c = contract.http("oauth-callback", {
+    endpoint: "POST /auth/google/callback",
+    client: createMockClient(),
+    cases: {
+      success: {
+        description: "real Google login",
+        requires: "browser",
+        expect: { status: 200 },
+      },
+    },
+  });
+  expect(c[0].meta.requires).toBe("browser");
+  expect(c[0].meta.defaultRun).toBe("opt-in");
+});
+
+test("contract.http - requires: out-of-band auto-implies defaultRun: opt-in", () => {
+  const c = contract.http("magic-link", {
+    endpoint: "POST /auth/magic-link",
+    client: createMockClient(),
+    cases: {
+      send: {
+        description: "send magic link email",
+        requires: "out-of-band",
+        expect: { status: 200 },
+      },
+    },
+  });
+  expect(c[0].meta.requires).toBe("out-of-band");
+  expect(c[0].meta.defaultRun).toBe("opt-in");
+});
+
+test("contract.http - explicit defaultRun: always overrides auto-imply", () => {
+  const c = contract.http("browser-always", {
+    endpoint: "GET /dashboard",
+    client: createMockClient(),
+    cases: {
+      render: {
+        description: "browser render check",
+        requires: "browser",
+        defaultRun: "always",
+        expect: { status: 200 },
+      },
+    },
+  });
+  expect(c[0].meta.requires).toBe("browser");
+  expect(c[0].meta.defaultRun).toBe("always");
+});
+
+test("contract.http - headless + opt-in for expensive API", () => {
+  const c = contract.http("twilio-sms", {
+    endpoint: "POST /send-sms",
+    client: createMockClient(),
+    cases: {
+      realSend: {
+        description: "real Twilio SMS",
+        requires: "headless",
+        defaultRun: "opt-in",
+        expect: { status: 202 },
+      },
+    },
+  });
+  expect(c[0].meta.requires).toBe("headless");
+  expect(c[0].meta.defaultRun).toBe("opt-in");
+});
+
+test("contract.http - auto-tags for requires:browser", () => {
+  const c = contract.http("tagged-browser", {
+    endpoint: "POST /auth/callback",
+    client: createMockClient(),
+    cases: {
+      success: {
+        description: "OAuth callback",
+        requires: "browser",
+        tags: ["auth"],
+        expect: { status: 200 },
+      },
+    },
+  });
+  const tags = c[0].meta.tags as string[];
+  expect(tags).toContain("auth");
+  expect(tags).toContain("requires:browser");
+  expect(tags).toContain("default-run:opt-in");
+});
+
+test("contract.http - auto-tags for out-of-band + opt-in", () => {
+  const c = contract.http("tagged-oob", {
+    endpoint: "POST /auth/magic",
+    client: createMockClient(),
+    cases: {
+      send: {
+        description: "magic link",
+        requires: "out-of-band",
+        expect: { status: 200 },
+      },
+    },
+  });
+  const tags = c[0].meta.tags as string[];
+  expect(tags).toContain("requires:out-of-band");
+  expect(tags).toContain("default-run:opt-in");
+});
+
+test("contract.http - headless + always has no runtime tags", () => {
+  const c = contract.http("no-runtime-tags", {
+    endpoint: "GET /users",
+    client: createMockClient(),
+    cases: {
+      list: {
+        description: "list users",
+        expect: { status: 200 },
+      },
+    },
+  });
+  const tags = c[0].meta.tags;
+  // No tags at all (no user tags, no runtime tags)
+  expect(tags).toBeUndefined();
+});
+
+test("contract.http - headless + opt-in adds only default-run tag", () => {
+  const c = contract.http("opt-in-headless", {
+    endpoint: "POST /expensive",
+    client: createMockClient(),
+    cases: {
+      call: {
+        description: "expensive API call",
+        defaultRun: "opt-in",
+        expect: { status: 200 },
+      },
+    },
+  });
+  const tags = c[0].meta.tags as string[];
+  expect(tags).toContain("default-run:opt-in");
+  expect(tags).not.toContain("requires:headless");
+});
+
+test("contract.http - registry includes requires and defaultRun", () => {
+  const c = contract.http("registry-runtime", {
+    endpoint: "POST /auth/callback",
+    client: createMockClient(),
+    cases: {
+      success: {
+        description: "OAuth callback",
+        requires: "browser",
+        expect: { status: 200 },
+      },
+    },
+  });
+  const reg = getRegistry();
+  const entry = reg.find((r) => r.id === "registry-runtime.success");
+  expect(entry).toBeDefined();
+  expect(entry!.requires).toBe("browser");
+  expect(entry!.defaultRun).toBe("opt-in");
+});
+
+// =============================================================================
+// Flow-level requires / defaultRun
+// =============================================================================
+
+test("contract.flow - default requires is headless, defaultRun is always", () => {
+  const flow = contract.flow("flow-default-runtime")
+    .http("step1", {
+      endpoint: "GET /health",
+      client: createMockClient(),
+      expect: { status: 200 },
+    })
+    .build();
+  expect(flow.meta.requires).toBe("headless");
+  expect(flow.meta.defaultRun).toBe("always");
+});
+
+test("contract.flow - requires: browser auto-implies defaultRun: opt-in", () => {
+  const flow = contract.flow("flow-browser", { requires: "browser" })
+    .http("login", {
+      endpoint: "POST /auth/callback",
+      client: createMockClient(),
+      expect: { status: 200 },
+    })
+    .build();
+  expect(flow.meta.requires).toBe("browser");
+  expect(flow.meta.defaultRun).toBe("opt-in");
+});
+
+test("contract.flow - auto-tags for requires:browser", () => {
+  const flow = contract.flow("flow-tagged", {
+    requires: "browser",
+    tags: ["e2e"],
+  })
+    .http("step", {
+      endpoint: "GET /me",
+      client: createMockClient(),
+      expect: { status: 200 },
+    })
+    .build();
+  const tags = flow.meta.tags as string[];
+  expect(tags).toContain("e2e");
+  expect(tags).toContain("requires:browser");
+  expect(tags).toContain("default-run:opt-in");
+});
+
+test("contract.flow - explicit defaultRun overrides auto-imply", () => {
+  const flow = contract.flow("flow-explicit", {
+    requires: "browser",
+    defaultRun: "always",
+  })
+    .http("step", {
+      endpoint: "GET /",
+      client: createMockClient(),
+      expect: { status: 200 },
+    })
+    .build();
+  expect(flow.meta.requires).toBe("browser");
+  expect(flow.meta.defaultRun).toBe("always");
+});
+
+test("contract.flow - registry includes requires and defaultRun", () => {
+  const flow = contract.flow("flow-registry-rt", { requires: "out-of-band" })
+    .http("step", {
+      endpoint: "POST /webhook",
+      client: createMockClient(),
+      expect: { status: 200 },
+    })
+    .build();
+  const reg = getRegistry();
+  const entry = reg.find((r) => r.id === "flow-registry-rt");
+  expect(entry).toBeDefined();
+  expect(entry!.requires).toBe("out-of-band");
+  expect(entry!.defaultRun).toBe("opt-in");
+});
