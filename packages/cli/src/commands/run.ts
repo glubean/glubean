@@ -19,7 +19,7 @@ import { loadEnvFile } from "../lib/env.js";
 import { resolveEnvFileName } from "../lib/active_env.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
-import { extractFromSource } from "@glubean/scanner/static";
+import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
 
 // ANSI color codes for pretty output
 const colors = {
@@ -95,9 +95,14 @@ interface CapabilityProfile {
  * Returns undefined if the test should run, or a skip reason string.
  */
 function shouldSkipTest(
-  meta: { requires?: string; defaultRun?: string },
+  meta: { requires?: string; defaultRun?: string; deferred?: string },
   profile: CapabilityProfile,
 ): string | undefined {
+  // Deferred cases are never runnable — no flag can enable them
+  if (meta.deferred) {
+    return `deferred: ${meta.deferred}`;
+  }
+
   const requires = meta.requires ?? "headless";
   const defaultRun = meta.defaultRun ?? "always";
 
@@ -190,7 +195,7 @@ async function walkTestFiles(dir: string, result: string[]): Promise<void> {
   for (const entry of entries) {
     if (DEFAULT_SKIP_DIRS.includes(entry.name)) continue;
     const full = resolve(dir, entry.name);
-    if (entry.isFile() && entry.name.endsWith(".test.ts")) {
+    if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".contract.ts"))) {
       result.push(full);
     } else if (entry.isDirectory()) {
       await walkTestFiles(full, result);
@@ -219,7 +224,7 @@ async function resolveTestFiles(target: string): Promise<string[]> {
     const files: string[] = [];
     for await (const entry of glob(target, { cwd: process.cwd() })) {
       const full = resolve(process.cwd(), entry);
-      if (full.endsWith(".test.ts")) {
+      if (full.endsWith(".test.ts") || full.endsWith(".contract.ts")) {
         const s = await stat(full).catch(() => null);
         if (s?.isFile()) files.push(full);
       }
@@ -251,6 +256,26 @@ interface DiscoveredTest {
 
 async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
   const content = await readFile(filePath, "utf-8");
+
+  if (filePath.endsWith(".contract.ts")) {
+    const contracts = extractContractCases(content);
+    const results: DiscoveredTest[] = [];
+    for (const c of contracts) {
+      for (const caseItem of c.cases) {
+        results.push({
+          exportName: c.exportName,
+          meta: {
+            id: `${c.contractId}.${caseItem.key}`,
+            requires: caseItem.requires,
+            defaultRun: caseItem.defaultRun,
+            deferred: caseItem.deferred,
+          },
+        });
+      }
+    }
+    return results;
+  }
+
   const metas = extractFromSource(content);
   return metas.map((m: any) => ({
     exportName: m.exportName,
@@ -385,7 +410,7 @@ export async function runCommand(
       `\n${colors.red}❌ No test files found for target: ${target}${colors.reset}`,
     );
     console.error(
-      `${colors.dim}Glubean looks for files matching *.test.ts in the target directory.${colors.reset}`,
+      `${colors.dim}Glubean looks for files matching *.test.ts or *.contract.ts in the target directory.${colors.reset}`,
     );
     console.error(
       `${colors.dim}Run "glubean run tests/" or "glubean run path/to/file.test.ts".${colors.reset}\n`,

@@ -253,22 +253,24 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
     let client = cache.get(runtime);
     if (client) return client;
 
-    // Build ky-compatible options from the configure http config
-    
-    const extendOptions: Record<string, any> = {};
+    // Build ky-compatible options from the configure http config.
+    // Start by passing through all options (including unknown ones like `redirect`),
+    // then override the fields that need template resolution.
+    const { prefixUrl, headers, searchParams, ...rest } = httpOptions as any;
+    const extendOptions: Record<string, any> = { ...rest };
 
-    if (httpOptions.prefixUrl) {
+    if (prefixUrl) {
       extendOptions.prefixUrl = resolveTemplate(
-        httpOptions.prefixUrl,
+        prefixUrl,
         runtime.vars,
         runtime.secrets,
         runtime.session,
       );
     }
 
-    if (httpOptions.headers) {
+    if (headers) {
       const resolvedHeaders: Record<string, string> = {};
-      for (const [name, template] of Object.entries(httpOptions.headers)) {
+      for (const [name, template] of Object.entries(headers as Record<string, string>)) {
         resolvedHeaders[name] = resolveTemplate(
           template,
           runtime.vars,
@@ -279,30 +281,14 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
       extendOptions.headers = resolvedHeaders;
     }
 
-    if (httpOptions.searchParams) {
+    if (searchParams) {
       const resolvedParams: Record<string, string> = {};
-      for (const [name, template] of Object.entries(httpOptions.searchParams)) {
+      for (const [name, template] of Object.entries(searchParams as Record<string, string>)) {
         resolvedParams[name] = resolveTemplate(
           template, runtime.vars, runtime.secrets, runtime.session,
         );
       }
       extendOptions.searchParams = resolvedParams;
-    }
-
-    if (httpOptions.timeout !== undefined) {
-      extendOptions.timeout = httpOptions.timeout;
-    }
-
-    if (httpOptions.retry !== undefined) {
-      extendOptions.retry = httpOptions.retry;
-    }
-
-    if (httpOptions.throwHttpErrors !== undefined) {
-      extendOptions.throwHttpErrors = httpOptions.throwHttpErrors;
-    }
-
-    if (httpOptions.hooks) {
-      extendOptions.hooks = httpOptions.hooks;
     }
 
     if (typeof process !== "undefined" && process.env?.["GLUBEAN_DEBUG"]) {
