@@ -71,17 +71,17 @@ export interface ContractCase<T = unknown, S = void> {
   /** Expected response */
   expect: ContractExpect<T>;
 
-  /** Request body (for POST/PUT/PATCH) */
-  body?: unknown;
+  /** Request body (for POST/PUT/PATCH) — static value or function deriving from setup state */
+  body?: unknown | ((state: S) => unknown);
 
   /** URL params — static object or function deriving from setup state */
   params?: Record<string, string> | ((state: S) => Record<string, string>);
 
-  /** Query parameters */
+  /** Query parameters — static object or function deriving from setup state */
   query?: Record<string, string> | ((state: S) => Record<string, string>);
 
-  /** Request headers (merged with client headers) */
-  headers?: Record<string, string>;
+  /** Request headers (merged with client headers) — static object or function deriving from setup state */
+  headers?: Record<string, string> | ((state: S) => Record<string, string>);
 
   /**
    * Setup function — runs before the request. Return value is available
@@ -242,8 +242,8 @@ export interface HttpFlowStepSpec<T = unknown, S = unknown> {
   /** Query parameters */
   query?: Record<string, string> | ((state: S) => Record<string, string>);
 
-  /** Request headers */
-  headers?: Record<string, string>;
+  /** Request headers — static object or derived from previous step's state */
+  headers?: Record<string, string> | ((state: S) => Record<string, string>);
 
   /** Request body — static or derived from state */
   body?: unknown | ((state: S) => unknown);

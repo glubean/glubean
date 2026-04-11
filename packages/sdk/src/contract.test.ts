@@ -938,6 +938,89 @@ test("flow body as function of state", async () => {
 });
 
 // =============================================================================
+// body / headers as function of state (http case)
+// =============================================================================
+
+test("contract.http - body as function of setup state", async () => {
+  clearRegistry();
+  let receivedBody: unknown;
+  const client = createMockClient({ "POST /tokens": { status: 200, body: { ok: true } } });
+  (client as any).post = (url: string, opts: any) => {
+    receivedBody = opts?.json;
+    return createMockClient({ [`POST ${url}`]: { status: 200, body: { ok: true } } }).post(url, opts);
+  };
+
+  const [test] = contract.http("body-fn-http", {
+    endpoint: "POST /tokens",
+    client,
+    cases: {
+      withToken: {
+        description: "sends token from setup state in body",
+        setup: async () => ({ token: "abc123" }),
+        body: (state: { token: string }) => ({ token: state.token }),
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await test.fn!(mockCtx);
+  expect(receivedBody).toEqual({ token: "abc123" });
+});
+
+test("contract.http - headers as function of setup state", async () => {
+  clearRegistry();
+  let receivedHeaders: unknown;
+  const client = createMockClient({ "GET /me": { status: 200, body: {} } });
+  (client as any).get = (url: string, opts: any) => {
+    receivedHeaders = opts?.headers;
+    return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
+  };
+
+  const [test] = contract.http("headers-fn-http", {
+    endpoint: "GET /me",
+    client,
+    cases: {
+      withAuth: {
+        description: "sends auth header from setup state",
+        setup: async () => ({ token: "tok_xyz" }),
+        headers: (state: { token: string }) => ({ Authorization: `Bearer ${state.token}` }),
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const mockCtx = createMockContext();
+  await test.fn!(mockCtx);
+  expect(receivedHeaders).toEqual({ Authorization: "Bearer tok_xyz" });
+});
+
+test("flow - headers as function of state", async () => {
+  clearRegistry();
+  let receivedHeaders: unknown;
+  const client = createMockClient();
+  (client as any).get = (url: string, opts: any) => {
+    receivedHeaders = opts?.headers;
+    return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
+  };
+
+  const flow = contract.flow("headers-fn-flow")
+    .setup(async () => ({ token: "flow_tok" }))
+    .http("fetch", {
+      endpoint: "GET /me",
+      client,
+      headers: (state: { token: string }) => ({ Authorization: `Bearer ${state.token}` }),
+      expect: { status: 200 },
+    })
+    .build();
+
+  const mockCtx = createMockContext();
+  const state = await flow.setup!(mockCtx);
+  await flow.steps![0].fn(mockCtx, state);
+  expect(receivedHeaders).toEqual({ Authorization: "Bearer flow_tok" });
+});
+
+// =============================================================================
 // requires / defaultRun — case execution boundary
 // =============================================================================
 

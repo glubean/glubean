@@ -152,8 +152,10 @@ function buildCaseTest<T, S>(
 
       // 5. Build request options
       const requestOptions: Record<string, unknown> = {};
-      if (c.body !== undefined) requestOptions.json = c.body;
-      if (c.headers) requestOptions.headers = c.headers;
+      const body = typeof c.body === "function" ? (c.body as Function)(state) : c.body;
+      if (body !== undefined) requestOptions.json = body;
+      const headers = typeof c.headers === "function" ? (c.headers as Function)(state) : c.headers;
+      if (headers) requestOptions.headers = headers;
       if (c.query) {
         const q = typeof c.query === "function" ? c.query(state) : c.query;
         requestOptions.searchParams = q;
@@ -317,7 +319,8 @@ class FlowBuilder<S = unknown> {
       // Build request options
       const opts: Record<string, unknown> = { throwHttpErrors: false };
       if (body !== undefined) opts.json = body;
-      if (spec.headers) opts.headers = spec.headers;
+      const headers = typeof spec.headers === "function" ? spec.headers(state) : spec.headers;
+      if (headers) opts.headers = headers;
       if (query) opts.searchParams = query;
 
       // Send request
