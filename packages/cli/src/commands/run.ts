@@ -201,6 +201,7 @@ interface DiscoveredTestMeta {
   parallel?: boolean;
   requires?: string;
   defaultRun?: string;
+  deferred?: string;
 }
 
 interface DiscoveredTest {
