@@ -991,6 +991,14 @@ export interface ConfigureHttpOptions {
   throwHttpErrors?: boolean;
 
   /**
+   * How to handle HTTP redirects.
+   * - `"follow"` (default): automatically follow redirects
+   * - `"manual"`: return the 3xx response as-is (useful for testing redirect endpoints)
+   * - `"error"`: throw on redirect
+   */
+  redirect?: "follow" | "manual" | "error";
+
+  /**
    * Hooks for intercepting HTTP request/response lifecycle.
    * Passed through to the underlying ky client.
    *

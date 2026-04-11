@@ -592,6 +592,21 @@ test("http - passes through throwHttpErrors option", () => {
   }
 });
 
+test("http - passes through redirect option", () => {
+  const extendCalls: { options: HttpRequestOptions }[] = [];
+  const mockHttp = createMockHttp(extendCalls);
+  const cleanup = setRuntime({}, {}, mockHttp);
+  try {
+    const { http } = configure({
+      http: { redirect: "manual" },
+    });
+    http.get("https://example.com");
+    expect((extendCalls[0].options as any).redirect).toBe("manual");
+  } finally {
+    cleanup();
+  }
+});
+
 test("http - caches extended client (extend called once per runtime)", () => {
   const extendCalls: { options: HttpRequestOptions }[] = [];
   const mockHttp = createMockHttp(extendCalls);

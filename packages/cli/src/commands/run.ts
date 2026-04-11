@@ -17,6 +17,7 @@ import { glob } from "node:fs/promises";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
 import { loadEnvFile } from "../lib/env.js";
 import { resolveEnvFileName } from "../lib/active_env.js";
+import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
@@ -77,55 +78,8 @@ interface RunOptions {
 
 // =============================================================================
 // Capability profile — determines which cases can run
+// (shouldSkipTest + CapabilityProfile imported from ../lib/skip.js)
 // =============================================================================
-
-interface CapabilityProfile {
-  /** Can run browser-interactive cases */
-  browser: boolean;
-  /** Can run out-of-band cases (email, SMS, webhook) */
-  outOfBand: boolean;
-  /** Can run opt-in cases (expensive, slow) */
-  optIn: boolean;
-}
-
-/**
- * Check if a test should be skipped based on its requires/defaultRun
- * and the current capability profile.
- *
- * Returns undefined if the test should run, or a skip reason string.
- */
-function shouldSkipTest(
-  meta: { requires?: string; defaultRun?: string; deferred?: string },
-  profile: CapabilityProfile,
-): string | undefined {
-  // Deferred cases are never runnable — no flag can enable them
-  if (meta.deferred) {
-    return `deferred: ${meta.deferred}`;
-  }
-
-  const requires = meta.requires ?? "headless";
-  const defaultRun = meta.defaultRun ?? "always";
-
-  // Check requires capability
-  if (requires === "browser" && !profile.browser) {
-    return `requires: browser (use --include-browser to run)`;
-  }
-  if (requires === "out-of-band" && !profile.outOfBand) {
-    return `requires: out-of-band (use --include-out-of-band to run)`;
-  }
-
-  // Check defaultRun policy
-  if (defaultRun === "opt-in") {
-    // Non-headless opt-in: already handled by requires check above
-    // Headless opt-in: needs explicit --include-opt-in
-    if (requires === "headless" && !profile.optIn) {
-      return `defaultRun: opt-in (use --include-opt-in to run)`;
-    }
-    // Non-headless + included via --include-browser/--include-out-of-band: allow
-  }
-
-  return undefined;
-}
 
 interface CollectedTestRun {
   testId: string;
