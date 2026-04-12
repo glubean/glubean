@@ -840,6 +840,8 @@ export interface ContractCaseStaticMeta {
   key: string;
   /** Source location (1-based line number) of the case key */
   line: number;
+  /** Human-readable description (required field on ContractCase) */
+  description?: string;
   /** Expected status code, or undefined if not statically extractable */
   expectStatus?: number;
   /** Deferred reason, or undefined if executable */
@@ -862,6 +864,10 @@ export interface ContractStaticMeta {
   endpoint: string;
   /** Protocol */
   protocol: string;
+  /** Human-readable description of the contract (e.g. "新用户注册账号") */
+  description?: string;
+  /** Feature grouping key for projection (e.g. "用户注册") */
+  feature?: string;
   /** Cases */
   cases: ContractCaseStaticMeta[];
 }
@@ -892,18 +898,34 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
     const contractId = contractMatch[3];
     const line = getLineNumber(content, contractMatch.index);
 
-    // Extract endpoint from the spec object
-    let endpoint = "";
     const afterContract = content.slice(contractMatch.index + contractMatch[0].length);
-    const endpointMatch = afterContract.match(/endpoint\s*:\s*["']([^"']+)["']/);
+
+    // Find the cases: { ... } block
+    const casesStart = afterContract.indexOf("cases:");
+
+    // Extract contract-level fields from the region BEFORE cases: to avoid
+    // matching case-level fields inside the cases block.
+    const specHeader = casesStart !== -1 ? afterContract.slice(0, casesStart) : afterContract;
+
+    let endpoint = "";
+    const endpointMatch = specHeader.match(/endpoint\s*:\s*["']([^"']+)["']/);
     if (endpointMatch) {
       endpoint = endpointMatch[1];
     }
 
-    // Find the cases: { ... } block
-    const casesStart = afterContract.indexOf("cases:");
+    let description: string | undefined;
+    const descriptionMatch = specHeader.match(/description\s*:\s*["']([^"']+)["']/);
+    if (descriptionMatch) {
+      description = descriptionMatch[1];
+    }
+
+    let feature: string | undefined;
+    const featureMatch = specHeader.match(/feature\s*:\s*["']([^"']+)["']/);
+    if (featureMatch) {
+      feature = featureMatch[1];
+    }
     if (casesStart === -1) {
-      results.push({ contractId, exportName, line, endpoint, protocol, cases: [] });
+      results.push({ contractId, exportName, line, endpoint, protocol, description, feature, cases: [] });
       continue;
     }
 
@@ -911,7 +933,7 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
     const afterCases = afterContract.slice(casesStart);
     const braceIdx = afterCases.indexOf("{");
     if (braceIdx === -1) {
-      results.push({ contractId, exportName, line, endpoint, protocol, cases: [] });
+      results.push({ contractId, exportName, line, endpoint, protocol, description, feature, cases: [] });
       continue;
     }
 
@@ -959,6 +981,10 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
       }
       const caseBody = casesContent.slice(offset, caseEnd + 1);
 
+      let description: string | undefined;
+      const descMatch = caseBody.match(/description\s*:\s*["']([^"']+)["']/);
+      if (descMatch) description = descMatch[1];
+
       let expectStatus: number | undefined;
       const statusMatch = caseBody.match(/status\s*:\s*(\d+)/);
       if (statusMatch) expectStatus = parseInt(statusMatch[1], 10);
@@ -975,10 +1001,10 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
       const defaultRunMatch = caseBody.match(/defaultRun\s*:\s*["'](always|opt-in)["']/);
       if (defaultRunMatch) defaultRun = defaultRunMatch[1];
 
-      cases.push({ key, line: caseLine, expectStatus, deferred, requires, defaultRun });
+      cases.push({ key, line: caseLine, description, expectStatus, deferred, requires, defaultRun });
     }
 
-    results.push({ contractId, exportName, line, endpoint, protocol, cases });
+    results.push({ contractId, exportName, line, endpoint, protocol, description, feature, cases });
   }
 
   return results;

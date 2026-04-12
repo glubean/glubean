@@ -1309,3 +1309,65 @@ export const simple = contract.http("simple", {
   expect(result[0].cases[0].requires).toBeUndefined();
   expect(result[0].cases[0].defaultRun).toBeUndefined();
 });
+
+test("extractContractCases — feature and description field extraction", () => {
+  const source = `import { contract } from "@glubean/sdk";
+export const createUser = contract.http("create-user", {
+  endpoint: "POST /users",
+  description: "新用户注册账号",
+  feature: "用户注册",
+  cases: {
+    success: {
+      description: "Valid registration",
+      expect: { status: 201 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(1);
+  expect(result[0].feature).toBe("用户注册");
+  expect(result[0].description).toBe("新用户注册账号");
+  expect(result[0].contractId).toBe("create-user");
+  // Case description is separate from contract description
+  expect(result[0].cases[0].description).toBe("Valid registration");
+});
+
+test("extractContractCases — feature is undefined when not provided", () => {
+  const source = `import { contract } from "@glubean/sdk";
+export const c = contract.http("no-feature", {
+  endpoint: "GET /health",
+  cases: {
+    ok: {
+      description: "Health check",
+      expect: { status: 200 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(1);
+  expect(result[0].feature).toBeUndefined();
+});
+
+test("extractContractCases — multiple contracts with different features", () => {
+  const source = `import { contract } from "@glubean/sdk";
+export const a = contract.http("create-user", {
+  endpoint: "POST /users",
+  feature: "User Registration",
+  cases: { ok: { description: "ok", expect: { status: 201 } } },
+});
+export const b = contract.http("get-user", {
+  endpoint: "GET /users/:id",
+  feature: "User Registration",
+  cases: { found: { description: "found", expect: { status: 200 } } },
+});
+export const c = contract.http("create-project", {
+  endpoint: "POST /projects",
+  feature: "Project Management",
+  cases: { ok: { description: "ok", expect: { status: 201 } } },
+});`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(3);
+  expect(result[0].feature).toBe("User Registration");
+  expect(result[1].feature).toBe("User Registration");
+  expect(result[2].feature).toBe("Project Management");
+});

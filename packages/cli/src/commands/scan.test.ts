@@ -72,3 +72,83 @@ test("scan command exits with error when no test files found", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("scan command succeeds on contract-only project (no test() exports)", async () => {
+  const dir = await createTempDir();
+  try {
+    await writeFile(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "contract-only",
+        type: "module",
+        dependencies: { "@glubean/sdk": "workspace:*" },
+      }),
+      "utf-8",
+    );
+
+    await writeFile(
+      join(dir, "create.contract.ts"),
+      `import { contract } from "@glubean/sdk";
+export const createUser = contract.http("create-user", {
+  endpoint: "POST /users",
+  description: "新用户注册账号",
+  feature: "用户注册",
+  cases: {
+    success: {
+      description: "邮箱和密码注册成功",
+      expect: { status: 201 },
+    },
+  },
+});`,
+      "utf-8",
+    );
+
+    const { code } = await runCli(["scan", "--dir", dir]);
+    // Should NOT exit with 1 — contracts exist even though no test() exports
+    expect(code).toBe(0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("scan command emits description lint warnings for technical descriptions", async () => {
+  const dir = await createTempDir();
+  try {
+    await writeFile(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "lint-test",
+        type: "module",
+        dependencies: { "@glubean/sdk": "workspace:*" },
+      }),
+      "utf-8",
+    );
+
+    await writeFile(
+      join(dir, "api.contract.ts"),
+      `import { contract } from "@glubean/sdk";
+export const c = contract.http("my-api", {
+  endpoint: "GET /health",
+  description: "POST /users endpoint",
+  cases: {
+    ok: {
+      description: "returns 200 on success",
+      expect: { status: 200 },
+    },
+  },
+});`,
+      "utf-8",
+    );
+
+    const { code, stdout } = await runCli(["scan", "--dir", dir]);
+    expect(code).toBe(0);
+    // Contract-level description lint
+    expect(stdout).toContain("my-api.(contract)");
+    expect(stdout).toContain("HTTP method");
+    // Case-level description lint
+    expect(stdout).toContain("my-api.ok");
+    expect(stdout).toContain("status code");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

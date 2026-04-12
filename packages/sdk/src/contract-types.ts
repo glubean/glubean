@@ -162,6 +162,17 @@ export interface HttpContractSpec<
   description?: string;
 
   /**
+   * Feature grouping key for projection output.
+   * Contracts with the same `feature` value are grouped into one section.
+   * If omitted, the contract is grouped by endpoint.
+   *
+   * Use business language, not technical terms:
+   *   Good: "用户注册", "User Registration"
+   *   Bad:  "POST /users endpoint"
+   */
+  feature?: string;
+
+  /**
    * Default HTTP client for all cases.
    * Individual cases can override with their own `client`.
    */

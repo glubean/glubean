@@ -183,6 +183,22 @@ program
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// contracts command
+// ─────────────────────────────────────────────────────────────────────────────
+program
+  .command("contracts")
+  .description("Project contract specs as human-readable or machine-readable output")
+  .option("-d, --dir <path>", "Project directory", ".")
+  .option("-f, --format <format>", "Output format: md-outline or json", "md-outline")
+  .action(async (options) => {
+    const { contractsCommand } = await import("./commands/contracts.js");
+    await contractsCommand({
+      dir: options.dir,
+      format: options.format as "md-outline" | "json",
+    });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
 // validate-metadata command
 // ─────────────────────────────────────────────────────────────────────────────
 program

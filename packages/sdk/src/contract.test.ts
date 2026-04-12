@@ -1264,3 +1264,28 @@ test("contract.flow - registry includes requires and defaultRun", () => {
   expect(entry!.requires).toBe("out-of-band");
   expect(entry!.defaultRun).toBe("opt-in");
 });
+
+// =============================================================================
+// feature field (type-level — projection grouping key)
+// =============================================================================
+
+test("contract.http accepts optional feature field", () => {
+  clearRegistry();
+  const client = createMockClient({ "POST /projects": { status: 201 } });
+  const c = contract.http("feat-test", {
+    endpoint: "POST /projects",
+    feature: "项目管理",
+    client,
+    cases: {
+      ok: {
+        description: "Create project",
+        body: { name: "Test" },
+        expect: { status: 201 },
+      },
+    },
+  });
+  // feature is a spec-level field for scanner, not on the runtime HttpContract
+  // Just verify the contract compiles and produces a test
+  expect(c).toHaveLength(1);
+  expect(c.id).toBe("feat-test");
+});

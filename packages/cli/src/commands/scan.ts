@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { scan } from "@glubean/scanner";
 import { buildMetadata } from "../metadata.js";
 import { CLI_VERSION } from "../version.js";
+import { lintDescription } from "./contracts.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -29,10 +30,11 @@ export async function scanCommand(
   console.log(`${colors.dim}Output:    ${outputPath}${colors.reset}\n`);
 
   const scanResult = await scan(dir);
-  if (scanResult.fileCount === 0) {
-    console.log(`${colors.yellow}⚠️  No test files found.${colors.reset}`);
+  const hasContracts = (scanResult.contracts ?? []).length > 0;
+  if (scanResult.fileCount === 0 && !hasContracts) {
+    console.log(`${colors.yellow}⚠️  No test or contract files found.${colors.reset}`);
     console.log(
-      `${colors.dim}   Ensure test files import @glubean/sdk and export test().${colors.reset}\n`,
+      `${colors.dim}   Ensure files import @glubean/sdk and export test() or contract.http().${colors.reset}\n`,
     );
     process.exit(1);
   }
@@ -81,4 +83,27 @@ export async function scanCommand(
   console.log(
     `${colors.dim}  Files: ${metadata.fileCount}, Tests: ${metadata.testCount}${colors.reset}\n`,
   );
+
+  // Description lint for contract cases
+  const contracts = scanResult.contracts ?? [];
+  const descWarnings: Array<{ contractId: string; caseKey: string; message: string }> = [];
+  for (const c of contracts) {
+    if (c.description) {
+      const w = lintDescription(c.contractId, "(contract)", c.description);
+      if (w) descWarnings.push(w);
+    }
+    for (const cas of c.cases) {
+      if (cas.description) {
+        const w = lintDescription(c.contractId, cas.key, cas.description);
+        if (w) descWarnings.push(w);
+      }
+    }
+  }
+  if (descWarnings.length > 0) {
+    console.log(`${colors.yellow}⚠ Contract description warnings:${colors.reset}`);
+    for (const w of descWarnings) {
+      console.log(`${colors.dim}  ${w.contractId}.${w.caseKey}: ${w.message}${colors.reset}`);
+    }
+    console.log();
+  }
 }
