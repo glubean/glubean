@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import {
   buildLastRunSummary,
   diagnoseProjectConfig,
+  discoverTestsFromFile,
   filterLocalDebugEvents,
   runLocalTestsFromFile,
   type LocalRunSnapshot,
@@ -301,3 +302,186 @@ export const httpTest = test("http-test", async (ctx) => {
     }
   }
 }, 15_000);
+
+// ── Contract discovery tests ──────────────────────────────────────────────
+
+const CONTRACT_SOURCE = `
+import { contract } from "@glubean/sdk";
+import { api, publicHttp } from "../config/client.js";
+
+export const createProject = contract.http("create-project", {
+  endpoint: "POST /projects",
+  client: api,
+  cases: {
+    success: {
+      description: "Valid input returns 201.",
+      body: { name: "Test" },
+      expect: { status: 201 },
+    },
+    noAuth: {
+      description: "Unauthenticated returns 401.",
+      client: publicHttp,
+      expect: { status: 401 },
+    },
+    deferredCase: {
+      description: "Not implemented yet.",
+      deferred: "backend not ready",
+      expect: { status: 200 },
+    },
+    browserOnly: {
+      description: "Needs real OAuth.",
+      requires: "browser",
+      expect: { status: 200 },
+    },
+    oobOnly: {
+      description: "Needs SMS.",
+      requires: "out-of-band",
+      expect: { status: 200 },
+    },
+    expensiveCase: {
+      description: "Costly operation.",
+      defaultRun: "opt-in",
+      expect: { status: 200 },
+    },
+  },
+});
+`;
+
+test("discoverTestsFromFile discovers contract cases from .contract.ts files", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-contract-"));
+  const filePath = join(dir, "create.contract.ts");
+  await writeFile(filePath, CONTRACT_SOURCE);
+
+  try {
+    const { tests } = await discoverTestsFromFile(filePath);
+
+    expect(tests).toHaveLength(6);
+
+    const ids = tests.map((t) => t.id);
+    expect(ids).toContain("create-project.success");
+    expect(ids).toContain("create-project.noAuth");
+    expect(ids).toContain("create-project.deferredCase");
+    expect(ids).toContain("create-project.browserOnly");
+    expect(ids).toContain("create-project.oobOnly");
+    expect(ids).toContain("create-project.expensiveCase");
+
+    // All cases share the same exportName
+    for (const t of tests) {
+      expect(t.exportName).toBe("createProject");
+    }
+
+    // Deferred case is marked as skip
+    const deferred = tests.find((t) => t.id === "create-project.deferredCase")!;
+    expect(deferred.skip).toBe(true);
+    expect(deferred.deferred).toBe("backend not ready");
+
+    // requires/defaultRun are carried through
+    const browser = tests.find((t) => t.id === "create-project.browserOnly")!;
+    expect(browser.requires).toBe("browser");
+
+    const oob = tests.find((t) => t.id === "create-project.oobOnly")!;
+    expect(oob.requires).toBe("out-of-band");
+
+    const optIn = tests.find((t) => t.id === "create-project.expensiveCase")!;
+    expect(optIn.defaultRun).toBe("opt-in");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverTestsFromFile returns empty for contract file with no cases", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-contract-empty-"));
+  const filePath = join(dir, "empty.contract.ts");
+  await writeFile(filePath, `// no contract calls\nexport {};\n`);
+
+  try {
+    const { tests } = await discoverTestsFromFile(filePath);
+    expect(tests).toHaveLength(0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverTestsFromFile still works for regular test files", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-regular-"));
+  const filePath = join(dir, "smoke.test.ts");
+  await writeFile(filePath, `
+import { test } from "@glubean/sdk";
+export const smoke = test("smoke-check", (ctx) => {
+  ctx.assert(true, "ok");
+});
+`);
+
+  try {
+    const { tests } = await discoverTestsFromFile(filePath);
+    expect(tests).toHaveLength(1);
+    expect(tests[0].id).toBe("smoke-check");
+    expect(tests[0].exportName).toBe("smoke");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("runLocalTestsFromFile filters deferred/browser/out-of-band/opt-in contract cases", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+
+  // Contract with 5 cases: 1 runnable + 4 that must be filtered
+  await writeFile(
+    join(dir, "tests", "filter.contract.ts"),
+    `import { contract, configure } from "@glubean/sdk";
+
+const { http: api } = configure({ http: { prefixUrl: "https://example.com" } });
+
+export const filterCheck = contract.http("filter-check", {
+  endpoint: "GET /",
+  client: api,
+  cases: {
+    runMe: {
+      description: "headless always-run case — only this should execute.",
+      expect: { status: 200 },
+    },
+    deferredCase: {
+      description: "deferred — must be skipped.",
+      deferred: "not ready",
+      expect: { status: 200 },
+    },
+    browserCase: {
+      description: "requires browser — must be skipped.",
+      requires: "browser",
+      expect: { status: 200 },
+    },
+    oobCase: {
+      description: "requires out-of-band — must be skipped.",
+      requires: "out-of-band",
+      expect: { status: 200 },
+    },
+    optInCase: {
+      description: "opt-in — must be skipped.",
+      defaultRun: "opt-in",
+      expect: { status: 200 },
+    },
+  },
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "filter.contract.ts"),
+    includeLogs: false,
+  });
+
+  // Only the single runnable case should be executed.
+  // We do NOT care whether the one case passes or fails — what matters
+  // is that the filter dropped deferred/browser/oob/opt-in before execution.
+  expect(result.error).toBeUndefined();
+  expect(result.summary.total).toBe(1);
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0].id).toBe("filter-check.runMe");
+
+  // None of the filtered case IDs should appear in results
+  const ids = result.results.map((r) => r.id);
+  expect(ids).not.toContain("filter-check.deferredCase");
+  expect(ids).not.toContain("filter-check.browserCase");
+  expect(ids).not.toContain("filter-check.oobCase");
+  expect(ids).not.toContain("filter-check.optInCase");
+}, 30_000);

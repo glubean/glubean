@@ -21,6 +21,7 @@ import { pathToFileURL } from "node:url";
 import { LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { createScanner, extractFromSource, scan } from "@glubean/scanner";
+import { extractContractCases } from "@glubean/scanner/static";
 import type { BundleMetadata, ExportMeta, FileMeta, ScanResult } from "@glubean/scanner";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
 
@@ -244,14 +245,84 @@ async function buildMetadata(
   };
 }
 
+// ── Contract discovery ──────────────────────────────────────────────────────
+
+/**
+ * Unified test metadata for MCP discovery.
+ * Follows CLI's DiscoveredTestMeta pattern — contract cases carry
+ * requires/defaultRun/deferred natively instead of being forced into ExportMeta.
+ */
+interface DiscoveredTest {
+  exportName: string;
+  id: string;
+  name?: string;
+  skip?: boolean;
+  only?: boolean;
+  tags?: string[];
+  requires?: string;
+  defaultRun?: string;
+  deferred?: string;
+}
+
+/**
+ * Inline skip logic for contract cases (mirrors cli/src/lib/skip.ts).
+ * Returns a skip reason string, or undefined if the test should run.
+ */
+function shouldSkipContractCase(
+  meta: { requires?: string; defaultRun?: string; deferred?: string },
+): string | undefined {
+  if (meta.deferred) return `deferred: ${meta.deferred}`;
+
+  const requires = meta.requires ?? "headless";
+  const defaultRun = meta.defaultRun ?? "always";
+
+  // MCP is always headless — no browser or out-of-band capability
+  if (requires === "browser") return "requires: browser";
+  if (requires === "out-of-band") return "requires: out-of-band";
+
+  // MCP never runs opt-in cases by default
+  if (defaultRun === "opt-in" && requires === "headless") return "defaultRun: opt-in";
+
+  return undefined;
+}
+
 export async function discoverTestsFromFile(filePath: string): Promise<{
   fileUrl: string;
-  tests: ExportMeta[];
+  tests: DiscoveredTest[];
 }> {
   const absolutePath = resolve(filePath);
   const fileUrl = pathToFileURL(absolutePath).toString();
   const content = await readFile(absolutePath, "utf-8");
-  const tests = extractFromSource(content);
+
+  // Contract files: use extractContractCases(), same pattern as CLI's discoverTests()
+  if (basename(absolutePath).includes(".contract.")) {
+    const contracts = extractContractCases(content);
+    const tests: DiscoveredTest[] = contracts.flatMap((contract) =>
+      contract.cases.map((c) => ({
+        exportName: contract.exportName,
+        id: `${contract.contractId}.${c.key}`,
+        name: `${contract.endpoint} — ${c.key}`,
+        skip: !!c.deferred,
+        only: false,
+        tags: [],
+        requires: c.requires,
+        defaultRun: c.defaultRun,
+        deferred: c.deferred,
+      })),
+    );
+    return { fileUrl, tests };
+  }
+
+  // Regular test files: use extractFromSource()
+  const metas = extractFromSource(content);
+  const tests: DiscoveredTest[] = metas.map((m) => ({
+    exportName: m.exportName,
+    id: m.id,
+    name: m.name,
+    skip: m.skip,
+    only: m.only,
+    tags: m.tags,
+  }));
   return { fileUrl, tests };
 }
 
@@ -523,6 +594,10 @@ export async function runLocalTestsFromFile(args: {
   const selected = tests.filter((t) => {
     if (t.skip) return false;
     if (hasOnly && !t.only) return false;
+    // Contract cases: check requires/defaultRun/deferred
+    if (t.requires || t.defaultRun || t.deferred) {
+      if (shouldSkipContractCase(t)) return false;
+    }
     if (!normalizedFilter) return true;
     const haystack = [t.id, t.name ?? "", ...(t.tags ?? [])]
       .join(" ")
@@ -539,7 +614,7 @@ export async function runLocalTestsFromFile(args: {
       results: [],
       summary: { total: 0, passed: 0, failed: 0 },
       error: tests.length === 0
-        ? "No tests discovered in file. Check that exports use test() from @glubean/sdk."
+        ? "No tests discovered in file. Check that exports use test() or contract.http() from @glubean/sdk."
         : `No tests matched filter "${args.filter}". Available: ${tests.map((t) => t.id).join(", ")}`,
     };
   }
