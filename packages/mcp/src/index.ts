@@ -771,6 +771,7 @@ export const MCP_TOOL_NAMES = {
   getLastRunSummary: "glubean_get_last_run_summary",
   getLocalEvents: "glubean_get_local_events",
   listTestFiles: "glubean_list_test_files",
+  projectContracts: "glubean_project_contracts",
   diagnoseConfig: "glubean_diagnose_config",
   getMetadata: "glubean_get_metadata",
   openTriggerRun: "glubean_open_trigger_run",
@@ -1021,6 +1022,94 @@ server.registerTool(
             null,
             2,
           ),
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.projectContracts,
+  {
+    description:
+      "Return all contract specs in the project as structured JSON, grouped by feature. " +
+      "Each contract includes endpoint, description, feature, and cases with descriptions. " +
+      "Use this to understand the API specification, generate documentation, or review contract coverage.",
+    inputSchema: {
+      dir: z
+        .string()
+        .optional()
+        .describe("Project root directory (default: current working directory)"),
+    },
+  },
+  async (input: { dir?: string }) => {
+    const rootDir = resolveRootDir(input.dir);
+    const result = await scanProject(rootDir, "static");
+    const contracts = result.contracts ?? [];
+
+    if (contracts.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              error: "No contracts found. Ensure .contract.ts files exist and export contract.http().",
+            }),
+          },
+        ],
+      };
+    }
+
+    // Group by feature
+    const featureMap = new Map<string, typeof contracts>();
+    for (const c of contracts) {
+      const key = c.feature ?? c.endpoint;
+      if (!featureMap.has(key)) featureMap.set(key, []);
+      featureMap.get(key)!.push(c);
+    }
+
+    let totalCases = 0;
+    let deferred = 0;
+    let gated = 0;
+    for (const c of contracts) {
+      for (const cas of c.cases) {
+        totalCases++;
+        if (cas.deferred) deferred++;
+        else if (cas.requires === "browser" || cas.requires === "out-of-band") gated++;
+      }
+    }
+
+    const output = {
+      features: Array.from(featureMap.entries()).map(([name, group]) => ({
+        name,
+        contracts: group.map((c) => ({
+          id: c.contractId,
+          endpoint: c.endpoint,
+          description: c.description,
+          feature: c.feature,
+          cases: c.cases.map((cas) => ({
+            key: cas.key,
+            description: cas.description,
+            status: cas.expectStatus,
+            deferred: cas.deferred,
+            requires: cas.requires,
+            defaultRun: cas.defaultRun,
+          })),
+        })),
+      })),
+      summary: {
+        total: totalCases,
+        active: totalCases - deferred - gated,
+        deferred,
+        gated,
+      },
+    };
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(output, null, 2),
         },
       ],
     };

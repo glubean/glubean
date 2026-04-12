@@ -31,6 +31,7 @@ test("mcp tool name registry includes all tools", () => {
   expect(names).toContain("glubean_get_last_run_summary");
   expect(names).toContain("glubean_get_local_events");
   expect(names).toContain("glubean_diagnose_config");
+  expect(names).toContain("glubean_project_contracts");
   expect(new Set(names).size).toBe(names.length);
 });
 
