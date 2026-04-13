@@ -772,6 +772,8 @@ export const MCP_TOOL_NAMES = {
   getLocalEvents: "glubean_get_local_events",
   listTestFiles: "glubean_list_test_files",
   projectContracts: "glubean_project_contracts",
+  extractContracts: "glubean_extract_contracts",
+  openapi: "glubean_openapi",
   diagnoseConfig: "glubean_diagnose_config",
   getMetadata: "glubean_get_metadata",
   openTriggerRun: "glubean_open_trigger_run",
@@ -1299,6 +1301,296 @@ server.registerTool(
       headers: bearerHeaders(token),
     });
     return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
+  },
+);
+
+// =============================================================================
+// Runtime contract extraction — dynamic import to access Zod schemas
+// =============================================================================
+
+/**
+ * Check if a value looks like an HttpContract (duck-typing).
+ */
+function isHttpContract(val: unknown): val is {
+  id: string;
+  endpoint: string;
+  description?: string;
+  feature?: string;
+  request?: { safeParse: Function };
+  _caseSchemas?: Record<string, {
+    expectStatus?: number;
+    responseSchema?: { safeParse: Function };
+    description?: string;
+  }>;
+  length: number;
+} {
+  return (
+    Array.isArray(val) &&
+    typeof (val as any).id === "string" &&
+    typeof (val as any).endpoint === "string"
+  );
+}
+
+/**
+ * Try to convert a SchemaLike to JSON Schema using Zod v4's toJSONSchema.
+ * Returns null if the schema is not a Zod type or conversion fails.
+ */
+async function schemaToJsonSchema(schema: unknown): Promise<unknown | null> {
+  if (!schema || typeof schema !== "object") return null;
+  try {
+    // Zod v4 exports toJSONSchema as a standalone function
+    // Check if the value has Zod internals (_zod property)
+    if (!("_zod" in (schema as any))) return null;
+    const { toJSONSchema } = await import("zod");
+    return toJSONSchema(schema as any);
+  } catch {
+    // Not a Zod schema or conversion failed
+  }
+  return null;
+}
+
+/**
+ * Extract full contract data from a project by dynamically importing modules.
+ */
+async function extractContractsRuntime(rootDir: string): Promise<Array<{
+  id: string;
+  endpoint: string;
+  description?: string;
+  feature?: string;
+  requestSchema: unknown | null;
+  cases: Array<{
+    key: string;
+    description?: string;
+    expectStatus?: number;
+    responseSchema: unknown | null;
+  }>;
+}>> {
+  // Use static scanner to find .contract.ts files
+  const result = await scanProject(rootDir, "static");
+  const staticContracts = result.contracts ?? [];
+  if (staticContracts.length === 0) return [];
+
+  // Collect file paths from scan result
+  const contractFiles = new Set<string>();
+  if (result.files) {
+    for (const [filePath, _meta] of Object.entries(result.files)) {
+      if (filePath.includes(".contract.")) {
+        contractFiles.add(resolve(rootDir, filePath));
+      }
+    }
+  }
+  // Fallback: scan for .contract.ts files using the static metadata
+  if (contractFiles.size === 0) {
+    const { readdirSync, statSync } = await import("node:fs");
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = resolve(dir, entry);
+        if (entry === "node_modules" || entry.startsWith(".")) continue;
+        if (statSync(full).isDirectory()) walk(full);
+        else if (entry.includes(".contract.")) contractFiles.add(full);
+      }
+    };
+    walk(rootDir);
+  }
+
+  const contracts: Awaited<ReturnType<typeof extractContractsRuntime>> = [];
+
+  for (const filePath of contractFiles) {
+    try {
+      const mod = await import(pathToFileURL(filePath).href);
+      for (const [, value] of Object.entries(mod)) {
+        if (!isHttpContract(value)) continue;
+
+        const requestSchema = await schemaToJsonSchema(value.request);
+        const cases: typeof contracts[0]["cases"] = [];
+
+        if (value._caseSchemas) {
+          for (const [key, caseMeta] of Object.entries(value._caseSchemas)) {
+            cases.push({
+              key,
+              description: caseMeta.description,
+              expectStatus: caseMeta.expectStatus,
+              responseSchema: await schemaToJsonSchema(caseMeta.responseSchema),
+            });
+          }
+        }
+
+        contracts.push({
+          id: value.id,
+          endpoint: value.endpoint,
+          description: value.description,
+          feature: value.feature,
+          requestSchema,
+          cases,
+        });
+      }
+    } catch (err) {
+      console.error(`[glubean:mcp] Failed to import ${filePath}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  return contracts;
+}
+
+server.registerTool(
+  MCP_TOOL_NAMES.extractContracts,
+  {
+    description:
+      "Extract full contract metadata by dynamically importing .contract.ts modules. " +
+      "Unlike glubean_project_contracts (static-only), this tool accesses runtime values " +
+      "including Zod schemas converted to JSON Schema. Use this for OpenAPI generation " +
+      "or detailed schema analysis.",
+    inputSchema: {
+      dir: z
+        .string()
+        .optional()
+        .describe("Project root directory (default: current working directory)"),
+    },
+  },
+  async (input: { dir?: string }) => {
+    const rootDir = resolveRootDir(input.dir);
+    const contracts = await extractContractsRuntime(rootDir);
+
+    if (contracts.length === 0) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            error: "No contracts found. Ensure .contract.ts files exist and export contract.http().",
+          }),
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ contracts }, null, 2),
+      }],
+    };
+  },
+);
+
+// =============================================================================
+// OpenAPI spec generation from runtime contract data
+// =============================================================================
+
+function contractsToOpenApi(
+  contracts: Awaited<ReturnType<typeof extractContractsRuntime>>,
+  title = "API Specification",
+): Record<string, unknown> {
+  const paths: Record<string, Record<string, unknown>> = {};
+  const tags = new Set<string>();
+
+  for (const c of contracts) {
+    // Parse "METHOD /path" → { method, path }
+    const match = c.endpoint.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+)$/i);
+    if (!match) continue;
+    const method = match[1].toLowerCase();
+    let apiPath = match[2];
+
+    // Convert :param to {param} for OpenAPI
+    apiPath = apiPath.replace(/:(\w+)/g, "{$1}");
+
+    if (!paths[apiPath]) paths[apiPath] = {};
+    if (c.feature) tags.add(c.feature);
+
+    // Build responses from cases
+    const responses: Record<string, unknown> = {};
+    for (const cas of c.cases) {
+      const statusCode = String(cas.expectStatus ?? 200);
+      if (!responses[statusCode]) {
+        const resp: Record<string, unknown> = {
+          description: cas.description ?? "",
+        };
+        if (cas.responseSchema) {
+          resp.content = {
+            "application/json": { schema: cas.responseSchema },
+          };
+        }
+        responses[statusCode] = resp;
+      }
+    }
+
+    // Build operation
+    const operation: Record<string, unknown> = {
+      operationId: c.id,
+      summary: c.description,
+      responses,
+    };
+    if (c.feature) operation.tags = [c.feature];
+
+    // Extract path parameters
+    const paramMatches = apiPath.matchAll(/\{(\w+)\}/g);
+    const params = [...paramMatches].map((m) => ({
+      name: m[1],
+      in: "path",
+      required: true,
+      schema: { type: "string" },
+    }));
+    if (params.length > 0) operation.parameters = params;
+
+    // Request body
+    if (c.requestSchema) {
+      operation.requestBody = {
+        content: {
+          "application/json": { schema: c.requestSchema },
+        },
+      };
+    }
+
+    paths[apiPath][method] = operation;
+  }
+
+  return {
+    openapi: "3.1.0",
+    info: { title, version: "1.0.0" },
+    ...(tags.size > 0 ? { tags: [...tags].map((t) => ({ name: t })) } : {}),
+    paths,
+  };
+}
+
+server.registerTool(
+  MCP_TOOL_NAMES.openapi,
+  {
+    description:
+      "Generate an OpenAPI 3.1 specification from contract.http() definitions. " +
+      "Dynamically imports contract modules to extract Zod schemas and converts them " +
+      "to JSON Schema. Returns a complete OpenAPI spec as JSON.",
+    inputSchema: {
+      dir: z
+        .string()
+        .optional()
+        .describe("Project root directory (default: current working directory)"),
+      title: z
+        .string()
+        .optional()
+        .describe("API title for the OpenAPI info section (default: 'API Specification')"),
+    },
+  },
+  async (input: { dir?: string; title?: string }) => {
+    const rootDir = resolveRootDir(input.dir);
+    const contracts = await extractContractsRuntime(rootDir);
+
+    if (contracts.length === 0) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            error: "No contracts found. Ensure .contract.ts files exist and export contract.http().",
+          }),
+        }],
+      };
+    }
+
+    const spec = contractsToOpenApi(contracts, input.title);
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify(spec, null, 2),
+      }],
+    };
   },
 );
 
