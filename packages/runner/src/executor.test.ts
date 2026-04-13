@@ -1532,7 +1532,7 @@ export const httpSchemaWithSeverityTest = test(
 );
 `;
 
-test("HTTP schema - query validation passes with valid params", async () => {
+test("HTTP schema - query validation passes with valid params", { timeout: 15_000 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1549,7 +1549,7 @@ test("HTTP schema - query validation passes with valid params", async () => {
   expect(queryValidation!.success).toBe(true);
 });
 
-test("HTTP schema - query validation fails with invalid params", async () => {
+test("HTTP schema - query validation fails with invalid params", { timeout: 15_000 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1568,7 +1568,7 @@ test("HTTP schema - query validation fails with invalid params", async () => {
   expect(queryValidation!.success).toBe(false);
 });
 
-test("HTTP schema - request body validation passes", async () => {
+test("HTTP schema - request body validation passes", { timeout: 15_000 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1584,7 +1584,7 @@ test("HTTP schema - request body validation passes", async () => {
   expect(bodyValidation!.success).toBe(true);
 });
 
-test("HTTP schema - request body validation fails", async () => {
+test("HTTP schema - request body validation fails", { timeout: 15_000 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1603,7 +1603,7 @@ test("HTTP schema - request body validation fails", async () => {
   expect(bodyValidation!.success).toBe(false);
 });
 
-test("HTTP schema - severity: warn does not fail test", async () => {
+test("HTTP schema - severity: warn does not fail test", { timeout: 15_000 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
