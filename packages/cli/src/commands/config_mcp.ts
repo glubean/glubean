@@ -32,7 +32,7 @@ export async function configMcpCommand(options: ConfigMcpOptions): Promise<void>
 }
 
 function installWithAddMcp(): void {
-  const cmd = `npx add-mcp --global ${MCP_ARGS}`;
+  const cmd = `npx add-mcp --global --name ${MCP_SERVER_NAME} ${MCP_ARGS}`;
   console.log(`Running: ${cmd}\n`);
   try {
     execSync(cmd, { stdio: "inherit" });
