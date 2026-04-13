@@ -881,47 +881,72 @@ async function initTryCookbook(): Promise<void> {
 // Contract-first init
 // ---------------------------------------------------------------------------
 
-const PRODUCT_README = `# Product Intent
-
-This directory holds the upstream business requirements, user stories, and
-acceptance criteria that drive the contracts in \`contracts/\`.
-
-The agent reads these files to understand what the API should do.
-Write them in whatever format your team uses — markdown, bullet lists,
-copy-pasted issue descriptions, or structured PRDs.
-
-## Tips
-
-- One file per feature or resource (e.g. \`coupons.md\`, \`auth.md\`)
-- Include expected error cases and edge conditions
-- Reference specific status codes and field names when you know them
-- When requirements conflict, note both versions — the agent will escalate
-`;
-
 const CONTRACTS_README = `# Contracts
 
 Executable API contracts — the source of truth for how the API should behave.
 
-Files here are Glubean tests written in contract-first style:
-- \`ctx.validate(zodSchema)\` defines response shape contracts
-- \`.step()\` chains define cross-endpoint workflow contracts
-- \`ctx.expect\` assertions define key business values
+Each file uses \`contract.http()\` to declare endpoint behavior with named cases:
 
-These contracts are NOT exploratory tests. They define the target behavior.
+\`\`\`typescript
+import { contract } from "@glubean/sdk";
+import { api } from "../configure.js";
+
+export const createUser = contract.http("create-user", {
+  endpoint: "POST /users",
+  feature: "User Registration",
+  description: "Create a new user account",
+  client: api,
+  cases: {
+    success: {
+      description: "Valid registration creates user and returns profile",
+      body: { email: "test@example.com", password: "secure123" },
+      expect: { status: 201 },
+    },
+    duplicateEmail: {
+      description: "Already registered email is rejected",
+      body: { email: "existing@example.com", password: "secure123" },
+      expect: { status: 409 },
+    },
+  },
+});
+\`\`\`
 
 ## Lifecycle
 
-1. Draft: agent writes contract from product intent
-2. Review: human confirms the contract matches intent
-3. Red: implementation does not satisfy the contract yet
-4. Green: implementation passes all contracts
-5. Promote: stable contracts move to \`tests/\` for regression
+1. Define: write contracts describing what the API should do
+2. Red: implementation does not satisfy the contract yet
+3. Green: implementation passes all contracts
+4. Iterate: add error cases, auth, schema validation
 
 ## Rules
 
-- Do not modify contracts to make failing implementations pass
 - Fix the implementation, not the contract
 - Only change a contract when the business requirement changes
+- Use business language in descriptions, not technical jargon
+`;
+
+const EXAMPLE_CONTRACT = `import { contract, configure } from "@glubean/sdk";
+
+const { api } = configure({
+  base: process.env.BASE_URL,
+});
+
+/**
+ * Example contract — replace with your own endpoints.
+ * Run with: npm run contract:run
+ */
+export const healthCheck = contract.http("health-check", {
+  endpoint: "GET /health",
+  feature: "System",
+  description: "Service health check",
+  client: api,
+  cases: {
+    ok: {
+      description: "Service is running and healthy",
+      expect: { status: 200 },
+    },
+  },
+});
 `;
 
 const CONTRACT_FIRST_PACKAGE_JSON = (sdkVersion: string) =>
@@ -974,14 +999,14 @@ async function initContractFirst(overwrite: boolean): Promise<void> {
       description: "Git ignore rules",
     },
     {
-      path: "product/README.md",
-      content: PRODUCT_README,
-      description: "Product intent directory",
-    },
-    {
       path: "contracts/README.md",
       content: CONTRACTS_README,
       description: "Executable contracts directory",
+    },
+    {
+      path: "contracts/health.contract.ts",
+      content: EXAMPLE_CONTRACT,
+      description: "Example contract (replace with your own)",
     },
     {
       path: "types/README.md",
@@ -1061,16 +1086,16 @@ async function initContractFirst(overwrite: boolean): Promise<void> {
     console.log(`    ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
     console.log(`    ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}\n`);
     console.log(
-      `  1. Write your API requirements in ${colors.cyan}product/${colors.reset}`,
+      `  1. Try the example: ${colors.cyan}npm run contract:run${colors.reset}`,
     );
     console.log(
-      `  2. Ask your AI agent to write contracts in ${colors.cyan}contracts/${colors.reset}`,
+      `  2. Write contracts in ${colors.cyan}contracts/${colors.reset} using ${colors.cyan}contract.http()${colors.reset}`,
     );
     console.log(
       `  3. Implement the API, then run ${colors.cyan}npm run contract:run${colors.reset}`,
     );
     console.log(
-      `  4. Iterate until green, then promote to ${colors.cyan}tests/${colors.reset}\n`,
+      `  4. Iterate until green — fix implementation, not contracts\n`,
     );
   }
 }

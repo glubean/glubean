@@ -303,8 +303,8 @@ test("init --contract-first creates contract-first project", async () => {
     expect(await fileExists(join(dir, ".env"))).toBe(true);
     expect(await fileExists(join(dir, ".env.secrets"))).toBe(true);
     expect(await fileExists(join(dir, ".gitignore"))).toBe(true);
-    expect(await fileExists(join(dir, "product/README.md"))).toBe(true);
     expect(await fileExists(join(dir, "contracts/README.md"))).toBe(true);
+    expect(await fileExists(join(dir, "contracts/health.contract.ts"))).toBe(true);
     expect(await fileExists(join(dir, "types/README.md"))).toBe(true);
     expect(await fileExists(join(dir, "schemas/README.md"))).toBe(true);
     expect(await fileExists(join(dir, "ci-config/default.yaml"))).toBe(true);

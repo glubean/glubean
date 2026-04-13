@@ -193,6 +193,7 @@ async function resolveTestFiles(target: string): Promise<string[]> {
 interface DiscoveredTestMeta {
   id: string;
   name?: string;
+  description?: string;
   tags?: string[];
   timeout?: number;
   skip?: boolean;
@@ -221,6 +222,7 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
           exportName: c.exportName,
           meta: {
             id: `${c.contractId}.${caseItem.key}`,
+            description: caseItem.description,
             requires: caseItem.requires,
             defaultRun: caseItem.defaultRun,
             deferred: caseItem.deferred,
@@ -961,6 +963,11 @@ export async function runCommand(
           console.log(
             `  ${colors.cyan}●${colors.reset} ${testName}${tags}`,
           );
+          if (testItem?.meta.description) {
+            console.log(
+              `    ${colors.dim}${testItem.meta.description}${colors.reset}`,
+            );
+          }
           break;
         }
 
