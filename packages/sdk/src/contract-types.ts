@@ -205,8 +205,24 @@ export interface HttpContract extends Array<Test> {
   /** Endpoint (e.g. "POST /users") */
   readonly endpoint: string;
 
+  /** Contract-level description */
+  readonly description?: string;
+
+  /** Feature grouping key */
+  readonly feature?: string;
+
   /** Endpoint-level request schema (if provided) */
   readonly request?: SchemaLike<unknown>;
+
+  /**
+   * Per-case schema metadata for runtime extraction (e.g. OpenAPI generation).
+   * Maps case key → { expectStatus, responseSchema, description }.
+   */
+  readonly _caseSchemas?: Record<string, {
+    expectStatus?: number;
+    responseSchema?: SchemaLike<unknown>;
+    description?: string;
+  }>;
 
   /**
    * Inject all cases as steps into a test builder.

@@ -1289,3 +1289,101 @@ test("contract.http accepts optional feature field", () => {
   expect(c).toHaveLength(1);
   expect(c.id).toBe("feat-test");
 });
+
+// ---------------------------------------------------------------------------
+// HttpContract preserves metadata for runtime extraction (OpenAPI generation)
+// ---------------------------------------------------------------------------
+
+test("HttpContract preserves description and feature", () => {
+  const client = createMockClient();
+  const result = contract.http("meta-test", {
+    endpoint: "GET /health",
+    description: "Health check endpoint",
+    feature: "Monitoring",
+    client,
+    cases: {
+      ok: {
+        description: "Service is healthy",
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  expect(result.description).toBe("Health check endpoint");
+  expect(result.feature).toBe("Monitoring");
+});
+
+test("HttpContract preserves _caseSchemas with response schemas", () => {
+  const client = createMockClient();
+  const result = contract.http("schema-test", {
+    endpoint: "GET /user",
+    client,
+    cases: {
+      found: {
+        description: "User found",
+        expect: { status: 200, schema: UserSchema },
+      },
+      notFound: {
+        description: "User not found",
+        expect: { status: 404 },
+      },
+    },
+  });
+
+  expect(result._caseSchemas).toBeDefined();
+  expect(result._caseSchemas!.found).toEqual({
+    expectStatus: 200,
+    responseSchema: UserSchema,
+    description: "User found",
+  });
+  expect(result._caseSchemas!.notFound).toEqual({
+    expectStatus: 404,
+    responseSchema: undefined,
+    description: "User not found",
+  });
+});
+
+test("HttpContract _caseSchemas is empty object for no-case edge", () => {
+  const client = createMockClient();
+  const result = contract.http("empty-cases", {
+    endpoint: "GET /ping",
+    client,
+    cases: {},
+  });
+
+  expect(result._caseSchemas).toEqual({});
+});
+
+test("HttpContract preserves request schema", () => {
+  const RequestSchema = {
+    safeParse: (data: unknown) => ({ success: true as const, data }),
+  };
+  const client = createMockClient();
+  const result = contract.http("req-schema", {
+    endpoint: "POST /users",
+    client,
+    request: RequestSchema,
+    cases: {
+      ok: {
+        description: "Created",
+        expect: { status: 201 },
+      },
+    },
+  });
+
+  expect(result.request).toBe(RequestSchema);
+});
+
+test("HttpContract without description/feature has undefined fields", () => {
+  const client = createMockClient();
+  const result = contract.http("minimal", {
+    endpoint: "GET /health",
+    client,
+    cases: {
+      ok: { description: "ok", expect: { status: 200 } },
+    },
+  });
+
+  expect(result.description).toBeUndefined();
+  expect(result.feature).toBeUndefined();
+});

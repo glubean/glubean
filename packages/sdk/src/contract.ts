@@ -29,6 +29,9 @@ function createHttpContract(
   endpoint: string,
   tests: Test[],
   request?: import("./types.js").SchemaLike<unknown>,
+  description?: string,
+  feature?: string,
+  caseSchemas?: Record<string, { expectStatus?: number; responseSchema?: import("./types.js").SchemaLike<unknown>; description?: string }>,
 ): HttpContract {
   const arr = [...tests];
 
@@ -59,7 +62,11 @@ function createHttpContract(
     };
   };
 
-  return Object.assign(arr, { id, endpoint, request, asSteps, asStep }) as HttpContract;
+  return Object.assign(arr, {
+    id, endpoint, request, description, feature,
+    _caseSchemas: caseSchemas,
+    asSteps, asStep,
+  }) as HttpContract;
 }
 
 // =============================================================================
@@ -244,12 +251,22 @@ function contractHttp<
   spec: HttpContractSpec<Cases>,
 ): HttpContract {
   const tests: Test[] = [];
+  const caseSchemas: Record<string, {
+    expectStatus?: number;
+    responseSchema?: import("./types.js").SchemaLike<unknown>;
+    description?: string;
+  }> = {};
 
   for (const [caseKey, caseSpec] of Object.entries(spec.cases)) {
     tests.push(buildCaseTest(id, caseKey, spec.endpoint, caseSpec, spec));
+    caseSchemas[caseKey] = {
+      expectStatus: caseSpec.expect.status,
+      responseSchema: caseSpec.expect.schema,
+      description: caseSpec.description,
+    };
   }
 
-  return createHttpContract(id, spec.endpoint, tests, spec.request);
+  return createHttpContract(id, spec.endpoint, tests, spec.request, spec.description, spec.feature, caseSchemas);
 }
 
 // =============================================================================
