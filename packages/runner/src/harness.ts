@@ -321,6 +321,17 @@ class StepTimeoutError extends Error {
 }
 
 /**
+ * Classify an error into a structured reason for the `reason` field
+ * on status/error events. Returns undefined for unclassified errors.
+ */
+function classifyErrorReason(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  if (error.name === "TimeoutError") return "http_timeout";
+  if (error.name === "TypeError" && error.message.includes("fetch failed")) return "network";
+  return undefined;
+}
+
+/**
  * Helper to run validator and get error message.
  *
  * @param result Validator result (true/false/string/void/null)
@@ -1245,10 +1256,12 @@ try {
           console.log(JSON.stringify({ type: "status", status: "skipped", id, testId: id, reason: error.reason }));
         } else {
           hasFailure = true;
+          const reason = classifyErrorReason(error);
           console.log(JSON.stringify({
             type: "status", status: "failed", id, testId: id,
             error: error instanceof Error ? error.message : String(error),
             stack: error instanceof Error ? error.stack : undefined,
+            ...(reason && { reason }),
           }));
         }
       }
@@ -1289,7 +1302,8 @@ try {
           console.log(JSON.stringify({ type: "status", status: "skipped", id: resolved.id, testId: resolved.id, reason: (error as SkipError).reason }));
         } else {
           hasFailure = true;
-          console.log(JSON.stringify({ type: "status", status: "failed", id: resolved.id, testId: resolved.id, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }));
+          const reason = classifyErrorReason(error);
+          console.log(JSON.stringify({ type: "status", status: "failed", id: resolved.id, testId: resolved.id, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, ...(reason && { reason }) }));
         }
       }
     }
@@ -1334,6 +1348,7 @@ try {
   }
 
   // Regular error - report as failure
+  const reason = classifyErrorReason(error);
   console.log(
     JSON.stringify({
       type: "status",
@@ -1341,6 +1356,7 @@ try {
       ...(tid && { testId: tid }),
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
+      ...(reason && { reason }),
     }),
   );
   process.exit(1);

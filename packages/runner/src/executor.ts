@@ -74,7 +74,7 @@ export type ExecutionEvent = { testId?: string } & (
     peakMemoryBytes?: number;
     peakMemoryMB?: string;
   }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; reason?: "http_timeout" | "test_timeout" | "network" | "oom" }
   | {
     type: "step_start";
     index: number;
@@ -625,13 +625,14 @@ export class TestExecutor {
         if (aborted) {
           eventQueue.push({ type: "error", message: "Test execution was cancelled" });
         } else if (timedOut) {
-          eventQueue.push({ type: "error", message: `Test execution timed out after ${timeout}ms` });
+          eventQueue.push({ type: "error", message: `Test execution timed out after ${timeout}ms`, reason: "test_timeout" });
         } else if (signal === "SIGKILL" || code === 137) {
           const heapInfo = this.options.maxHeapSizeMb ? ` (limit: ${this.options.maxHeapSizeMb} MB)` : "";
           const detail = stderr.trim() ? `\n${stderr.trim()}` : "";
           eventQueue.push({
             type: "error",
             message: `Out of memory — process killed${heapInfo}.${detail}\nTo fix: process data in smaller batches.`,
+            reason: "oom",
           });
         } else if (stderr.trim()) {
           eventQueue.push({ type: "error", message: stderr.trim() });
