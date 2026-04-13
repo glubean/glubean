@@ -345,8 +345,11 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
   }
 
   // extend() — returns a new HttpClient that merges options with the resolved base
-  
+
   proxy.extend = (options: any) => getClient().extend(options);
+
+  // Expose configured timeout for error reporting (e.g. contract timeout errors)
+  (proxy as any)._configuredTimeout = httpOptions.timeout;
 
   return proxy as HttpClient;
 }

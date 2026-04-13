@@ -164,10 +164,22 @@ function buildCaseTest<T, S>(
 
       // 6. Send request
       const methodLower = method.toLowerCase() as keyof HttpClient;
-      const res = await (client[methodLower] as Function)(
-        resolvedPath,
-        requestOptions,
-      );
+      let res;
+      try {
+        res = await (client[methodLower] as Function)(
+          resolvedPath,
+          requestOptions,
+        );
+      } catch (err: unknown) {
+        // Enhance timeout errors with configured timeout value
+        if (err instanceof Error && err.name === "TimeoutError") {
+          const timeoutMs = (client as any)._configuredTimeout ?? 10000;
+          throw new Error(
+            `${err.message} (timeout: ${timeoutMs}ms)`,
+          );
+        }
+        throw err;
+      }
 
       // 7. Assert status
       ctx.expect(res).toHaveStatus(c.expect.status);
@@ -325,7 +337,16 @@ class FlowBuilder<S = unknown> {
 
       // Send request
       const methodLower = method.toLowerCase() as keyof HttpClient;
-      const res = await (client[methodLower] as Function)(resolvedPath, opts);
+      let res;
+      try {
+        res = await (client[methodLower] as Function)(resolvedPath, opts);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "TimeoutError") {
+          const timeoutMs = (client as any)._configuredTimeout ?? 10000;
+          throw new Error(`${err.message} (timeout: ${timeoutMs}ms)`);
+        }
+        throw err;
+      }
 
       // Assert status
       ctx.expect(res).toHaveStatus(expectedStatus);
