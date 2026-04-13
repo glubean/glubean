@@ -32,11 +32,12 @@ export async function configMcpCommand(options: ConfigMcpOptions): Promise<void>
 }
 
 function installWithAddMcp(): void {
-  console.log(`Running: npx add-mcp ${MCP_ARGS}\n`);
+  const cmd = `npx add-mcp --global ${MCP_ARGS}`;
+  console.log(`Running: ${cmd}\n`);
   try {
-    execSync(`npx add-mcp ${MCP_ARGS}`, { stdio: "inherit" });
+    execSync(cmd, { stdio: "inherit" });
   } catch {
-    console.error(`\n✗ Failed. Run manually: npx add-mcp ${MCP_ARGS}`);
+    console.error(`\n✗ Failed. Run manually: ${cmd}`);
     process.exit(1);
   }
 }
