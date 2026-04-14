@@ -2442,6 +2442,8 @@ export interface RegisteredTestMeta {
     expectStatus: number;
     hasSchema: boolean;
     deferred?: string;
+    instanceName?: string;
+    security?: import("./contract-types.js").HttpSecurityScheme;
   };
 
   /**

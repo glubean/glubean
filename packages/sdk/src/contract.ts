@@ -10,8 +10,11 @@ import type {
   ContractProtocolAdapter,
   ContractRegistryMeta,
   HttpContract,
+  HttpContractDefaults,
+  HttpContractFactory,
   HttpContractSpec,
   HttpFlowStepSpec,
+  HttpSecurityScheme,
 } from "./contract-types.js";
 import type { HttpClient, Test, TestContext, TestMeta } from "./types.js";
 import { registerTest } from "./internal.js";
@@ -31,7 +34,9 @@ function createHttpContract(
   request?: import("./types.js").SchemaLike<unknown>,
   description?: string,
   feature?: string,
-  caseSchemas?: Record<string, { expectStatus?: number; responseSchema?: import("./types.js").SchemaLike<unknown>; description?: string }>,
+  caseSchemas?: Record<string, { expectStatus?: number; responseSchema?: import("./types.js").SchemaLike<unknown>; description?: string; deferred?: string; requires?: string; defaultRun?: string }>,
+  instanceName?: string,
+  security?: HttpSecurityScheme,
 ): HttpContract {
   const arr = [...tests];
 
@@ -64,6 +69,7 @@ function createHttpContract(
 
   return Object.assign(arr, {
     id, endpoint, request, description, feature,
+    instanceName, security,
     _caseSchemas: caseSchemas,
     asSteps, asStep,
   }) as HttpContract;
@@ -104,6 +110,8 @@ function buildCaseTest<T, S>(
   endpoint: string,
   c: ContractCase<T, S>,
   spec: HttpContractSpec,
+  instanceName?: string,
+  security?: HttpSecurityScheme,
 ): Test {
   const { method, path } = parseEndpoint(endpoint);
   const contractTags = spec.tags ? (Array.isArray(spec.tags) ? spec.tags : [spec.tags]) : [];
@@ -224,6 +232,8 @@ function buildCaseTest<T, S>(
     expectStatus: c.expect.status,
     hasSchema: !!c.expect.schema,
     deferred: c.deferred,
+    instanceName,
+    security,
   };
 
   registerTest({
@@ -249,24 +259,35 @@ function contractHttp<
 >(
   id: string,
   spec: HttpContractSpec<Cases>,
+  instanceName?: string,
+  security?: HttpSecurityScheme,
 ): HttpContract {
   const tests: Test[] = [];
   const caseSchemas: Record<string, {
     expectStatus?: number;
     responseSchema?: import("./types.js").SchemaLike<unknown>;
     description?: string;
+    deferred?: string;
+    requires?: string;
+    defaultRun?: string;
   }> = {};
 
   for (const [caseKey, caseSpec] of Object.entries(spec.cases)) {
-    tests.push(buildCaseTest(id, caseKey, spec.endpoint, caseSpec, spec));
+    tests.push(buildCaseTest(id, caseKey, spec.endpoint, caseSpec, spec, instanceName, security));
     caseSchemas[caseKey] = {
       expectStatus: caseSpec.expect.status,
       responseSchema: caseSpec.expect.schema,
       description: caseSpec.description,
+      deferred: caseSpec.deferred,
+      requires: caseSpec.requires,
+      defaultRun: caseSpec.defaultRun,
     };
   }
 
-  return createHttpContract(id, spec.endpoint, tests, spec.request, spec.description, spec.feature, caseSchemas);
+  return createHttpContract(
+    id, spec.endpoint, tests, spec.request, spec.description, spec.feature,
+    caseSchemas, instanceName, security,
+  );
 }
 
 // =============================================================================
@@ -495,20 +516,74 @@ function contractFlow(id: string, options?: { client?: HttpClient; tags?: string
 
 const _adapters = new Map<string, ContractProtocolAdapter<any>>();
 
+// =============================================================================
+// HTTP contract factory — contract.http.with("name", defaults)
+// =============================================================================
+
+/**
+ * Merge instance defaults with per-contract spec.
+ * Tags are additive (concat), other fields: spec overrides defaults.
+ */
+function mergeHttpDefaults(
+  defaults: (HttpContractDefaults & { _name?: string }) | undefined,
+  spec: HttpContractSpec,
+): HttpContractSpec {
+  if (!defaults) return spec;
+  const mergedTags = [
+    ...(defaults.tags ?? []),
+    ...(spec.tags ?? []),
+  ];
+  return {
+    ...spec,
+    client: spec.client ?? defaults.client,
+    feature: spec.feature ?? defaults.feature,
+    tags: mergedTags.length > 0 ? mergedTags : undefined,
+  };
+}
+
+/**
+ * Create an HTTP contract factory with `.with()` support.
+ * The factory is callable (same signature as contractHttp) and chainable.
+ */
+function createHttpFactory(
+  defaults?: HttpContractDefaults & { _name?: string },
+): HttpContractFactory {
+  const factory = <Cases extends Record<string, ContractCase<any, any>>>(
+    id: string,
+    spec: HttpContractSpec<Cases>,
+  ): HttpContract => {
+    const merged = mergeHttpDefaults(defaults, spec as HttpContractSpec);
+    return contractHttp(id, merged as HttpContractSpec<Cases>, defaults?._name, defaults?.security);
+  };
+
+  factory.with = (name: string, more: HttpContractDefaults): HttpContractFactory => {
+    const mergedTags = [...(defaults?.tags ?? []), ...(more.tags ?? [])];
+    return createHttpFactory({
+      ...defaults,
+      ...more,
+      tags: mergedTags.length > 0 ? mergedTags : undefined,
+      _name: name,
+    });
+  };
+
+  return factory;
+}
+
 /**
  * The contract namespace.
  *
- * - `contract.http(id, spec)` — builtin HTTP contract
+ * - `contract.http.with("name", defaults)` — create scoped HTTP factory
+ * - `contract.flow(id, options)` — declarative flow builder
  * - `contract.register(protocol, adapter)` — plugin extension point
  * - `contract[protocol](id, spec)` — available after register()
  */
 export const contract: {
-  http: typeof contractHttp;
+  http: HttpContractFactory;
   flow: typeof contractFlow;
   register: <Spec>(protocol: string, adapter: ContractProtocolAdapter<Spec>) => void;
   [protocol: string]: unknown;
 } = {
-  http: contractHttp,
+  http: createHttpFactory(),
   flow: contractFlow,
 
   register<Spec>(protocol: string, adapter: ContractProtocolAdapter<Spec>) {

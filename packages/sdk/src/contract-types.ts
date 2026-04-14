@@ -10,6 +10,57 @@ import type { SchemaLike } from "./types.js";
 import type { Test, TestContext, RegisteredTestMeta, HttpClient } from "./types.js";
 
 // =============================================================================
+// Security scheme types
+// =============================================================================
+
+/**
+ * HTTP security scheme declaration for contract instances.
+ * Maps to OpenAPI securitySchemes. Authoritative metadata, not docs-only.
+ */
+export type HttpSecurityScheme =
+  | "bearer"
+  | "basic"
+  | { type: "apiKey"; name: string; in: "header" | "query" }
+  | { type: "oauth2"; flows: Record<string, unknown> }
+  | null;
+
+// =============================================================================
+// HTTP contract defaults (for contract.http.with())
+// =============================================================================
+
+/**
+ * Default values for a scoped HTTP contract instance.
+ * Created via `contract.http.with("name", defaults)`.
+ */
+export interface HttpContractDefaults {
+  /** Default HTTP client for all contracts in this instance */
+  client?: HttpClient;
+  /** Security scheme declaration (authoritative, maps to OpenAPI) */
+  security?: HttpSecurityScheme;
+  /** Tags inherited by all contracts in this instance */
+  tags?: string[];
+  /** Default feature grouping key */
+  feature?: string;
+}
+
+// =============================================================================
+// HTTP contract factory (callable + .with())
+// =============================================================================
+
+/**
+ * Protocol-bound contract factory returned by `contract.http.with()`.
+ * Callable: `factory("id", spec)` creates an HttpContract.
+ * Chainable: `factory.with("name", defaults)` creates a nested instance.
+ */
+export interface HttpContractFactory {
+  <Cases extends Record<string, ContractCase<any, any>>>(
+    id: string,
+    spec: HttpContractSpec<Cases>,
+  ): HttpContract;
+  with(name: string, defaults: HttpContractDefaults): HttpContractFactory;
+}
+
+// =============================================================================
 // Case execution boundary (dual-axis model)
 // =============================================================================
 
@@ -211,17 +262,26 @@ export interface HttpContract extends Array<Test> {
   /** Feature grouping key */
   readonly feature?: string;
 
+  /** Instance name from contract.http.with("name", ...) */
+  readonly instanceName?: string;
+
+  /** Security scheme declaration */
+  readonly security?: HttpSecurityScheme;
+
   /** Endpoint-level request schema (if provided) */
   readonly request?: SchemaLike<unknown>;
 
   /**
-   * Per-case schema metadata for runtime extraction (e.g. OpenAPI generation).
-   * Maps case key → { expectStatus, responseSchema, description }.
+   * Per-case metadata for runtime extraction (OpenAPI generation, projection).
+   * Maps case key → full case metadata including schema and gating fields.
    */
   readonly _caseSchemas?: Record<string, {
     expectStatus?: number;
     responseSchema?: SchemaLike<unknown>;
     description?: string;
+    deferred?: string;
+    requires?: string;
+    defaultRun?: string;
   }>;
 
   /**
@@ -327,6 +387,10 @@ export interface ContractRegistryMeta {
   hasSchema: boolean;
   /** Deferred reason, or undefined if executable */
   deferred?: string;
+  /** Instance name from contract.http.with("name", ...) */
+  instanceName?: string;
+  /** Security scheme declaration */
+  security?: HttpSecurityScheme;
 }
 
 /**

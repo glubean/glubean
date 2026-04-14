@@ -1387,3 +1387,164 @@ test("HttpContract without description/feature has undefined fields", () => {
   expect(result.description).toBeUndefined();
   expect(result.feature).toBeUndefined();
 });
+
+// ---------------------------------------------------------------------------
+// contract.http.with() — scoped instance factory
+// ---------------------------------------------------------------------------
+
+test("contract.http.with() creates a scoped factory", () => {
+  const client = createMockClient();
+  const userApi = contract.http.with("user", {
+    security: "bearer",
+    client,
+  });
+
+  const result = userApi("get-me", {
+    endpoint: "GET /me",
+    description: "Get current user",
+    cases: {
+      ok: { description: "Returns profile", expect: { status: 200 } },
+    },
+  });
+
+  expect(result).toHaveLength(1);
+  expect(result.id).toBe("get-me");
+  expect(result.instanceName).toBe("user");
+  expect(result.security).toBe("bearer");
+  expect(result.description).toBe("Get current user");
+});
+
+test("contract.http.with() merges tags additively", () => {
+  const client = createMockClient();
+  const userApi = contract.http.with("user", {
+    client,
+    tags: ["user"],
+  });
+
+  const result = userApi("get-me", {
+    endpoint: "GET /me",
+    description: "Profile",
+    tags: ["profile"],
+    cases: {
+      ok: { description: "ok", expect: { status: 200 } },
+    },
+  });
+
+  // instance tags + contract tags → merged
+  expect(result[0].meta.tags).toContain("user");
+  expect(result[0].meta.tags).toContain("profile");
+});
+
+test("contract.http.with() spec fields override defaults", () => {
+  const defaultClient = createMockClient();
+  const overrideClient = createMockClient({ "GET /override": { status: 200, body: { overridden: true } } });
+
+  const api = contract.http.with("test", {
+    client: defaultClient,
+    feature: "Default Feature",
+  });
+
+  const result = api("override", {
+    endpoint: "GET /override",
+    description: "test",
+    client: overrideClient,
+    feature: "Override Feature",
+    cases: {
+      ok: { description: "ok", expect: { status: 200 } },
+    },
+  });
+
+  expect(result.feature).toBe("Override Feature");
+});
+
+test("contract.http.with() nested .with() inherits and overrides", () => {
+  const client = createMockClient();
+  const base = contract.http.with("api", { client, tags: ["api"] });
+  const authed = base.with("user", { security: "bearer", tags: ["user"] });
+
+  const result = authed("get-me", {
+    endpoint: "GET /me",
+    description: "Profile",
+    cases: {
+      ok: { description: "ok", expect: { status: 200 } },
+    },
+  });
+
+  expect(result.instanceName).toBe("user");
+  expect(result.security).toBe("bearer");
+  // tags: api + user merged
+  expect(result[0].meta.tags).toContain("api");
+  expect(result[0].meta.tags).toContain("user");
+});
+
+test("contract.http.with() nested .with() replaces instance name", () => {
+  const client = createMockClient();
+  const base = contract.http.with("api", { client });
+  const admin = base.with("admin", { security: { type: "apiKey", name: "X-Key", in: "header" } });
+
+  const result = admin("delete-user", {
+    endpoint: "DELETE /users/:id",
+    description: "Delete user",
+    cases: {
+      ok: { description: "ok", expect: { status: 204 } },
+    },
+  });
+
+  expect(result.instanceName).toBe("admin");
+  expect(result.security).toEqual({ type: "apiKey", name: "X-Key", in: "header" });
+});
+
+test("contract.http.with() stores enriched _caseSchemas", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+
+  const result = api("lifecycle", {
+    endpoint: "GET /test",
+    description: "test",
+    cases: {
+      ok: {
+        description: "Success case",
+        expect: { status: 200, schema: UserSchema },
+      },
+      deferred: {
+        description: "Not yet",
+        expect: { status: 200 },
+        deferred: "backend not ready",
+      },
+      browser: {
+        description: "Needs browser",
+        expect: { status: 200 },
+        requires: "browser",
+        defaultRun: "opt-in",
+      },
+    },
+  });
+
+  expect(result._caseSchemas?.ok).toEqual({
+    expectStatus: 200,
+    responseSchema: UserSchema,
+    description: "Success case",
+    deferred: undefined,
+    requires: undefined,
+    defaultRun: undefined,
+  });
+  expect(result._caseSchemas?.deferred?.deferred).toBe("backend not ready");
+  expect(result._caseSchemas?.browser?.requires).toBe("browser");
+  expect(result._caseSchemas?.browser?.defaultRun).toBe("opt-in");
+});
+
+test("contract.http.with() security=null marks public endpoint", () => {
+  const client = createMockClient();
+  const publicApi = contract.http.with("public", { client, security: null });
+
+  const result = publicApi("health", {
+    endpoint: "GET /health",
+    description: "Health check",
+    cases: {
+      ok: { description: "ok", expect: { status: 200 } },
+    },
+  });
+
+  expect(result.instanceName).toBe("public");
+  expect(result.security).toBeNull();
+});
