@@ -1338,13 +1338,15 @@ function isHttpContract(val: unknown): val is {
 async function schemaToJsonSchema(schema: unknown): Promise<unknown | null> {
   if (!schema || typeof schema !== "object") return null;
   try {
-    // Zod v4 exports toJSONSchema as a standalone function
-    // Check if the value has Zod internals (_zod property)
-    if (!("_zod" in (schema as any))) return null;
-    const { toJSONSchema } = await import("zod");
-    return toJSONSchema(schema as any);
-  } catch {
-    // Not a Zod schema or conversion failed
+    // Use the schema's own toJSONSchema() instance method (Zod v4).
+    // This avoids cross-instance issues when the MCP server's zod
+    // is a different copy than the contract module's zod.
+    if (typeof (schema as any).toJSONSchema === "function") {
+      return (schema as any).toJSONSchema();
+    }
+  } catch (err) {
+    // Log conversion failures to stderr (won't pollute MCP stdout)
+    console.error(`[glubean:mcp] toJSONSchema failed: ${err instanceof Error ? err.message : err}`);
   }
   return null;
 }
