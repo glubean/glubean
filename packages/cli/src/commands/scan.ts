@@ -39,12 +39,22 @@ export async function scanCommand(
     process.exit(1);
   }
 
-  // Scanner Phase 4 already uses shared extractContractFromFile() for runtime
-  // contract extraction. Contract import errors appear in scanResult.warnings.
+  // Scanner Phase 4 uses shared extractContractFromFile() for runtime contract
+  // extraction. Import errors surface as warnings prefixed with "Contract import failed:".
+  const contractImportErrors = scanResult.warnings.filter((w) => w.startsWith("Contract import failed:"));
+  const otherWarnings = scanResult.warnings.filter((w) => !w.startsWith("Contract import failed:"));
 
-  if (scanResult.warnings.length > 0) {
+  if (contractImportErrors.length > 0) {
+    console.log(`${colors.yellow}Contract import errors:${colors.reset}`);
+    for (const err of contractImportErrors) {
+      console.log(`${colors.yellow}  ✗ ${err}${colors.reset}`);
+    }
+    console.log();
+  }
+
+  if (otherWarnings.length > 0) {
     console.log(`${colors.yellow}Warnings:${colors.reset}`);
-    for (const warning of scanResult.warnings) {
+    for (const warning of otherWarnings) {
       console.log(`${colors.dim}- ${warning}${colors.reset}`);
     }
     console.log();
@@ -110,4 +120,8 @@ export async function scanCommand(
     console.log();
   }
 
+  // Hard-fail if any contract files failed to import
+  if (contractImportErrors.length > 0) {
+    process.exit(1);
+  }
 }
