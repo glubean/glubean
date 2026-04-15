@@ -294,6 +294,7 @@ function shouldSkipContractCase(
 export async function discoverTestsFromFile(filePath: string): Promise<{
   fileUrl: string;
   tests: DiscoveredTest[];
+  errors?: Array<{ file: string; error: string }>;
 }> {
   const absolutePath = resolve(filePath);
   const fileUrl = pathToFileURL(absolutePath).toString();
@@ -336,14 +337,12 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
           })),
         );
       } else {
-        // Neither runtime nor static found contracts — surface import errors
-        for (const e of result.errors) {
-          console.error(`[glubean:mcp] Contract import failed for ${e.file}: ${e.error}`);
-        }
+        // Neither runtime nor static found contracts — return structured errors
+        return { fileUrl, tests: [], errors: result.errors };
       }
     }
 
-    return { fileUrl, tests };
+    return { fileUrl, tests, ...(result.errors.length > 0 ? { errors: result.errors } : {}) };
   }
 
   // Regular test files: use extractFromSource()
@@ -619,7 +618,7 @@ export async function runLocalTestsFromFile(args: {
     loadEnvFile(secretsPath),
   ]);
 
-  const { fileUrl, tests } = await discoverTestsFromFile(absolutePath);
+  const { fileUrl, tests, errors: discoveryErrors } = await discoverTestsFromFile(absolutePath);
 
   const hasOnly = tests.some((t) => t.only);
   const normalizedFilter = args.filter?.toLowerCase().trim();
@@ -649,6 +648,7 @@ export async function runLocalTestsFromFile(args: {
       error: tests.length === 0
         ? "No tests discovered in file. Check that exports use test() or contract.http.with() from @glubean/sdk."
         : `No tests matched filter "${args.filter}". Available: ${tests.map((t) => t.id).join(", ")}`,
+      ...(discoveryErrors && discoveryErrors.length > 0 ? { importErrors: discoveryErrors } : {}),
     };
   }
 
@@ -826,12 +826,15 @@ server.registerTool(
   },
   async (input: { filePath: string }) => {
     const { filePath } = input;
-    const { tests } = await discoverTestsFromFile(filePath);
+    const { tests, errors } = await discoverTestsFromFile(filePath);
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify({ tests }),
+          text: JSON.stringify({
+            tests,
+            ...(errors && errors.length > 0 ? { errors } : {}),
+          }),
         },
       ],
     };
