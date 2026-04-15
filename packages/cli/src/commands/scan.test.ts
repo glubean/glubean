@@ -89,7 +89,7 @@ test("scan command succeeds on contract-only project (no test() exports)", async
     await writeFile(
       join(dir, "create.contract.ts"),
       `import { contract } from "@glubean/sdk";
-// TODO: migrate to .with() syntax when scanner moves to runtime extraction (Step 7)
+// Note: uses old syntax so static regex works in temp dirs without node_modules
 export const createUser = contract.http("create-user", {
   endpoint: "POST /users",
   description: "新用户注册账号",
@@ -128,7 +128,7 @@ test("scan command emits description lint warnings for technical descriptions", 
     await writeFile(
       join(dir, "api.contract.ts"),
       `import { contract } from "@glubean/sdk";
-// TODO: migrate to .with() syntax when scanner moves to runtime extraction (Step 7)
+// Note: uses old syntax so static regex works in temp dirs without node_modules
 export const c = contract.http("my-api", {
   endpoint: "GET /health",
   description: "POST /users endpoint",

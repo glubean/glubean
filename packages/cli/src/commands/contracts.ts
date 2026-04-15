@@ -214,13 +214,17 @@ export async function contractsCommand(
   }
 
   // Map ExtractedContract → ContractStaticMeta for formatters
+  // Instance-aware: use "instanceName: feature" as the feature key when instances exist
+  const hasInstances = result.contracts.some((ec) => ec.instanceName);
   const contracts: ContractStaticMeta[] = result.contracts.map((ec) => ({
     contractId: ec.id,
     exportName: ec.exportName,
     endpoint: ec.endpoint,
     protocol: "http",
     description: ec.description,
-    feature: ec.feature,
+    feature: hasInstances && ec.instanceName
+      ? `${ec.instanceName}: ${ec.feature ?? ec.endpoint}`
+      : ec.feature,
     line: 0,
     cases: ec.cases.map((c) => ({
       key: c.key,

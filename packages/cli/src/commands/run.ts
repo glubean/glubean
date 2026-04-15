@@ -258,6 +258,12 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
         }
         return results;
       }
+
+      // Both runtime and static failed — surface the import error
+      for (const err of result.errors) {
+        console.error(`\x1b[31m✗ Contract import failed: ${err.file}\x1b[0m`);
+        console.error(`\x1b[2m  ${err.error}\x1b[0m`);
+      }
     }
 
     return [];

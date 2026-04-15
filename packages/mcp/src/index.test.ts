@@ -306,14 +306,15 @@ export const httpTest = test("http-test", async (ctx) => {
 
 // ── Contract discovery tests ──────────────────────────────────────────────
 
-// TODO: migrate to .with() syntax when scanner moves to runtime extraction (Step 7)
 const CONTRACT_SOURCE = `
-import { contract } from "@glubean/sdk";
-import { api, publicHttp } from "../config/client.js";
+import { contract, configure } from "@glubean/sdk";
 
-export const createProject = contract.http("create-project", {
+const { http: api } = configure({ http: { prefixUrl: "https://example.com" } });
+const projectApi = contract.http.with("projects", { client: api });
+
+// @contract
+export const createProject = projectApi("create-project", {
   endpoint: "POST /projects",
-  client: api,
   cases: {
     success: {
       description: "Valid input returns 201.",
@@ -322,7 +323,6 @@ export const createProject = contract.http("create-project", {
     },
     noAuth: {
       description: "Unauthenticated returns 401.",
-      client: publicHttp,
       expect: { status: 401 },
     },
     deferredCase: {
@@ -350,7 +350,10 @@ export const createProject = contract.http("create-project", {
 `;
 
 test("discoverTestsFromFile discovers contract cases from .contract.ts files", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "mcp-contract-"));
+  // Write fixture inside test-project so @glubean/sdk resolves for runtime import
+  const testProjectDir = join(dirname(fileURLToPath(import.meta.url)), "../../../test-project");
+  const dir = join(testProjectDir, ".tmp-contract-test-" + Date.now());
+  await mkdir(dir, { recursive: true });
   const filePath = join(dir, "create.contract.ts");
   await writeFile(filePath, CONTRACT_SOURCE);
 
@@ -435,10 +438,11 @@ test("runLocalTestsFromFile filters deferred/browser/out-of-band/opt-in contract
 
 const { http: api } = configure({ http: { prefixUrl: "https://example.com" } });
 
-// TODO: migrate to .with() syntax when scanner moves to runtime extraction (Step 7)
-export const filterCheck = contract.http("filter-check", {
+const filterInstance = contract.http.with("filter", { client: api });
+
+// @contract
+export const filterCheck = filterInstance("filter-check", {
   endpoint: "GET /",
-  client: api,
   cases: {
     runMe: {
       description: "headless always-run case — only this should execute.",

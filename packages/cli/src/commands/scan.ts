@@ -39,6 +39,9 @@ export async function scanCommand(
     process.exit(1);
   }
 
+  // Scanner Phase 4 already uses shared extractContractFromFile() for runtime
+  // contract extraction. Contract import errors appear in scanResult.warnings.
+
   if (scanResult.warnings.length > 0) {
     console.log(`${colors.yellow}Warnings:${colors.reset}`);
     for (const warning of scanResult.warnings) {
@@ -106,4 +109,5 @@ export async function scanCommand(
     }
     console.log();
   }
+
 }
