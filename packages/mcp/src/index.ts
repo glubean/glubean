@@ -1519,15 +1519,18 @@ server.registerTool(
 
 /**
  * Map HttpSecurityScheme to OpenAPI securitySchemes entry + scheme name.
+ * Uses instanceName to disambiguate when multiple instances use different
+ * apiKey/oauth2 configurations (bearer/basic are canonical and shared).
  */
-function securityToOpenApi(security: unknown): { name: string; scheme: Record<string, unknown> } | null {
+function securityToOpenApi(security: unknown, instanceName?: string): { name: string; scheme: Record<string, unknown> } | null {
   if (!security) return null;
   if (security === "bearer") return { name: "bearerAuth", scheme: { type: "http", scheme: "bearer" } };
   if (security === "basic") return { name: "basicAuth", scheme: { type: "http", scheme: "basic" } };
   if (typeof security === "object" && security !== null) {
     const s = security as Record<string, unknown>;
-    if (s.type === "apiKey") return { name: "apiKeyAuth", scheme: { type: "apiKey", name: s.name, in: s.in } };
-    if (s.type === "oauth2") return { name: "oauth2Auth", scheme: { type: "oauth2", flows: s.flows } };
+    const suffix = instanceName ? `_${instanceName}` : "";
+    if (s.type === "apiKey") return { name: `apiKeyAuth${suffix}`, scheme: { type: "apiKey", name: s.name, in: s.in } };
+    if (s.type === "oauth2") return { name: `oauth2Auth${suffix}`, scheme: { type: "oauth2", flows: s.flows } };
   }
   return null;
 }
@@ -1553,8 +1556,8 @@ function contractsToOpenApi(
     if (!paths[apiPath]) paths[apiPath] = {};
     if (c.feature) tags.add(c.feature);
 
-    // Collect security scheme
-    const secMapping = securityToOpenApi(c.security);
+    // Collect security scheme (instanceName disambiguates collisions)
+    const secMapping = securityToOpenApi(c.security, c.instanceName);
     if (secMapping) {
       securitySchemes[secMapping.name] = secMapping.scheme;
     }
@@ -1661,7 +1664,10 @@ server.registerTool(
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify(spec, null, 2),
+        text: JSON.stringify({
+          ...spec,
+          ...(result.errors.length > 0 ? { "x-glubean-import-errors": result.errors } : {}),
+        }, null, 2),
       }],
     };
   },
