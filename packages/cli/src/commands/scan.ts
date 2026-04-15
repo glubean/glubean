@@ -34,7 +34,7 @@ export async function scanCommand(
   if (scanResult.fileCount === 0 && !hasContracts) {
     console.log(`${colors.yellow}⚠️  No test or contract files found.${colors.reset}`);
     console.log(
-      `${colors.dim}   Ensure files import @glubean/sdk and export test() or contract.http().${colors.reset}\n`,
+      `${colors.dim}   Ensure files import @glubean/sdk and export test() or contract.http.with().${colors.reset}\n`,
     );
     process.exit(1);
   }

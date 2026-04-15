@@ -306,6 +306,7 @@ export const httpTest = test("http-test", async (ctx) => {
 
 // ── Contract discovery tests ──────────────────────────────────────────────
 
+// TODO: migrate to .with() syntax when scanner moves to runtime extraction (Step 7)
 const CONTRACT_SOURCE = `
 import { contract } from "@glubean/sdk";
 import { api, publicHttp } from "../config/client.js";
@@ -434,6 +435,7 @@ test("runLocalTestsFromFile filters deferred/browser/out-of-band/opt-in contract
 
 const { http: api } = configure({ http: { prefixUrl: "https://example.com" } });
 
+// TODO: migrate to .with() syntax when scanner moves to runtime extraction (Step 7)
 export const filterCheck = contract.http("filter-check", {
   endpoint: "GET /",
   client: api,

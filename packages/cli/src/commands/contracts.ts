@@ -202,7 +202,7 @@ export async function contractsCommand(
   if (contracts.length === 0) {
     console.error(
       `${colors.yellow}No contracts found.${colors.reset} ` +
-      `Ensure .contract.ts files exist and export contract.http().`,
+      `Ensure .contract.ts files exist and use contract.http.with().`,
     );
     process.exit(1);
   }
