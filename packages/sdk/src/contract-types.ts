@@ -48,6 +48,14 @@ export interface HttpContractDefaults {
 // =============================================================================
 
 /**
+ * Root contract.http entrypoint — only .with() is available.
+ * Direct contract.http("id", spec) is not supported.
+ */
+export interface HttpContractRoot {
+  with(name: string, defaults: HttpContractDefaults): HttpContractFactory;
+}
+
+/**
  * Protocol-bound contract factory returned by `contract.http.with()`.
  * Callable: `factory("id", spec)` creates an HttpContract.
  * Chainable: `factory.with("name", defaults)` creates a nested instance.

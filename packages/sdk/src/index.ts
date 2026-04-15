@@ -1568,6 +1568,7 @@ export type {
   HttpContractSpec,
   HttpContract,
   HttpContractDefaults,
+  HttpContractRoot,
   HttpContractFactory,
   HttpSecurityScheme,
   ContractProtocolAdapter,

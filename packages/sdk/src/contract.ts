@@ -12,6 +12,7 @@ import type {
   HttpContract,
   HttpContractDefaults,
   HttpContractFactory,
+  HttpContractRoot,
   HttpContractSpec,
   HttpFlowStepSpec,
   HttpSecurityScheme,
@@ -593,12 +594,12 @@ function createHttpFactory(
  * - `contract[protocol](id, spec)` — available after register()
  */
 export const contract: {
-  http: HttpContractFactory;
+  http: HttpContractRoot;
   flow: typeof contractFlow;
   register: <Spec>(protocol: string, adapter: ContractProtocolAdapter<Spec>) => void;
   [protocol: string]: unknown;
 } = {
-  http: createHttpFactory(),
+  http: createHttpFactory() as unknown as HttpContractRoot,
   flow: contractFlow,
 
   register<Spec>(protocol: string, adapter: ContractProtocolAdapter<Spec>) {

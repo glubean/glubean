@@ -614,7 +614,7 @@ export async function runLocalTestsFromFile(args: {
       results: [],
       summary: { total: 0, passed: 0, failed: 0 },
       error: tests.length === 0
-        ? "No tests discovered in file. Check that exports use test() or contract.http() from @glubean/sdk."
+        ? "No tests discovered in file. Check that exports use test() or contract.http.with() from @glubean/sdk."
         : `No tests matched filter "${args.filter}". Available: ${tests.map((t) => t.id).join(", ")}`,
     };
   }
@@ -1055,7 +1055,7 @@ server.registerTool(
           {
             type: "text" as const,
             text: JSON.stringify({
-              error: "No contracts found. Ensure .contract.ts files exist and export contract.http().",
+              error: "No contracts found. Ensure .contract.ts files exist and export contract.http.with().",
             }),
           },
         ],
@@ -1458,7 +1458,7 @@ server.registerTool(
         content: [{
           type: "text" as const,
           text: JSON.stringify({
-            error: "No contracts found. Ensure .contract.ts files exist and export contract.http().",
+            error: "No contracts found. Ensure .contract.ts files exist and export contract.http.with().",
           }),
         }],
       };
@@ -1556,7 +1556,7 @@ server.registerTool(
   MCP_TOOL_NAMES.openapi,
   {
     description:
-      "Generate an OpenAPI 3.1 specification from contract.http() definitions. " +
+      "Generate an OpenAPI 3.1 specification from contract.http.with() definitions. " +
       "Dynamically imports contract modules to extract Zod schemas and converts them " +
       "to JSON Schema. Returns a complete OpenAPI spec as JSON.",
     inputSchema: {
@@ -1579,7 +1579,7 @@ server.registerTool(
         content: [{
           type: "text" as const,
           text: JSON.stringify({
-            error: "No contracts found. Ensure .contract.ts files exist and export contract.http().",
+            error: "No contracts found. Ensure .contract.ts files exist and export contract.http.with().",
           }),
         }],
       };
