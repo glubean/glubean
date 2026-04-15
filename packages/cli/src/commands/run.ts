@@ -213,7 +213,37 @@ interface DiscoveredTest {
 async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
   const content = await readFile(filePath, "utf-8");
 
-  if (filePath.endsWith(".contract.ts")) {
+  if (filePath.includes(".contract.")) {
+    // Try runtime import first (supports .with() scoped instances)
+    try {
+      const { pathToFileURL } = await import("node:url");
+      const { resolve } = await import("node:path");
+      const mod = await import(pathToFileURL(resolve(filePath)).href);
+      const results: DiscoveredTest[] = [];
+      for (const [exportName, value] of Object.entries(mod)) {
+        if (!Array.isArray(value) || !(value as any).id || !(value as any).endpoint) continue;
+        const contract = value as any;
+        if (contract._caseSchemas) {
+          for (const [key, caseMeta] of Object.entries(contract._caseSchemas as Record<string, any>)) {
+            results.push({
+              exportName,
+              meta: {
+                id: `${contract.id}.${key}`,
+                description: caseMeta.description,
+                requires: caseMeta.requires,
+                defaultRun: caseMeta.defaultRun,
+                deferred: caseMeta.deferred,
+              },
+            });
+          }
+        }
+      }
+      if (results.length > 0) return results;
+    } catch {
+      // Runtime import failed — fall back to static regex
+    }
+
+    // Static regex fallback (old syntax)
     const contracts = extractContractCases(content);
     const results: DiscoveredTest[] = [];
     for (const c of contracts) {
