@@ -5,11 +5,10 @@
  * metadata from the SDK's global registry instead of static analysis.
  */
 
-import { pathToFileURL } from "node:url";
-import { resolve as pathResolve } from "node:path";
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
 import { extractAliasesFromSource, extractContractCases } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
+import { extractContractFromFile } from "./contract-extraction.js";
 import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.js";
 
 /** File system interface for runtime abstraction */
@@ -261,44 +260,37 @@ export class Scanner {
     }
 
     // Phase 4: Extract contract metadata from contract files
-    // Try runtime import first (supports .with() scoped instances),
-    // fall back to static regex for environments where import is unavailable.
+    // Uses shared runtime extraction (supports both old and .with() syntax).
+    // Falls back to static regex if runtime import fails.
     const contracts: ContractStaticMeta[] = [];
     for (const filePath of contractFiles) {
-      try {
-        // Runtime import — works for both old and new (.with()) syntax
-        const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : pathResolve(filePath);
-        const mod = await import(pathToFileURL(absolutePath).href);
-        for (const [exportName, value] of Object.entries(mod)) {
-          if (!Array.isArray(value) || !(value as any).id || !(value as any).endpoint) continue;
-          const contract = value as any;
-          const cases: ContractStaticMeta["cases"] = [];
-          if (contract._caseSchemas) {
-            for (const [key, caseMeta] of Object.entries(contract._caseSchemas as Record<string, any>)) {
-              cases.push({
-                key,
-                description: caseMeta.description,
-                expectStatus: caseMeta.expectStatus,
-                deferred: caseMeta.deferred,
-                requires: caseMeta.requires,
-                defaultRun: caseMeta.defaultRun,
-                line: 0, // runtime extraction doesn't have line info
-              });
-            }
-          }
+      const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
+      const result = await extractContractFromFile(absolutePath);
+
+      if (result.contracts.length > 0) {
+        // Map ExtractedContract → ContractStaticMeta for backward compatibility
+        for (const ec of result.contracts) {
           contracts.push({
-            contractId: contract.id,
-            exportName,
-            endpoint: contract.endpoint,
+            contractId: ec.id,
+            exportName: ec.exportName,
+            endpoint: ec.endpoint,
             protocol: "http",
-            description: contract.description,
-            feature: contract.feature,
-            cases,
+            description: ec.description,
+            feature: ec.feature,
             line: 0,
+            cases: ec.cases.map((c) => ({
+              key: c.key,
+              description: c.description,
+              expectStatus: c.expectStatus,
+              deferred: c.deferred,
+              requires: c.requires,
+              defaultRun: c.defaultRun,
+              line: 0,
+            })),
           });
         }
-      } catch {
-        // Runtime import failed — fall back to static regex
+      } else if (result.errors.length > 0) {
+        // Runtime failed — try static regex fallback
         try {
           const content = await this.fs.readText(filePath);
           const extracted = extractContractCases(content);
