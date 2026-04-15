@@ -320,22 +320,29 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
           }
         }
       }
-    } catch {
-      // Runtime import failed — fall back to static regex
+    } catch (err) {
+      // Runtime import failed — try static regex as fallback for old-syntax files.
+      // If regex also finds nothing, surface the import error so scoped .with()
+      // contracts don't silently disappear.
       const contracts = extractContractCases(content);
-      tests = contracts.flatMap((contract) =>
-        contract.cases.map((c) => ({
-          exportName: contract.exportName,
-          id: `${contract.contractId}.${c.key}`,
-          name: `${contract.endpoint} — ${c.key}`,
-          skip: !!c.deferred,
-          only: false,
-          tags: [],
-          requires: c.requires,
-          defaultRun: c.defaultRun,
-          deferred: c.deferred,
-        })),
-      );
+      if (contracts.length > 0) {
+        tests = contracts.flatMap((contract) =>
+          contract.cases.map((c) => ({
+            exportName: contract.exportName,
+            id: `${contract.contractId}.${c.key}`,
+            name: `${contract.endpoint} — ${c.key}`,
+            skip: !!c.deferred,
+            only: false,
+            tags: [],
+            requires: c.requires,
+            defaultRun: c.defaultRun,
+            deferred: c.deferred,
+          })),
+        );
+      } else {
+        // Neither runtime nor static found contracts — report error
+        console.error(`[glubean:mcp] Contract import failed for ${filePath}: ${err instanceof Error ? err.message : err}`);
+      }
     }
 
     return { fileUrl, tests };
@@ -1074,23 +1081,20 @@ server.registerTool(
   },
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
-    const result = await scanProject(rootDir, "static");
-    const contracts = result.contracts ?? [];
+    const contracts = await extractContractsRuntime(rootDir);
 
     if (contracts.length === 0) {
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              error: "No contracts found. Ensure .contract.ts files exist and export contract.http.with().",
-            }),
-          },
-        ],
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            error: "No contracts found. Ensure .contract.ts files exist and use contract.http.with().",
+          }),
+        }],
       };
     }
 
-    // Group by feature
+    // Group by feature (or instanceName → feature if instances exist)
     const featureMap = new Map<string, typeof contracts>();
     for (const c of contracts) {
       const key = c.feature ?? c.endpoint;
@@ -1099,49 +1103,40 @@ server.registerTool(
     }
 
     let totalCases = 0;
-    let deferred = 0;
-    let gated = 0;
     for (const c of contracts) {
-      for (const cas of c.cases) {
-        totalCases++;
-        if (cas.deferred) deferred++;
-        else if (cas.requires === "browser" || cas.requires === "out-of-band") gated++;
-      }
+      totalCases += c.cases.length;
     }
 
     const output = {
       features: Array.from(featureMap.entries()).map(([name, group]) => ({
         name,
         contracts: group.map((c) => ({
-          id: c.contractId,
+          id: c.id,
           endpoint: c.endpoint,
           description: c.description,
           feature: c.feature,
+          instanceName: c.instanceName,
+          security: c.security,
           cases: c.cases.map((cas) => ({
             key: cas.key,
             description: cas.description,
             status: cas.expectStatus,
-            deferred: cas.deferred,
-            requires: cas.requires,
-            defaultRun: cas.defaultRun,
           })),
         })),
       })),
       summary: {
         total: totalCases,
-        active: totalCases - deferred - gated,
-        deferred,
-        gated,
+        active: totalCases,
+        deferred: 0,
+        gated: 0,
       },
     };
 
     return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(output, null, 2),
-        },
-      ],
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify(output, null, 2),
+      }],
     };
   },
 );
