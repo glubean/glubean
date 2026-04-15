@@ -6,7 +6,7 @@
  */
 
 import { resolve } from "node:path";
-import { createScanner } from "@glubean/scanner";
+import { extractContractsFromProject } from "@glubean/scanner";
 import type { ContractStaticMeta, ContractCaseStaticMeta } from "@glubean/scanner/static";
 
 // ── Description lint ────────────────────────────────────────────────────────
@@ -195,17 +195,43 @@ export async function contractsCommand(
   const dir = options.dir ? resolve(options.dir) : process.cwd();
   const format = options.format ?? "md-outline";
 
-  const scanner = createScanner();
-  const result = await scanner.scan(dir);
-  const contracts = result.contracts ?? [];
+  const result = await extractContractsFromProject(dir);
 
-  if (contracts.length === 0) {
+  // Surface import errors
+  if (result.errors.length > 0) {
+    for (const err of result.errors) {
+      console.error(`${colors.yellow}⚠ Import failed: ${err.file}${colors.reset}`);
+      console.error(`${colors.dim}  ${err.error}${colors.reset}`);
+    }
+  }
+
+  if (result.contracts.length === 0) {
     console.error(
       `${colors.yellow}No contracts found.${colors.reset} ` +
       `Ensure .contract.ts files exist and use contract.http.with().`,
     );
     process.exit(1);
   }
+
+  // Map ExtractedContract → ContractStaticMeta for formatters
+  const contracts: ContractStaticMeta[] = result.contracts.map((ec) => ({
+    contractId: ec.id,
+    exportName: ec.exportName,
+    endpoint: ec.endpoint,
+    protocol: "http",
+    description: ec.description,
+    feature: ec.feature,
+    line: 0,
+    cases: ec.cases.map((c) => ({
+      key: c.key,
+      description: c.description,
+      expectStatus: c.expectStatus,
+      deferred: c.deferred,
+      requires: c.requires as any,
+      defaultRun: c.defaultRun as any,
+      line: 0,
+    })),
+  }));
 
   // Output projection
   if (format === "json") {

@@ -21,6 +21,7 @@ import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
+import { extractContractFromFile } from "@glubean/scanner";
 
 // ANSI color codes for pretty output
 const colors = {
@@ -214,53 +215,52 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
   const content = await readFile(filePath, "utf-8");
 
   if (filePath.includes(".contract.")) {
-    // Try runtime import first (supports .with() scoped instances)
-    try {
-      const { pathToFileURL } = await import("node:url");
-      const { resolve } = await import("node:path");
-      const mod = await import(pathToFileURL(resolve(filePath)).href);
+    // Runtime extraction via shared function (supports .with() syntax)
+    const result = await extractContractFromFile(filePath);
+
+    if (result.contracts.length > 0) {
       const results: DiscoveredTest[] = [];
-      for (const [exportName, value] of Object.entries(mod)) {
-        if (!Array.isArray(value) || !(value as any).id || !(value as any).endpoint) continue;
-        const contract = value as any;
-        if (contract._caseSchemas) {
-          for (const [key, caseMeta] of Object.entries(contract._caseSchemas as Record<string, any>)) {
+      for (const ec of result.contracts) {
+        for (const c of ec.cases) {
+          results.push({
+            exportName: ec.exportName,
+            meta: {
+              id: `${ec.id}.${c.key}`,
+              description: c.description,
+              requires: c.requires,
+              defaultRun: c.defaultRun,
+              deferred: c.deferred,
+            },
+          });
+        }
+      }
+      return results;
+    }
+
+    // Runtime failed — fall back to static regex (old syntax)
+    if (result.errors.length > 0) {
+      const contracts = extractContractCases(content);
+      if (contracts.length > 0) {
+        const results: DiscoveredTest[] = [];
+        for (const c of contracts) {
+          for (const caseItem of c.cases) {
             results.push({
-              exportName,
+              exportName: c.exportName,
               meta: {
-                id: `${contract.id}.${key}`,
-                description: caseMeta.description,
-                requires: caseMeta.requires,
-                defaultRun: caseMeta.defaultRun,
-                deferred: caseMeta.deferred,
+                id: `${c.contractId}.${caseItem.key}`,
+                description: caseItem.description,
+                requires: caseItem.requires,
+                defaultRun: caseItem.defaultRun,
+                deferred: caseItem.deferred,
               },
             });
           }
         }
+        return results;
       }
-      if (results.length > 0) return results;
-    } catch {
-      // Runtime import failed — fall back to static regex
     }
 
-    // Static regex fallback (old syntax)
-    const contracts = extractContractCases(content);
-    const results: DiscoveredTest[] = [];
-    for (const c of contracts) {
-      for (const caseItem of c.cases) {
-        results.push({
-          exportName: c.exportName,
-          meta: {
-            id: `${c.contractId}.${caseItem.key}`,
-            description: caseItem.description,
-            requires: caseItem.requires,
-            defaultRun: caseItem.defaultRun,
-            deferred: caseItem.deferred,
-          },
-        });
-      }
-    }
-    return results;
+    return [];
   }
 
   const metas = extractFromSource(content);
