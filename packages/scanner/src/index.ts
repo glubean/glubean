@@ -41,6 +41,15 @@ export type { FileSystem, Hasher, MetadataExtractor } from "./scanner.js";
 export { createStaticExtractor, extractAliasesFromSource, extractContractCases, extractFromSource, isGlubeanFile } from "./extractor-static.js";
 export type { ContractStaticMeta, ContractCaseStaticMeta } from "./extractor-static.js";
 
+// Re-export runtime contract extraction
+export {
+  extractContractFromFile,
+  extractContractsFromProject,
+  isHttpContract,
+  schemaToJsonSchema,
+} from "./contract-extraction.js";
+export type { ExtractedContract, ExtractionResult } from "./contract-extraction.js";
+
 // Re-export file system implementations
 export { nodeFs, nodeHasher } from "./fs.js";
 
