@@ -1081,7 +1081,8 @@ server.registerTool(
   },
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
-    const contracts = await extractContractsRuntime(rootDir);
+    const result = await extractContractsRuntime(rootDir);
+    const { contracts, errors } = result;
 
     if (contracts.length === 0) {
       return {
@@ -1089,15 +1090,18 @@ server.registerTool(
           type: "text" as const,
           text: JSON.stringify({
             error: "No contracts found. Ensure .contract.ts files exist and use contract.http.with().",
+            ...(errors.length > 0 ? { importErrors: errors } : {}),
           }),
         }],
       };
     }
 
-    // Group by feature (or instanceName → feature if instances exist)
-    const featureMap = new Map<string, typeof contracts>();
+    // Group by instanceName → feature (instance-aware grouping)
+    const featureMap = new Map<string, ExtractedContract[]>();
     for (const c of contracts) {
-      const key = c.feature ?? c.endpoint;
+      const key = c.instanceName
+        ? `${c.instanceName}:${c.feature ?? c.endpoint}`
+        : (c.feature ?? c.endpoint);
       if (!featureMap.has(key)) featureMap.set(key, []);
       featureMap.get(key)!.push(c);
     }
@@ -1130,6 +1134,7 @@ server.registerTool(
         deferred: 0,
         gated: 0,
       },
+      ...(errors.length > 0 ? { errors } : {}),
     };
 
     return {
@@ -1379,10 +1384,7 @@ async function schemaToJsonSchema(schema: unknown): Promise<unknown | null> {
   return null;
 }
 
-/**
- * Extract full contract data from a project by dynamically importing modules.
- */
-async function extractContractsRuntime(rootDir: string): Promise<Array<{
+interface ExtractedContract {
   id: string;
   endpoint: string;
   description?: string;
@@ -1396,7 +1398,18 @@ async function extractContractsRuntime(rootDir: string): Promise<Array<{
     expectStatus?: number;
     responseSchema: unknown | null;
   }>;
-}>> {
+}
+
+interface ExtractionResult {
+  contracts: ExtractedContract[];
+  errors: Array<{ file: string; error: string }>;
+}
+
+/**
+ * Extract full contract data from a project by dynamically importing modules.
+ * Returns structured errors for import failures — callers surface them to users.
+ */
+async function extractContractsRuntime(rootDir: string): Promise<ExtractionResult> {
   // Find .contract.{ts,js,mjs} files by walking the directory tree.
   // Does NOT depend on static scanner — works for both old and new (.with()) syntax.
   const contractFiles = new Set<string>();
@@ -1411,9 +1424,10 @@ async function extractContractsRuntime(rootDir: string): Promise<Array<{
   };
   walk(rootDir);
 
-  if (contractFiles.size === 0) return [];
+  if (contractFiles.size === 0) return { contracts: [], errors: [] };
 
-  const contracts: Awaited<ReturnType<typeof extractContractsRuntime>> = [];
+  const contracts: ExtractedContract[] = [];
+  const errors: ExtractionResult["errors"] = [];
 
   for (const filePath of contractFiles) {
     try {
@@ -1422,7 +1436,7 @@ async function extractContractsRuntime(rootDir: string): Promise<Array<{
         if (!isHttpContract(value)) continue;
 
         const requestSchema = await schemaToJsonSchema(value.request);
-        const cases: typeof contracts[0]["cases"] = [];
+        const cases: ExtractedContract["cases"] = [];
 
         if (value._caseSchemas) {
           for (const [key, caseMeta] of Object.entries(value._caseSchemas)) {
@@ -1447,11 +1461,13 @@ async function extractContractsRuntime(rootDir: string): Promise<Array<{
         });
       }
     } catch (err) {
-      console.error(`[glubean:mcp] Failed to import ${filePath}: ${err instanceof Error ? err.message : err}`);
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ file: filePath, error: message });
+      console.error(`[glubean:mcp] Failed to import ${filePath}: ${message}`);
     }
   }
 
-  return contracts;
+  return { contracts, errors };
 }
 
 server.registerTool(
@@ -1471,14 +1487,15 @@ server.registerTool(
   },
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
-    const contracts = await extractContractsRuntime(rootDir);
+    const result = await extractContractsRuntime(rootDir);
 
-    if (contracts.length === 0) {
+    if (result.contracts.length === 0) {
       return {
         content: [{
           type: "text" as const,
           text: JSON.stringify({
-            error: "No contracts found. Ensure .contract.ts files exist and export contract.http.with().",
+            error: "No contracts found. Ensure .contract.ts files exist and use contract.http.with().",
+            ...(result.errors.length > 0 ? { importErrors: result.errors } : {}),
           }),
         }],
       };
@@ -1487,7 +1504,10 @@ server.registerTool(
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ contracts }, null, 2),
+        text: JSON.stringify({
+          contracts: result.contracts,
+          ...(result.errors.length > 0 ? { errors: result.errors } : {}),
+        }, null, 2),
       }],
     };
   },
@@ -1497,12 +1517,28 @@ server.registerTool(
 // OpenAPI spec generation from runtime contract data
 // =============================================================================
 
+/**
+ * Map HttpSecurityScheme to OpenAPI securitySchemes entry + scheme name.
+ */
+function securityToOpenApi(security: unknown): { name: string; scheme: Record<string, unknown> } | null {
+  if (!security) return null;
+  if (security === "bearer") return { name: "bearerAuth", scheme: { type: "http", scheme: "bearer" } };
+  if (security === "basic") return { name: "basicAuth", scheme: { type: "http", scheme: "basic" } };
+  if (typeof security === "object" && security !== null) {
+    const s = security as Record<string, unknown>;
+    if (s.type === "apiKey") return { name: "apiKeyAuth", scheme: { type: "apiKey", name: s.name, in: s.in } };
+    if (s.type === "oauth2") return { name: "oauth2Auth", scheme: { type: "oauth2", flows: s.flows } };
+  }
+  return null;
+}
+
 function contractsToOpenApi(
-  contracts: Awaited<ReturnType<typeof extractContractsRuntime>>,
+  contracts: ExtractedContract[],
   title = "API Specification",
 ): Record<string, unknown> {
   const paths: Record<string, Record<string, unknown>> = {};
   const tags = new Set<string>();
+  const securitySchemes: Record<string, Record<string, unknown>> = {};
 
   for (const c of contracts) {
     // Parse "METHOD /path" → { method, path }
@@ -1516,6 +1552,12 @@ function contractsToOpenApi(
 
     if (!paths[apiPath]) paths[apiPath] = {};
     if (c.feature) tags.add(c.feature);
+
+    // Collect security scheme
+    const secMapping = securityToOpenApi(c.security);
+    if (secMapping) {
+      securitySchemes[secMapping.name] = secMapping.scheme;
+    }
 
     // Build responses from cases
     const responses: Record<string, unknown> = {};
@@ -1541,6 +1583,13 @@ function contractsToOpenApi(
       responses,
     };
     if (c.feature) operation.tags = [c.feature];
+
+    // Operation-level security from contract instance
+    if (secMapping) {
+      operation.security = [{ [secMapping.name]: [] }];
+    } else if (c.security === null) {
+      operation.security = []; // explicitly public
+    }
 
     // Extract path parameters
     const paramMatches = apiPath.matchAll(/\{(\w+)\}/g);
@@ -1568,6 +1617,7 @@ function contractsToOpenApi(
     openapi: "3.1.0",
     info: { title, version: "1.0.0" },
     ...(tags.size > 0 ? { tags: [...tags].map((t) => ({ name: t })) } : {}),
+    ...(Object.keys(securitySchemes).length > 0 ? { components: { securitySchemes } } : {}),
     paths,
   };
 }
@@ -1592,20 +1642,21 @@ server.registerTool(
   },
   async (input: { dir?: string; title?: string }) => {
     const rootDir = resolveRootDir(input.dir);
-    const contracts = await extractContractsRuntime(rootDir);
+    const result = await extractContractsRuntime(rootDir);
 
-    if (contracts.length === 0) {
+    if (result.contracts.length === 0) {
       return {
         content: [{
           type: "text" as const,
           text: JSON.stringify({
-            error: "No contracts found. Ensure .contract.ts files exist and export contract.http.with().",
+            error: "No contracts found. Ensure .contract.ts files exist and use contract.http.with().",
+            ...(result.errors.length > 0 ? { importErrors: result.errors } : {}),
           }),
         }],
       };
     }
 
-    const spec = contractsToOpenApi(contracts, input.title);
+    const spec = contractsToOpenApi(result.contracts, input.title);
 
     return {
       content: [{
