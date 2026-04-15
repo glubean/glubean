@@ -291,14 +291,22 @@ export class Scanner {
         }
       } else if (result.errors.length > 0) {
         // Runtime failed — try static regex fallback
+        let fallbackFound = false;
         try {
           const content = await this.fs.readText(filePath);
           const extracted = extractContractCases(content);
           for (const meta of extracted) {
             contracts.push(meta);
+            fallbackFound = true;
           }
-        } catch (err) {
-          warnings.push(`Failed to extract contracts from ${filePath}: ${err}`);
+        } catch {
+          // Static fallback also failed
+        }
+        // If both runtime and static found nothing, surface the import error
+        if (!fallbackFound) {
+          for (const err of result.errors) {
+            warnings.push(`Contract import failed: ${err.file} — ${err.error}`);
+          }
         }
       }
     }
