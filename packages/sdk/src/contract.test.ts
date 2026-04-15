@@ -97,16 +97,26 @@ const UserSchema = {
 // Tests
 // ---------------------------------------------------------------------------
 
+/**
+ * Helper: create a scoped HTTP contract factory with a mock client.
+ * All tests must use .with() — contract.http("id", spec) is removed.
+ */
+function createTestFactory(
+  responses: Record<string, { status: number; body?: unknown }> = {},
+) {
+  const client = createMockClient(responses);
+  return contract.http.with("test", { client });
+}
+
 beforeEach(() => {
   clearRegistry();
 });
 
 test("contract.http() produces HttpContract extending Array<Test>", () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  const result = contract.http("get-user", {
+  const result = api("get-user", {
     endpoint: "GET /users/:id",
-    client,
     cases: {
       success: {
         description: "test",
@@ -135,11 +145,10 @@ test("contract.http() produces HttpContract extending Array<Test>", () => {
 });
 
 test("case IDs follow contractId.caseKey pattern", () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  const result = contract.http("create-user", {
+  const result = api("create-user", {
     endpoint: "POST /users",
-    client,
     cases: {
       success: { description: "test", expect: { status: 201 } },
       invalidBody: { description: "test", expect: { status: 400 } },
@@ -155,11 +164,10 @@ test("case IDs follow contractId.caseKey pattern", () => {
 });
 
 test("tags inherit from contract-level and merge with case-level", () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  const result = contract.http("list-users", {
+  const result = api("list-users", {
     endpoint: "GET /users",
-    client,
     tags: ["users", "api"],
     cases: {
       success: {
@@ -179,11 +187,10 @@ test("tags inherit from contract-level and merge with case-level", () => {
 });
 
 test("cases register to global registry with contract metadata", () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  contract.http("whoami", {
+  api("whoami", {
     endpoint: "GET /whoami",
-    client,
     cases: {
       success: { description: "test", expect: { status: 200, schema: UserSchema } },
       noAuth: { description: "test", expect: { status: 401 }, deferred: "needs credentials" },
@@ -204,6 +211,8 @@ test("cases register to global registry with contract metadata", () => {
     expectStatus: 200,
     hasSchema: true,
     deferred: undefined,
+    instanceName: "test",
+    security: undefined,
   });
 
   const noAuth = entries.find((r) => r.id === "whoami.noAuth")!;
@@ -218,9 +227,9 @@ test("case-level client overrides contract-level client", () => {
     "GET /users": { status: 200, body: { source: "admin" } },
   });
 
-  const result = contract.http("list-users", {
+  const api = contract.http.with("test", { client: defaultClient });
+  const result = api("list-users", {
     endpoint: "GET /users",
-    client: defaultClient,
     cases: {
       withDefault: {
         description: "test",
@@ -256,11 +265,10 @@ test("contract.register() adds a protocol and rejects reserved names", () => {
 });
 
 test("asSteps() and asStep() are available", () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  const result = contract.http("test-contract", {
+  const result = api("test-contract", {
     endpoint: "GET /test",
-    client,
     cases: {
       success: { description: "test", expect: { status: 200 } },
     },
@@ -271,9 +279,10 @@ test("asSteps() and asStep() are available", () => {
 });
 
 test("throws when no client is provided", async () => {
-  const result = contract.http("no-client", {
+  const api = contract.http.with("test", {});
+  const result = api("no-client", {
     endpoint: "GET /test",
-    // no client at contract or case level
+    // no client at instance or case level
     cases: {
       success: { description: "test", expect: { status: 200 } },
     },
@@ -286,13 +295,12 @@ test("throws when no client is provided", async () => {
 
 test("verify() receives raw JSON body when no schema provided", async () => {
   let receivedBody: unknown;
-  const client = createMockClient({
+  const api = createTestFactory({
     "GET /data": { status: 200, body: { foo: "bar", count: 42 } },
   });
 
-  const result = contract.http("verify-no-schema", {
+  const result = api("verify-no-schema", {
     endpoint: "GET /data",
-    client,
     cases: {
       success: {
         description: "test",
@@ -313,13 +321,12 @@ test("verify() receives raw JSON body when no schema provided", async () => {
 
 test("verify() receives schema-parsed value when schema provided", async () => {
   let receivedBody: unknown;
-  const client = createMockClient({
+  const api = createTestFactory({
     "GET /user": { status: 200, body: { id: "u1", name: "Alice" } },
   });
 
-  const result = contract.http("verify-with-schema", {
+  const result = api("verify-with-schema", {
     endpoint: "GET /user",
-    client,
     cases: {
       success: {
         description: "test",
@@ -339,13 +346,12 @@ test("verify() receives schema-parsed value when schema provided", async () => {
 
 test("setup and teardown execute in correct order", async () => {
   const order: string[] = [];
-  const client = createMockClient({
+  const api = createTestFactory({
     "POST /items": { status: 201, body: { id: "item1" } },
   });
 
-  const result = contract.http("lifecycle-order", {
+  const result = api("lifecycle-order", {
     endpoint: "POST /items",
-    client,
     cases: {
       success: {
         description: "test",
@@ -372,13 +378,12 @@ test("setup and teardown execute in correct order", async () => {
 
 test("teardown runs even when verify throws", async () => {
   let teardownRan = false;
-  const client = createMockClient({
+  const api = createTestFactory({
     "GET /fail": { status: 200, body: {} },
   });
 
-  const result = contract.http("teardown-on-fail", {
+  const result = api("teardown-on-fail", {
     endpoint: "GET /fail",
-    client,
     cases: {
       success: {
         description: "test",
@@ -399,11 +404,10 @@ test("teardown runs even when verify throws", async () => {
 });
 
 test("asStep() skips deferred cases when no caseKey given", () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  const result = contract.http("deferred-test", {
+  const result = api("deferred-test", {
     endpoint: "GET /test",
-    client,
     cases: {
       deferredCase: {
         description: "test",
@@ -424,11 +428,10 @@ test("asStep() skips deferred cases when no caseKey given", () => {
 });
 
 test("deferred case calls ctx.skip() at execution time", async () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  const result = contract.http("deferred-exec", {
+  const result = api("deferred-exec", {
     endpoint: "GET /test",
-    client,
     cases: {
       blocked: {
         description: "test",
@@ -451,9 +454,9 @@ test("params function receives setup state", async () => {
     return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
   };
 
-  const result = contract.http("param-fn", {
+  const api = contract.http.with("test", { client });
+  const result = api("param-fn", {
     endpoint: "GET /users/:id",
-    client,
     cases: {
       success: {
         description: "test",
@@ -477,9 +480,9 @@ test("resolveParams replaces :param placeholders", async () => {
     return createMockClient({ [`DELETE ${url}`]: { status: 200, body: {} } }).delete(url, opts);
   };
 
-  const result = contract.http("resolve-test", {
+  const api = contract.http.with("test", { client });
+  const result = api("resolve-test", {
     endpoint: "DELETE /projects/:projectId/items/:itemId",
-    client,
     cases: {
       success: {
         description: "test",
@@ -502,9 +505,9 @@ test("query params are passed to request", async () => {
     return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
   };
 
-  const result = contract.http("query-test", {
+  const api = contract.http.with("test", { client });
+  const result = api("query-test", {
     endpoint: "GET /search",
-    client,
     cases: {
       success: {
         description: "test",
@@ -527,9 +530,9 @@ test("headers are passed to request", async () => {
     return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
   };
 
-  const result = contract.http("headers-test", {
+  const api = contract.http.with("test", { client });
+  const result = api("headers-test", {
     endpoint: "GET /data",
-    client,
     cases: {
       success: {
         description: "test",
@@ -545,11 +548,10 @@ test("headers are passed to request", async () => {
 });
 
 test("asSteps() injects and executes steps in test builder", async () => {
-  const client = createMockClient();
+  const api = createTestFactory();
 
-  const myContract = contract.http("as-steps-test", {
+  const myContract = api("as-steps-test", {
     endpoint: "GET /test",
-    client,
     cases: {
       a: { description: "test", expect: { status: 200 } },
       b: { description: "test", expect: { status: 201 } },
@@ -597,13 +599,12 @@ test("register() adapter execute() is called at runtime", async () => {
 
 test("multiple cases do not share state", async () => {
   const states: unknown[] = [];
-  const client = createMockClient({
+  const api = createTestFactory({
     "POST /items": { status: 201, body: {} },
   });
 
-  const result = contract.http("isolation-test", {
+  const result = api("isolation-test", {
     endpoint: "POST /items",
-    client,
     cases: {
       a: {
         description: "test",
@@ -628,12 +629,11 @@ test("multiple cases do not share state", async () => {
 });
 
 test("request schema is accessible on contract object", () => {
-  const client = createMockClient();
+  const api = createTestFactory();
   const schema = { safeParse: () => ({ success: true as const, data: {} }) };
 
-  const result = contract.http("req-schema", {
+  const result = api("req-schema", {
     endpoint: "POST /users",
-    client,
     request: schema,
     cases: {
       success: { description: "test", expect: { status: 201 } },
@@ -950,9 +950,9 @@ test("contract.http - body as function of setup state", async () => {
     return createMockClient({ [`POST ${url}`]: { status: 200, body: { ok: true } } }).post(url, opts);
   };
 
-  const [test] = contract.http("body-fn-http", {
+  const api = contract.http.with("test", { client });
+  const [test] = api("body-fn-http", {
     endpoint: "POST /tokens",
-    client,
     cases: {
       withToken: {
         description: "sends token from setup state in body",
@@ -977,9 +977,9 @@ test("contract.http - headers as function of setup state", async () => {
     return createMockClient({ [`GET ${url}`]: { status: 200, body: {} } }).get(url, opts);
   };
 
-  const [test] = contract.http("headers-fn-http", {
+  const api = contract.http.with("test", { client });
+  const [test] = api("headers-fn-http", {
     endpoint: "GET /me",
-    client,
     cases: {
       withAuth: {
         description: "sends auth header from setup state",
@@ -1025,9 +1025,9 @@ test("flow - headers as function of state", async () => {
 // =============================================================================
 
 test("contract.http - default requires is headless, defaultRun is always", () => {
-  const c = contract.http("default-runtime", {
+  const api = createTestFactory();
+  const c = api("default-runtime", {
     endpoint: "GET /health",
-    client: createMockClient(),
     cases: {
       check: { description: "health check", expect: { status: 200 } },
     },
@@ -1037,9 +1037,9 @@ test("contract.http - default requires is headless, defaultRun is always", () =>
 });
 
 test("contract.http - requires: browser auto-implies defaultRun: opt-in", () => {
-  const c = contract.http("oauth-callback", {
+  const api = createTestFactory();
+  const c = api("oauth-callback", {
     endpoint: "POST /auth/google/callback",
-    client: createMockClient(),
     cases: {
       success: {
         description: "real Google login",
@@ -1053,9 +1053,9 @@ test("contract.http - requires: browser auto-implies defaultRun: opt-in", () => 
 });
 
 test("contract.http - requires: out-of-band auto-implies defaultRun: opt-in", () => {
-  const c = contract.http("magic-link", {
+  const api = createTestFactory();
+  const c = api("magic-link", {
     endpoint: "POST /auth/magic-link",
-    client: createMockClient(),
     cases: {
       send: {
         description: "send magic link email",
@@ -1069,9 +1069,9 @@ test("contract.http - requires: out-of-band auto-implies defaultRun: opt-in", ()
 });
 
 test("contract.http - explicit defaultRun: always overrides auto-imply", () => {
-  const c = contract.http("browser-always", {
+  const api = createTestFactory();
+  const c = api("browser-always", {
     endpoint: "GET /dashboard",
-    client: createMockClient(),
     cases: {
       render: {
         description: "browser render check",
@@ -1086,9 +1086,9 @@ test("contract.http - explicit defaultRun: always overrides auto-imply", () => {
 });
 
 test("contract.http - headless + opt-in for expensive API", () => {
-  const c = contract.http("twilio-sms", {
+  const api = createTestFactory();
+  const c = api("twilio-sms", {
     endpoint: "POST /send-sms",
-    client: createMockClient(),
     cases: {
       realSend: {
         description: "real Twilio SMS",
@@ -1103,9 +1103,9 @@ test("contract.http - headless + opt-in for expensive API", () => {
 });
 
 test("contract.http - auto-tags for requires:browser", () => {
-  const c = contract.http("tagged-browser", {
+  const api = createTestFactory();
+  const c = api("tagged-browser", {
     endpoint: "POST /auth/callback",
-    client: createMockClient(),
     cases: {
       success: {
         description: "OAuth callback",
@@ -1122,9 +1122,9 @@ test("contract.http - auto-tags for requires:browser", () => {
 });
 
 test("contract.http - auto-tags for out-of-band + opt-in", () => {
-  const c = contract.http("tagged-oob", {
+  const api = createTestFactory();
+  const c = api("tagged-oob", {
     endpoint: "POST /auth/magic",
-    client: createMockClient(),
     cases: {
       send: {
         description: "magic link",
@@ -1139,9 +1139,9 @@ test("contract.http - auto-tags for out-of-band + opt-in", () => {
 });
 
 test("contract.http - headless + always has no runtime tags", () => {
-  const c = contract.http("no-runtime-tags", {
+  const api = createTestFactory();
+  const c = api("no-runtime-tags", {
     endpoint: "GET /users",
-    client: createMockClient(),
     cases: {
       list: {
         description: "list users",
@@ -1155,9 +1155,9 @@ test("contract.http - headless + always has no runtime tags", () => {
 });
 
 test("contract.http - headless + opt-in adds only default-run tag", () => {
-  const c = contract.http("opt-in-headless", {
+  const api = createTestFactory();
+  const c = api("opt-in-headless", {
     endpoint: "POST /expensive",
-    client: createMockClient(),
     cases: {
       call: {
         description: "expensive API call",
@@ -1172,9 +1172,9 @@ test("contract.http - headless + opt-in adds only default-run tag", () => {
 });
 
 test("contract.http - registry includes requires and defaultRun", () => {
-  const c = contract.http("registry-runtime", {
+  const api = createTestFactory();
+  const c = api("registry-runtime", {
     endpoint: "POST /auth/callback",
-    client: createMockClient(),
     cases: {
       success: {
         description: "OAuth callback",
@@ -1271,11 +1271,10 @@ test("contract.flow - registry includes requires and defaultRun", () => {
 
 test("contract.http accepts optional feature field", () => {
   clearRegistry();
-  const client = createMockClient({ "POST /projects": { status: 201 } });
-  const c = contract.http("feat-test", {
+  const api = createTestFactory({ "POST /projects": { status: 201 } });
+  const c = api("feat-test", {
     endpoint: "POST /projects",
     feature: "项目管理",
-    client,
     cases: {
       ok: {
         description: "Create project",
@@ -1295,12 +1294,11 @@ test("contract.http accepts optional feature field", () => {
 // ---------------------------------------------------------------------------
 
 test("HttpContract preserves description and feature", () => {
-  const client = createMockClient();
-  const result = contract.http("meta-test", {
+  const api = createTestFactory();
+  const result = api("meta-test", {
     endpoint: "GET /health",
     description: "Health check endpoint",
     feature: "Monitoring",
-    client,
     cases: {
       ok: {
         description: "Service is healthy",
@@ -1314,10 +1312,9 @@ test("HttpContract preserves description and feature", () => {
 });
 
 test("HttpContract preserves _caseSchemas with response schemas", () => {
-  const client = createMockClient();
-  const result = contract.http("schema-test", {
+  const api = createTestFactory();
+  const result = api("schema-test", {
     endpoint: "GET /user",
-    client,
     cases: {
       found: {
         description: "User found",
@@ -1335,19 +1332,24 @@ test("HttpContract preserves _caseSchemas with response schemas", () => {
     expectStatus: 200,
     responseSchema: UserSchema,
     description: "User found",
+    deferred: undefined,
+    requires: "headless",
+    defaultRun: "always",
   });
   expect(result._caseSchemas!.notFound).toEqual({
     expectStatus: 404,
     responseSchema: undefined,
     description: "User not found",
+    deferred: undefined,
+    requires: "headless",
+    defaultRun: "always",
   });
 });
 
 test("HttpContract _caseSchemas is empty object for no-case edge", () => {
-  const client = createMockClient();
-  const result = contract.http("empty-cases", {
+  const api = createTestFactory();
+  const result = api("empty-cases", {
     endpoint: "GET /ping",
-    client,
     cases: {},
   });
 
@@ -1358,10 +1360,9 @@ test("HttpContract preserves request schema", () => {
   const RequestSchema = {
     safeParse: (data: unknown) => ({ success: true as const, data }),
   };
-  const client = createMockClient();
-  const result = contract.http("req-schema", {
+  const api = createTestFactory();
+  const result = api("req-schema", {
     endpoint: "POST /users",
-    client,
     request: RequestSchema,
     cases: {
       ok: {
@@ -1375,10 +1376,9 @@ test("HttpContract preserves request schema", () => {
 });
 
 test("HttpContract without description/feature has undefined fields", () => {
-  const client = createMockClient();
-  const result = contract.http("minimal", {
+  const api = createTestFactory();
+  const result = api("minimal", {
     endpoint: "GET /health",
-    client,
     cases: {
       ok: { description: "ok", expect: { status: 200 } },
     },
@@ -1525,8 +1525,8 @@ test("contract.http.with() stores enriched _caseSchemas", () => {
     responseSchema: UserSchema,
     description: "Success case",
     deferred: undefined,
-    requires: undefined,
-    defaultRun: undefined,
+    requires: "headless",
+    defaultRun: "always",
   });
   expect(result._caseSchemas?.deferred?.deferred).toBe("backend not ready");
   expect(result._caseSchemas?.browser?.requires).toBe("browser");

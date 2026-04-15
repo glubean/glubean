@@ -274,13 +274,16 @@ function contractHttp<
 
   for (const [caseKey, caseSpec] of Object.entries(spec.cases)) {
     tests.push(buildCaseTest(id, caseKey, spec.endpoint, caseSpec, spec, instanceName, security));
+    // Resolve effective requires/defaultRun (same logic as buildCaseTest)
+    const effectiveRequires = caseSpec.requires ?? "headless";
+    const effectiveDefaultRun = caseSpec.defaultRun ?? (effectiveRequires !== "headless" ? "opt-in" : "always");
     caseSchemas[caseKey] = {
       expectStatus: caseSpec.expect.status,
       responseSchema: caseSpec.expect.schema,
       description: caseSpec.description,
       deferred: caseSpec.deferred,
-      requires: caseSpec.requires,
-      defaultRun: caseSpec.defaultRun,
+      requires: effectiveRequires,
+      defaultRun: effectiveDefaultRun,
     };
   }
 
@@ -545,6 +548,11 @@ function mergeHttpDefaults(
  * Create an HTTP contract factory with `.with()` support.
  * The factory is callable (same signature as contractHttp) and chainable.
  */
+/**
+ * Create an HTTP contract factory. If `defaults` is provided (via .with()),
+ * the factory is callable. If not, only .with() is available — direct
+ * contract.http("id", spec) is not supported.
+ */
 function createHttpFactory(
   defaults?: HttpContractDefaults & { _name?: string },
 ): HttpContractFactory {
@@ -552,8 +560,15 @@ function createHttpFactory(
     id: string,
     spec: HttpContractSpec<Cases>,
   ): HttpContract => {
+    if (!defaults?._name) {
+      throw new Error(
+        `contract.http("${id}", spec) is not supported. ` +
+        `Use contract.http.with("name", { client }) first to create a scoped instance, ` +
+        `then call instance("${id}", spec).`,
+      );
+    }
     const merged = mergeHttpDefaults(defaults, spec as HttpContractSpec);
-    return contractHttp(id, merged as HttpContractSpec<Cases>, defaults?._name, defaults?.security);
+    return contractHttp(id, merged as HttpContractSpec<Cases>, defaults._name, defaults.security);
   };
 
   factory.with = (name: string, more: HttpContractDefaults): HttpContractFactory => {

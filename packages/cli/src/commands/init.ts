@@ -885,17 +885,22 @@ const CONTRACTS_README = `# Contracts
 
 Executable API contracts — the source of truth for how the API should behave.
 
-Each file uses \`contract.http()\` to declare endpoint behavior with named cases:
+Create a scoped contract instance with \`contract.http.with()\`, then define endpoints:
 
 \`\`\`typescript
 import { contract } from "@glubean/sdk";
 import { api } from "../configure.js";
 
-export const createUser = contract.http("create-user", {
+const userApi = contract.http.with("user", {
+  client: api,
+  security: "bearer",
+});
+
+// @contract
+export const createUser = userApi("create-user", {
   endpoint: "POST /users",
   feature: "User Registration",
   description: "Create a new user account",
-  client: api,
   cases: {
     success: {
       description: "Valid registration creates user and returns profile",
@@ -927,19 +932,24 @@ export const createUser = contract.http("create-user", {
 
 const EXAMPLE_CONTRACT = `import { contract, configure } from "@glubean/sdk";
 
-const { api } = configure({
-  base: process.env.BASE_URL,
+const { http: api } = configure({
+  http: { prefixUrl: "{{BASE_URL}}" },
+});
+
+const publicApi = contract.http.with("public", {
+  client: api,
+  security: null,
 });
 
 /**
  * Example contract — replace with your own endpoints.
  * Run with: npm run contract:run
  */
-export const healthCheck = contract.http("health-check", {
+// @contract
+export const healthCheck = publicApi("health-check", {
   endpoint: "GET /health",
   feature: "System",
   description: "Service health check",
-  client: api,
   cases: {
     ok: {
       description: "Service is running and healthy",
@@ -1089,7 +1099,7 @@ async function initContractFirst(overwrite: boolean): Promise<void> {
       `  1. Try the example: ${colors.cyan}npm run contract:run${colors.reset}`,
     );
     console.log(
-      `  2. Write contracts in ${colors.cyan}contracts/${colors.reset} using ${colors.cyan}contract.http()${colors.reset}`,
+      `  2. Write contracts in ${colors.cyan}contracts/${colors.reset} using ${colors.cyan}contract.http.with()${colors.reset}`,
     );
     console.log(
       `  3. Implement the API, then run ${colors.cyan}npm run contract:run${colors.reset}`,
