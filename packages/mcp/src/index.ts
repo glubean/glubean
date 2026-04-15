@@ -294,22 +294,50 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
   const fileUrl = pathToFileURL(absolutePath).toString();
   const content = await readFile(absolutePath, "utf-8");
 
-  // Contract files: use extractContractCases(), same pattern as CLI's discoverTests()
+  // Contract files: try runtime import first, fall back to static regex
   if (basename(absolutePath).includes(".contract.")) {
-    const contracts = extractContractCases(content);
-    const tests: DiscoveredTest[] = contracts.flatMap((contract) =>
-      contract.cases.map((c) => ({
-        exportName: contract.exportName,
-        id: `${contract.contractId}.${c.key}`,
-        name: `${contract.endpoint} — ${c.key}`,
-        skip: !!c.deferred,
-        only: false,
-        tags: [],
-        requires: c.requires,
-        defaultRun: c.defaultRun,
-        deferred: c.deferred,
-      })),
-    );
+    let tests: DiscoveredTest[] = [];
+
+    // Try runtime import — works for both old and new (.with()) syntax
+    try {
+      const mod = await import(fileUrl);
+      for (const [exportName, value] of Object.entries(mod)) {
+        if (!isHttpContract(value)) continue;
+        const contract = value as { id: string; endpoint: string; _caseSchemas?: Record<string, any> };
+        if (contract._caseSchemas) {
+          for (const [caseKey, caseMeta] of Object.entries(contract._caseSchemas)) {
+            tests.push({
+              exportName,
+              id: `${contract.id}.${caseKey}`,
+              name: `${contract.endpoint} — ${caseKey}`,
+              skip: !!caseMeta.deferred,
+              only: false,
+              tags: [],
+              requires: caseMeta.requires,
+              defaultRun: caseMeta.defaultRun,
+              deferred: caseMeta.deferred,
+            });
+          }
+        }
+      }
+    } catch {
+      // Runtime import failed — fall back to static regex
+      const contracts = extractContractCases(content);
+      tests = contracts.flatMap((contract) =>
+        contract.cases.map((c) => ({
+          exportName: contract.exportName,
+          id: `${contract.contractId}.${c.key}`,
+          name: `${contract.endpoint} — ${c.key}`,
+          skip: !!c.deferred,
+          only: false,
+          tags: [],
+          requires: c.requires,
+          defaultRun: c.defaultRun,
+          deferred: c.deferred,
+        })),
+      );
+    }
+
     return { fileUrl, tests };
   }
 
@@ -1316,11 +1344,16 @@ function isHttpContract(val: unknown): val is {
   endpoint: string;
   description?: string;
   feature?: string;
+  instanceName?: string;
+  security?: unknown;
   request?: { safeParse: Function };
   _caseSchemas?: Record<string, {
     expectStatus?: number;
     responseSchema?: { safeParse: Function };
     description?: string;
+    deferred?: string;
+    requires?: string;
+    defaultRun?: string;
   }>;
   length: number;
 } {
@@ -1359,6 +1392,8 @@ async function extractContractsRuntime(rootDir: string): Promise<Array<{
   endpoint: string;
   description?: string;
   feature?: string;
+  instanceName?: string;
+  security?: unknown;
   requestSchema: unknown | null;
   cases: Array<{
     key: string;
@@ -1367,33 +1402,21 @@ async function extractContractsRuntime(rootDir: string): Promise<Array<{
     responseSchema: unknown | null;
   }>;
 }>> {
-  // Use static scanner to find .contract.ts files
-  const result = await scanProject(rootDir, "static");
-  const staticContracts = result.contracts ?? [];
-  if (staticContracts.length === 0) return [];
-
-  // Collect file paths from scan result
+  // Find .contract.{ts,js,mjs} files by walking the directory tree.
+  // Does NOT depend on static scanner — works for both old and new (.with()) syntax.
   const contractFiles = new Set<string>();
-  if (result.files) {
-    for (const [filePath, _meta] of Object.entries(result.files)) {
-      if (filePath.includes(".contract.")) {
-        contractFiles.add(resolve(rootDir, filePath));
-      }
+  const { readdirSync, statSync } = await import("node:fs");
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const full = resolve(dir, entry);
+      if (entry === "node_modules" || entry.startsWith(".")) continue;
+      if (statSync(full).isDirectory()) walk(full);
+      else if (entry.includes(".contract.")) contractFiles.add(full);
     }
-  }
-  // Fallback: scan for .contract.ts files using the static metadata
-  if (contractFiles.size === 0) {
-    const { readdirSync, statSync } = await import("node:fs");
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir)) {
-        const full = resolve(dir, entry);
-        if (entry === "node_modules" || entry.startsWith(".")) continue;
-        if (statSync(full).isDirectory()) walk(full);
-        else if (entry.includes(".contract.")) contractFiles.add(full);
-      }
-    };
-    walk(rootDir);
-  }
+  };
+  walk(rootDir);
+
+  if (contractFiles.size === 0) return [];
 
   const contracts: Awaited<ReturnType<typeof extractContractsRuntime>> = [];
 
@@ -1422,6 +1445,8 @@ async function extractContractsRuntime(rootDir: string): Promise<Array<{
           endpoint: value.endpoint,
           description: value.description,
           feature: value.feature,
+          instanceName: value.instanceName,
+          security: value.security,
           requestSchema,
           cases,
         });
