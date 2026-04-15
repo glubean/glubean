@@ -22,6 +22,11 @@ import { LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glu
 import type { SharedRunConfig } from "@glubean/runner";
 import { createScanner, extractFromSource, scan } from "@glubean/scanner";
 import { extractContractCases } from "@glubean/scanner/static";
+import {
+  extractContractFromFile as sharedExtractFromFile,
+  extractContractsFromProject as sharedExtractFromProject,
+  type ExtractedContract as SharedExtractedContract,
+} from "@glubean/scanner";
 import type { BundleMetadata, ExportMeta, FileMeta, ScanResult } from "@glubean/scanner";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
 
@@ -294,36 +299,27 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
   const fileUrl = pathToFileURL(absolutePath).toString();
   const content = await readFile(absolutePath, "utf-8");
 
-  // Contract files: try runtime import first, fall back to static regex
+  // Contract files: use shared scanner extraction, fall back to static regex
   if (basename(absolutePath).includes(".contract.")) {
     let tests: DiscoveredTest[] = [];
 
-    // Try runtime import — works for both old and new (.with()) syntax
-    try {
-      const mod = await import(fileUrl);
-      for (const [exportName, value] of Object.entries(mod)) {
-        if (!isHttpContract(value)) continue;
-        const contract = value as { id: string; endpoint: string; _caseSchemas?: Record<string, any> };
-        if (contract._caseSchemas) {
-          for (const [caseKey, caseMeta] of Object.entries(contract._caseSchemas)) {
-            tests.push({
-              exportName,
-              id: `${contract.id}.${caseKey}`,
-              name: `${contract.endpoint} — ${caseKey}`,
-              skip: !!caseMeta.deferred,
-              only: false,
-              tags: [],
-              requires: caseMeta.requires,
-              defaultRun: caseMeta.defaultRun,
-              deferred: caseMeta.deferred,
-            });
-          }
-        }
-      }
-    } catch (err) {
+    const result = await sharedExtractFromFile(absolutePath);
+    if (result.contracts.length > 0) {
+      tests = result.contracts.flatMap((c) =>
+        c.cases.map((cas) => ({
+          exportName: c.exportName,
+          id: `${c.id}.${cas.key}`,
+          name: `${c.endpoint} — ${cas.key}`,
+          skip: !!cas.deferred,
+          only: false,
+          tags: [],
+          requires: cas.requires,
+          defaultRun: cas.defaultRun,
+          deferred: cas.deferred,
+        })),
+      );
+    } else if (result.errors.length > 0) {
       // Runtime import failed — try static regex as fallback for old-syntax files.
-      // If regex also finds nothing, surface the import error so scoped .with()
-      // contracts don't silently disappear.
       const contracts = extractContractCases(content);
       if (contracts.length > 0) {
         tests = contracts.flatMap((contract) =>
@@ -340,8 +336,10 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
           })),
         );
       } else {
-        // Neither runtime nor static found contracts — report error
-        console.error(`[glubean:mcp] Contract import failed for ${filePath}: ${err instanceof Error ? err.message : err}`);
+        // Neither runtime nor static found contracts — surface import errors
+        for (const e of result.errors) {
+          console.error(`[glubean:mcp] Contract import failed for ${e.file}: ${e.error}`);
+        }
       }
     }
 
@@ -1081,7 +1079,7 @@ server.registerTool(
   },
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
-    const result = await extractContractsRuntime(rootDir);
+    const result = await sharedExtractFromProject(rootDir);
     const { contracts, errors } = result;
 
     if (contracts.length === 0) {
@@ -1097,7 +1095,7 @@ server.registerTool(
     }
 
     // Group by instanceName → feature (instance-aware grouping)
-    const featureMap = new Map<string, ExtractedContract[]>();
+    const featureMap = new Map<string, SharedExtractedContract[]>();
     for (const c of contracts) {
       const key = c.instanceName
         ? `${c.instanceName}:${c.feature ?? c.endpoint}`
@@ -1333,142 +1331,8 @@ server.registerTool(
 );
 
 // =============================================================================
-// Runtime contract extraction — dynamic import to access Zod schemas
+// Runtime contract extraction — delegated to @glubean/scanner
 // =============================================================================
-
-/**
- * Check if a value looks like an HttpContract (duck-typing).
- */
-function isHttpContract(val: unknown): val is {
-  id: string;
-  endpoint: string;
-  description?: string;
-  feature?: string;
-  instanceName?: string;
-  security?: unknown;
-  request?: { safeParse: Function };
-  _caseSchemas?: Record<string, {
-    expectStatus?: number;
-    responseSchema?: { safeParse: Function };
-    description?: string;
-    deferred?: string;
-    requires?: string;
-    defaultRun?: string;
-  }>;
-  length: number;
-} {
-  return (
-    Array.isArray(val) &&
-    typeof (val as any).id === "string" &&
-    typeof (val as any).endpoint === "string"
-  );
-}
-
-/**
- * Try to convert a SchemaLike to JSON Schema using Zod v4's toJSONSchema.
- * Returns null if the schema is not a Zod type or conversion fails.
- */
-async function schemaToJsonSchema(schema: unknown): Promise<unknown | null> {
-  if (!schema || typeof schema !== "object") return null;
-  try {
-    // Use the schema's own toJSONSchema() instance method (Zod v4).
-    // This avoids cross-instance issues when the MCP server's zod
-    // is a different copy than the contract module's zod.
-    if (typeof (schema as any).toJSONSchema === "function") {
-      return (schema as any).toJSONSchema();
-    }
-  } catch (err) {
-    // Log conversion failures to stderr (won't pollute MCP stdout)
-    console.error(`[glubean:mcp] toJSONSchema failed: ${err instanceof Error ? err.message : err}`);
-  }
-  return null;
-}
-
-interface ExtractedContract {
-  id: string;
-  endpoint: string;
-  description?: string;
-  feature?: string;
-  instanceName?: string;
-  security?: unknown;
-  requestSchema: unknown | null;
-  cases: Array<{
-    key: string;
-    description?: string;
-    expectStatus?: number;
-    responseSchema: unknown | null;
-  }>;
-}
-
-interface ExtractionResult {
-  contracts: ExtractedContract[];
-  errors: Array<{ file: string; error: string }>;
-}
-
-/**
- * Extract full contract data from a project by dynamically importing modules.
- * Returns structured errors for import failures — callers surface them to users.
- */
-async function extractContractsRuntime(rootDir: string): Promise<ExtractionResult> {
-  // Find .contract.{ts,js,mjs} files by walking the directory tree.
-  // Does NOT depend on static scanner — works for both old and new (.with()) syntax.
-  const contractFiles = new Set<string>();
-  const { readdirSync, statSync } = await import("node:fs");
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(dir)) {
-      const full = resolve(dir, entry);
-      if (entry === "node_modules" || entry.startsWith(".")) continue;
-      if (statSync(full).isDirectory()) walk(full);
-      else if (entry.includes(".contract.")) contractFiles.add(full);
-    }
-  };
-  walk(rootDir);
-
-  if (contractFiles.size === 0) return { contracts: [], errors: [] };
-
-  const contracts: ExtractedContract[] = [];
-  const errors: ExtractionResult["errors"] = [];
-
-  for (const filePath of contractFiles) {
-    try {
-      const mod = await import(pathToFileURL(filePath).href);
-      for (const [, value] of Object.entries(mod)) {
-        if (!isHttpContract(value)) continue;
-
-        const requestSchema = await schemaToJsonSchema(value.request);
-        const cases: ExtractedContract["cases"] = [];
-
-        if (value._caseSchemas) {
-          for (const [key, caseMeta] of Object.entries(value._caseSchemas)) {
-            cases.push({
-              key,
-              description: caseMeta.description,
-              expectStatus: caseMeta.expectStatus,
-              responseSchema: await schemaToJsonSchema(caseMeta.responseSchema),
-            });
-          }
-        }
-
-        contracts.push({
-          id: value.id,
-          endpoint: value.endpoint,
-          description: value.description,
-          feature: value.feature,
-          instanceName: value.instanceName,
-          security: value.security,
-          requestSchema,
-          cases,
-        });
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      errors.push({ file: filePath, error: message });
-      console.error(`[glubean:mcp] Failed to import ${filePath}: ${message}`);
-    }
-  }
-
-  return { contracts, errors };
-}
 
 server.registerTool(
   MCP_TOOL_NAMES.extractContracts,
@@ -1487,7 +1351,7 @@ server.registerTool(
   },
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
-    const result = await extractContractsRuntime(rootDir);
+    const result = await sharedExtractFromProject(rootDir);
 
     if (result.contracts.length === 0) {
       return {
@@ -1536,7 +1400,7 @@ function securityToOpenApi(security: unknown, instanceName?: string): { name: st
 }
 
 function contractsToOpenApi(
-  contracts: ExtractedContract[],
+  contracts: SharedExtractedContract[],
   title = "API Specification",
 ): Record<string, unknown> {
   const paths: Record<string, Record<string, unknown>> = {};
@@ -1645,7 +1509,7 @@ server.registerTool(
   },
   async (input: { dir?: string; title?: string }) => {
     const rootDir = resolveRootDir(input.dir);
-    const result = await extractContractsRuntime(rootDir);
+    const result = await sharedExtractFromProject(rootDir);
 
     if (result.contracts.length === 0) {
       return {
