@@ -19,9 +19,13 @@ export interface CapabilityProfile {
  * Returns undefined if the test should run, or a skip reason string.
  */
 export function shouldSkipTest(
-  meta: { requires?: string; defaultRun?: string; deferred?: string },
+  meta: { requires?: string; defaultRun?: string; deferred?: string; deprecated?: string },
   profile: CapabilityProfile,
 ): string | undefined {
+  // Deprecated cases are retained for history but never executed
+  if (meta.deprecated) {
+    return `deprecated: ${meta.deprecated}`;
+  }
   // Deferred cases are never runnable — no flag can enable them
   if (meta.deferred) {
     return `deferred: ${meta.deferred}`;

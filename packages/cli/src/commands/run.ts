@@ -204,6 +204,7 @@ interface DiscoveredTestMeta {
   requires?: string;
   defaultRun?: string;
   deferred?: string;
+  deprecated?: string;
 }
 
 interface DiscoveredTest {
@@ -230,6 +231,7 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
               requires: c.requires,
               defaultRun: c.defaultRun,
               deferred: c.deferredReason,
+              deprecated: c.deprecatedReason,
             },
           });
         }
