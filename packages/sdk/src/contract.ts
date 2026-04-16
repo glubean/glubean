@@ -7,6 +7,7 @@
 
 import type {
   ContractCase,
+  ContractProjection,
   ContractProtocolAdapter,
   ContractRegistryMeta,
   HttpContract,
@@ -16,6 +17,7 @@ import type {
   HttpContractSpec,
   HttpFlowStepSpec,
   HttpSecurityScheme,
+  ProtocolContract,
 } from "./contract-types.js";
 import type { HttpClient, Test, TestContext, TestMeta } from "./types.js";
 import { registerTest } from "./internal.js";
@@ -57,7 +59,7 @@ function createHttpContract(
   const asStep = (caseKey?: string) => {
     const target = caseKey
       ? arr.find((t) => t.meta.id.endsWith(`.${caseKey}`))
-      : arr.find((t) => t.fn !== undefined && !t.meta.deferred);
+      : arr.find((t) => t.fn !== undefined && !t.meta.deferred && !t.meta.deprecated);
     if (!target) throw new Error(`Case "${caseKey ?? "default"}" not found in contract "${id}"`);
 
     return <S>(b: import("./index.js").TestBuilder<S>) => {
@@ -138,12 +140,17 @@ function buildCaseTest<T, S>(
     description: c.description,
     tags: finalTags.length > 0 ? finalTags : undefined,
     deferred: c.deferred,
+    deprecated: c.deprecated,
     requires,
     defaultRun,
   };
 
   const fn = async (ctx: import("./types.js").TestContext) => {
-    // 1. Deferred → skip
+    // 1. Deprecated → skip (takes precedence over deferred)
+    if (c.deprecated) {
+      ctx.skip(`deprecated: ${c.deprecated}`);
+    }
+    // 2. Deferred → skip
     if (c.deferred) {
       ctx.skip(c.deferred);
     }
@@ -225,16 +232,26 @@ function buildCaseTest<T, S>(
     }
   };
 
-  // Register to global registry with contract metadata
+  // Lifecycle normalization: deprecated > deferred > active
+  const lifecycle: import("./contract-types.js").CaseLifecycle =
+    c.deprecated ? "deprecated" :
+    c.deferred ? "deferred" :
+    "active";
+  const severity: import("./contract-types.js").CaseSeverity = c.severity ?? "warning";
+
+  // Register to global registry with protocol-agnostic contract metadata
   const registryMeta: ContractRegistryMeta = {
-    endpoint,
+    target: endpoint,
     protocol: "http",
     caseKey,
-    expectStatus: c.expect.status,
+    lifecycle,
+    severity,
     hasSchema: !!c.expect.schema,
-    deferred: c.deferred,
     instanceName,
-    security,
+    protocolMeta: {
+      ...(security != null ? { security } : {}),
+      expect: { status: c.expect.status },
+    },
   };
 
   registerTest({
@@ -264,25 +281,26 @@ function contractHttp<
   security?: HttpSecurityScheme,
 ): HttpContract {
   const tests: Test[] = [];
-  const caseSchemas: Record<string, {
-    expectStatus?: number;
-    responseSchema?: import("./types.js").SchemaLike<unknown>;
-    description?: string;
-    deferred?: string;
-    requires?: string;
-    defaultRun?: string;
-  }> = {};
+  const caseSchemas: NonNullable<import("./contract-types.js").HttpContract["_caseSchemas"]> = {};
 
   for (const [caseKey, caseSpec] of Object.entries(spec.cases)) {
     tests.push(buildCaseTest(id, caseKey, spec.endpoint, caseSpec, spec, instanceName, security));
     // Resolve effective requires/defaultRun (same logic as buildCaseTest)
     const effectiveRequires = caseSpec.requires ?? "headless";
     const effectiveDefaultRun = caseSpec.defaultRun ?? (effectiveRequires !== "headless" ? "opt-in" : "always");
+    // Lifecycle normalization: deprecated > deferred > active
+    const lifecycle: import("./contract-types.js").CaseLifecycle =
+      caseSpec.deprecated ? "deprecated" :
+      caseSpec.deferred ? "deferred" :
+      "active";
     caseSchemas[caseKey] = {
       expectStatus: caseSpec.expect.status,
       responseSchema: caseSpec.expect.schema,
       description: caseSpec.description,
       deferred: caseSpec.deferred,
+      deprecated: caseSpec.deprecated,
+      severity: caseSpec.severity,
+      lifecycle,
       requires: effectiveRequires,
       defaultRun: effectiveDefaultRun,
     };
@@ -611,28 +629,88 @@ export const contract: {
     // Dynamically attach contract[protocol]()
     (contract as any)[protocol] = (
       id: string,
-      spec: Spec & { cases?: Record<string, { expect?: { status?: number }; deferred?: string; tags?: string[] }>; tags?: string[] },
-    ): Test[] => {
-      const meta = adapter.metadata(spec);
+      spec: Spec & { cases?: Record<string, { description?: string; deferred?: string; deprecated?: string; severity?: import("./contract-types.js").CaseSeverity; requires?: import("./contract-types.js").CaseRequires; defaultRun?: import("./contract-types.js").CaseDefaultRun; tags?: string[] }>; tags?: string[] },
+    ): ProtocolContract => {
+      // Get projection from adapter v2
+      const projection: ContractProjection = adapter.project(spec);
+
+      // Validate: no duplicate keys in projected cases
+      const projKeyList = projection.cases.map(c => c.key);
+      const projKeySet = new Set(projKeyList);
+      if (projKeySet.size !== projKeyList.length) {
+        const dupes = projKeyList.filter((k, i) => projKeyList.indexOf(k) !== i);
+        throw new Error(
+          `contract.register("${protocol}"): project() returned duplicate case key(s): ${[...new Set(dupes)].join(", ")}. ` +
+          `Each projected case key must be unique.`,
+        );
+      }
+
+      // Validate 1:1 key invariant between projection and spec.cases
+      const specKeys = new Set(Object.keys(spec.cases ?? {}));
+      for (const key of projKeySet) {
+        if (!specKeys.has(key)) {
+          throw new Error(
+            `contract.register("${protocol}"): project() returned case "${key}" not present in spec.cases. ` +
+            `Projected cases must 1:1 match spec.cases keys.`,
+          );
+        }
+      }
+      for (const key of specKeys) {
+        if (!projKeySet.has(key)) {
+          throw new Error(
+            `contract.register("${protocol}"): spec.cases has "${key}" but project() did not return it. ` +
+            `Projected cases must 1:1 match spec.cases keys.`,
+          );
+        }
+      }
+
       const cases = spec.cases ?? {};
       const contractTags = spec.tags ? (Array.isArray(spec.tags) ? spec.tags : [spec.tags]) : [];
+
+      // Build a lookup from projection cases by key
+      const projCaseMap = new Map(projection.cases.map(c => [c.key, c]));
 
       const tests: Test[] = Object.entries(cases).map(([caseKey, caseSpec]) => {
         const testId = `${id}.${caseKey}`;
         const testName = `${id} — ${caseKey}`;
         const caseTags = caseSpec.tags ?? [];
         const allTags = [...contractTags, ...caseTags];
+        const projCase = projCaseMap.get(caseKey)!;
+
+        // Derive runtime requires/defaultRun from projection (authoritative)
+        // with case spec as fallback, mirroring HTTP path logic
+        const requires = projCase.requires ?? caseSpec.requires ?? "headless";
+        const defaultRun = projCase.defaultRun ?? caseSpec.defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
+
+        // Runtime tags from requires/defaultRun
+        const runtimeTags: string[] = [];
+        if (requires !== "headless") runtimeTags.push(`requires:${requires}`);
+        if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
+        const finalTags = [...allTags, ...runtimeTags];
+
+        // Derive skip from projected lifecycle (authoritative), not just caseSpec fields
+        const skipDeprecated = projCase.lifecycle === "deprecated"
+          ? `deprecated: ${projCase.deprecatedReason ?? caseSpec.deprecated ?? "deprecated"}`
+          : caseSpec.deprecated ? `deprecated: ${caseSpec.deprecated}` : undefined;
+        const skipDeferred = projCase.lifecycle === "deferred"
+          ? (projCase.deferredReason ?? caseSpec.deferred ?? "deferred")
+          : caseSpec.deferred;
 
         const testDef: Test = {
           meta: {
             id: testId,
             name: testName,
-            tags: allTags.length > 0 ? allTags : undefined,
-            deferred: caseSpec.deferred,
+            description: projCase.description,
+            tags: finalTags.length > 0 ? finalTags : undefined,
+            deferred: skipDeferred,
+            deprecated: skipDeprecated ? (projCase.deprecatedReason ?? caseSpec.deprecated ?? "deprecated") : undefined,
+            requires,
+            defaultRun,
           },
           type: "simple",
           fn: async (ctx) => {
-            if (caseSpec.deferred) ctx.skip(caseSpec.deferred);
+            if (skipDeprecated) ctx.skip(skipDeprecated);
+            if (skipDeferred) ctx.skip(skipDeferred);
             await adapter.execute(ctx, caseSpec, spec);
           },
         };
@@ -641,22 +719,34 @@ export const contract: {
           id: testId,
           name: testName,
           type: "simple",
-          tags: allTags.length > 0 ? allTags : undefined,
+          tags: finalTags.length > 0 ? finalTags : undefined,
           groupId: id,
+          requires,
+          defaultRun,
           contract: {
-            endpoint: meta.endpoint ?? "",
-            protocol,
+            target: projection.target,
+            protocol: projection.protocol,
             caseKey,
-            expectStatus: caseSpec.expect?.status ?? 0,
-            hasSchema: false,
-            deferred: caseSpec.deferred,
+            lifecycle: projCase.lifecycle,
+            severity: projCase.severity,
+            hasSchema: projCase.responseSchema != null,
+            instanceName: projection.instanceName,
+            protocolMeta: {
+              ...(projection.protocolMeta ?? {}),
+              ...(projCase.protocolExpect ? { expect: projCase.protocolExpect } : {}),
+              ...(projCase.protocolMeta ?? {}),
+            },
           },
         });
 
         return testDef;
       });
 
-      return tests;
+      // Inject contract id into projection (adapter doesn't know the user-supplied id)
+      const enrichedProjection = { ...projection, id };
+
+      // Return ProtocolContract — Test[] with _projection carrier
+      return Object.assign(tests, { _projection: enrichedProjection }) as ProtocolContract;
     };
   },
 };

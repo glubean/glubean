@@ -402,3 +402,144 @@ export const deleteUser = contract.http("delete-user", {
   expect(deferred!.deferred).toBe("needs VIEWER_API_KEY");
   expect(deferred!.expectStatus).toBe(403);
 });
+
+// ==================== Static Fallback Protocol Gate Tests ====================
+
+test("scan() fallback: pure HTTP file (old syntax) falls back to static extraction on import failure", async () => {
+  // Runtime import will fail (fake path), but file is HTTP-only old syntax → static fallback works
+  // Note: .with() syntax is NOT statically extractable — only old bare contract.http("id", spec) is
+  const source = `
+import { contract } from "@glubean/sdk";
+export const getUser = contract.http("get-user", {
+  endpoint: "GET /users/:id",
+  client: api,
+  cases: {
+    success: { description: "found", expect: { status: 200 } },
+  },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/users.contract.ts": source,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  // Static fallback should extract the HTTP contract (old syntax only)
+  expect(result.contracts).toHaveLength(1);
+  expect(result.contracts![0].contractId).toBe("get-user");
+  expect(result.contracts![0].endpoint).toBe("GET /users/:id");
+  // No import failure warning since fallback succeeded
+  expect(result.warnings.some((w) => w.includes("Contract import failed"))).toBe(false);
+});
+
+test("scan() fallback: pure HTTP .with() file fails closed on import failure (not statically extractable)", async () => {
+  // .with() syntax is not extractable by static regex — runtime import is required
+  const source = `
+import { contract } from "@glubean/sdk";
+const api = contract.http.with("user", { client });
+export const getUser = api("get-user", {
+  endpoint: "GET /users/:id",
+  cases: {
+    success: { description: "found", expect: { status: 200 } },
+  },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/users.contract.ts": source,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  // Static regex can't extract .with() syntax — will show as 0 contracts + warning
+  expect(result.contracts).toHaveLength(0);
+  expect(result.warnings.some((w) => w.includes("Contract import failed"))).toBe(true);
+});
+
+test("scan() fallback: pure protocol file fails closed on import failure", async () => {
+  // Runtime import will fail (fake path), and file uses contract.grpc → no static fallback
+  const source = `
+import { contract } from "@glubean/sdk";
+export const greeter = contract.grpc("greeter", {
+  target: "Greeter/SayHello",
+  cases: {
+    success: { description: "hello", expect: { code: 0 } },
+  },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/greeter.contract.ts": source,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  // No contracts extracted — static fallback rejected non-HTTP file
+  expect(result.contracts).toHaveLength(0);
+  // Import failure warning surfaced
+  expect(result.warnings.some((w) => w.includes("Contract import failed"))).toBe(true);
+});
+
+test("scan() fallback: mixed HTTP + protocol file fails closed on import failure", async () => {
+  // Runtime import will fail (fake path), and file mixes HTTP + custom protocol
+  // → no static fallback, even though HTTP contracts are extractable
+  const source = `
+import { contract } from "@glubean/sdk";
+const api = contract.http.with("user", { client });
+export const getUser = api("get-user", {
+  endpoint: "GET /users/:id",
+  cases: {
+    success: { description: "found", expect: { status: 200 } },
+  },
+});
+export const events = contract.kafka("user-events", {
+  topic: "user.created",
+  cases: {
+    published: { description: "event emitted" },
+  },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/users.contract.ts": source,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  // No contracts extracted — fail closed for mixed file
+  expect(result.contracts).toHaveLength(0);
+  // Import failure warning surfaced
+  expect(result.warnings.some((w) => w.includes("Contract import failed"))).toBe(true);
+});
+
+test("scan() fallback: mixed HTTP + contract.register() fails closed on import failure", async () => {
+  // contract.register() is a non-HTTP protocol usage
+  const source = `
+import { contract } from "@glubean/sdk";
+const api = contract.http.with("user", { client });
+export const getUser = api("get-user", {
+  endpoint: "GET /users",
+  cases: { ok: { description: "ok", expect: { status: 200 } } },
+});
+contract.register("myproto", myAdapter);
+export const custom = contract.myproto("svc", {
+  cases: { ping: { description: "ping" } },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/mixed.contract.ts": source,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  // Fail closed — contract.register + contract.myproto are non-HTTP
+  expect(result.contracts).toHaveLength(0);
+  expect(result.warnings.some((w) => w.includes("Contract import failed"))).toBe(true);
+});

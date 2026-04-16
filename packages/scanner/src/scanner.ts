@@ -268,21 +268,24 @@ export class Scanner {
       const result = await extractContractFromFile(absolutePath);
 
       if (result.contracts.length > 0) {
-        // Map ExtractedContract → ContractStaticMeta for backward compatibility
+        // Map NormalizedContractMeta → ContractStaticMeta for backward compatibility
         for (const ec of result.contracts) {
           contracts.push({
             contractId: ec.id,
             exportName: ec.exportName,
-            endpoint: ec.endpoint,
-            protocol: "http",
+            endpoint: ec.target,
+            protocol: ec.protocol,
             description: ec.description,
             feature: ec.feature,
             line: 0,
             cases: ec.cases.map((c) => ({
               key: c.key,
               description: c.description,
-              expectStatus: c.expectStatus,
-              deferred: c.deferred,
+              expectStatus: (c.protocolExpect as any)?.status,
+              deferred: c.deferredReason,
+              deprecated: c.deprecatedReason,
+              lifecycle: c.lifecycle,
+              severity: c.severity,
               requires: c.requires,
               defaultRun: c.defaultRun,
               line: 0,
@@ -290,19 +293,30 @@ export class Scanner {
           });
         }
       } else if (result.errors.length > 0) {
-        // Runtime failed — try static regex fallback
+        // Runtime failed — try static regex fallback only for HTTP-only files.
+        // Static extractor only understands contract.http syntax.
+        // If the file contains ANY non-HTTP protocol usage (grpc, graphql, register, etc.),
+        // fail closed for the entire file — partial fallback would silently drop
+        // protocol contracts while keeping HTTP ones.
         let fallbackFound = false;
         try {
           const content = await this.fs.readText(filePath);
-          const extracted = extractContractCases(content);
-          for (const meta of extracted) {
-            contracts.push(meta);
-            fallbackFound = true;
+          const hasHttp = /contract\.http\b/i.test(content);
+          // Detect any contract.<protocol> that isn't contract.http or contract.flow
+          // This catches grpc, graphql, ws, register, and any custom registered protocol
+          const hasNonHttp = /contract\.(?!http\b|flow\b)\w+\s*[.(]/i.test(content);
+          // Only fall back if file is HTTP-only (has HTTP, no non-HTTP)
+          if (hasHttp && !hasNonHttp) {
+            const extracted = extractContractCases(content);
+            for (const meta of extracted) {
+              contracts.push(meta);
+              fallbackFound = true;
+            }
           }
         } catch {
           // Static fallback also failed
         }
-        // If both runtime and static found nothing, surface the import error
+        // If fallback didn't produce results, surface the import error
         if (!fallbackFound) {
           for (const err of result.errors) {
             warnings.push(`Contract import failed: ${err.file} — ${err.error}`);

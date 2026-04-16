@@ -1576,6 +1576,12 @@ export type {
   ContractRegistryMeta,
   CaseRequires,
   CaseDefaultRun,
+  CaseLifecycle,
+  CaseSeverity,
+  FailureKind,
+  FailureClassification,
+  ContractProjection,
+  ProtocolContract,
 } from "./contract-types.js";
 
 // Session API

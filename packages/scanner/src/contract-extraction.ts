@@ -1,10 +1,13 @@
 /**
  * Runtime contract extraction — dynamically imports .contract.ts modules
- * and extracts metadata from exported HttpContract objects.
+ * and extracts metadata from exported contract objects.
  *
  * This is the shared extraction layer used by scanner, CLI, and MCP.
- * Works for both old contract.http("id", spec) and new
- * contract.http.with("name", defaults)("id", spec) syntax.
+ * Produces NormalizedContractMeta — a protocol-agnostic contract model.
+ *
+ * Supports:
+ * - HttpContract (from contract.http.with())
+ * - ProtocolContract (from contract.register() with adapter v2)
  */
 
 import { pathToFileURL } from "node:url";
@@ -15,30 +18,59 @@ import { readdirSync, statSync } from "node:fs";
 // Types
 // =============================================================================
 
-/** Extracted contract metadata from a single HttpContract export. */
-export interface ExtractedContract {
+/** Case lifecycle. */
+export type CaseLifecycle = "active" | "deferred" | "deprecated";
+
+/** Case severity. */
+export type CaseSeverity = "critical" | "warning" | "info";
+
+/** Case execution requirement. */
+export type CaseRequires = "headless" | "browser" | "out-of-band";
+
+/** Case default run policy. */
+export type CaseDefaultRun = "always" | "opt-in";
+
+/** Normalized case metadata. Protocol-agnostic. */
+export interface NormalizedCaseMeta {
+  key: string;
+  description?: string;
+  lifecycle: CaseLifecycle;
+  severity: CaseSeverity;
+  deferredReason?: string;
+  deprecatedReason?: string;
+  requires?: CaseRequires;
+  defaultRun?: CaseDefaultRun;
+  schemaMount?: string;
+  /** Protocol-specific expectations. HTTP: { status: 200 }, gRPC: { code: 0 } */
+  protocolExpect?: Record<string, unknown>;
+  responseSchema: unknown | null;
+}
+
+/** Normalized contract metadata. Protocol-agnostic. Evolved from ExtractedContract. */
+export interface NormalizedContractMeta {
   id: string;
   exportName: string;
-  endpoint: string;
+  protocol: string;
+  /** Protocol-agnostic target. HTTP: "GET /users", gRPC: "Greeter/SayHello" */
+  target: string;
   description?: string;
   feature?: string;
   instanceName?: string;
   security?: unknown;
+  schemaMount?: string;
   requestSchema: unknown | null;
-  cases: Array<{
-    key: string;
-    description?: string;
-    expectStatus?: number;
-    deferred?: string;
-    requires?: string;
-    defaultRun?: string;
-    responseSchema: unknown | null;
-  }>;
+  protocolMeta?: Record<string, unknown>;
+  cases: NormalizedCaseMeta[];
 }
+
+/**
+ * @deprecated Alias for NormalizedContractMeta. Use NormalizedContractMeta directly.
+ */
+export type ExtractedContract = NormalizedContractMeta;
 
 /** Result of extracting contracts from one or more files. */
 export interface ExtractionResult {
-  contracts: ExtractedContract[];
+  contracts: NormalizedContractMeta[];
   errors: Array<{ file: string; error: string }>;
 }
 
@@ -63,6 +95,9 @@ export function isHttpContract(val: unknown): val is {
     responseSchema?: { toJSONSchema?: () => unknown };
     description?: string;
     deferred?: string;
+    deprecated?: string;
+    severity?: string;
+    lifecycle?: string;
     requires?: string;
     defaultRun?: string;
   }>;
@@ -71,6 +106,46 @@ export function isHttpContract(val: unknown): val is {
     Array.isArray(val) &&
     typeof (val as any).id === "string" &&
     typeof (val as any).endpoint === "string"
+  );
+}
+
+/**
+ * Check if a value looks like a ProtocolContract (duck-typing).
+ * ProtocolContract extends Array<Test> and has _projection with protocol + target.
+ */
+export function isProtocolContract(val: unknown): val is {
+  _projection: {
+    protocol: string;
+    target: string;
+    description?: string;
+    feature?: string;
+    instanceName?: string;
+    security?: unknown;
+    schemaMount?: string;
+    requestSchema?: unknown;
+    cases: Array<{
+      key: string;
+      description?: string;
+      lifecycle: string;
+      severity: string;
+      deferredReason?: string;
+      deprecatedReason?: string;
+      requires?: string;
+      defaultRun?: string;
+      schemaMount?: string;
+      protocolExpect?: Record<string, unknown>;
+      responseSchema?: unknown;
+      protocolMeta?: Record<string, unknown>;
+    }>;
+    protocolMeta?: Record<string, unknown>;
+  };
+} {
+  return (
+    Array.isArray(val) &&
+    typeof (val as any)._projection === "object" &&
+    (val as any)._projection !== null &&
+    typeof (val as any)._projection.protocol === "string" &&
+    typeof (val as any)._projection.target === "string"
   );
 }
 
@@ -96,51 +171,118 @@ export function schemaToJsonSchema(schema: unknown): unknown | null {
 }
 
 // =============================================================================
+// Mapping functions
+// =============================================================================
+
+/**
+ * Map an HttpContract to NormalizedContractMeta.
+ */
+function httpContractToNormalized(
+  value: ReturnType<typeof isHttpContract extends (v: any) => v is infer T ? () => T : never>,
+  exportName: string,
+): NormalizedContractMeta {
+  const cases: NormalizedCaseMeta[] = [];
+
+  if (value._caseSchemas) {
+    for (const [key, meta] of Object.entries(value._caseSchemas)) {
+      // Lifecycle normalization
+      const lifecycle: CaseLifecycle =
+        meta.deprecated ? "deprecated" :
+        meta.deferred ? "deferred" :
+        "active";
+
+      cases.push({
+        key,
+        description: meta.description,
+        lifecycle,
+        severity: (meta.severity as CaseSeverity) ?? "warning",
+        deferredReason: meta.deferred,
+        deprecatedReason: meta.deprecated,
+        requires: meta.requires as CaseRequires | undefined,
+        defaultRun: meta.defaultRun as CaseDefaultRun | undefined,
+        schemaMount: "response.body",
+        protocolExpect: meta.expectStatus != null
+          ? { status: meta.expectStatus }
+          : undefined,
+        responseSchema: schemaToJsonSchema(meta.responseSchema),
+      });
+    }
+  }
+
+  return {
+    id: value.id,
+    exportName,
+    protocol: "http",
+    target: value.endpoint,
+    description: value.description,
+    feature: value.feature,
+    instanceName: value.instanceName,
+    security: value.security,
+    schemaMount: "response.body",
+    requestSchema: schemaToJsonSchema(value.request),
+    cases,
+  };
+}
+
+/**
+ * Map a ProtocolContract's _projection to NormalizedContractMeta.
+ */
+function protocolContractToNormalized(
+  value: { _projection: any },
+  exportName: string,
+): NormalizedContractMeta {
+  const proj = value._projection;
+  return {
+    id: proj.id ?? exportName, // prefer injected id, fall back to export name
+    exportName,
+    protocol: proj.protocol,
+    target: proj.target,
+    description: proj.description,
+    feature: proj.feature,
+    instanceName: proj.instanceName,
+    security: proj.security,
+    schemaMount: proj.schemaMount,
+    // Normalize schemas: if adapter returned live schema objects, convert to JSON Schema
+    requestSchema: schemaToJsonSchema(proj.requestSchema) ?? proj.requestSchema ?? null,
+    protocolMeta: proj.protocolMeta,
+    cases: (proj.cases ?? []).map((c: any) => ({
+      key: c.key,
+      description: c.description,
+      lifecycle: c.lifecycle ?? "active",
+      severity: c.severity ?? "warning",
+      deferredReason: c.deferredReason,
+      deprecatedReason: c.deprecatedReason,
+      requires: c.requires,
+      defaultRun: c.defaultRun,
+      schemaMount: c.schemaMount,
+      protocolExpect: c.protocolExpect,
+      // Normalize: try JSON Schema conversion, fall back to raw value
+      responseSchema: schemaToJsonSchema(c.responseSchema) ?? c.responseSchema ?? null,
+    })),
+  };
+}
+
+// =============================================================================
 // File-level extraction
 // =============================================================================
 
 /**
  * Extract contracts from a single file by dynamic import.
- * Works for both old and new (.with()) contract syntax.
+ * Supports HttpContract (.with()) and ProtocolContract (register() v2).
  */
 export async function extractContractFromFile(filePath: string): Promise<ExtractionResult> {
-  const contracts: ExtractedContract[] = [];
+  const contracts: NormalizedContractMeta[] = [];
   const errors: ExtractionResult["errors"] = [];
   const absolutePath = resolve(filePath);
 
   try {
     const mod = await import(pathToFileURL(absolutePath).href);
     for (const [exportName, value] of Object.entries(mod)) {
-      if (!isHttpContract(value)) continue;
-
-      const requestSchema = schemaToJsonSchema(value.request);
-      const cases: ExtractedContract["cases"] = [];
-
-      if (value._caseSchemas) {
-        for (const [key, caseMeta] of Object.entries(value._caseSchemas)) {
-          cases.push({
-            key,
-            description: caseMeta.description,
-            expectStatus: caseMeta.expectStatus,
-            deferred: caseMeta.deferred,
-            requires: caseMeta.requires,
-            defaultRun: caseMeta.defaultRun,
-            responseSchema: schemaToJsonSchema(caseMeta.responseSchema),
-          });
-        }
+      if (isHttpContract(value)) {
+        contracts.push(httpContractToNormalized(value, exportName));
+      } else if (isProtocolContract(value)) {
+        contracts.push(protocolContractToNormalized(value, exportName));
       }
-
-      contracts.push({
-        id: value.id,
-        exportName,
-        endpoint: value.endpoint,
-        description: value.description,
-        feature: value.feature,
-        instanceName: value.instanceName,
-        security: value.security,
-        requestSchema,
-        cases,
-      });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -179,7 +321,7 @@ export async function extractContractsFromProject(dir: string): Promise<Extracti
   const contractFiles = findContractFiles(dir);
   if (contractFiles.length === 0) return { contracts: [], errors: [] };
 
-  const allContracts: ExtractedContract[] = [];
+  const allContracts: NormalizedContractMeta[] = [];
   const allErrors: ExtractionResult["errors"] = [];
 
   for (const filePath of contractFiles) {

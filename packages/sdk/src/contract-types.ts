@@ -25,6 +25,56 @@ export type HttpSecurityScheme =
   | null;
 
 // =============================================================================
+// Protocol-agnostic base types
+// =============================================================================
+
+/**
+ * Case lifecycle.
+ *
+ * - `"active"` — executable, will run normally
+ * - `"deferred"` — not yet executable (missing credentials, infrastructure)
+ * - `"deprecated"` — retained for history but no longer executed
+ */
+export type CaseLifecycle = "active" | "deferred" | "deprecated";
+
+/**
+ * Case severity. Affects Cloud alert routing and projection diff weight.
+ *
+ * - `"critical"` — failure triggers immediate alert
+ * - `"warning"` — failure is recorded but may not alert (default)
+ * - `"info"` — informational check, failure does not trigger alerts
+ */
+export type CaseSeverity = "critical" | "warning" | "info";
+
+/**
+ * Standardized failure classification kind. Protocol-agnostic.
+ *
+ * Open string type — adapters can extend with custom values.
+ * Recommended values:
+ * - `"auth"` — authentication failure (401-class)
+ * - `"permission"` — authorization failure (403-class)
+ * - `"not-found"` — resource does not exist
+ * - `"schema"` — response shape mismatch
+ * - `"timeout"` — request or execution timeout
+ * - `"transport"` — network/connection error
+ * - `"rate-limit"` — throttled
+ * - `"business-rule"` — business logic assertion failure
+ * - `"unknown"` — cannot classify
+ */
+export type FailureKind = string;
+
+/**
+ * Standardized failure classification.
+ * Produced by protocol adapters or core. Consumed by repair loop, Cloud, runner summary.
+ */
+export interface FailureClassification {
+  kind: FailureKind;
+  source: "assertion" | "trace" | "plugin";
+  retryable?: boolean;
+  message?: string;
+}
+
+// =============================================================================
 // HTTP contract defaults (for contract.http.with())
 // =============================================================================
 
@@ -200,6 +250,21 @@ export interface ContractCase<T = unknown, S = void> {
    * set to `"opt-in"` if not explicitly provided.
    */
   defaultRun?: CaseDefaultRun;
+
+  /**
+   * Case severity. Affects Cloud alert routing.
+   * Default: `"warning"`.
+   */
+  severity?: CaseSeverity;
+
+  /**
+   * Mark this case as deprecated. Value is the deprecation reason.
+   * Deprecated cases are skipped at runtime but appear in projection output.
+   *
+   * `deprecated` takes precedence over `deferred`: if both are set,
+   * lifecycle normalizes to `"deprecated"`.
+   */
+  deprecated?: string;
 }
 
 // =============================================================================
@@ -288,8 +353,11 @@ export interface HttpContract extends Array<Test> {
     responseSchema?: SchemaLike<unknown>;
     description?: string;
     deferred?: string;
-    requires?: string;
-    defaultRun?: string;
+    deprecated?: string;
+    severity?: CaseSeverity;
+    lifecycle: CaseLifecycle;
+    requires?: CaseRequires;
+    defaultRun?: CaseDefaultRun;
   }>;
 
   /**
@@ -362,43 +430,112 @@ export interface HttpFlowStepSpec<T = unknown, S = unknown> {
 // =============================================================================
 
 /**
- * Protocol adapter for contract.register().
+ * Protocol adapter v2 for contract.register().
  * Plugins implement this to add contract.grpc(), contract.ws(), etc.
+ *
+ * Breaking change from v1: `metadata()` replaced by `project()`.
+ * No v1 compat — no third-party plugins exist yet.
  */
 export interface ContractProtocolAdapter<Spec = unknown> {
   /** Generate a Test function for a single case */
   execute: (ctx: TestContext, caseSpec: unknown, endpointSpec: Spec) => Promise<void>;
 
-  /** Extract registry-time metadata from the spec */
-  metadata: (spec: Spec) => {
-    protocol: string;
-    endpoint?: string;
-    [key: string]: unknown;
-  };
+  /**
+   * Project spec into normalized contract metadata.
+   * Scanner / CLI / MCP / Cloud consume this.
+   *
+   * **Invariant:** `project().cases[].key` must 1:1 match `spec.cases` keys.
+   * `contract.register()` validates this at registration time:
+   * - projected key not in spec.cases → hard error
+   * - spec.cases key not in projection → hard error
+   * - duplicate key → hard error
+   */
+  project: (spec: Spec) => ContractProjection;
+
+  /**
+   * Optional: determine where schema validation mounts.
+   * HTTP → "response.body", gRPC → "response.message", GraphQL → "response.data"
+   */
+  schemaMount?: (caseSpec: unknown, spec: Spec) => string | undefined;
+
+  /**
+   * Optional: classify failure from events/error.
+   * Consumed by repair loop and Cloud — they don't need to understand protocol details.
+   */
+  classifyFailure?: (input: {
+    error?: unknown;
+    events: Array<{ type: string; data: Record<string, unknown> }>;
+  }) => FailureClassification | undefined;
+}
+
+/**
+ * Return type of `ContractProtocolAdapter.project()`.
+ * Aligns with NormalizedContractMeta in scanner.
+ */
+export interface ContractProjection {
+  protocol: string;
+  target: string;
+  description?: string;
+  feature?: string;
+  instanceName?: string;
+  security?: unknown;
+  schemaMount?: string;
+  requestSchema?: unknown | null;
+  cases: Array<{
+    key: string;
+    description?: string;
+    lifecycle: CaseLifecycle;
+    severity: CaseSeverity;
+    deferredReason?: string;
+    deprecatedReason?: string;
+    requires?: CaseRequires;
+    defaultRun?: CaseDefaultRun;
+    schemaMount?: string;
+    protocolExpect?: Record<string, unknown>;
+    responseSchema?: unknown | null;
+    protocolMeta?: Record<string, unknown>;
+  }>;
+  protocolMeta?: Record<string, unknown>;
+}
+
+/**
+ * Return value of `contract[protocol]()` — extends Test[] with projection carrier.
+ * Mirrors HttpContract: extends Array<Test> + metadata for scanner extraction.
+ *
+ * `_projection` extends ContractProjection with `id` — injected by `contract.register()`
+ * since the adapter's `project()` doesn't know the user-supplied contract id.
+ */
+export interface ProtocolContract extends Array<Test> {
+  /** Adapter project() output + injected id. Scanner duck-types this field for extraction. */
+  readonly _projection: ContractProjection & { id: string };
 }
 
 // =============================================================================
 // Registry metadata extension
 // =============================================================================
 
-/** Contract-specific metadata attached to RegisteredTestMeta. */
+/** Contract-specific metadata attached to RegisteredTestMeta. Protocol-agnostic. */
 export interface ContractRegistryMeta {
-  /** Endpoint (e.g. "POST /users") */
-  endpoint: string;
-  /** Protocol */
+  /** Protocol-agnostic target. HTTP: "POST /users", gRPC: "Greeter/SayHello" */
+  target: string;
+  /** Protocol identifier */
   protocol: string;
   /** Case key within the contract */
   caseKey: string;
-  /** Expected status code */
-  expectStatus: number;
+  /** Case lifecycle */
+  lifecycle: CaseLifecycle;
+  /** Case severity */
+  severity: CaseSeverity;
   /** Whether response schema is defined */
   hasSchema: boolean;
-  /** Deferred reason, or undefined if executable */
-  deferred?: string;
   /** Instance name from contract.http.with("name", ...) */
   instanceName?: string;
-  /** Security scheme declaration */
-  security?: HttpSecurityScheme;
+  /**
+   * Protocol-specific metadata. Core does not read this field's contents.
+   * HTTP: { security: "bearer", expect: { status: 200 } }
+   * gRPC: { expect: { code: 0 } }
+   */
+  protocolMeta?: Record<string, unknown>;
 }
 
 /**

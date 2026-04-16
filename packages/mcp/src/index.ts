@@ -25,7 +25,7 @@ import { extractContractCases } from "@glubean/scanner/static";
 import {
   extractContractFromFile as sharedExtractFromFile,
   extractContractsFromProject as sharedExtractFromProject,
-  type ExtractedContract as SharedExtractedContract,
+  type NormalizedContractMeta as SharedExtractedContract,
 } from "@glubean/scanner";
 import type { BundleMetadata, ExportMeta, FileMeta, ScanResult } from "@glubean/scanner";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
@@ -310,18 +310,23 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
         c.cases.map((cas) => ({
           exportName: c.exportName,
           id: `${c.id}.${cas.key}`,
-          name: `${c.endpoint} — ${cas.key}`,
-          skip: !!cas.deferred,
+          name: `${c.target} — ${cas.key}`,
+          skip: cas.lifecycle !== "active",
           only: false,
           tags: [],
           requires: cas.requires,
           defaultRun: cas.defaultRun,
-          deferred: cas.deferred,
+          deferred: cas.deferredReason,
         })),
       );
     } else if (result.errors.length > 0) {
-      // Runtime import failed — try static regex as fallback for old-syntax files.
-      const contracts = extractContractCases(content);
+      // Runtime import failed — try static regex fallback only for HTTP-only files.
+      // If the file contains ANY non-HTTP protocol usage, fail closed for the
+      // entire file — partial fallback would silently drop protocol contracts.
+      const hasHttp = /contract\.http\b/i.test(content);
+      // Detect any contract.<protocol> that isn't contract.http or contract.flow
+      const hasNonHttp = /contract\.(?!http\b|flow\b)\w+\s*[.(]/i.test(content);
+      const contracts = (hasHttp && !hasNonHttp) ? extractContractCases(content) : [];
       if (contracts.length > 0) {
         tests = contracts.flatMap((contract) =>
           contract.cases.map((c) => ({
@@ -1101,15 +1106,23 @@ server.registerTool(
     const featureMap = new Map<string, SharedExtractedContract[]>();
     for (const c of contracts) {
       const key = c.instanceName
-        ? `${c.instanceName}:${c.feature ?? c.endpoint}`
-        : (c.feature ?? c.endpoint);
+        ? `${c.instanceName}:${c.feature ?? c.target}`
+        : (c.feature ?? c.target);
       if (!featureMap.has(key)) featureMap.set(key, []);
       featureMap.get(key)!.push(c);
     }
 
     let totalCases = 0;
+    let deferredCases = 0;
+    let deprecatedCases = 0;
+    let gatedCases = 0;
     for (const c of contracts) {
-      totalCases += c.cases.length;
+      for (const cas of c.cases) {
+        totalCases++;
+        if (cas.lifecycle === "deprecated") deprecatedCases++;
+        else if (cas.lifecycle === "deferred") deferredCases++;
+        else if (cas.requires === "browser" || cas.requires === "out-of-band") gatedCases++;
+      }
     }
 
     const output = {
@@ -1117,7 +1130,8 @@ server.registerTool(
         name,
         contracts: group.map((c) => ({
           id: c.id,
-          endpoint: c.endpoint,
+          target: c.target,
+          protocol: c.protocol,
           description: c.description,
           feature: c.feature,
           instanceName: c.instanceName,
@@ -1125,15 +1139,18 @@ server.registerTool(
           cases: c.cases.map((cas) => ({
             key: cas.key,
             description: cas.description,
-            status: cas.expectStatus,
+            lifecycle: cas.lifecycle,
+            severity: cas.severity,
+            status: (cas.protocolExpect as any)?.status,
           })),
         })),
       })),
       summary: {
         total: totalCases,
-        active: totalCases,
-        deferred: 0,
-        gated: 0,
+        active: totalCases - deferredCases - deprecatedCases - gatedCases,
+        deferred: deferredCases,
+        deprecated: deprecatedCases,
+        gated: gatedCases,
       },
       ...(errors.length > 0 ? { errors } : {}),
     };
@@ -1411,8 +1428,11 @@ function contractsToOpenApi(
   const securitySchemes: Record<string, Record<string, unknown>> = {};
 
   for (const c of contracts) {
+    // Only process HTTP protocol contracts for OpenAPI
+    if (c.protocol !== "http") continue;
+
     // Parse "METHOD /path" → { method, path }
-    const match = c.endpoint.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+)$/i);
+    const match = c.target.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+)$/i);
     if (!match) continue;
     const method = match[1].toLowerCase();
     let apiPath = match[2];
@@ -1432,7 +1452,7 @@ function contractsToOpenApi(
     // Build responses from cases
     const responses: Record<string, unknown> = {};
     for (const cas of c.cases) {
-      const statusCode = String(cas.expectStatus ?? 200);
+      const statusCode = String((cas.protocolExpect as any)?.status ?? 200);
       if (!responses[statusCode]) {
         const resp: Record<string, unknown> = {
           description: cas.description ?? "",

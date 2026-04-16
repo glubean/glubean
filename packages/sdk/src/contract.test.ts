@@ -205,18 +205,18 @@ test("cases register to global registry with contract metadata", () => {
   const success = entries.find((r) => r.id === "whoami.success")!;
   expect(success.groupId).toBe("whoami");
   expect((success as any).contract).toEqual({
-    endpoint: "GET /whoami",
+    target: "GET /whoami",
     protocol: "http",
     caseKey: "success",
-    expectStatus: 200,
+    lifecycle: "active",
+    severity: "warning",
     hasSchema: true,
-    deferred: undefined,
     instanceName: "test",
-    security: undefined,
+    protocolMeta: { expect: { status: 200 } },
   });
 
   const noAuth = entries.find((r) => r.id === "whoami.noAuth")!;
-  expect((noAuth as any).contract.deferred).toBe("needs credentials");
+  expect((noAuth as any).contract.lifecycle).toBe("deferred");
 });
 
 test("case-level client overrides contract-level client", () => {
@@ -577,9 +577,14 @@ test("register() adapter execute() is called at runtime", async () => {
       executeCalled = true;
       receivedSpec = { caseSpec, endpointSpec };
     },
-    metadata: (spec: { target: string }) => ({
+    project: (spec: { target: string; cases: Record<string, any> }) => ({
       protocol: "test-proto",
-      endpoint: spec.target,
+      target: spec.target,
+      cases: Object.keys(spec.cases).map(key => ({
+        key,
+        lifecycle: "active" as const,
+        severity: "warning" as const,
+      })),
     }),
   });
 
@@ -643,34 +648,65 @@ test("request schema is accessible on contract object", () => {
   expect(result.request).toBe(schema);
 });
 
-test("contract.register() produces executable tests via adapter", () => {
+test("contract.register() produces executable tests via adapter v2", () => {
   clearRegistry();
 
   let executeCalled = false;
 
   contract.register("custom", {
     execute: async () => { executeCalled = true; },
-    metadata: (spec: { target: string }) => ({
+    project: (spec: { target: string; cases: Record<string, any> }) => ({
       protocol: "custom",
-      endpoint: spec.target,
+      target: spec.target,
+      cases: Object.entries(spec.cases).map(([key, c]: [string, any]) => ({
+        key,
+        lifecycle: c.deferred ? "deferred" as const : "active" as const,
+        severity: "warning" as const,
+      })),
     }),
   });
 
-  const tests = (contract as any).custom("my-custom", {
+  const result = (contract as any).custom("my-custom", {
     target: "my-service",
     cases: {
       ping: { description: "test", expect: { status: 200 } },
     },
-  }) as import("./types.js").Test[];
+  });
 
-  expect(tests).toHaveLength(1);
-  expect(tests[0].meta.id).toBe("my-custom.ping");
-  expect(tests[0].fn).toBeTypeOf("function");
+  expect(result).toHaveLength(1);
+  expect(result[0].meta.id).toBe("my-custom.ping");
+  expect(result[0].fn).toBeTypeOf("function");
+  // ProtocolContract carries _projection
+  expect(result._projection).toBeDefined();
+  expect(result._projection.protocol).toBe("custom");
+  expect(result._projection.target).toBe("my-service");
 
   const registry = getRegistry();
   const entry = registry.find((r) => r.id === "my-custom.ping")!;
   expect((entry as any).contract.protocol).toBe("custom");
-  expect((entry as any).contract.endpoint).toBe("my-service");
+  expect((entry as any).contract.target).toBe("my-service");
+  expect((entry as any).contract.lifecycle).toBe("active");
+  expect((entry as any).contract.severity).toBe("warning");
+});
+
+test("contract.register() validates project() cases match spec.cases", () => {
+  contract.register("mismatch-test", {
+    execute: async () => {},
+    project: (spec: { target: string }) => ({
+      protocol: "mismatch-test",
+      target: spec.target,
+      cases: [
+        { key: "nonexistent", lifecycle: "active" as const, severity: "warning" as const },
+      ],
+    }),
+  });
+
+  expect(() => {
+    (contract as any)["mismatch-test"]("bad", {
+      target: "svc",
+      cases: { real: { description: "test" } },
+    });
+  }).toThrow(/project\(\) returned case "nonexistent" not present in spec\.cases/);
 });
 
 // =============================================================================
@@ -1333,6 +1369,9 @@ test("HttpContract preserves _caseSchemas with response schemas", () => {
     responseSchema: UserSchema,
     description: "User found",
     deferred: undefined,
+    deprecated: undefined,
+    severity: undefined,
+    lifecycle: "active",
     requires: "headless",
     defaultRun: "always",
   });
@@ -1341,6 +1380,9 @@ test("HttpContract preserves _caseSchemas with response schemas", () => {
     responseSchema: undefined,
     description: "User not found",
     deferred: undefined,
+    deprecated: undefined,
+    severity: undefined,
+    lifecycle: "active",
     requires: "headless",
     defaultRun: "always",
   });
@@ -1525,10 +1567,14 @@ test("contract.http.with() stores enriched _caseSchemas", () => {
     responseSchema: UserSchema,
     description: "Success case",
     deferred: undefined,
+    deprecated: undefined,
+    severity: undefined,
+    lifecycle: "active",
     requires: "headless",
     defaultRun: "always",
   });
   expect(result._caseSchemas?.deferred?.deferred).toBe("backend not ready");
+  expect(result._caseSchemas?.deferred?.lifecycle).toBe("deferred");
   expect(result._caseSchemas?.browser?.requires).toBe("browser");
   expect(result._caseSchemas?.browser?.defaultRun).toBe("opt-in");
 });

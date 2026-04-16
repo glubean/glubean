@@ -846,6 +846,12 @@ export interface ContractCaseStaticMeta {
   expectStatus?: number;
   /** Deferred reason, or undefined if executable */
   deferred?: string;
+  /** Deprecated reason */
+  deprecated?: string;
+  /** Case lifecycle: "active" | "deferred" | "deprecated" */
+  lifecycle?: string;
+  /** Case severity: "critical" | "warning" | "info" */
+  severity?: string;
   /** Physical capability required: "headless" | "browser" | "out-of-band" */
   requires?: string;
   /** Default run policy: "always" | "opt-in" */

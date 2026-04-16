@@ -46,9 +46,19 @@ export {
   extractContractFromFile,
   extractContractsFromProject,
   isHttpContract,
+  isProtocolContract,
   schemaToJsonSchema,
 } from "./contract-extraction.js";
-export type { ExtractedContract, ExtractionResult } from "./contract-extraction.js";
+export type {
+  NormalizedContractMeta,
+  NormalizedCaseMeta,
+  ExtractedContract,
+  ExtractionResult,
+  CaseLifecycle,
+  CaseSeverity,
+  CaseRequires,
+  CaseDefaultRun,
+} from "./contract-extraction.js";
 
 // Re-export file system implementations
 export { nodeFs, nodeHasher } from "./fs.js";

@@ -229,7 +229,7 @@ async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
               description: c.description,
               requires: c.requires,
               defaultRun: c.defaultRun,
-              deferred: c.deferred,
+              deferred: c.deferredReason,
             },
           });
         }

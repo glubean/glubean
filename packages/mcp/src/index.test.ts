@@ -492,3 +492,58 @@ export const filterCheck = filterInstance("filter-check", {
   expect(ids).not.toContain("filter-check.oobCase");
   expect(ids).not.toContain("filter-check.optInCase");
 }, 30_000);
+
+// ==================== Static Fallback Protocol Gate Tests ====================
+
+test("discoverTestsFromFile: mixed HTTP + custom protocol file fails closed on import failure", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-mixed-proto-"));
+  // File imports a nonexistent module to force runtime import failure.
+  // Contains both contract.http and contract.kafka — fallback should NOT trigger.
+  const filePath = join(dir, "mixed.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@nonexistent/sdk";
+const api = contract.http.with("user", { client });
+export const getUser = api("get-user", {
+  endpoint: "GET /users/:id",
+  cases: {
+    success: { description: "found", expect: { status: 200 } },
+  },
+});
+export const events = contract.kafka("user-events", {
+  topic: "user.created",
+  cases: { published: { description: "event emitted" } },
+});
+`);
+
+  try {
+    const result = await discoverTestsFromFile(filePath);
+    // Fail closed: no tests extracted, error surfaced
+    expect(result.tests).toHaveLength(0);
+    expect(result.errors).toBeDefined();
+    expect(result.errors!.length).toBeGreaterThan(0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverTestsFromFile: pure custom protocol file fails closed on import failure", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-pure-proto-"));
+  const filePath = join(dir, "greeter.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@nonexistent/sdk";
+export const greeter = contract.grpc("greeter", {
+  target: "Greeter/SayHello",
+  cases: { success: { description: "hello" } },
+});
+`);
+
+  try {
+    const result = await discoverTestsFromFile(filePath);
+    // Fail closed: no tests extracted, error surfaced
+    expect(result.tests).toHaveLength(0);
+    expect(result.errors).toBeDefined();
+    expect(result.errors!.length).toBeGreaterThan(0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
