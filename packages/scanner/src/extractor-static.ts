@@ -856,6 +856,10 @@ export interface ContractCaseStaticMeta {
   requires?: string;
   /** Default run policy: "always" | "opt-in" */
   defaultRun?: string;
+  /** True if case declares a response headers schema */
+  hasHeaderSchema?: boolean;
+  /** True if case declares an example or examples */
+  hasExample?: boolean;
 }
 
 /** Metadata for a discovered contract.http() call. */
@@ -874,6 +878,8 @@ export interface ContractStaticMeta {
   description?: string;
   /** Feature grouping key for projection (e.g. "用户注册") */
   feature?: string;
+  /** Contract-level deprecation reason (propagates to all cases) */
+  deprecated?: string;
   /** Cases */
   cases: ContractCaseStaticMeta[];
 }

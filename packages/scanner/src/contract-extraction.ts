@@ -30,6 +30,21 @@ export type CaseRequires = "headless" | "browser" | "out-of-band";
 /** Case default run policy. */
 export type CaseDefaultRun = "always" | "opt-in";
 
+/** A named example entry for OpenAPI docs. */
+export interface NormalizedExample {
+  value: unknown;
+  summary?: string;
+  description?: string;
+}
+
+/** Per-parameter metadata for OpenAPI output. */
+export interface NormalizedParamMeta {
+  schema?: unknown | null;
+  description?: string;
+  required?: boolean;
+  deprecated?: boolean;
+}
+
 /** Normalized case metadata. Protocol-agnostic. */
 export interface NormalizedCaseMeta {
   key: string;
@@ -44,6 +59,18 @@ export interface NormalizedCaseMeta {
   /** Protocol-specific expectations. HTTP: { status: 200 }, gRPC: { code: 0 } */
   protocolExpect?: Record<string, unknown>;
   responseSchema: unknown | null;
+  /** Response headers schema (OpenAPI + runtime validation) */
+  responseHeaders?: unknown | null;
+  /** Response content-type (HTTP-specific) */
+  responseContentType?: string;
+  /** Named response examples for OpenAPI docs */
+  examples?: Record<string, NormalizedExample>;
+  /** Per-path-param metadata */
+  paramSchemas?: Record<string, NormalizedParamMeta>;
+  /** Per-query-param metadata */
+  querySchemas?: Record<string, NormalizedParamMeta>;
+  /** Fully merged extensions (defaults < contract < case). Keys are x-* OpenAPI extensions. */
+  extensions?: Record<string, unknown>;
 }
 
 /** Normalized contract metadata. Protocol-agnostic. Evolved from ExtractedContract. */
@@ -59,6 +86,12 @@ export interface NormalizedContractMeta {
   security?: unknown;
   schemaMount?: string;
   requestSchema: unknown | null;
+  /** Request content type (HTTP-specific; default application/json) */
+  requestContentType?: string;
+  /** Contract-level deprecation reason (propagates to all cases) */
+  deprecated?: string;
+  /** Contract-level merged extensions (defaults < contract). Keys are x-* OpenAPI extensions. */
+  extensions?: Record<string, unknown>;
   protocolMeta?: Record<string, unknown>;
   cases: NormalizedCaseMeta[];
 }
@@ -89,10 +122,29 @@ export function isHttpContract(val: unknown): val is {
   feature?: string;
   instanceName?: string;
   security?: unknown;
+  deprecated?: string;
+  extensions?: Record<string, unknown>;
+  requestContentType?: string;
   request?: { toJSONSchema?: () => unknown };
   _caseSchemas?: Record<string, {
     expectStatus?: number;
     responseSchema?: { toJSONSchema?: () => unknown };
+    responseHeaders?: { toJSONSchema?: () => unknown };
+    responseContentType?: string;
+    example?: unknown;
+    examples?: Record<string, { value: unknown; summary?: string; description?: string }>;
+    paramSchemas?: Record<string, {
+      schema?: { toJSONSchema?: () => unknown };
+      description?: string;
+      required?: boolean;
+      deprecated?: boolean;
+    }>;
+    querySchemas?: Record<string, {
+      schema?: { toJSONSchema?: () => unknown };
+      description?: string;
+      required?: boolean;
+      deprecated?: boolean;
+    }>;
     description?: string;
     deferred?: string;
     deprecated?: string;
@@ -100,6 +152,7 @@ export function isHttpContract(val: unknown): val is {
     lifecycle?: string;
     requires?: string;
     defaultRun?: string;
+    extensions?: Record<string, unknown>;
   }>;
 } {
   return (
@@ -191,6 +244,37 @@ function httpContractToNormalized(
         meta.deferred ? "deferred" :
         "active";
 
+      // Map per-param metadata (convert schema objects to JSON Schema)
+      const mapParamMeta = (m?: Record<string, {
+        schema?: { toJSONSchema?: () => unknown };
+        description?: string;
+        required?: boolean;
+        deprecated?: boolean;
+      }>): Record<string, NormalizedParamMeta> | undefined => {
+        if (!m) return undefined;
+        const result: Record<string, NormalizedParamMeta> = {};
+        for (const [k, v] of Object.entries(m)) {
+          result[k] = {
+            schema: schemaToJsonSchema(v.schema),
+            description: v.description,
+            required: v.required,
+            deprecated: v.deprecated,
+          };
+        }
+        return result;
+      };
+
+      // Normalize examples: prefer meta.examples, fall back to meta.example (single)
+      let examples: Record<string, NormalizedExample> | undefined;
+      if (meta.examples) {
+        examples = {};
+        for (const [name, ex] of Object.entries(meta.examples)) {
+          examples[name] = { value: ex.value, summary: ex.summary, description: ex.description };
+        }
+      } else if (meta.example !== undefined) {
+        examples = { default: { value: meta.example } };
+      }
+
       cases.push({
         key,
         description: meta.description,
@@ -205,6 +289,12 @@ function httpContractToNormalized(
           ? { status: meta.expectStatus }
           : undefined,
         responseSchema: schemaToJsonSchema(meta.responseSchema),
+        responseHeaders: schemaToJsonSchema(meta.responseHeaders),
+        responseContentType: meta.responseContentType,
+        examples,
+        paramSchemas: mapParamMeta(meta.paramSchemas),
+        querySchemas: mapParamMeta(meta.querySchemas),
+        extensions: meta.extensions,
       });
     }
   }
@@ -220,6 +310,9 @@ function httpContractToNormalized(
     security: value.security,
     schemaMount: "response.body",
     requestSchema: schemaToJsonSchema(value.request),
+    requestContentType: value.requestContentType,
+    deprecated: value.deprecated,
+    extensions: value.extensions,
     cases,
   };
 }

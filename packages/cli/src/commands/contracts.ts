@@ -146,6 +146,11 @@ export function formatMdOutline(contracts: ContractStaticMeta[]): string {
       // Priority: explicit description > endpoint (if feature differs from endpoint)
       const intro = contract.description
         ?? (feature.name !== contract.endpoint ? contract.endpoint : undefined);
+      // Contract-level deprecated marker
+      if (contract.deprecated) {
+        lines.push(`🚫 **Deprecated:** ${contract.deprecated}`);
+        lines.push("");
+      }
       if (intro) {
         lines.push(intro);
         lines.push("");
@@ -244,6 +249,7 @@ export async function contractsCommand(
     feature: hasInstances && ec.instanceName
       ? `${ec.instanceName}: ${ec.feature ?? ec.target}`
       : ec.feature,
+    deprecated: ec.deprecated,
     line: 0,
     cases: ec.cases.map((c) => ({
       key: c.key,
@@ -255,6 +261,8 @@ export async function contractsCommand(
       severity: c.severity,
       requires: c.requires as any,
       defaultRun: c.defaultRun as any,
+      hasHeaderSchema: c.responseHeaders != null,
+      hasExample: c.examples != null,
       line: 0,
     })),
   }));

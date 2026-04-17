@@ -82,6 +82,13 @@ export interface FailureClassification {
  * Default values for a scoped HTTP contract instance.
  * Created via `contract.http.with("name", defaults)`.
  */
+/**
+ * OpenAPI-style extensions. Keys MUST start with "x-".
+ * Non-x keys are rejected at the type level.
+ * Used for tool-interop metadata (e.g. "x-glubean-internal-id").
+ */
+export type Extensions = Record<`x-${string}`, unknown>;
+
 export interface HttpContractDefaults {
   /** Default HTTP client for all contracts in this instance */
   client?: HttpClient;
@@ -91,6 +98,8 @@ export interface HttpContractDefaults {
   tags?: string[];
   /** Default feature grouping key */
   feature?: string;
+  /** OpenAPI extensions (x-* keys). Inherited by all contracts in this instance. */
+  extensions?: Extensions;
 }
 
 // =============================================================================
@@ -147,6 +156,22 @@ export type CaseDefaultRun = "always" | "opt-in";
 // =============================================================================
 
 /**
+ * Normalized response headers shape.
+ * HTTP allows multi-value headers (e.g. Set-Cookie), so values can be string or string[].
+ * Keys are always lowercase (runtime normalization).
+ */
+export type NormalizedHeaders = Record<string, string | string[]>;
+
+/**
+ * A single example entry for OpenAPI docs.
+ */
+export interface ContractExample<T = unknown> {
+  value: T;
+  summary?: string;
+  description?: string;
+}
+
+/**
  * Expected response for a contract case.
  *
  * @template T The parsed response type (inferred from schema)
@@ -156,7 +181,57 @@ export interface ContractExpect<T = unknown> {
   status: number;
   /** Zod/Valibot schema to validate response body. Parsed value is passed to verify(). */
   schema?: SchemaLike<T>;
+
+  /**
+   * Expected response content-type. Default: "application/json".
+   * Used by OpenAPI generation and (future) response body deserialization dispatch.
+   */
+  contentType?: string;
+
+  /**
+   * Schema to validate response headers. Headers are normalized to lowercase keys
+   * before validation (HTTP spec: header names are case-insensitive).
+   * Values are `string | string[]` to support multi-value headers (e.g. Set-Cookie).
+   *
+   * @example
+   * headers: z.object({
+   *   "content-type": z.string().regex(/^application\/json/),
+   *   "x-request-id": z.string().uuid(),
+   * })
+   */
+  headers?: SchemaLike<NormalizedHeaders>;
+
+  /**
+   * Single response example (shorthand). Equivalent to examples: { default: { value } }.
+   * Not used at runtime — only for OpenAPI documentation.
+   */
+  example?: T;
+
+  /**
+   * Multiple named response examples. Mapped to OpenAPI responses[status].content.examples.
+   * Not used at runtime — only for OpenAPI documentation.
+   */
+  examples?: Record<string, ContractExample<T>>;
 }
+
+/**
+ * Path or query parameter value.
+ * String shorthand: just the value. Object form: value + OpenAPI metadata.
+ */
+export type ParamValue =
+  | string
+  | {
+      /** The actual value used for URL substitution / query string construction */
+      value: string;
+      /** OpenAPI parameter schema (not used at runtime, see Part 5 of proposal) */
+      schema?: SchemaLike<unknown>;
+      /** Parameter description for OpenAPI docs */
+      description?: string;
+      /** Whether the parameter is required (default: true for path, false for query) */
+      required?: boolean;
+      /** Whether the parameter is deprecated */
+      deprecated?: boolean;
+    };
 
 /**
  * A single spec case within a contract.
@@ -180,14 +255,32 @@ export interface ContractCase<T = unknown, S = void> {
   /** Expected response */
   expect: ContractExpect<T>;
 
-  /** Request body (for POST/PUT/PATCH) — static value or function deriving from setup state */
-  body?: unknown | ((state: S) => unknown);
+  /**
+   * Request body (for POST/PUT/PATCH) — static value or function deriving from setup state.
+   * For non-JSON content types, provide `FormData`, `URLSearchParams`, `Blob`, or string.
+   * JSON is the default (plain object).
+   */
+  body?: unknown | FormData | URLSearchParams | Blob | ((state: S) => unknown);
 
-  /** URL params — static object or function deriving from setup state */
-  params?: Record<string, string> | ((state: S) => Record<string, string>);
+  /**
+   * Request content type override for this case.
+   * If not set, inherits from contract.request.contentType, defaults to "application/json".
+   * Supported: "application/json", "multipart/form-data", "application/x-www-form-urlencoded",
+   * "text/plain", "application/octet-stream".
+   */
+  contentType?: string;
 
-  /** Query parameters — static object or function deriving from setup state */
-  query?: Record<string, string> | ((state: S) => Record<string, string>);
+  /**
+   * URL params — static object or function deriving from setup state.
+   * Values can be plain strings or ParamValue objects with OpenAPI metadata.
+   */
+  params?: Record<string, ParamValue> | ((state: S) => Record<string, string>);
+
+  /**
+   * Query parameters — static object or function deriving from setup state.
+   * Values can be plain strings or ParamValue objects with OpenAPI metadata.
+   */
+  query?: Record<string, ParamValue> | ((state: S) => Record<string, string>);
 
   /** Request headers (merged with client headers) — static object or function deriving from setup state */
   headers?: Record<string, string> | ((state: S) => Record<string, string>);
@@ -265,11 +358,36 @@ export interface ContractCase<T = unknown, S = void> {
    * lifecycle normalizes to `"deprecated"`.
    */
   deprecated?: string;
+
+  /**
+   * OpenAPI extensions (x-* keys). Merged over contract-level extensions
+   * (precedence: defaults < contract < case).
+   */
+  extensions?: Extensions;
 }
 
 // =============================================================================
 // Contract spec
 // =============================================================================
+
+/**
+ * Structured request specification.
+ * Can be provided as a bare SchemaLike (shorthand for JSON body) or as an
+ * object with full metadata (contentType, headers, examples).
+ */
+export type RequestSpec =
+  | SchemaLike<unknown>
+  | {
+      body?: SchemaLike<unknown>;
+      /** Request content type. Default: "application/json". */
+      contentType?: string;
+      /** Request headers schema (OpenAPI docs only, not runtime validated on request). */
+      headers?: SchemaLike<Record<string, string>>;
+      /** Single example value */
+      example?: unknown;
+      /** Named examples */
+      examples?: Record<string, ContractExample<unknown>>;
+    };
 
 /**
  * Spec for contract.http() — defines an HTTP endpoint and its cases.
@@ -302,11 +420,28 @@ export interface HttpContractSpec<
    */
   client?: HttpClient;
 
-  /** Request body schema — endpoint-level, for scanner/OpenAPI (not for execution) */
-  request?: SchemaLike<unknown>;
+  /**
+   * Request specification — endpoint-level, for scanner/OpenAPI (not used at runtime).
+   * Can be a bare SchemaLike (shorthand for JSON body) or a structured RequestSpec object.
+   */
+  request?: RequestSpec;
 
   /** Tags inherited by all cases */
   tags?: string[];
+
+  /**
+   * Mark the entire endpoint as deprecated. Value is the deprecation reason.
+   * Propagates to all cases: every case lifecycle becomes "deprecated" unless
+   * the case explicitly sets its own `deprecated` reason.
+   * Maps to OpenAPI operation `deprecated: true` + `x-deprecated-reason`.
+   */
+  deprecated?: string;
+
+  /**
+   * OpenAPI extensions (x-* keys). Merged over instance-level defaults.extensions.
+   * Precedence: defaults < contract < case.
+   */
+  extensions?: Extensions;
 
   /** Named spec cases */
   cases: Cases;
@@ -341,8 +476,20 @@ export interface HttpContract extends Array<Test> {
   /** Security scheme declaration */
   readonly security?: HttpSecurityScheme;
 
-  /** Endpoint-level request schema (if provided) */
+  /** Endpoint-level request schema, normalized to body SchemaLike */
   readonly request?: SchemaLike<unknown>;
+
+  /** Endpoint-level request content type (default: "application/json") */
+  readonly requestContentType?: string;
+
+  /** Contract-level deprecation reason (propagates to all cases) */
+  readonly deprecated?: string;
+
+  /**
+   * Contract-level merged extensions (defaults < contract).
+   * Case-level merged extensions live on _caseSchemas[key].extensions.
+   */
+  readonly extensions?: Extensions;
 
   /**
    * Per-case metadata for runtime extraction (OpenAPI generation, projection).
@@ -351,6 +498,28 @@ export interface HttpContract extends Array<Test> {
   readonly _caseSchemas?: Record<string, {
     expectStatus?: number;
     responseSchema?: SchemaLike<unknown>;
+    /** Response headers schema (OpenAPI + runtime validation) */
+    responseHeaders?: SchemaLike<NormalizedHeaders>;
+    /** Response content-type (default: application/json) */
+    responseContentType?: string;
+    /** Single example (OpenAPI docs) */
+    example?: unknown;
+    /** Named examples (OpenAPI docs) */
+    examples?: Record<string, ContractExample<unknown>>;
+    /** Per-path-param metadata (schema, description, required, deprecated) */
+    paramSchemas?: Record<string, {
+      schema?: SchemaLike<unknown>;
+      description?: string;
+      required?: boolean;
+      deprecated?: boolean;
+    }>;
+    /** Per-query-param metadata */
+    querySchemas?: Record<string, {
+      schema?: SchemaLike<unknown>;
+      description?: string;
+      required?: boolean;
+      deprecated?: boolean;
+    }>;
     description?: string;
     deferred?: string;
     deprecated?: string;
@@ -358,6 +527,8 @@ export interface HttpContract extends Array<Test> {
     lifecycle: CaseLifecycle;
     requires?: CaseRequires;
     defaultRun?: CaseDefaultRun;
+    /** Fully merged extensions (defaults < contract < case) */
+    extensions?: Extensions;
   }>;
 
   /**

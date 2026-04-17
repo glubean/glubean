@@ -1594,3 +1594,436 @@ test("contract.http.with() security=null marks public endpoint", () => {
   expect(result.instanceName).toBe("public");
   expect(result.security).toBeNull();
 });
+
+// =============================================================================
+// Phase 1 — Tier 1 feature tests
+// =============================================================================
+
+// Mock client that returns custom headers — used for header validation tests
+function createMockClientWithHeaders(
+  responses: Record<string, { status: number; body?: unknown; headers?: Record<string, string> }>,
+): HttpClient {
+  function makeResponse(key: string): HttpResponsePromise {
+    const resp = responses[key] ?? { status: 200 };
+    const bodyStr = JSON.stringify(resp.body ?? {});
+    const headers = new Headers(resp.headers ?? { "Content-Type": "application/json" });
+    const raw = new Response(bodyStr, { status: resp.status, headers });
+    const p = Promise.resolve(raw) as HttpResponsePromise;
+    p.json = <T = unknown>() => Promise.resolve(resp.body as T);
+    p.text = () => Promise.resolve(bodyStr);
+    p.blob = () => raw.blob();
+    p.arrayBuffer = () => raw.arrayBuffer();
+    return p;
+  }
+  const handler = (method: string) => (url: string | URL | Request) =>
+    makeResponse(`${method.toUpperCase()} ${String(url)}`);
+  const client = Object.assign(handler("GET"), {
+    get: handler("GET"), post: handler("POST"), put: handler("PUT"),
+    patch: handler("PATCH"), delete: handler("DELETE"), head: handler("HEAD"),
+    extend: () => client,
+  });
+  return client as unknown as HttpClient;
+}
+
+test("expect.headers validates response headers (case-insensitive keys)", async () => {
+  const client = createMockClientWithHeaders({
+    "GET /info": { status: 200, headers: { "X-Request-Id": "abc123", "Content-Type": "application/json" } },
+  });
+  const api = contract.http.with("test", { client });
+  const c = api("info", {
+    endpoint: "GET /info",
+    cases: {
+      success: {
+        description: "response has request id",
+        expect: {
+          status: 200,
+          headers: UserSchemaLike({ "x-request-id": "abc123", "content-type": "application/json" }),
+        },
+      },
+    },
+  });
+
+  const ctx = createMockContext();
+  await c[0].fn!(ctx);
+  // No assertion failures — header validation passed with lowercase normalized keys
+  expect(true).toBe(true);
+});
+
+test("expect.headers fails when required header is missing", async () => {
+  const client = createMockClientWithHeaders({
+    "GET /info": { status: 200, headers: { "Content-Type": "application/json" } },
+  });
+  const api = contract.http.with("test", { client });
+  const c = api("info-missing", {
+    endpoint: "GET /info",
+    cases: {
+      success: {
+        description: "expect request id",
+        expect: {
+          status: 200,
+          headers: UserSchemaLike({ "x-request-id": "required" }, true),  // strict: require field
+        },
+      },
+    },
+  });
+
+  const ctx = createMockContext();
+  const recorded: any[] = [];
+  ctx.validate = (value, schema, _label) => {
+    recorded.push({ value, schema });
+    const result = (schema as any).safeParse(value);
+    if (!result.success) throw new Error(`validation failed: ${JSON.stringify(result)}`);
+    return result.data;
+  };
+  await expect(c[0].fn!(ctx)).rejects.toThrow(/validation failed/);
+  expect(recorded.length).toBeGreaterThan(0);
+});
+
+test("contract-level deprecated propagates to all cases", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+  const c = api("old-endpoint", {
+    endpoint: "GET /v1/old",
+    deprecated: "use /v2/new instead",
+    cases: {
+      success: { description: "was valid", expect: { status: 200 } },
+      notFound: { description: "was 404", expect: { status: 404 } },
+    },
+  });
+
+  expect(c.deprecated).toBe("use /v2/new instead");
+  expect(c._caseSchemas?.success?.deprecated).toBe("use /v2/new instead");
+  expect(c._caseSchemas?.success?.lifecycle).toBe("deprecated");
+  expect(c._caseSchemas?.notFound?.lifecycle).toBe("deprecated");
+});
+
+test("case-level deprecated overrides contract-level", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+  const c = api("mixed", {
+    endpoint: "GET /thing",
+    deprecated: "generic reason",
+    cases: {
+      caseA: { description: "a", expect: { status: 200 }, deprecated: "specific reason for a" },
+      caseB: { description: "b", expect: { status: 200 } },
+    },
+  });
+
+  expect(c._caseSchemas?.caseA?.deprecated).toBe("specific reason for a");
+  expect(c._caseSchemas?.caseB?.deprecated).toBe("generic reason");
+});
+
+test("ParamValue object form: value extraction works", async () => {
+  const client = createMockClient({
+    "GET /users/42": { status: 200, body: { id: "42" } },
+  });
+  const api = contract.http.with("test", { client });
+  const c = api("get-user", {
+    endpoint: "GET /users/:id",
+    cases: {
+      success: {
+        description: "find user",
+        params: { id: { value: "42", schema: {} as any, description: "User ID" } },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const ctx = createMockContext();
+  await c[0].fn!(ctx);
+  // Execution succeeded → value was extracted correctly from { value: "42" }
+  expect(c._caseSchemas?.success?.paramSchemas?.id?.description).toBe("User ID");
+});
+
+test("ParamValue string form still works (backward compat)", async () => {
+  const client = createMockClient({
+    "GET /users/42": { status: 200, body: { id: "42" } },
+  });
+  const api = contract.http.with("test", { client });
+  const c = api("get-user-str", {
+    endpoint: "GET /users/:id",
+    cases: {
+      success: {
+        description: "find user",
+        params: { id: "42" },  // string shorthand
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const ctx = createMockContext();
+  await c[0].fn!(ctx);
+  // String shorthand should NOT produce paramSchemas entries
+  expect(c._caseSchemas?.success?.paramSchemas).toBeUndefined();
+});
+
+test("query ParamValue object form", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+  const c = api("list-users", {
+    endpoint: "GET /users",
+    cases: {
+      filtered: {
+        description: "filter by role",
+        query: {
+          role: { value: "admin", description: "User role filter", required: false },
+        },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  expect(c._caseSchemas?.filtered?.querySchemas?.role?.description).toBe("User role filter");
+  expect(c._caseSchemas?.filtered?.querySchemas?.role?.required).toBe(false);
+});
+
+test("expect.example and expect.examples are stored on _caseSchemas", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+  const c = api("examples-demo", {
+    endpoint: "GET /thing",
+    cases: {
+      single: {
+        description: "with single example",
+        expect: { status: 200, example: { id: 1 } },
+      },
+      multi: {
+        description: "with named examples",
+        expect: {
+          status: 200,
+          examples: {
+            admin: { value: { role: "admin" }, summary: "Admin user" },
+            viewer: { value: { role: "viewer" } },
+          },
+        },
+      },
+    },
+  });
+
+  expect(c._caseSchemas?.single?.example).toEqual({ id: 1 });
+  expect(c._caseSchemas?.multi?.examples?.admin?.summary).toBe("Admin user");
+  expect(c._caseSchemas?.multi?.examples?.viewer?.value).toEqual({ role: "viewer" });
+});
+
+// =============================================================================
+// Phase 2 — Extensions, request/expect structural, content-type dispatch
+// =============================================================================
+
+test("extensions merge precedence: defaults < contract < case", () => {
+  const client = createMockClient();
+  const base = contract.http.with("base", {
+    client,
+    extensions: { "x-owner": "team-a", "x-tier": "1" },
+  });
+  const api = base.with("scoped", {
+    client,
+    extensions: { "x-tier": "2", "x-source": "scoped" },  // override tier
+  });
+
+  const c = api("ext-test", {
+    endpoint: "GET /thing",
+    extensions: { "x-contract": "custom" },  // contract-level adds
+    cases: {
+      a: {
+        description: "case A",
+        expect: { status: 200 },
+        extensions: { "x-tier": "3", "x-case-only": "yes" },  // case overrides tier
+      },
+      b: {
+        description: "case B",
+        expect: { status: 200 },
+        // no case-level extensions — inherits contract
+      },
+    },
+  });
+
+  // Contract-level merged view (defaults < contract)
+  expect(c.extensions?.["x-owner"]).toBe("team-a");
+  expect(c.extensions?.["x-tier"]).toBe("2"); // scoped defaults override base defaults
+  expect(c.extensions?.["x-source"]).toBe("scoped");
+  expect(c.extensions?.["x-contract"]).toBe("custom");
+
+  // Case A: case-level overrides
+  const caseA = c._caseSchemas?.a?.extensions as Record<string, unknown>;
+  expect(caseA?.["x-tier"]).toBe("3");
+  expect(caseA?.["x-owner"]).toBe("team-a");
+  expect(caseA?.["x-case-only"]).toBe("yes");
+  expect(caseA?.["x-contract"]).toBe("custom");
+
+  // Case B: inherits contract-level (no case override)
+  const caseB = c._caseSchemas?.b?.extensions as Record<string, unknown>;
+  expect(caseB?.["x-tier"]).toBe("2");
+  expect(caseB?.["x-owner"]).toBe("team-a");
+});
+
+test("request structural form: { body, contentType } normalized", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+
+  // Bare SchemaLike shorthand
+  const schema = { safeParse: () => ({ success: true as const, data: {} }) };
+  const cShort = api("shorthand", {
+    endpoint: "POST /shorthand",
+    request: schema,
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  });
+  expect(cShort.request).toBe(schema);
+  expect(cShort.requestContentType).toBeUndefined();
+
+  // Structured form with contentType
+  const cStruct = api("struct", {
+    endpoint: "POST /upload",
+    request: { body: schema, contentType: "multipart/form-data" },
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  });
+  expect(cStruct.request).toBe(schema);
+  expect(cStruct.requestContentType).toBe("multipart/form-data");
+});
+
+test("multipart content-type: object body converts to FormData", async () => {
+  let capturedBody: unknown;
+  const client = {
+    get: () => undefined as any,
+    post: ((url: string, opts: any) => {
+      capturedBody = opts.body;
+      const raw = new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      const p = Promise.resolve(raw) as HttpResponsePromise;
+      p.json = <T = unknown>() => Promise.resolve({} as T);
+      p.text = () => Promise.resolve("{}");
+      p.blob = () => raw.blob();
+      p.arrayBuffer = () => raw.arrayBuffer();
+      return p;
+    }) as any,
+    put: () => undefined as any,
+    patch: () => undefined as any,
+    delete: () => undefined as any,
+    head: () => undefined as any,
+    extend: () => client,
+  } as unknown as HttpClient;
+
+  const api = contract.http.with("upload", { client });
+  const c = api("upload-form", {
+    endpoint: "POST /upload",
+    cases: {
+      success: {
+        description: "multipart upload",
+        contentType: "multipart/form-data",
+        body: { name: "alice", role: "admin" },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const ctx = createMockContext();
+  await c[0].fn!(ctx);
+
+  // Body should be converted to FormData
+  expect(capturedBody).toBeInstanceOf(FormData);
+  const fd = capturedBody as FormData;
+  expect(fd.get("name")).toBe("alice");
+  expect(fd.get("role")).toBe("admin");
+});
+
+test("urlencoded content-type: object body converts to URLSearchParams", async () => {
+  let capturedBody: unknown;
+  const client = {
+    get: () => undefined as any,
+    post: ((_url: string, opts: any) => {
+      capturedBody = opts.body;
+      const raw = new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      const p = Promise.resolve(raw) as HttpResponsePromise;
+      p.json = <T = unknown>() => Promise.resolve({} as T);
+      p.text = () => Promise.resolve("{}");
+      p.blob = () => raw.blob();
+      p.arrayBuffer = () => raw.arrayBuffer();
+      return p;
+    }) as any,
+    put: () => undefined as any,
+    patch: () => undefined as any,
+    delete: () => undefined as any,
+    head: () => undefined as any,
+    extend: () => (client as HttpClient),
+  } as unknown as HttpClient;
+
+  const api = contract.http.with("form", { client });
+  const c = api("form-post", {
+    endpoint: "POST /form",
+    cases: {
+      success: {
+        description: "urlencoded form post",
+        contentType: "application/x-www-form-urlencoded",
+        body: { username: "bob", password: "s3cret" },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const ctx = createMockContext();
+  await c[0].fn!(ctx);
+
+  expect(capturedBody).toBeInstanceOf(URLSearchParams);
+  const params = capturedBody as URLSearchParams;
+  expect(params.get("username")).toBe("bob");
+  expect(params.get("password")).toBe("s3cret");
+});
+
+test("contentType inherits from contract request when case doesn't override", async () => {
+  let capturedBody: unknown;
+  const client = {
+    get: () => undefined as any,
+    post: ((_url: string, opts: any) => {
+      capturedBody = opts.body;
+      const raw = new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      const p = Promise.resolve(raw) as HttpResponsePromise;
+      p.json = <T = unknown>() => Promise.resolve({} as T);
+      p.text = () => Promise.resolve("{}");
+      p.blob = () => raw.blob();
+      p.arrayBuffer = () => raw.arrayBuffer();
+      return p;
+    }) as any,
+    put: () => undefined as any,
+    patch: () => undefined as any,
+    delete: () => undefined as any,
+    head: () => undefined as any,
+    extend: () => (client as HttpClient),
+  } as unknown as HttpClient;
+
+  const api = contract.http.with("form", { client });
+  const c = api("form-post-inherit", {
+    endpoint: "POST /form",
+    request: { contentType: "application/x-www-form-urlencoded" },
+    cases: {
+      success: {
+        description: "inherits contract-level content type",
+        body: { k: "v" },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const ctx = createMockContext();
+  await c[0].fn!(ctx);
+
+  expect(capturedBody).toBeInstanceOf(URLSearchParams);
+});
+
+// Minimal SchemaLike helper for testing — mimics Zod safeParse contract
+function UserSchemaLike(shape: Record<string, string>, strict = false) {
+  return {
+    safeParse: (value: unknown) => {
+      if (!value || typeof value !== "object") {
+        return { success: false, error: { issues: [{ message: "not an object" }] } };
+      }
+      const v = value as Record<string, unknown>;
+      for (const [key, expected] of Object.entries(shape)) {
+        if (strict && v[key] !== expected) {
+          return { success: false, error: { issues: [{ message: `${key} mismatch` }] } };
+        }
+        if (!strict && v[key] !== undefined && v[key] !== expected) {
+          return { success: false, error: { issues: [{ message: `${key} mismatch` }] } };
+        }
+      }
+      return { success: true, data: value };
+    },
+  };
+}

@@ -37,9 +37,12 @@ function createHttpContract(
   request?: import("./types.js").SchemaLike<unknown>,
   description?: string,
   feature?: string,
-  caseSchemas?: Record<string, { expectStatus?: number; responseSchema?: import("./types.js").SchemaLike<unknown>; description?: string; deferred?: string; requires?: string; defaultRun?: string }>,
+  caseSchemas?: HttpContract["_caseSchemas"],
   instanceName?: string,
   security?: HttpSecurityScheme,
+  deprecated?: string,
+  extensions?: import("./contract-types.js").Extensions,
+  requestContentType?: string,
 ): HttpContract {
   const arr = [...tests];
 
@@ -72,7 +75,7 @@ function createHttpContract(
 
   return Object.assign(arr, {
     id, endpoint, request, description, feature,
-    instanceName, security,
+    instanceName, security, deprecated, extensions, requestContentType,
     _caseSchemas: caseSchemas,
     asSteps, asStep,
   }) as HttpContract;
@@ -91,6 +94,32 @@ function parseEndpoint(endpoint: string): { method: string; path: string } {
   };
 }
 
+/**
+ * Extract the string value from a ParamValue (string or { value } object).
+ */
+function extractParamValue(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v && typeof v === "object" && "value" in v) {
+    return String((v as { value: string }).value);
+  }
+  return String(v);
+}
+
+/**
+ * Convert a params/query Record<string, ParamValue> to Record<string, string>
+ * by extracting `.value` from ParamValue objects.
+ */
+function flattenParamValues(
+  params: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  if (!params) return undefined;
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(params)) {
+    result[key] = extractParamValue(value);
+  }
+  return result;
+}
+
 function resolveParams(
   path: string,
   params: Record<string, string> | undefined,
@@ -101,6 +130,117 @@ function resolveParams(
     resolved = resolved.replace(`:${key}`, encodeURIComponent(value));
   }
   return resolved;
+}
+
+/**
+ * Normalize RequestSpec to a structured form { body, contentType, headers, example, examples }.
+ * Accepts either bare SchemaLike (treated as JSON body) or already-structured object.
+ */
+function normalizeRequest(
+  req: import("./contract-types.js").RequestSpec | undefined,
+): {
+  body?: import("./types.js").SchemaLike<unknown>;
+  contentType?: string;
+  headers?: import("./types.js").SchemaLike<Record<string, string>>;
+  example?: unknown;
+  examples?: Record<string, import("./contract-types.js").ContractExample<unknown>>;
+} | undefined {
+  if (!req) return undefined;
+  // SchemaLike duck-type: has safeParse, no body field
+  if (typeof (req as any).safeParse === "function" && !("body" in (req as any))) {
+    return { body: req as import("./types.js").SchemaLike<unknown> };
+  }
+  return req as any;
+}
+
+/**
+ * Build request options based on content type. Supports:
+ * - application/json (default) — body → requestOptions.json
+ * - multipart/form-data — body (FormData | object) → requestOptions.body
+ * - application/x-www-form-urlencoded — body (URLSearchParams | object) → requestOptions.body
+ * - text/plain, application/octet-stream — body → requestOptions.body (string/binary)
+ */
+function buildRequestBodyOptions(
+  body: unknown,
+  contentType: string | undefined,
+): Record<string, unknown> {
+  if (body === undefined) return {};
+  const ct = (contentType ?? "application/json").toLowerCase();
+
+  if (ct.startsWith("application/json")) {
+    return { json: body };
+  }
+  if (ct.startsWith("multipart/form-data")) {
+    // If body is already FormData, pass through. Otherwise, convert object to FormData.
+    if (typeof FormData !== "undefined" && body instanceof FormData) {
+      return { body };
+    }
+    if (body && typeof body === "object") {
+      const fd = new FormData();
+      for (const [k, v] of Object.entries(body as Record<string, unknown>)) {
+        if (v instanceof Blob || v instanceof File) {
+          fd.append(k, v);
+        } else {
+          fd.append(k, String(v));
+        }
+      }
+      return { body: fd };
+    }
+    return { body };
+  }
+  if (ct.startsWith("application/x-www-form-urlencoded")) {
+    if (body instanceof URLSearchParams) return { body };
+    if (body && typeof body === "object") {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(body as Record<string, unknown>)) {
+        params.append(k, String(v));
+      }
+      return { body: params };
+    }
+    return { body };
+  }
+  // text/plain, application/octet-stream, other — raw pass-through
+  // Set Content-Type header if not already present (handled via headers in caller)
+  return { body };
+}
+
+/**
+ * Normalize response headers to lowercase keys + preserve multi-value shape.
+ * HTTP spec: header names are case-insensitive. Some headers (Set-Cookie) can have multiple values.
+ */
+function normalizeResponseHeaders(headers: unknown): Record<string, string | string[]> {
+  const result: Record<string, string | string[]> = {};
+  if (!headers) return result;
+
+  // Handle Headers object (fetch / ky response headers)
+  if (typeof (headers as Headers).forEach === "function" && typeof (headers as Headers).get === "function") {
+    // Use .forEach which handles multi-value headers by concatenation
+    (headers as Headers).forEach((value, key) => {
+      const lowerKey = key.toLowerCase();
+      // Set-Cookie is the common multi-value case; split comma for best-effort
+      if (lowerKey === "set-cookie") {
+        const existing = result[lowerKey];
+        const newValue = typeof existing === "string" ? [existing, value] : [...(existing ?? []), value];
+        result[lowerKey] = newValue;
+      } else {
+        result[lowerKey] = value;
+      }
+    });
+    return result;
+  }
+
+  // Handle plain object
+  if (typeof headers === "object") {
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      const lowerKey = key.toLowerCase();
+      if (Array.isArray(value)) {
+        result[lowerKey] = value.map(String);
+      } else if (value != null) {
+        result[lowerKey] = String(value);
+      }
+    }
+  }
+  return result;
 }
 
 // =============================================================================
@@ -124,6 +264,9 @@ function buildCaseTest<T, S>(
   const testId = `${contractId}.${caseKey}`;
   const testName = `${contractId} — ${caseKey}`;
 
+  // Contract-level deprecated propagates to cases (case value wins if both set)
+  const effectiveDeprecated = c.deprecated ?? spec.deprecated;
+
   // Auto-imply: non-headless requires → defaultRun: "opt-in"
   const requires = c.requires ?? "headless";
   const defaultRun = c.defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
@@ -140,15 +283,15 @@ function buildCaseTest<T, S>(
     description: c.description,
     tags: finalTags.length > 0 ? finalTags : undefined,
     deferred: c.deferred,
-    deprecated: c.deprecated,
+    deprecated: effectiveDeprecated,
     requires,
     defaultRun,
   };
 
   const fn = async (ctx: import("./types.js").TestContext) => {
     // 1. Deprecated → skip (takes precedence over deferred)
-    if (c.deprecated) {
-      ctx.skip(`deprecated: ${c.deprecated}`);
+    if (effectiveDeprecated) {
+      ctx.skip(`deprecated: ${effectiveDeprecated}`);
     }
     // 2. Deferred → skip
     if (c.deferred) {
@@ -168,20 +311,29 @@ function buildCaseTest<T, S>(
         );
       }
 
-      // 4. Resolve params and path
-      const params =
+      // 4. Resolve params and path (flatten ParamValue objects to strings)
+      const rawParams =
         typeof c.params === "function" ? c.params(state) : c.params;
+      const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
       const resolvedPath = resolveParams(path, params);
 
       // 5. Build request options
       const requestOptions: Record<string, unknown> = {};
       const body = typeof c.body === "function" ? (c.body as Function)(state) : c.body;
-      if (body !== undefined) requestOptions.json = body;
+
+      // Resolve content type: case override > contract default > application/json
+      const normalizedRequest = normalizeRequest(spec.request);
+      const effectiveContentType = c.contentType ?? normalizedRequest?.contentType ?? "application/json";
+
+      // Dispatch body serialization based on content type
+      if (body !== undefined) {
+        Object.assign(requestOptions, buildRequestBodyOptions(body, effectiveContentType));
+      }
       const headers = typeof c.headers === "function" ? (c.headers as Function)(state) : c.headers;
       if (headers) requestOptions.headers = headers;
       if (c.query) {
-        const q = typeof c.query === "function" ? c.query(state) : c.query;
-        requestOptions.searchParams = q;
+        const rawQuery = typeof c.query === "function" ? c.query(state) : c.query;
+        requestOptions.searchParams = flattenParamValues(rawQuery as Record<string, unknown> | undefined);
       }
       requestOptions.throwHttpErrors = false;
 
@@ -206,6 +358,12 @@ function buildCaseTest<T, S>(
 
       // 7. Assert status
       ctx.expect(res).toHaveStatus(c.expect.status);
+
+      // 7b. Validate response headers (if schema provided)
+      if (c.expect.headers) {
+        const normalizedHeaders = normalizeResponseHeaders(res.headers);
+        ctx.validate(normalizedHeaders, c.expect.headers, `${testId} response headers`);
+      }
 
       // 8. Parse response + validate schema
       let parsed: T;
@@ -288,28 +446,79 @@ function contractHttp<
     // Resolve effective requires/defaultRun (same logic as buildCaseTest)
     const effectiveRequires = caseSpec.requires ?? "headless";
     const effectiveDefaultRun = caseSpec.defaultRun ?? (effectiveRequires !== "headless" ? "opt-in" : "always");
+    // Effective deprecated: case wins, fall back to contract-level
+    const effectiveDeprecated = caseSpec.deprecated ?? spec.deprecated;
     // Lifecycle normalization: deprecated > deferred > active
     const lifecycle: import("./contract-types.js").CaseLifecycle =
-      caseSpec.deprecated ? "deprecated" :
+      effectiveDeprecated ? "deprecated" :
       caseSpec.deferred ? "deferred" :
       "active";
+
+    // Extract per-param schemas (only from object-shaped ParamValues, not string shorthand)
+    const paramSchemas = extractParamMetaSchemas(caseSpec.params);
+    const querySchemas = extractParamMetaSchemas(caseSpec.query);
+
+    // Merge case-level extensions over contract-level (spec.extensions is already defaults+contract merged)
+    const caseExtensions = mergeExtensions(spec.extensions, caseSpec.extensions);
+
     caseSchemas[caseKey] = {
       expectStatus: caseSpec.expect.status,
       responseSchema: caseSpec.expect.schema,
+      responseHeaders: caseSpec.expect.headers,
+      responseContentType: caseSpec.expect.contentType,
+      example: caseSpec.expect.example,
+      examples: caseSpec.expect.examples as Record<string, import("./contract-types.js").ContractExample<unknown>> | undefined,
+      paramSchemas,
+      querySchemas,
       description: caseSpec.description,
       deferred: caseSpec.deferred,
-      deprecated: caseSpec.deprecated,
+      deprecated: effectiveDeprecated,
       severity: caseSpec.severity,
       lifecycle,
       requires: effectiveRequires,
       defaultRun: effectiveDefaultRun,
+      extensions: caseExtensions,
     };
   }
 
+  // Normalize request (SchemaLike or RequestSpec object → { body, contentType })
+  const normalizedReq = normalizeRequest(spec.request);
+  const requestBodySchema = normalizedReq?.body;
+  const requestContentType = normalizedReq?.contentType;
+
   return createHttpContract(
-    id, spec.endpoint, tests, spec.request, spec.description, spec.feature,
-    caseSchemas, instanceName, security,
+    id, spec.endpoint, tests, requestBodySchema, spec.description, spec.feature,
+    caseSchemas, instanceName, security, spec.deprecated, spec.extensions,
+    requestContentType,
   );
+}
+
+/**
+ * Extract per-param schema metadata from a params/query object.
+ * Only collects entries where the ParamValue is an object (has `.value` + optional schema/description).
+ * String shorthand values produce no metadata.
+ */
+function extractParamMetaSchemas(
+  params: Record<string, unknown> | ((state: unknown) => Record<string, string>) | undefined,
+): Record<string, { schema?: import("./types.js").SchemaLike<unknown>; description?: string; required?: boolean; deprecated?: boolean }> | undefined {
+  if (!params || typeof params === "function") return undefined;
+  const result: Record<string, { schema?: import("./types.js").SchemaLike<unknown>; description?: string; required?: boolean; deprecated?: boolean }> = {};
+  let hasAny = false;
+  for (const [key, val] of Object.entries(params)) {
+    if (val && typeof val === "object" && !Array.isArray(val) && "value" in val) {
+      const pv = val as { schema?: import("./types.js").SchemaLike<unknown>; description?: string; required?: boolean; deprecated?: boolean };
+      if (pv.schema !== undefined || pv.description !== undefined || pv.required !== undefined || pv.deprecated !== undefined) {
+        result[key] = {
+          schema: pv.schema,
+          description: pv.description,
+          required: pv.required,
+          deprecated: pv.deprecated,
+        };
+        hasAny = true;
+      }
+    }
+  }
+  return hasAny ? result : undefined;
 }
 
 // =============================================================================
@@ -555,12 +764,30 @@ function mergeHttpDefaults(
     ...(defaults.tags ?? []),
     ...(spec.tags ?? []),
   ];
+  // Merge extensions: defaults < contract (contract key overrides defaults key)
+  const mergedExtensions = mergeExtensions(defaults.extensions, spec.extensions);
   return {
     ...spec,
     client: spec.client ?? defaults.client,
     feature: spec.feature ?? defaults.feature,
     tags: mergedTags.length > 0 ? mergedTags : undefined,
+    extensions: mergedExtensions,
   };
+}
+
+/**
+ * Merge two Extensions records. Right wins on key conflict.
+ * Returns undefined if result would be empty.
+ */
+function mergeExtensions(
+  base: import("./contract-types.js").Extensions | undefined,
+  override: import("./contract-types.js").Extensions | undefined,
+): import("./contract-types.js").Extensions | undefined {
+  if (!base && !override) return undefined;
+  const merged: Record<string, unknown> = { ...(base ?? {}), ...(override ?? {}) };
+  return Object.keys(merged).length > 0
+    ? (merged as import("./contract-types.js").Extensions)
+    : undefined;
 }
 
 /**
@@ -592,10 +819,12 @@ function createHttpFactory(
 
   factory.with = (name: string, more: HttpContractDefaults): HttpContractFactory => {
     const mergedTags = [...(defaults?.tags ?? []), ...(more.tags ?? [])];
+    const mergedExtensions = mergeExtensions(defaults?.extensions, more.extensions);
     return createHttpFactory({
       ...defaults,
       ...more,
       tags: mergedTags.length > 0 ? mergedTags : undefined,
+      extensions: mergedExtensions,
       _name: name,
     });
   };

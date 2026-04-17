@@ -1582,6 +1582,11 @@ export type {
   FailureClassification,
   ContractProjection,
   ProtocolContract,
+  NormalizedHeaders,
+  ContractExample,
+  ParamValue,
+  Extensions,
+  RequestSpec,
 } from "./contract-types.js";
 
 // Session API

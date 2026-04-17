@@ -52,6 +52,8 @@ export {
 export type {
   NormalizedContractMeta,
   NormalizedCaseMeta,
+  NormalizedExample,
+  NormalizedParamMeta,
   ExtractedContract,
   ExtractionResult,
   CaseLifecycle,

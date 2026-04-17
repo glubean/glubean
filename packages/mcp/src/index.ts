@@ -1453,14 +1453,30 @@ function contractsToOpenApi(
     const responses: Record<string, unknown> = {};
     for (const cas of c.cases) {
       const statusCode = String((cas.protocolExpect as any)?.status ?? 200);
+      const contentType = cas.responseContentType ?? "application/json";
       if (!responses[statusCode]) {
         const resp: Record<string, unknown> = {
           description: cas.description ?? "",
         };
-        if (cas.responseSchema) {
-          resp.content = {
-            "application/json": { schema: cas.responseSchema },
-          };
+        // Content (schema + examples)
+        if (cas.responseSchema || cas.examples) {
+          const contentEntry: Record<string, unknown> = {};
+          if (cas.responseSchema) contentEntry.schema = cas.responseSchema;
+          if (cas.examples) contentEntry.examples = cas.examples;
+          resp.content = { [contentType]: contentEntry };
+        }
+        // Response headers
+        if (cas.responseHeaders) {
+          // Extract per-header schemas from the response headers JSON Schema
+          // Expected shape: { type: "object", properties: { "content-type": {...}, ... } }
+          const headersSchema = cas.responseHeaders as any;
+          if (headersSchema?.properties) {
+            const headersOut: Record<string, unknown> = {};
+            for (const [headerName, headerSchema] of Object.entries(headersSchema.properties)) {
+              headersOut[headerName] = { schema: headerSchema };
+            }
+            resp.headers = headersOut;
+          }
         }
         responses[statusCode] = resp;
       }
@@ -1473,6 +1489,17 @@ function contractsToOpenApi(
       responses,
     };
     if (c.feature) operation.tags = [c.feature];
+    // Contract-level deprecated flag
+    if (c.deprecated) {
+      operation.deprecated = true;
+      operation["x-deprecated-reason"] = c.deprecated;
+    }
+    // Contract-level OpenAPI extensions (x-* keys)
+    if ((c as any).extensions) {
+      for (const [extKey, extVal] of Object.entries((c as any).extensions)) {
+        operation[extKey] = extVal;
+      }
+    }
 
     // Operation-level security from contract instance
     if (secMapping) {
@@ -1481,21 +1508,54 @@ function contractsToOpenApi(
       operation.security = []; // explicitly public
     }
 
-    // Extract path parameters
+    // Extract path parameters from URL + merge with per-case param schemas (first case wins)
     const paramMatches = apiPath.matchAll(/\{(\w+)\}/g);
-    const params = [...paramMatches].map((m) => ({
-      name: m[1],
-      in: "path",
-      required: true,
-      schema: { type: "string" },
-    }));
-    if (params.length > 0) operation.parameters = params;
+    const firstCase = c.cases[0];
+    const paramMetas = (firstCase as any)?.paramSchemas as Record<string, {
+      schema?: unknown;
+      description?: string;
+      required?: boolean;
+      deprecated?: boolean;
+    }> | undefined;
+    const queryMetas = (firstCase as any)?.querySchemas as Record<string, {
+      schema?: unknown;
+      description?: string;
+      required?: boolean;
+      deprecated?: boolean;
+    }> | undefined;
+
+    const pathParams = [...paramMatches].map((m) => {
+      const name = m[1];
+      const meta = paramMetas?.[name];
+      return {
+        name,
+        in: "path",
+        required: meta?.required ?? true,
+        schema: meta?.schema ?? { type: "string" },
+        ...(meta?.description ? { description: meta.description } : {}),
+        ...(meta?.deprecated ? { deprecated: true } : {}),
+      };
+    });
+    // Query parameters (only ones with metadata — string-only queries are not enumerated here)
+    const queryParams = queryMetas
+      ? Object.entries(queryMetas).map(([name, meta]) => ({
+          name,
+          in: "query",
+          required: meta.required ?? false,
+          schema: meta.schema ?? { type: "string" },
+          ...(meta.description ? { description: meta.description } : {}),
+          ...(meta.deprecated ? { deprecated: true } : {}),
+        }))
+      : [];
+    const allParams = [...pathParams, ...queryParams];
+    if (allParams.length > 0) operation.parameters = allParams;
 
     // Request body
     if (c.requestSchema) {
+      const reqContentType = (c as any).requestContentType ?? "application/json";
       operation.requestBody = {
         content: {
-          "application/json": { schema: c.requestSchema },
+          [reqContentType]: { schema: c.requestSchema },
         },
       };
     }

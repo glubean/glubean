@@ -277,6 +277,7 @@ export class Scanner {
             protocol: ec.protocol,
             description: ec.description,
             feature: ec.feature,
+            deprecated: ec.deprecated,
             line: 0,
             cases: ec.cases.map((c) => ({
               key: c.key,
@@ -288,6 +289,8 @@ export class Scanner {
               severity: c.severity,
               requires: c.requires,
               defaultRun: c.defaultRun,
+              hasHeaderSchema: c.responseHeaders != null,
+              hasExample: c.examples != null,
               line: 0,
             })),
           });
