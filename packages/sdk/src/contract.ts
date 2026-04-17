@@ -43,6 +43,9 @@ function createHttpContract(
   deprecated?: string,
   extensions?: import("./contract-types.js").Extensions,
   requestContentType?: string,
+  requestHeaders?: import("./types.js").SchemaLike<Record<string, string>>,
+  requestExample?: unknown,
+  requestExamples?: Record<string, import("./contract-types.js").ContractExample<unknown>>,
 ): HttpContract {
   const arr = [...tests];
 
@@ -75,7 +78,8 @@ function createHttpContract(
 
   return Object.assign(arr, {
     id, endpoint, request, description, feature,
-    instanceName, security, deprecated, extensions, requestContentType,
+    instanceName, security, deprecated, extensions,
+    requestContentType, requestHeaders, requestExample, requestExamples,
     _caseSchemas: caseSchemas,
     asSteps, asStep,
   }) as HttpContract;
@@ -133,8 +137,20 @@ function resolveParams(
 }
 
 /**
+ * Field names on the structured RequestSpec form. If any of these exist on `req`,
+ * we treat it as structured; otherwise we treat it as a bare SchemaLike body shorthand.
+ * This is the authoritative disambiguator — do NOT rely on probing SchemaLike methods
+ * (safeParse/parse), because SchemaLike allows either one to be present.
+ */
+const STRUCTURED_REQUEST_FIELDS = ["body", "contentType", "headers", "example", "examples"] as const;
+
+/**
  * Normalize RequestSpec to a structured form { body, contentType, headers, example, examples }.
  * Accepts either bare SchemaLike (treated as JSON body) or already-structured object.
+ *
+ * Disambiguation rule: structured form is recognized by presence of any known
+ * structured field. Otherwise the input is a SchemaLike (either safeParse-only
+ * or parse-only — both are valid).
  */
 function normalizeRequest(
   req: import("./contract-types.js").RequestSpec | undefined,
@@ -145,12 +161,16 @@ function normalizeRequest(
   example?: unknown;
   examples?: Record<string, import("./contract-types.js").ContractExample<unknown>>;
 } | undefined {
-  if (!req) return undefined;
-  // SchemaLike duck-type: has safeParse, no body field
-  if (typeof (req as any).safeParse === "function" && !("body" in (req as any))) {
-    return { body: req as import("./types.js").SchemaLike<unknown> };
+  if (!req || typeof req !== "object") return undefined;
+  // Structured form: has any of the known structured fields
+  const hasStructuredField = STRUCTURED_REQUEST_FIELDS.some(
+    (f) => f in (req as Record<string, unknown>),
+  );
+  if (hasStructuredField) {
+    return req as any;
   }
-  return req as any;
+  // Otherwise treat as SchemaLike (safeParse-only or parse-only)
+  return { body: req as import("./types.js").SchemaLike<unknown> };
 }
 
 /**
@@ -481,15 +501,16 @@ function contractHttp<
     };
   }
 
-  // Normalize request (SchemaLike or RequestSpec object → { body, contentType })
+  // Normalize request (SchemaLike or RequestSpec object → structured fields)
   const normalizedReq = normalizeRequest(spec.request);
-  const requestBodySchema = normalizedReq?.body;
-  const requestContentType = normalizedReq?.contentType;
 
   return createHttpContract(
-    id, spec.endpoint, tests, requestBodySchema, spec.description, spec.feature,
+    id, spec.endpoint, tests, normalizedReq?.body, spec.description, spec.feature,
     caseSchemas, instanceName, security, spec.deprecated, spec.extensions,
-    requestContentType,
+    normalizedReq?.contentType,
+    normalizedReq?.headers,
+    normalizedReq?.example,
+    normalizedReq?.examples,
   );
 }
 

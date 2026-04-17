@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import {
   buildLastRunSummary,
+  contractsToOpenApi,
   diagnoseProjectConfig,
   discoverTestsFromFile,
   filterLocalDebugEvents,
@@ -546,4 +547,294 @@ export const greeter = contract.grpc("greeter", {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// =============================================================================
+// OpenAPI generation regression tests (Phase 1+2 patch)
+// =============================================================================
+
+test("contractsToOpenApi: multiple cases with same status merge examples + headers (P1 regression)", () => {
+  const contract = {
+    id: "list-users",
+    exportName: "listUsers",
+    protocol: "http",
+    target: "GET /users",
+    description: "List users",
+    feature: "users",
+    instanceName: undefined,
+    security: undefined,
+    schemaMount: "response.body",
+    requestSchema: null,
+    cases: [
+      {
+        key: "defaultPage",
+        description: "default",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 200 },
+        responseSchema: { type: "object", properties: { items: { type: "array" } } },
+        responseContentType: "application/json",
+        examples: { default: { value: { items: [] } } },
+        responseHeaders: { type: "object", properties: { "x-total-count": { type: "string" } } },
+      },
+      {
+        key: "withLimit",
+        description: "limited",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 200 },
+        responseSchema: null,
+        examples: { default: { value: { items: [{}] } } },
+        responseHeaders: { type: "object", properties: { "x-rate-limit": { type: "string" } } },
+      },
+    ],
+  };
+
+  const spec = contractsToOpenApi([contract as any]);
+  const op = (spec as any).paths["/users"].get;
+  expect(op).toBeDefined();
+
+  const r200 = op.responses["200"];
+  expect(r200.content["application/json"].schema).toBeDefined();
+
+  const examples = r200.content["application/json"].examples;
+  expect(examples.defaultPage).toEqual({ value: { items: [] } });
+  expect(examples.withLimit).toEqual({ value: { items: [{}] } });
+
+  expect(r200.headers["x-total-count"]).toBeDefined();
+  expect(r200.headers["x-rate-limit"]).toBeDefined();
+});
+
+test("contractsToOpenApi: param schemas merged across all cases (P2 regression)", () => {
+  const contract = {
+    id: "get-user",
+    exportName: "getUser",
+    protocol: "http",
+    target: "GET /users/:id",
+    description: "Get user",
+    feature: "users",
+    instanceName: undefined,
+    security: undefined,
+    schemaMount: "response.body",
+    requestSchema: null,
+    cases: [
+      {
+        key: "found",
+        description: "found",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 200 },
+        responseSchema: null,
+      },
+      {
+        key: "notFound",
+        description: "not found",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 404 },
+        responseSchema: null,
+        paramSchemas: {
+          id: { schema: { type: "string", format: "uuid" }, description: "User ID" },
+        },
+        querySchemas: {
+          include: { description: "Related fields", required: false },
+        },
+      },
+    ],
+  };
+
+  const spec = contractsToOpenApi([contract as any]);
+  const op = (spec as any).paths["/users/{id}"].get;
+  expect(op.parameters).toBeDefined();
+
+  const byName = Object.fromEntries(op.parameters.map((p: any) => [p.name, p]));
+  expect(byName.id.schema).toEqual({ type: "string", format: "uuid" });
+  expect(byName.id.description).toBe("User ID");
+  expect(byName.include).toBeDefined();
+  expect(byName.include.description).toBe("Related fields");
+});
+
+test("contractsToOpenApi: same status + different content types get separate content entries (P1 regression)", () => {
+  const contract = {
+    id: "list-users",
+    exportName: "listUsers",
+    protocol: "http",
+    target: "GET /users",
+    description: "list",
+    feature: "users",
+    schemaMount: "response.body",
+    requestSchema: null,
+    cases: [
+      {
+        key: "json",
+        description: "json output",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 200 },
+        responseSchema: { type: "object" },
+        responseContentType: "application/json",
+        examples: { default: { value: { items: [] } } },
+      },
+      {
+        key: "csv",
+        description: "csv output",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 200 },
+        responseSchema: { type: "string" },
+        responseContentType: "text/csv",
+        examples: { default: { value: "id,name\n1,Alice" } },
+      },
+    ],
+  };
+
+  const spec = contractsToOpenApi([contract as any]);
+  const r200 = (spec as any).paths["/users"].get.responses["200"];
+
+  // Both content types present under the same status
+  expect(r200.content["application/json"]).toBeDefined();
+  expect(r200.content["text/csv"]).toBeDefined();
+
+  // Each content type preserves its own schema and example
+  expect(r200.content["application/json"].schema).toEqual({ type: "object" });
+  expect(r200.content["text/csv"].schema).toEqual({ type: "string" });
+  expect(r200.content["application/json"].examples.json).toBeDefined();
+  expect(r200.content["text/csv"].examples.csv).toBeDefined();
+});
+
+test("contractsToOpenApi: param metadata fields merge independently across cases (P2 regression)", () => {
+  const contract = {
+    id: "get-user",
+    exportName: "getUser",
+    protocol: "http",
+    target: "GET /users/:id",
+    description: "Get user",
+    feature: "users",
+    schemaMount: "response.body",
+    requestSchema: null,
+    cases: [
+      {
+        key: "withDescription",
+        description: "first",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 200 },
+        responseSchema: null,
+        // Only description for id
+        paramSchemas: { id: { description: "User identifier" } },
+      },
+      {
+        key: "withSchema",
+        description: "second",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 404 },
+        responseSchema: null,
+        // Only schema + deprecated for id
+        paramSchemas: { id: { schema: { type: "string", format: "uuid" }, deprecated: true } },
+      },
+    ],
+  };
+
+  const spec = contractsToOpenApi([contract as any]);
+  const op = (spec as any).paths["/users/{id}"].get;
+  const byName = Object.fromEntries(op.parameters.map((p: any) => [p.name, p]));
+
+  // All three fields collected from the two different cases
+  expect(byName.id.description).toBe("User identifier");
+  expect(byName.id.schema).toEqual({ type: "string", format: "uuid" });
+  expect(byName.id.deprecated).toBe(true);
+});
+
+test("contractsToOpenApi: request.headers emits OpenAPI header parameters (P2 regression)", () => {
+  const contract = {
+    id: "create",
+    exportName: "create",
+    protocol: "http",
+    target: "POST /things",
+    description: "Create",
+    feature: "things",
+    schemaMount: "response.body",
+    requestSchema: { type: "object" },
+    requestHeaders: {
+      type: "object",
+      required: ["x-api-key"],
+      properties: {
+        "x-api-key": { type: "string" },
+        "x-request-id": { type: "string", format: "uuid" },
+      },
+    },
+    cases: [
+      {
+        key: "ok",
+        description: "ok",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 201 },
+        responseSchema: null,
+      },
+    ],
+  };
+
+  const spec = contractsToOpenApi([contract as any]);
+  const op = (spec as any).paths["/things"].post;
+  expect(op.parameters).toBeDefined();
+
+  const byName = Object.fromEntries(op.parameters.map((p: any) => [`${p.in}:${p.name}`, p]));
+  expect(byName["header:x-api-key"]).toBeDefined();
+  expect(byName["header:x-api-key"].required).toBe(true);
+  expect(byName["header:x-api-key"].schema).toEqual({ type: "string" });
+
+  expect(byName["header:x-request-id"]).toBeDefined();
+  expect(byName["header:x-request-id"].required).toBe(false);
+  expect(byName["header:x-request-id"].schema).toEqual({ type: "string", format: "uuid" });
+});
+
+test("contractsToOpenApi: request body emits schema + example(s) (P1 regression)", () => {
+  const contract = {
+    id: "create-user",
+    exportName: "createUser",
+    protocol: "http",
+    target: "POST /users",
+    description: "Create user",
+    feature: "users",
+    instanceName: undefined,
+    security: undefined,
+    schemaMount: "response.body",
+    requestSchema: { type: "object", properties: { name: { type: "string" } } },
+    requestContentType: "application/json",
+    requestExample: { name: "Alice" },
+    requestExamples: {
+      admin: { value: { name: "Admin" }, summary: "Admin user" },
+    },
+    cases: [
+      {
+        key: "success",
+        description: "ok",
+        lifecycle: "active",
+        severity: "warning",
+        schemaMount: "response.body",
+        protocolExpect: { status: 201 },
+        responseSchema: null,
+      },
+    ],
+  };
+
+  const spec = contractsToOpenApi([contract as any]);
+  const op = (spec as any).paths["/users"].post;
+  expect(op.requestBody).toBeDefined();
+  const content = op.requestBody.content["application/json"];
+  expect(content.schema).toBeDefined();
+  expect(content.examples.default).toEqual({ value: { name: "Alice" } });
+  expect(content.examples.admin?.value).toEqual({ name: "Admin" });
+  expect(content.examples.admin?.summary).toBe("Admin user");
 });

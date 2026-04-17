@@ -1967,6 +1967,46 @@ test("urlencoded content-type: object body converts to URLSearchParams", async (
   expect(params.get("password")).toBe("s3cret");
 });
 
+test("request: parse-only SchemaLike is recognized as body shorthand (P1 regression)", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+  // Schema that only implements parse() (no safeParse) — must still be treated as body
+  const parseOnlySchema = { parse: (data: unknown) => data };
+
+  const c = api("parse-only", {
+    endpoint: "POST /thing",
+    request: parseOnlySchema as any,
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  });
+
+  expect(c.request).toBe(parseOnlySchema);
+});
+
+test("request: structured metadata persists on HttpContract (P1 regression)", () => {
+  const client = createMockClient();
+  const api = contract.http.with("test", { client });
+  const bodySchema = { safeParse: () => ({ success: true as const, data: {} }) };
+  const headersSchema = { safeParse: () => ({ success: true as const, data: {} }) };
+
+  const c = api("structured-req", {
+    endpoint: "POST /thing",
+    request: {
+      body: bodySchema,
+      contentType: "application/json",
+      headers: headersSchema,
+      example: { id: 1 },
+      examples: { admin: { value: { role: "admin" } } },
+    },
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  });
+
+  expect(c.request).toBe(bodySchema);
+  expect(c.requestContentType).toBe("application/json");
+  expect(c.requestHeaders).toBe(headersSchema);
+  expect(c.requestExample).toEqual({ id: 1 });
+  expect(c.requestExamples?.admin?.value).toEqual({ role: "admin" });
+});
+
 test("contentType inherits from contract request when case doesn't override", async () => {
   let capturedBody: unknown;
   const client = {

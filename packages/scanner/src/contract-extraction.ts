@@ -88,6 +88,12 @@ export interface NormalizedContractMeta {
   requestSchema: unknown | null;
   /** Request content type (HTTP-specific; default application/json) */
   requestContentType?: string;
+  /** Request headers schema (OpenAPI docs) */
+  requestHeaders?: unknown | null;
+  /** Single request example */
+  requestExample?: unknown;
+  /** Named request examples */
+  requestExamples?: Record<string, NormalizedExample>;
   /** Contract-level deprecation reason (propagates to all cases) */
   deprecated?: string;
   /** Contract-level merged extensions (defaults < contract). Keys are x-* OpenAPI extensions. */
@@ -125,6 +131,9 @@ export function isHttpContract(val: unknown): val is {
   deprecated?: string;
   extensions?: Record<string, unknown>;
   requestContentType?: string;
+  requestHeaders?: { toJSONSchema?: () => unknown };
+  requestExample?: unknown;
+  requestExamples?: Record<string, { value: unknown; summary?: string; description?: string }>;
   request?: { toJSONSchema?: () => unknown };
   _caseSchemas?: Record<string, {
     expectStatus?: number;
@@ -311,6 +320,16 @@ function httpContractToNormalized(
     schemaMount: "response.body",
     requestSchema: schemaToJsonSchema(value.request),
     requestContentType: value.requestContentType,
+    requestHeaders: schemaToJsonSchema(value.requestHeaders),
+    requestExample: value.requestExample,
+    requestExamples: value.requestExamples
+      ? Object.fromEntries(
+          Object.entries(value.requestExamples).map(([k, ex]) => [
+            k,
+            { value: ex.value, summary: ex.summary, description: ex.description },
+          ]),
+        )
+      : undefined,
     deprecated: value.deprecated,
     extensions: value.extensions,
     cases,

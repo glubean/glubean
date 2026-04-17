@@ -476,11 +476,20 @@ export interface HttpContract extends Array<Test> {
   /** Security scheme declaration */
   readonly security?: HttpSecurityScheme;
 
-  /** Endpoint-level request schema, normalized to body SchemaLike */
+  /** Endpoint-level request body schema, normalized from RequestSpec */
   readonly request?: SchemaLike<unknown>;
 
   /** Endpoint-level request content type (default: "application/json") */
   readonly requestContentType?: string;
+
+  /** Endpoint-level request headers schema (OpenAPI docs) */
+  readonly requestHeaders?: SchemaLike<Record<string, string>>;
+
+  /** Single request example for OpenAPI docs */
+  readonly requestExample?: unknown;
+
+  /** Named request examples for OpenAPI docs */
+  readonly requestExamples?: Record<string, ContractExample<unknown>>;
 
   /** Contract-level deprecation reason (propagates to all cases) */
   readonly deprecated?: string;
