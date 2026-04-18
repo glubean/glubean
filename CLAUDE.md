@@ -11,7 +11,7 @@
 sdk, scanner, redaction, runner, cli
 
 - **All core packages share the same minor version** (currently `0.1`). Patch versions are independent — only bump the package(s) you changed.
-- Pre-launch: PATCH only (`0.1.x`).
+- Pre-launch: PATCH only (`0.1.x`) **except** one-off minor jumps for architecture rewrites. v0.1.x → v0.2.0 happens once at the contract-system rewrite (2026-04-18), and is OK because there are no external users.
 - Bump command (example): `pnpm --filter @glubean/cli exec -- npm version 0.1.X --no-git-tag-version`
 
 ### Plugin packages (versioned independently)
