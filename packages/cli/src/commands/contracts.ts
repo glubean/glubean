@@ -251,20 +251,33 @@ export async function contractsCommand(
       : ec.feature,
     deprecated: ec.deprecated,
     line: 0,
-    cases: ec.cases.map((c) => ({
-      key: c.key,
-      description: c.description,
-      expectStatus: (c.protocolExpect as any)?.status,
-      deferred: c.deferredReason,
-      deprecated: c.deprecatedReason,
-      lifecycle: c.lifecycle,
-      severity: c.severity,
-      requires: c.requires as any,
-      defaultRun: c.defaultRun as any,
-      hasHeaderSchema: c.responseHeaders != null,
-      hasExample: c.examples != null,
-      line: 0,
-    })),
+    cases: ec.cases.map((c) => {
+      // Scanner emits `schemas` as an opaque blob after v0.2. For HTTP
+      // contracts the shape is { response: { status, headers, examples, ... } }.
+      const schemas = c.schemas as
+        | {
+            response?: {
+              status?: number;
+              headers?: unknown;
+              examples?: unknown;
+            };
+          }
+        | undefined;
+      return {
+        key: c.key,
+        description: c.description,
+        expectStatus: schemas?.response?.status,
+        deferred: c.deferredReason,
+        deprecated: c.deprecatedReason,
+        lifecycle: c.lifecycle,
+        severity: c.severity,
+        requires: c.requires as any,
+        defaultRun: c.defaultRun as any,
+        hasHeaderSchema: schemas?.response?.headers != null,
+        hasExample: schemas?.response?.examples != null,
+        line: 0,
+      };
+    }),
   }));
 
   // Output projection

@@ -33,6 +33,168 @@ import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
 type Vars = Record<string, string>;
 const METADATA_SCHEMA_VERSION = "1";
 
+// ── HTTP-shaped legacy view over new NormalizedContractMeta ─────────────────
+//
+// After the v0.2 contract rewrite, scanner emits adapter-agnostic output with
+// schemas as an opaque blob. MCP's OpenAPI generation + project-contracts
+// consolidation were written against the pre-rewrite flat HTTP shape. Rather
+// than rewriting those ~300 lines inline, we produce a "legacy HTTP view"
+// that flattens the HTTP schemas back out onto the contract/case objects.
+//
+// For non-HTTP protocols the legacy fields will be undefined. OpenAPI
+// generation naturally skips contracts where it can't find HTTP info.
+//
+// This helper will be removed in a follow-up that migrates full OpenAPI
+// generation into `@glubean/sdk`'s `sdk/src/contract-http/openapi.ts`.
+
+interface LegacyHttpCase {
+  key: string;
+  description?: string;
+  lifecycle: string;
+  severity: string;
+  deferredReason?: string;
+  deprecatedReason?: string;
+  requires?: string;
+  defaultRun?: string;
+  tags?: string[];
+  extensions?: Record<string, unknown>;
+  // HTTP-flattened fields (undefined for non-HTTP protocols):
+  protocolExpect?: { status?: number };
+  responseSchema?: unknown;
+  responseContentType?: string;
+  responseHeaders?: unknown;
+  examples?: Record<string, { value: unknown; summary?: string; description?: string }>;
+  paramSchemas?: Record<string, { schema?: unknown; description?: string; required?: boolean; deprecated?: boolean }>;
+  querySchemas?: Record<string, { schema?: unknown; description?: string; required?: boolean; deprecated?: boolean }>;
+}
+
+interface LegacyHttpContract {
+  id: string;
+  exportName: string;
+  protocol: string;
+  target: string;
+  description?: string;
+  feature?: string;
+  instanceName?: string;
+  tags?: string[];
+  deprecated?: string;
+  extensions?: Record<string, unknown>;
+  security?: unknown;
+  requestSchema?: unknown;
+  requestContentType?: string;
+  requestHeaders?: unknown;
+  requestExample?: unknown;
+  requestExamples?: Record<string, { value: unknown; summary?: string; description?: string }>;
+  cases: LegacyHttpCase[];
+}
+
+function toLegacyHttpContract(c: SharedExtractedContract): LegacyHttpContract {
+  // Support BOTH shapes during transitional P4:
+  //   - new (v0.2 scanner output): fields nested under `schemas.request` /
+  //     `case.schemas.response` etc.
+  //   - old (pre-v0.2 test fixtures cast `as any`): fields flat on the
+  //     contract / case objects. Regression tests for OpenAPI generation
+  //     still use the old shape inline. Maintaining backward read here
+  //     avoids rewriting those tests in the same phase.
+  const cAny = c as any;
+  const schemas = cAny.schemas as
+    | {
+        request?: {
+          body?: unknown;
+          contentType?: string;
+          headers?: unknown;
+          example?: unknown;
+          examples?: Record<string, { value: unknown; summary?: string; description?: string }>;
+        };
+        security?: unknown;
+      }
+    | undefined;
+
+  return {
+    id: c.id,
+    exportName: c.exportName,
+    protocol: c.protocol,
+    target: c.target,
+    description: c.description,
+    feature: c.feature,
+    instanceName: c.instanceName,
+    tags: c.tags,
+    deprecated: c.deprecated,
+    extensions: c.extensions,
+    security: schemas?.security ?? cAny.security,
+    requestSchema: schemas?.request?.body ?? cAny.requestSchema,
+    requestContentType: schemas?.request?.contentType ?? cAny.requestContentType,
+    requestHeaders: schemas?.request?.headers ?? cAny.requestHeaders,
+    requestExample: schemas?.request?.example ?? cAny.requestExample,
+    requestExamples: schemas?.request?.examples ?? cAny.requestExamples,
+    cases: c.cases.map((cs): LegacyHttpCase => {
+      const csAny = cs as any;
+      const cs_schemas = csAny.schemas as
+        | {
+            response?: {
+              status?: number;
+              body?: unknown;
+              contentType?: string;
+              headers?: unknown;
+              example?: unknown;
+              examples?: Record<
+                string,
+                { value: unknown; summary?: string; description?: string }
+              >;
+            };
+            params?: Record<
+              string,
+              {
+                schema?: unknown;
+                description?: string;
+                required?: boolean;
+                deprecated?: boolean;
+              }
+            >;
+            query?: Record<
+              string,
+              {
+                schema?: unknown;
+                description?: string;
+                required?: boolean;
+                deprecated?: boolean;
+              }
+            >;
+          }
+        | undefined;
+      const response = cs_schemas?.response;
+      return {
+        key: cs.key,
+        description: cs.description,
+        lifecycle: cs.lifecycle,
+        severity: cs.severity,
+        deferredReason: cs.deferredReason,
+        deprecatedReason: cs.deprecatedReason,
+        requires: cs.requires,
+        defaultRun: cs.defaultRun,
+        tags: cs.tags,
+        extensions: cs.extensions,
+        protocolExpect:
+          response?.status != null
+            ? { status: response.status }
+            : csAny.protocolExpect,
+        responseSchema: response?.body ?? csAny.responseSchema,
+        responseContentType: response?.contentType ?? csAny.responseContentType,
+        responseHeaders: response?.headers ?? csAny.responseHeaders,
+        examples: response?.examples ?? csAny.examples,
+        paramSchemas: cs_schemas?.params ?? csAny.paramSchemas,
+        querySchemas: cs_schemas?.query ?? csAny.querySchemas,
+      };
+    }),
+  };
+}
+
+function toLegacyHttpContracts(
+  contracts: SharedExtractedContract[],
+): LegacyHttpContract[] {
+  return contracts.map(toLegacyHttpContract);
+}
+
 // ── MCP trace header stripping ──────────────────────────────────────────────
 
 interface McpTraceConfig {
@@ -1088,7 +1250,9 @@ server.registerTool(
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
     const result = await sharedExtractFromProject(rootDir);
-    const { contracts, errors } = result;
+    const { errors } = result;
+    // Translate new-shape contracts to legacy HTTP view (§P4 shim).
+    const contracts = toLegacyHttpContracts(result.contracts);
 
     if (contracts.length === 0) {
       return {
@@ -1103,7 +1267,7 @@ server.registerTool(
     }
 
     // Group by instanceName → feature (instance-aware grouping)
-    const featureMap = new Map<string, SharedExtractedContract[]>();
+    const featureMap = new Map<string, LegacyHttpContract[]>();
     for (const c of contracts) {
       const key = c.instanceName
         ? `${c.instanceName}:${c.feature ?? c.target}`
@@ -1420,9 +1584,14 @@ function securityToOpenApi(security: unknown, instanceName?: string): { name: st
 }
 
 export function contractsToOpenApi(
-  contracts: SharedExtractedContract[],
+  rawContracts: SharedExtractedContract[],
   title = "API Specification",
 ): Record<string, unknown> {
+  // Convert new-shape contracts to legacy HTTP view so the generation logic
+  // below (written against the pre-v0.2 shape) keeps working. Non-HTTP
+  // protocols are naturally skipped by the `protocol !== "http"` check.
+  const contracts = toLegacyHttpContracts(rawContracts);
+
   const paths: Record<string, Record<string, unknown>> = {};
   const tags = new Set<string>();
   const securitySchemes: Record<string, Record<string, unknown>> = {};
