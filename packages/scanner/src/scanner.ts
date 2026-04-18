@@ -269,11 +269,14 @@ export class Scanner {
       }
     }
 
-    // Phase 4: Extract contract metadata from contract files
+    // Phase 4: Extract contract metadata from contract AND flow files.
+    // Both file types can export contracts (a .flow.ts that composes contracts
+    // inline is a common pattern). Duplicates across files are handled by
+    // downstream consumers treating the contract id as authoritative.
     // Uses shared runtime extraction (supports both old and .with() syntax).
     // Falls back to static regex if runtime import fails.
     const contracts: ContractStaticMeta[] = [];
-    for (const filePath of contractFiles) {
+    for (const filePath of [...contractFiles, ...flowFiles]) {
       const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
       const result = await extractContractFromFile(absolutePath);
 

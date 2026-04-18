@@ -841,12 +841,11 @@ export function traceComputeFn(
 ): { reads: string[]; writes: string[] } {
   const reads = new Set<string>();
   const proxy = makeComputeProxy("state", reads);
-  let result: unknown;
-  try {
-    result = fn(proxy);
-  } catch {
-    return { reads: [], writes: [] };
-  }
+  // compute fn is permitted to do arbitrary synchronous TS — the proxy is
+  // tolerant of method calls / coercion / iteration via its permissive
+  // trap rules, so any exception here is genuine (e.g. fn threw explicitly).
+  // Don't silently swallow: let the error propagate so callers surface it.
+  const result = fn(proxy);
   const writes =
     result && typeof result === "object" && !Array.isArray(result)
       ? Object.keys(result as object).filter((k) => typeof k === "string")
@@ -855,7 +854,10 @@ export function traceComputeFn(
 }
 
 function makeComputeProxy(rootPath: string, reads: Set<string>): any {
-  return new Proxy(function dummy() {}, {
+  // Arrow-function target: callable (for `apply` trap on method calls) but
+  // does NOT own `prototype`, so `ownKeys` returning [] is valid and spread
+  // (`{ ...s }`) works without triggering a Proxy invariant violation.
+  return new Proxy((() => {}) as unknown as object, {
     get(_target, prop) {
       if (prop === Symbol.toPrimitive) return () => "";
       if (prop === "toString") return () => "";
@@ -887,7 +889,7 @@ function makeComputeProxy(rootPath: string, reads: Set<string>): any {
  * returns itself. Used for depth-2+ of compute tracing where we don't track.
  */
 function makePermissiveChildProxy(): any {
-  const self: any = new Proxy(function dummy() {}, {
+  const self: any = new Proxy((() => {}) as unknown as object, {
     get(_target, prop) {
       if (prop === Symbol.toPrimitive) return () => "";
       if (prop === "toString") return () => "";
