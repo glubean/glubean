@@ -1,31 +1,27 @@
 /**
- * Types for the contract() API.
+ * Core types for the protocol-agnostic contract system.
  *
- * contract.http() is a declarative test factory for any HTTP API:
- * spec in, Test[] out. Users provide their own HTTP clients via
- * configure() — the contract layer has no opinion on auth strategy.
+ * This file defines:
+ *   - Protocol-agnostic enums (lifecycle / severity / requires / defaultRun)
+ *   - Failure classification types
+ *   - ContractProtocolAdapter<Spec, Rt, RtM, Sf, SfM> interface
+ *   - ContractProjection<RuntimeSchemas, RuntimeMeta> — Runtime (live objects OK)
+ *   - ExtractedContractProjection<SafeSchemas, SafeMeta> — JSON-safe (downstream)
+ *   - ProtocolContract<Spec, PayloadSchemas, Meta> — runtime carrier
+ *   - Flow types — ContractCaseRef / FlowBuilder / FlowContract etc.
+ *
+ * Protocol-specific types (HttpContractSpec / HttpPayloadSchemas / etc.) live
+ * in `./contract-http/types.ts`. Core code never imports from there; other
+ * adapter plugins (gRPC / GraphQL / etc.) will follow the same pattern.
+ *
+ * See `internal/40-discovery/proposals/contract-generics-complete.md` v5
+ * and `internal/40-discovery/proposals/contract-flow.md` v9 for design.
  */
 
-import type { SchemaLike } from "./types.js";
-import type { Test, TestContext, RegisteredTestMeta, HttpClient } from "./types.js";
+import type { Test, TestContext } from "./types.js";
 
 // =============================================================================
-// Security scheme types
-// =============================================================================
-
-/**
- * HTTP security scheme declaration for contract instances.
- * Maps to OpenAPI securitySchemes. Authoritative metadata, not docs-only.
- */
-export type HttpSecurityScheme =
-  | "bearer"
-  | "basic"
-  | { type: "apiKey"; name: string; in: "header" | "query" }
-  | { type: "oauth2"; flows: Record<string, unknown> }
-  | null;
-
-// =============================================================================
-// Protocol-agnostic base types
+// Protocol-agnostic enums
 // =============================================================================
 
 /**
@@ -47,25 +43,49 @@ export type CaseLifecycle = "active" | "deferred" | "deprecated";
 export type CaseSeverity = "critical" | "warning" | "info";
 
 /**
+ * Physical capability required by a case or flow.
+ *
+ * - `"headless"` — fully automated, no human in loop (default)
+ * - `"browser"` — needs a real browser (OAuth code flow, checkout, captcha)
+ * - `"out-of-band"` — needs an out-of-band channel (email, SMS, webhook tunnel)
+ */
+export type CaseRequires = "headless" | "browser" | "out-of-band";
+
+/**
+ * Default run policy for a case or flow.
+ *
+ * - `"always"` — run whenever the runner satisfies `requires` (default)
+ * - `"opt-in"` — skip unless explicitly requested (`--include-opt-in`)
+ */
+export type CaseDefaultRun = "always" | "opt-in";
+
+// =============================================================================
+// Extensions (OpenAPI-style x-* keys)
+// =============================================================================
+
+/**
+ * OpenAPI-style extensions. Keys MUST start with "x-".
+ * Non-x keys are rejected at the type level.
+ */
+export type Extensions = Record<`x-${string}`, unknown>;
+
+// =============================================================================
+// Failure classification
+// =============================================================================
+
+/**
  * Standardized failure classification kind. Protocol-agnostic.
  *
  * Open string type — adapters can extend with custom values.
- * Recommended values:
- * - `"auth"` — authentication failure (401-class)
- * - `"permission"` — authorization failure (403-class)
- * - `"not-found"` — resource does not exist
- * - `"schema"` — response shape mismatch
- * - `"timeout"` — request or execution timeout
- * - `"transport"` — network/connection error
- * - `"rate-limit"` — throttled
- * - `"business-rule"` — business logic assertion failure
- * - `"unknown"` — cannot classify
+ * Recommended: "auth", "permission", "not-found", "schema", "timeout",
+ * "transport", "rate-limit", "business-rule", "unknown".
  */
 export type FailureKind = string;
 
 /**
  * Standardized failure classification.
- * Produced by protocol adapters or core. Consumed by repair loop, Cloud, runner summary.
+ * Produced by protocol adapters or core. Consumed by repair loop, Cloud,
+ * runner summary.
  */
 export interface FailureClassification {
   kind: FailureKind;
@@ -75,651 +95,551 @@ export interface FailureClassification {
 }
 
 // =============================================================================
-// HTTP contract defaults (for contract.http.with())
+// Case & contract projection (Runtime + Extracted)
 // =============================================================================
 
 /**
- * Default values for a scoped HTTP contract instance.
- * Created via `contract.http.with("name", defaults)`.
- */
-/**
- * OpenAPI-style extensions. Keys MUST start with "x-".
- * Non-x keys are rejected at the type level.
- * Used for tool-interop metadata (e.g. "x-glubean-internal-id").
- */
-export type Extensions = Record<`x-${string}`, unknown>;
-
-export interface HttpContractDefaults {
-  /** Default HTTP client for all contracts in this instance */
-  client?: HttpClient;
-  /** Security scheme declaration (authoritative, maps to OpenAPI) */
-  security?: HttpSecurityScheme;
-  /** Tags inherited by all contracts in this instance */
-  tags?: string[];
-  /** Default feature grouping key */
-  feature?: string;
-  /** OpenAPI extensions (x-* keys). Inherited by all contracts in this instance. */
-  extensions?: Extensions;
-}
-
-// =============================================================================
-// HTTP contract factory (callable + .with())
-// =============================================================================
-
-/**
- * Root contract.http entrypoint — only .with() is available.
- * Direct contract.http("id", spec) is not supported.
- */
-export interface HttpContractRoot {
-  with(name: string, defaults: HttpContractDefaults): HttpContractFactory;
-}
-
-/**
- * Protocol-bound contract factory returned by `contract.http.with()`.
- * Callable: `factory("id", spec)` creates an HttpContract.
- * Chainable: `factory.with("name", defaults)` creates a nested instance.
- */
-export interface HttpContractFactory {
-  <Cases extends Record<string, ContractCase<any, any>>>(
-    id: string,
-    spec: HttpContractSpec<Cases>,
-  ): HttpContract;
-  with(name: string, defaults: HttpContractDefaults): HttpContractFactory;
-}
-
-// =============================================================================
-// Case execution boundary (dual-axis model)
-// =============================================================================
-
-/**
- * Physical capability required by a case or flow.
+ * Protocol-agnostic case metadata. `schemas` is plugin-defined payload shape,
+ * opaque to core.
  *
- * - `"headless"` — fully automated, no human in loop (default)
- * - `"browser"` — needs a real browser (OAuth code flow, checkout, captcha)
- * - `"out-of-band"` — needs an out-of-band channel (email, SMS, push, webhook tunnel)
+ * @template PayloadSchemas Plugin-defined payload shape (e.g. HttpPayloadSchemas).
+ *   Same shape for every case in a contract; differences between cases live in
+ *   the values, not in the type.
+ * @template Meta Plugin-defined free-form metadata (opaque to core).
  */
-export type CaseRequires = "headless" | "browser" | "out-of-band";
-
-/**
- * Default run policy for a case or flow.
- *
- * - `"always"` — run whenever the runner satisfies `requires` (default)
- * - `"opt-in"` — skip unless explicitly requested (e.g. `--include-opt-in`)
- *
- * Use `"opt-in"` for cases that are expensive, have real side effects,
- * or are slow (Twilio SMS, Stripe charges, long stress tests).
- */
-export type CaseDefaultRun = "always" | "opt-in";
-
-// =============================================================================
-// Case definition
-// =============================================================================
-
-/**
- * Normalized response headers shape.
- * HTTP allows multi-value headers (e.g. Set-Cookie), so values can be string or string[].
- * Keys are always lowercase (runtime normalization).
- */
-export type NormalizedHeaders = Record<string, string | string[]>;
-
-/**
- * A single example entry for OpenAPI docs.
- */
-export interface ContractExample<T = unknown> {
-  value: T;
-  summary?: string;
+export interface CaseMeta<PayloadSchemas = unknown, Meta = unknown> {
+  key: string;
   description?: string;
-}
-
-/**
- * Expected response for a contract case.
- *
- * @template T The parsed response type (inferred from schema)
- */
-export interface ContractExpect<T = unknown> {
-  /** Expected HTTP status code */
-  status: number;
-  /** Zod/Valibot schema to validate response body. Parsed value is passed to verify(). */
-  schema?: SchemaLike<T>;
-
-  /**
-   * Expected response content-type. Default: "application/json".
-   * Used by OpenAPI generation and (future) response body deserialization dispatch.
-   */
-  contentType?: string;
-
-  /**
-   * Schema to validate response headers. Headers are normalized to lowercase keys
-   * before validation (HTTP spec: header names are case-insensitive).
-   * Values are `string | string[]` to support multi-value headers (e.g. Set-Cookie).
-   *
-   * @example
-   * headers: z.object({
-   *   "content-type": z.string().regex(/^application\/json/),
-   *   "x-request-id": z.string().uuid(),
-   * })
-   */
-  headers?: SchemaLike<NormalizedHeaders>;
-
-  /**
-   * Single response example (shorthand). Equivalent to examples: { default: { value } }.
-   * Not used at runtime — only for OpenAPI documentation.
-   */
-  example?: T;
-
-  /**
-   * Multiple named response examples. Mapped to OpenAPI responses[status].content.examples.
-   * Not used at runtime — only for OpenAPI documentation.
-   */
-  examples?: Record<string, ContractExample<T>>;
-}
-
-/**
- * Path or query parameter value.
- * String shorthand: just the value. Object form: value + OpenAPI metadata.
- */
-export type ParamValue =
-  | string
-  | {
-      /** The actual value used for URL substitution / query string construction */
-      value: string;
-      /** OpenAPI parameter schema (not used at runtime, see Part 5 of proposal) */
-      schema?: SchemaLike<unknown>;
-      /** Parameter description for OpenAPI docs */
-      description?: string;
-      /** Whether the parameter is required (default: true for path, false for query) */
-      required?: boolean;
-      /** Whether the parameter is deprecated */
-      deprecated?: boolean;
-    };
-
-/**
- * A single spec case within a contract.
- *
- * @template T The parsed response type (inferred from expect.schema)
- * @template S The setup return type
- */
-export interface ContractCase<T = unknown, S = void> {
-  /**
-   * HTTP client to use for this case.
-   * Each client can have different auth, base URL, headers, etc.
-   * Created via configure() — contract doesn't care about the auth strategy.
-   *
-   * If omitted, uses the contract-level `client`.
-   */
-  client?: HttpClient;
-
-  /** Why this case exists — business logic, boundary condition, or intent. Required. */
-  description: string;
-
-  /** Expected response */
-  expect: ContractExpect<T>;
-
-  /**
-   * Request body (for POST/PUT/PATCH) — static value or function deriving from setup state.
-   * For non-JSON content types, provide `FormData`, `URLSearchParams`, `Blob`, or string.
-   * JSON is the default (plain object).
-   */
-  body?: unknown | FormData | URLSearchParams | Blob | ((state: S) => unknown);
-
-  /**
-   * Request content type override for this case.
-   * If not set, inherits from contract.request.contentType, defaults to "application/json".
-   * Supported: "application/json", "multipart/form-data", "application/x-www-form-urlencoded",
-   * "text/plain", "application/octet-stream".
-   */
-  contentType?: string;
-
-  /**
-   * URL params — static object or function deriving from setup state.
-   * Values can be plain strings or ParamValue objects with OpenAPI metadata.
-   */
-  params?: Record<string, ParamValue> | ((state: S) => Record<string, string>);
-
-  /**
-   * Query parameters — static object or function deriving from setup state.
-   * Values can be plain strings or ParamValue objects with OpenAPI metadata.
-   */
-  query?: Record<string, ParamValue> | ((state: S) => Record<string, string>);
-
-  /** Request headers (merged with client headers) — static object or function deriving from setup state */
-  headers?: Record<string, string> | ((state: S) => Record<string, string>);
-
-  /**
-   * Setup function — runs before the request. Return value is available
-   * to params/query (if function) and teardown.
-   */
-  setup?: (ctx: TestContext) => Promise<S>;
-
-  /**
-   * Teardown function — runs after verify, even if verify fails.
-   */
-  teardown?: (ctx: TestContext, state: S) => Promise<void>;
-
-  /**
-   * Business logic verification — runs after status and schema validation.
-   * `res` is the schema-parsed response (typed) if schema was provided,
-   * otherwise the raw parsed JSON (unknown).
-   *
-   * Use this for assertions that can't be expressed declaratively:
-   * field relationships, computed checks, side-effect verification.
-   */
-  verify?: (ctx: TestContext, res: T) => Promise<void>;
-
-  /**
-   * Mark this case as not yet executable. Reason is shown in skip message
-   * and coverage reports. Remove this field to activate the case.
-   */
-  deferred?: string;
-
-  /** Additional tags for this case (merged with contract-level tags) */
-  tags?: string[];
-
-  /**
-   * Physical capability this case requires to execute.
-   *
-   * Default: `"headless"` — fully automated, no human in loop.
-   *
-   * When set to `"browser"` or `"out-of-band"`, the runner will skip this case
-   * unless the corresponding `--include-browser` / `--include-out-of-band` flag
-   * is passed. Skipped cases are reported explicitly with reason.
-   *
-   * Note: setting `requires` to a non-headless value automatically implies
-   * `defaultRun: "opt-in"`.
-   */
+  lifecycle: CaseLifecycle;
+  severity: CaseSeverity;
+  deferredReason?: string;
+  deprecatedReason?: string;
   requires?: CaseRequires;
-
-  /**
-   * Default run policy — should this case run automatically, or only when
-   * explicitly requested?
-   *
-   * Default: `"always"` — run whenever the runner satisfies `requires`.
-   *
-   * Set to `"opt-in"` for cases that are expensive (real Twilio SMS),
-   * have real side effects (Stripe charges), or are slow (stress tests).
-   * Opt-in cases require `--include-opt-in` to run, even locally.
-   *
-   * Note: when `requires !== "headless"`, `defaultRun` is automatically
-   * set to `"opt-in"` if not explicitly provided.
-   */
   defaultRun?: CaseDefaultRun;
-
-  /**
-   * Case severity. Affects Cloud alert routing.
-   * Default: `"warning"`.
-   */
-  severity?: CaseSeverity;
-
-  /**
-   * Mark this case as deprecated. Value is the deprecation reason.
-   * Deprecated cases are skipped at runtime but appear in projection output.
-   *
-   * `deprecated` takes precedence over `deferred`: if both are set,
-   * lifecycle normalizes to `"deprecated"`.
-   */
-  deprecated?: string;
-
-  /**
-   * OpenAPI extensions (x-* keys). Merged over contract-level extensions
-   * (precedence: defaults < contract < case).
-   */
-  extensions?: Extensions;
-}
-
-// =============================================================================
-// Contract spec
-// =============================================================================
-
-/**
- * Structured request specification.
- * Can be provided as a bare SchemaLike (shorthand for JSON body) or as an
- * object with full metadata (contentType, headers, examples).
- */
-export type RequestSpec =
-  | SchemaLike<unknown>
-  | {
-      body?: SchemaLike<unknown>;
-      /** Request content type. Default: "application/json". */
-      contentType?: string;
-      /** Request headers schema (OpenAPI docs only, not runtime validated on request). */
-      headers?: SchemaLike<Record<string, string>>;
-      /** Single example value */
-      example?: unknown;
-      /** Named examples */
-      examples?: Record<string, ContractExample<unknown>>;
-    };
-
-/**
- * Spec for contract.http() — defines an HTTP endpoint and its cases.
- *
- * @template Cases Record of case key → ContractCase
- */
-export interface HttpContractSpec<
-  Cases extends Record<string, ContractCase<any, any>> = Record<string, ContractCase>,
-> {
-  /** HTTP method + path, e.g. "POST /users" or "GET /runs/:runId" */
-  endpoint: string;
-
-  /** Human-readable description (optional, for projection/docs) */
-  description?: string;
-
-  /**
-   * Feature grouping key for projection output.
-   * Contracts with the same `feature` value are grouped into one section.
-   * If omitted, the contract is grouped by endpoint.
-   *
-   * Use business language, not technical terms:
-   *   Good: "用户注册", "User Registration"
-   *   Bad:  "POST /users endpoint"
-   */
-  feature?: string;
-
-  /**
-   * Default HTTP client for all cases.
-   * Individual cases can override with their own `client`.
-   */
-  client?: HttpClient;
-
-  /**
-   * Request specification — endpoint-level, for scanner/OpenAPI (not used at runtime).
-   * Can be a bare SchemaLike (shorthand for JSON body) or a structured RequestSpec object.
-   */
-  request?: RequestSpec;
-
-  /** Tags inherited by all cases */
   tags?: string[];
-
-  /**
-   * Mark the entire endpoint as deprecated. Value is the deprecation reason.
-   * Propagates to all cases: every case lifecycle becomes "deprecated" unless
-   * the case explicitly sets its own `deprecated` reason.
-   * Maps to OpenAPI operation `deprecated: true` + `x-deprecated-reason`.
-   */
-  deprecated?: string;
-
-  /**
-   * OpenAPI extensions (x-* keys). Merged over instance-level defaults.extensions.
-   * Precedence: defaults < contract < case.
-   */
   extensions?: Extensions;
 
-  /** Named spec cases */
-  cases: Cases;
+  /** Plugin-defined payload shape. Opaque to core. */
+  schemas?: PayloadSchemas;
+
+  /** Plugin-defined free-form metadata. Opaque to core. */
+  meta?: Meta;
 }
 
-// =============================================================================
-// HttpContract — the return value of contract.http()
-// =============================================================================
-
 /**
- * Return value of contract.http().
- *
- * Extends Array<Test> so runner/resolve can iterate it directly.
- * Adds contract-level properties and interop methods.
+ * Runtime contract projection — adapter.project() output.
+ * Allowed to contain live objects (Zod schemas, class instances). Never crosses
+ * a serialization boundary; adapter.normalize() converts to Extracted.
  */
-export interface HttpContract extends Array<Test> {
-  /** Contract ID */
-  readonly id: string;
-
-  /** Endpoint (e.g. "POST /users") */
-  readonly endpoint: string;
-
-  /** Contract-level description */
-  readonly description?: string;
-
-  /** Feature grouping key */
-  readonly feature?: string;
-
-  /** Instance name from contract.http.with("name", ...) */
-  readonly instanceName?: string;
-
-  /** Security scheme declaration */
-  readonly security?: HttpSecurityScheme;
-
-  /** Endpoint-level request body schema, normalized from RequestSpec */
-  readonly request?: SchemaLike<unknown>;
-
-  /** Endpoint-level request content type (default: "application/json") */
-  readonly requestContentType?: string;
-
-  /** Endpoint-level request headers schema (OpenAPI docs) */
-  readonly requestHeaders?: SchemaLike<Record<string, string>>;
-
-  /** Single request example for OpenAPI docs */
-  readonly requestExample?: unknown;
-
-  /** Named request examples for OpenAPI docs */
-  readonly requestExamples?: Record<string, ContractExample<unknown>>;
-
-  /** Contract-level deprecation reason (propagates to all cases) */
-  readonly deprecated?: string;
-
-  /**
-   * Contract-level merged extensions (defaults < contract).
-   * Case-level merged extensions live on _caseSchemas[key].extensions.
-   */
-  readonly extensions?: Extensions;
-
-  /**
-   * Per-case metadata for runtime extraction (OpenAPI generation, projection).
-   * Maps case key → full case metadata including schema and gating fields.
-   */
-  readonly _caseSchemas?: Record<string, {
-    expectStatus?: number;
-    responseSchema?: SchemaLike<unknown>;
-    /** Response headers schema (OpenAPI + runtime validation) */
-    responseHeaders?: SchemaLike<NormalizedHeaders>;
-    /** Response content-type (default: application/json) */
-    responseContentType?: string;
-    /** Single example (OpenAPI docs) */
-    example?: unknown;
-    /** Named examples (OpenAPI docs) */
-    examples?: Record<string, ContractExample<unknown>>;
-    /** Per-path-param metadata (schema, description, required, deprecated) */
-    paramSchemas?: Record<string, {
-      schema?: SchemaLike<unknown>;
-      description?: string;
-      required?: boolean;
-      deprecated?: boolean;
-    }>;
-    /** Per-query-param metadata */
-    querySchemas?: Record<string, {
-      schema?: SchemaLike<unknown>;
-      description?: string;
-      required?: boolean;
-      deprecated?: boolean;
-    }>;
-    description?: string;
-    deferred?: string;
-    deprecated?: string;
-    severity?: CaseSeverity;
-    lifecycle: CaseLifecycle;
-    requires?: CaseRequires;
-    defaultRun?: CaseDefaultRun;
-    /** Fully merged extensions (defaults < contract < case) */
-    extensions?: Extensions;
-  }>;
-
-  /**
-   * Inject all cases as steps into a test builder.
-   * Usage: test("e2e").use(myContract.asSteps()).step(...).build()
-   */
-  asSteps(): <S>(b: import("./index.js").TestBuilder<S>) => import("./index.js").TestBuilder<S>;
-
-  /**
-   * Inject a single case as a step into a test builder.
-   * Defaults to the first non-deferred case if caseKey is omitted.
-   */
-  asStep(caseKey?: string): <S>(b: import("./index.js").TestBuilder<S>) => import("./index.js").TestBuilder<S>;
-}
-
-// =============================================================================
-// Flow contract
-// =============================================================================
-
-/**
- * Spec for a single HTTP step in a contract.flow() chain.
- *
- * Flow steps are verification, not spec: each step has one fixed expected
- * outcome (expect), not multiple possible responses.
- *
- * @template T Response type (inferred from expect.schema)
- * @template S Incoming state type from previous step
- */
-export interface HttpFlowStepSpec<T = unknown, S = unknown> {
-  /** HTTP method + path, e.g. "POST /users" or "GET /runs/:runId" */
-  endpoint: string;
-
-  /** Optional description of this step's purpose. */
+export interface ContractProjection<PayloadSchemas = unknown, Meta = unknown> {
+  protocol: string;
+  target: string;
   description?: string;
+  feature?: string;
+  instanceName?: string;
+  tags?: string[];
+  extensions?: Extensions;
+  deprecated?: string;
 
-  /** HTTP client for this step. Falls back to flow-level default client. */
-  client?: HttpClient;
+  cases: Array<CaseMeta<PayloadSchemas, Meta>>;
 
-  /** Fixed expected outcome for this step */
-  expect: ContractExpect<T>;
+  /** Contract-level schemas (e.g. HTTP request body shared across cases). */
+  schemas?: PayloadSchemas;
 
-  /** URL params — static or derived from previous step's state */
-  params?: Record<string, string> | ((state: S) => Record<string, string>);
+  /** Contract-level free-form metadata. */
+  meta?: Meta;
+}
 
-  /** Query parameters */
-  query?: Record<string, string> | ((state: S) => Record<string, string>);
+/**
+ * JSON-safe case metadata. Shape-identical to CaseMeta but `schemas` / `meta`
+ * must be JSON-safe (plain objects / arrays / primitives). Produced by
+ * adapter.normalize().
+ */
+export type ExtractedCaseMeta<
+  SafeSchemas = unknown,
+  SafeMeta = unknown,
+> = CaseMeta<SafeSchemas, SafeMeta>;
 
-  /** Request headers — static object or derived from previous step's state */
-  headers?: Record<string, string> | ((state: S) => Record<string, string>);
+/**
+ * JSON-safe contract projection. Downstream (scanner / MCP / CLI / Cloud)
+ * consume this. Includes `id` (injected by core).
+ */
+export interface ExtractedContractProjection<
+  SafeSchemas = unknown,
+  SafeMeta = unknown,
+> {
+  id: string;
+  protocol: string;
+  target: string;
+  description?: string;
+  feature?: string;
+  instanceName?: string;
+  tags?: string[];
+  extensions?: Extensions;
+  deprecated?: string;
 
-  /** Request body — static or derived from state */
-  body?: unknown | ((state: S) => unknown);
+  cases: Array<ExtractedCaseMeta<SafeSchemas, SafeMeta>>;
 
-  /**
-   * Business logic verification — runs after status and schema validation.
-   * Receives schema-parsed value or raw JSON.
-   */
-  verify?: (ctx: TestContext, res: T) => Promise<void>;
-
-  /**
-   * Extract state from response for the next step.
-   * Receives the response and current state. Output replaces state.
-   * If omitted, state passes through unchanged.
-   */
-  returns?: (res: T, state: S) => unknown;
+  schemas?: SafeSchemas;
+  meta?: SafeMeta;
 }
 
 // =============================================================================
-// Plugin protocol adapter
+// ContractProtocolAdapter
 // =============================================================================
 
 /**
- * Protocol adapter v2 for contract.register().
- * Plugins implement this to add contract.grpc(), contract.ws(), etc.
+ * Protocol adapter interface. Implement to add support for a new protocol
+ * (HTTP is built-in; gRPC / GraphQL etc. will be external plugins).
  *
- * Breaking change from v1: `metadata()` replaced by `project()`.
- * No v1 compat — no third-party plugins exist yet.
+ * @template Spec Adapter's input spec type (e.g. HttpContractSpec).
+ * @template RuntimeSchemas Runtime payload shape (live objects allowed).
+ * @template RuntimeMeta Runtime free-form meta (live objects allowed).
+ * @template SafeSchemas JSON-safe payload shape (after normalize).
+ * @template SafeMeta JSON-safe free-form meta.
  */
-export interface ContractProtocolAdapter<Spec = unknown> {
-  /** Generate a Test function for a single case */
-  execute: (ctx: TestContext, caseSpec: unknown, endpointSpec: Spec) => Promise<void>;
+export interface ContractProtocolAdapter<
+  Spec = unknown,
+  RuntimeSchemas = unknown,
+  RuntimeMeta = unknown,
+  SafeSchemas = unknown,
+  SafeMeta = unknown,
+> {
+  /**
+   * Execute a single case. Called by the core dispatcher for each spec case.
+   * Adapter does the full case lifecycle: setup → request/invoke → expect →
+   * verify → teardown.
+   */
+  execute: (
+    ctx: TestContext,
+    caseSpec: unknown,
+    contractSpec: Spec,
+  ) => Promise<void>;
 
   /**
-   * Project spec into normalized contract metadata.
-   * Scanner / CLI / MCP / Cloud consume this.
+   * Project the spec to a Runtime projection (may contain live schemas).
    *
-   * **Invariant:** `project().cases[].key` must 1:1 match `spec.cases` keys.
-   * `contract.register()` validates this at registration time:
-   * - projected key not in spec.cases → hard error
-   * - spec.cases key not in projection → hard error
-   * - duplicate key → hard error
+   * **Invariant**: `project().cases[].key` must 1:1 match `spec.cases` keys.
+   * Core validates this at registration time:
+   *   - projected key not in spec.cases → hard error
+   *   - spec.cases key not in projection → hard error
+   *   - duplicate key → hard error
+   *
+   * The returned projection does NOT include `id` — core injects it.
    */
-  project: (spec: Spec) => ContractProjection;
+  project: (spec: Spec) => ContractProjection<RuntimeSchemas, RuntimeMeta>;
 
   /**
-   * Optional: determine where schema validation mounts.
-   * HTTP → "response.body", gRPC → "response.message", GraphQL → "response.data"
+   * Optional: normalize a Runtime projection to JSON-safe Extracted form.
+   * Called by scanner / MCP / CLI / Cloud.
+   *
+   * **Input is already `id`-injected** by core. Adapter just passes `id`
+   * through to the returned object.
+   *
+   * If adapter does NOT implement normalize, downstream consumers see only a
+   * protocol-agnostic skeleton (no `schemas` / `meta`). See `contract-flow.md`
+   * §3.5.3 rule 3.
    */
-  schemaMount?: (caseSpec: unknown, spec: Spec) => string | undefined;
+  normalize?: (
+    projection: ContractProjection<RuntimeSchemas, RuntimeMeta> & { id: string },
+  ) => ExtractedContractProjection<SafeSchemas, SafeMeta>;
 
   /**
-   * Optional: classify failure from events/error.
-   * Consumed by repair loop and Cloud — they don't need to understand protocol details.
+   * Optional: classify failure from error + event log.
+   * Consumers: repair loop, Cloud alerts, runner summary.
    */
   classifyFailure?: (input: {
     error?: unknown;
     events: Array<{ type: string; data: Record<string, unknown> }>;
   }) => FailureClassification | undefined;
+
+  /**
+   * Optional: render contract as an OpenAPI fragment. Input is the Extracted
+   * projection (after normalize). Used by MCP `glubean_openapi` tool.
+   */
+  toOpenApi?: (
+    projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
+  ) => Record<string, unknown> | undefined;
+
+  /**
+   * Optional: render contract as Markdown documentation. Used by
+   * CLI `glubean contracts --format md-outline` and
+   * MCP `glubean_project_contracts`.
+   */
+  toMarkdown?: (
+    projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
+  ) => string;
+
+  /**
+   * Optional: render the `target` string for display. HTTP: "POST /users"
+   * stays as-is. gRPC: "Greeter/SayHello" might become "Greeter.SayHello()".
+   */
+  renderTarget?: (target: string) => string;
+
+  /**
+   * Optional: produce a high-level payload summary for indexing / UI.
+   * Input: already-normalized SafeSchemas. Used when full schemas would be
+   * too heavy (e.g. index views).
+   */
+  describePayload?: (schemas: SafeSchemas) => PayloadDescriptor | undefined;
+
+  /**
+   * Optional: execute a single case as a flow step.
+   *
+   * Core has already:
+   *   1. Computed `resolvedInputs` via `step.bindings.in(state)` (may be partial)
+   *   2. Prepared current flow state
+   *   3. Passed the live contract instance (access merged scoped-factory state
+   *      via `contract._spec`)
+   *
+   * Adapter responsibilities:
+   *   1. Deep-merge `resolvedInputs` into the case's static input fields
+   *   2. Run case setup / request / expect / verify / case teardown
+   *      (Rule 1: case teardown is step-local finally — see contract-flow §7.3)
+   *   3. Return adapter-specific CaseOutput shape (HTTP: { status, headers, body })
+   *
+   * Not implemented = this protocol cannot be referenced in a flow.
+   */
+  executeCaseInFlow?: (input: {
+    ctx: TestContext;
+    contract: ProtocolContract<Spec, SafeSchemas, SafeMeta>;
+    caseKey: string;
+    resolvedInputs: unknown;
+  }) => Promise<unknown>;
 }
 
 /**
- * Return type of `ContractProtocolAdapter.project()`.
- * Aligns with NormalizedContractMeta in scanner.
+ * Protocol-agnostic payload summary. Adapter-provided via describePayload.
+ * Free-form — common keys: "hasRequest", "hasResponse", "contentType",
+ * "messageCount", "streaming".
  */
-export interface ContractProjection {
-  protocol: string;
-  target: string;
-  description?: string;
-  feature?: string;
-  instanceName?: string;
-  security?: unknown;
-  schemaMount?: string;
-  requestSchema?: unknown | null;
-  cases: Array<{
-    key: string;
-    description?: string;
-    lifecycle: CaseLifecycle;
-    severity: CaseSeverity;
-    deferredReason?: string;
-    deprecatedReason?: string;
-    requires?: CaseRequires;
-    defaultRun?: CaseDefaultRun;
-    schemaMount?: string;
-    protocolExpect?: Record<string, unknown>;
-    responseSchema?: unknown | null;
-    protocolMeta?: Record<string, unknown>;
-  }>;
-  protocolMeta?: Record<string, unknown>;
+export interface PayloadDescriptor {
+  hasRequest?: boolean;
+  hasResponse?: boolean;
+  [key: string]: unknown;
 }
 
+// =============================================================================
+// ProtocolContract (runtime carrier)
+// =============================================================================
+
 /**
- * Return value of `contract[protocol]()` — extends Test[] with projection carrier.
- * Mirrors HttpContract: extends Array<Test> + metadata for scanner extraction.
+ * Runtime contract object returned by `contract[protocol](id, spec)`.
+ * Extends Array<Test> so runner/resolve iterate it directly.
  *
- * `_projection` extends ContractProjection with `id` — injected by `contract.register()`
- * since the adapter's `project()` doesn't know the user-supplied contract id.
+ * @template Spec Adapter's spec type — executable info stored in `_spec`.
+ * @template PayloadSchemas Runtime (live) payload shape.
+ * @template Meta Runtime free-form meta.
  */
-export interface ProtocolContract extends Array<Test> {
-  /** Adapter project() output + injected id. Scanner duck-types this field for extraction. */
-  readonly _projection: ContractProjection & { id: string };
+export interface ProtocolContract<
+  Spec = unknown,
+  PayloadSchemas = unknown,
+  Meta = unknown,
+> extends Array<Test> {
+  /**
+   * Runtime projection with `id` injected by core. Consumers duck-type this.
+   */
+  readonly _projection: ContractProjection<PayloadSchemas, Meta> & { id: string };
+
+  /**
+   * Adapter-private runtime spec carrier. Holds the merged executable spec
+   * (scoped-factory defaults + contract spec) used by `executeCaseInFlow`
+   * and any adapter-internal helpers.
+   *
+   * Core never inspects this field. Adapter writes it at construction, reads
+   * it during execution.
+   */
+  readonly _spec: Spec;
+
+  /**
+   * Return a ContractCaseRef for use in `contract.flow(...).step(...)`.
+   *
+   * Runtime validation: adapter's `.case(key)` implementation MUST fail-fast
+   * if the case contains function-valued input fields (body/params/query/
+   * headers as functions). Function fields reference case-local setup state
+   * which is not available in flow mode. See contract-flow §5.1.1.
+   */
+  case(
+    key: string,
+  ): ContractCaseRef<InferInputs<PayloadSchemas>, InferOutput<PayloadSchemas>>;
+}
+
+/**
+ * Adapter-defined helper: extract the "case inputs" shape from PayloadSchemas.
+ * Each adapter exports its own version (HTTP adapter defines InferHttpInputs).
+ * Used by `.case()` return type to give lens functions TS autocomplete.
+ *
+ * The contract-level `PayloadSchemas` is the same for every case; I/O shape
+ * differences between cases live in values, not types.
+ *
+ * This is a default fallback — adapters override via module augmentation or
+ * direct typing of their own ContractCaseRef.
+ */
+export type InferInputs<_PayloadSchemas> = unknown;
+
+/** Adapter-defined helper: extract the "case output" shape from PayloadSchemas. */
+export type InferOutput<_PayloadSchemas> = unknown;
+
+// =============================================================================
+// Flow types
+// =============================================================================
+
+/**
+ * Opaque reference to a single case of a contract. Produced by
+ * `ProtocolContract.case(key)`. Used as input to `FlowBuilder.step(...)`.
+ *
+ * The generic parameters carry type information for lens TS inference; at
+ * runtime the ref only holds identification strings + the live contract ref.
+ */
+export interface ContractCaseRef<
+  CaseInputs = unknown,
+  CaseOutput = unknown,
+> {
+  readonly __glubean_type: "contract-case-ref";
+  readonly contractId: string;
+  readonly caseKey: string;
+  readonly protocol: string;
+  readonly target: string;
+
+  /** Live ProtocolContract instance — flow runtime uses this, not contractId lookup. */
+  readonly contract: ProtocolContract<any, any, any>;
+
+  /** Phantom fields — do not populate at runtime. TS-only. */
+  readonly __phantom_inputs?: CaseInputs;
+  readonly __phantom_output?: CaseOutput;
+}
+
+/** Contract-level metadata for a flow (set via `.meta()`). */
+export interface FlowMeta {
+  id: string;
+  name?: string;
+  description?: string;
+  tags?: string[];
+  extensions?: Extensions;
+}
+
+/**
+ * Field dependency / mapping produced by Proxy dry-run of a lens function.
+ * Consumed by downstream (MCP/CLI/Cloud) to render flow data-flow diagrams.
+ */
+export interface FieldMapping {
+  /** Destination path (within step inputs or flow state). */
+  target: string;
+  /** Source — a path in state/response, a literal, or pass-through. */
+  source:
+    | { kind: "path"; path: string }
+    | { kind: "literal"; value: unknown }
+    | { kind: "pass-through" };
+}
+
+// --- Runtime (live) ----------------------------------------------------------
+
+/**
+ * Runtime flow step — discriminated union.
+ * kind "contract-call" = a ContractCaseRef with bindings (Rule 1 teardown applies).
+ * kind "compute" = a pure sync data-transform function (no adapter, no teardown).
+ */
+export type RuntimeFlowStep = RuntimeContractCallStep | RuntimeComputeStep;
+
+export interface RuntimeContractCallStep {
+  kind: "contract-call";
+  name?: string;
+  ref: ContractCaseRef;
+  caseKey: string;
+  /** Live contract instance (mirrors ref.contract, kept for direct access). */
+  contract: ProtocolContract<any, any, any>;
+  bindings?: {
+    in?: (state: any) => any;
+    out?: (state: any, response: any) => any;
+  };
+}
+
+export interface RuntimeComputeStep {
+  kind: "compute";
+  name?: string;
+  /**
+   * Synchronous pure function. NOT subject to lens Proxy purity — may use
+   * template literals / method calls / .map(). MUST be synchronous and
+   * MUST NOT return a thenable (enforced at runtime).
+   */
+  fn: (state: any) => any;
+}
+
+/**
+ * Runtime flow projection. Carries live callbacks + live contract refs.
+ * Never crosses serialization boundaries. `normalizeFlow()` converts to
+ * ExtractedFlowProjection for downstream consumers.
+ */
+export interface RuntimeFlowProjection<State = unknown> {
+  protocol: "flow";
+  description?: string;
+  tags?: string[];
+  extensions?: Extensions;
+
+  /** Live flow-level setup callback (only I/O-capable callback in flow). */
+  setup?: (ctx: TestContext) => Promise<State>;
+
+  /** Live flow-level teardown callback. Rule 2: outer finally. */
+  teardown?: (ctx: TestContext, state: State) => Promise<void>;
+
+  steps: RuntimeFlowStep[];
+}
+
+// --- Extracted (JSON-safe) ---------------------------------------------------
+
+/**
+ * Extracted flow step — discriminated union, JSON-safe.
+ */
+export type ExtractedFlowStep =
+  | ExtractedContractCallStep
+  | ExtractedComputeStep;
+
+export interface ExtractedContractCallStep {
+  kind: "contract-call";
+  name?: string;
+  contractId: string;
+  caseKey: string;
+  protocol: string;
+  target: string;
+  /** Proxy dry-run output — input mappings. */
+  inputs?: FieldMapping[];
+  /** Proxy dry-run output — state update mappings. */
+  outputs?: FieldMapping[];
+}
+
+export interface ExtractedComputeStep {
+  kind: "compute";
+  name?: string;
+  /** Top-level state paths read (from Proxy dry-run). */
+  reads: string[];
+  /** Top-level state keys written (keys of returned object). */
+  writes: string[];
+}
+
+/**
+ * JSON-safe flow projection. Downstream (scanner / MCP / CLI / Cloud) consume
+ * this. Produced by `normalizeFlow(runtime)`.
+ */
+export interface ExtractedFlowProjection {
+  id: string;
+  protocol: "flow";
+  description?: string;
+  tags?: string[];
+  extensions?: Extensions;
+  /** Present when flow has a setup callback (state source is dynamic). */
+  setupDynamic?: true;
+  steps: ExtractedFlowStep[];
+}
+
+// --- FlowBuilder / FlowContract ----------------------------------------------
+
+/**
+ * Builder for `contract.flow(id)`. State chain threads through `.step()` /
+ * `.compute()` via TypeScript generics.
+ */
+export interface FlowBuilder<State = unknown> {
+  readonly __glubean_type: "flow-builder";
+
+  meta(m: Omit<FlowMeta, "id">): FlowBuilder<State>;
+
+  /**
+   * Flow-level setup — the ONLY I/O-capable callback in a flow. May be async,
+   * may read ctx, may call external services. Returns the initial state.
+   */
+  setup<NewState>(
+    fn: (ctx: TestContext) => Promise<NewState>,
+  ): FlowBuilder<NewState>;
+
+  /**
+   * Add a contract-call step. `bindings.in` and `bindings.out` MUST be pure
+   * lens functions (select / repack only; no I/O, no method calls, no
+   * branching). Lens purity is enforced at Proxy dry-run time during
+   * projection extraction.
+   */
+  step<CaseInputs, CaseOutput, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput>,
+    bindings?: {
+      in?: (state: State) => CaseInputs;
+      out?: (state: State, response: CaseOutput) => NewState;
+      name?: string;
+    },
+  ): FlowBuilder<NewState>;
+
+  /**
+   * Add a pure synchronous data-transform step. Accepts any synchronous TS
+   * expression (template literals, method calls, .map()). Projection records
+   * only read/write dependencies, NOT the formula.
+   *
+   * Runtime enforcement: throws if `fn` is async or returns a thenable.
+   */
+  compute<NewState>(fn: (state: State) => NewState): FlowBuilder<NewState>;
+
+  /**
+   * Flow-level teardown — runs in Rule 2 outer-finally, receives last-
+   * committed state. If flow.setup threw, teardown does NOT run.
+   */
+  teardown(
+    fn: (ctx: TestContext, state: State) => Promise<void>,
+  ): FlowBuilder<State>;
+
+  build(): FlowContract<State>;
+}
+
+/**
+ * Runtime flow contract. Extends Array<Test> so runner iterates directly.
+ * The single Test inside orchestrates setup → steps → teardown via runFlow.
+ */
+export interface FlowContract<State = unknown> extends Array<Test> {
+  readonly _flow: RuntimeFlowProjection<State> & { id: string };
 }
 
 // =============================================================================
-// Registry metadata extension
+// Registry metadata (embedded in RegisteredTestMeta.contract / .flow)
 // =============================================================================
 
-/** Contract-specific metadata attached to RegisteredTestMeta. Protocol-agnostic. */
+/**
+ * Contract registry metadata attached to tests produced by `contract[protocol]()`.
+ * Mirrored by `RegisteredTestMeta.contract` in types.ts.
+ */
 export interface ContractRegistryMeta {
-  /** Protocol-agnostic target. HTTP: "POST /users", gRPC: "Greeter/SayHello" */
+  /** Protocol-agnostic target. HTTP: "POST /users", gRPC: "Greeter/SayHello". */
   target: string;
-  /** Protocol identifier */
+  /** Protocol identifier. */
   protocol: string;
-  /** Case key within the contract */
+  /** Case key within the contract. */
   caseKey: string;
-  /** Case lifecycle */
   lifecycle: CaseLifecycle;
-  /** Case severity */
   severity: CaseSeverity;
-  /** Whether response schema is defined */
-  hasSchema: boolean;
-  /** Instance name from contract.http.with("name", ...) */
   instanceName?: string;
   /**
-   * Protocol-specific metadata. Core does not read this field's contents.
-   * HTTP: { security: "bearer", expect: { status: 200 } }
-   * gRPC: { expect: { code: 0 } }
+   * Adapter.describePayload() output — protocol-agnostic payload overview.
+   * Optional because describePayload is optional.
    */
-  protocolMeta?: Record<string, unknown>;
+  payloadSummary?: PayloadDescriptor;
+  /** Plugin-defined free-form meta; core does not inspect. */
+  meta?: unknown;
 }
 
 /**
- * @deprecated Use `RegisteredTestMeta` directly — it now has an optional `contract` field.
- * Kept as an alias for backward compatibility.
+ * Flow registry metadata attached to the single Test generated by
+ * `contract.flow()`. Mirrored by `RegisteredTestMeta.flow` in types.ts.
  */
-export type ContractCaseMeta = RegisteredTestMeta & { contract: ContractRegistryMeta };
+export interface FlowRegistryMeta {
+  id: string;
+  description?: string;
+  tags?: string[];
+  /** Flattened step descriptors (same shape as ExtractedFlowStep). */
+  steps: Array<{
+    kind: "contract-call" | "compute";
+    name?: string;
+    contractId?: string;
+    caseKey?: string;
+    protocol?: string;
+    target?: string;
+    inputs?: FieldMapping[];
+    outputs?: FieldMapping[];
+    reads?: string[];
+    writes?: string[];
+  }>;
+  setupDynamic?: true;
+}

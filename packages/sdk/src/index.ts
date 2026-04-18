@@ -1560,34 +1560,54 @@ export { configure, resolveTemplate } from "./configure.js";
 // Re-export plugin utilities
 export { definePlugin } from "./plugin.js";
 
-// Contract API
-export { contract } from "./contract.js";
+// Contract API — generic core (HTTP adapter self-registers via ./contract-http)
+export {
+  contract,
+  runFlow,
+  normalizeFlow,
+  extractMappings,
+  extractMappingsOut,
+  traceComputeFn,
+  getAdapter,
+} from "./contract-core.js";
 export type {
-  ContractCase,
-  ContractExpect,
-  HttpContractSpec,
-  HttpContract,
-  HttpContractDefaults,
-  HttpContractRoot,
-  HttpContractFactory,
-  HttpSecurityScheme,
-  ContractProtocolAdapter,
-  ContractCaseMeta,
-  ContractRegistryMeta,
-  CaseRequires,
-  CaseDefaultRun,
+  // Protocol-agnostic enums
   CaseLifecycle,
   CaseSeverity,
+  CaseRequires,
+  CaseDefaultRun,
   FailureKind,
   FailureClassification,
-  ContractProjection,
-  ProtocolContract,
-  NormalizedHeaders,
-  ContractExample,
-  ParamValue,
   Extensions,
-  RequestSpec,
+  // Adapter + projections
+  ContractProtocolAdapter,
+  ContractProjection,
+  ExtractedContractProjection,
+  CaseMeta,
+  ExtractedCaseMeta,
+  ContractRegistryMeta,
+  PayloadDescriptor,
+  // Runtime carriers
+  ProtocolContract,
+  ContractCaseRef,
+  InferInputs,
+  InferOutput,
+  // Flow
+  FlowBuilder,
+  FlowContract,
+  FlowMeta,
+  FlowRegistryMeta,
+  RuntimeFlowProjection,
+  RuntimeFlowStep,
+  RuntimeContractCallStep,
+  RuntimeComputeStep,
+  ExtractedFlowProjection,
+  ExtractedFlowStep,
+  ExtractedContractCallStep,
+  ExtractedComputeStep,
+  FieldMapping,
 } from "./contract-types.js";
+// HTTP-specific types are re-exported by ./contract-http/index.ts (P2).
 
 // Session API
 export { defineSession, session } from "./session.js";
