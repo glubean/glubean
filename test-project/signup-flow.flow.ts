@@ -59,7 +59,16 @@ export const fetchUser = api("fetch-user", {
  */
 export const signupFlow = contract
   .flow("signup-flow")
-  .meta({ description: "E2E signup + fetch round trip", tags: ["e2e"] })
+  .meta({
+    description: "E2E signup + fetch round trip",
+    tags: ["e2e", "example"],
+    // This example is for scanner/docs extraction only. It targets
+    // https://example.invalid which never answers. Marking it as skipped
+    // so that broad discovery (`glubean run test-project/`) doesn't try
+    // to hit the network. Remove `skip` + point `prefixUrl` at a real
+    // server to actually run it.
+    skip: "illustrative example — no live server configured",
+  })
   .setup(async () => ({
     email: "alice@test-project.invalid",
     category: "members",

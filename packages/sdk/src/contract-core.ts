@@ -442,9 +442,19 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
         id: meta.id,
         name: extraMeta.name ?? meta.id,
         tags: extraMeta.tags,
+        description: extraMeta.description,
+        // `FlowMeta.skip: string` (the reason) → `TestMeta.deferred: string`
+        // mirrors the ContractCase.deferred convention so downstream
+        // reporters render the skip reason consistently.
+        ...(extraMeta.skip !== undefined ? { deferred: extraMeta.skip } : {}),
+        ...(extraMeta.only !== undefined ? { only: extraMeta.only } : {}),
       },
       type: "simple",
       fn: async (ctx) => {
+        // Belt-and-suspenders: runtime ctx.skip in case the runner didn't
+        // filter on meta.deferred (e.g. the user ran with an explicit
+        // target that bypasses skip filters).
+        if (extraMeta.skip) ctx.skip(extraMeta.skip);
         await runFlow(resultHandle, ctx);
       },
     };
@@ -618,8 +628,19 @@ export function normalizeFlow<State>(
         (s.kind === "contract-call" ? `${s.contract._projection.id}#${s.caseKey}` : `step-${idx + 1}`);
 
       if (s.kind === "compute") {
-        const { reads, writes } = traceComputeFn(s.fn);
-        return { kind: "compute", name: s.name, reads, writes };
+        try {
+          const { reads, writes } = traceComputeFn(s.fn);
+          return { kind: "compute", name: s.name, reads, writes };
+        } catch (err) {
+          // Wrap compute-tracer failures with the same step-context format
+          // used for lens errors, so authoring mistakes are equally easy
+          // to localize regardless of which tracer caught them.
+          throw new Error(
+            `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (compute): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       }
 
       let inputs: FieldMapping[] | undefined;

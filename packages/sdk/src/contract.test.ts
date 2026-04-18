@@ -266,6 +266,30 @@ test("contract.flow builds a FlowContract with single Test", () => {
   expect(flow._flow.protocol).toBe("flow");
 });
 
+test("flow meta.skip maps to Test.meta.deferred + skips at runtime", async () => {
+  const flowObj = contract
+    .flow("illustrative")
+    .meta({ skip: "docs example — no live server", tags: ["example"] })
+    .setup(async () => ({ x: 1 }))
+    .build();
+
+  // The inner orchestrator Test should carry `deferred` so the runner
+  // surfaces the reason to reporters (mirrors contract case convention).
+  expect(flowObj[0].meta.deferred).toBe("docs example — no live server");
+
+  // At runtime, the fn calls ctx.skip() before attempting runFlow so the
+  // flow body never hits any network stub.
+  const skipReasons: string[] = [];
+  const ctx = makeMockCtx({
+    skip: ((r?: string) => {
+      skipReasons.push(r ?? "");
+      throw new Error(`__skipped__:${r ?? ""}`);
+    }) as any,
+  });
+  await expect(flowObj[0].fn!(ctx)).rejects.toThrow(/__skipped__/);
+  expect(skipReasons).toContain("docs example — no live server");
+});
+
 test("contract.flow meta / setup / teardown are captured in runtime projection", () => {
   const flow = contract
     .flow("m")
@@ -523,6 +547,19 @@ test("lens purity: normalizeFlow wraps LensPurityError with step context", async
       })
       .build();
   }).toThrow(/broken-flow.*in lens.*pure select\/repack/s);
+});
+
+test("compute tracer errors wrap with step context (P2 regression)", () => {
+  // A compute fn that throws at call time should surface through `.build()`
+  // as a wrapped Error with the flow/step prefix, matching the lens error
+  // wrapping format — so authors can localize failures symmetrically.
+  expect(() => {
+    contract
+      .flow("broken-compute")
+      .setup(async () => ({}))
+      .compute(() => { throw new Error("compute blew up"); })
+      .build();
+  }).toThrow(/broken-compute.*step 1.*\(compute\).*compute blew up/s);
 });
 
 test("lens purity: pure lens with spread + nested access still works", () => {

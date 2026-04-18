@@ -431,6 +431,20 @@ export interface FlowMeta {
   description?: string;
   tags?: string[];
   extensions?: Extensions;
+  /**
+   * Mark this flow as skipped at run time. Value is the skip reason
+   * displayed in reports. Useful for illustrative examples that should
+   * be discoverable (for scanner extraction / docs rendering) but must
+   * not attempt live HTTP calls.
+   *
+   * Mirrors `TestMeta.skip`.
+   */
+  skip?: string;
+  /**
+   * Mark this flow as focused. When any flows/tests in a run are `only`,
+   * non-focused ones may be excluded. Mirrors `TestMeta.only`.
+   */
+  only?: boolean;
 }
 
 /**
