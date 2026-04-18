@@ -452,6 +452,40 @@ test("normalize produces JSON-safe projection", async () => {
   expect(cloned).toEqual(extracted);
 });
 
+test("normalize preserves contract-level security from scoped factory", async () => {
+  const { httpAdapter } = await import("./adapter.js");
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client, security: "bearer" });
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200 } },
+    },
+  });
+
+  // Runtime projection has security injected by the factory
+  expect((c._projection.schemas as any)?.security).toBe("bearer");
+
+  const extracted = httpAdapter.normalize!({ ...c._projection });
+  expect((extracted.schemas as any)?.security).toBe("bearer");
+});
+
+test("normalize preserves apiKey security object verbatim", async () => {
+  const { httpAdapter } = await import("./adapter.js");
+  const client = makeMockClient();
+  const apiKey = { type: "apiKey" as const, name: "X-API-Key", in: "header" as const };
+  const api = contract.http.with("api", { client, security: apiKey });
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200 } },
+    },
+  });
+
+  const extracted = httpAdapter.normalize!({ ...c._projection });
+  expect((extracted.schemas as any)?.security).toEqual(apiKey);
+});
+
 // ---------------------------------------------------------------------------
 // classifyFailure
 // ---------------------------------------------------------------------------

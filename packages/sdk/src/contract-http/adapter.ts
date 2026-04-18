@@ -471,6 +471,10 @@ function normalizeHttp(
               examples: projection.schemas.request.examples,
             }
           : undefined,
+        // Contract-level security (set by the scoped factory via
+        // `contract.http.with("name", { security })`). Must survive
+        // normalize so downstream tools (toOpenApi, Cloud views) see it.
+        security: projection.schemas.security,
       }
     : undefined;
 
