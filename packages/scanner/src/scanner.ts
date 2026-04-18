@@ -279,20 +279,26 @@ export class Scanner {
             feature: ec.feature,
             deprecated: ec.deprecated,
             line: 0,
-            cases: ec.cases.map((c) => ({
-              key: c.key,
-              description: c.description,
-              expectStatus: (c.protocolExpect as any)?.status,
-              deferred: c.deferredReason,
-              deprecated: c.deprecatedReason,
-              lifecycle: c.lifecycle,
-              severity: c.severity,
-              requires: c.requires,
-              defaultRun: c.defaultRun,
-              hasHeaderSchema: c.responseHeaders != null,
-              hasExample: c.examples != null,
-              line: 0,
-            })),
+            cases: ec.cases.map((c) => {
+              // schemas is adapter-opaque; for HTTP it has { response: {...} }
+              const schemas = c.schemas as
+                | { response?: { status?: number; headers?: unknown; examples?: unknown } }
+                | undefined;
+              return {
+                key: c.key,
+                description: c.description,
+                expectStatus: schemas?.response?.status,
+                deferred: c.deferredReason,
+                deprecated: c.deprecatedReason,
+                lifecycle: c.lifecycle,
+                severity: c.severity,
+                requires: c.requires,
+                defaultRun: c.defaultRun,
+                hasHeaderSchema: schemas?.response?.headers != null,
+                hasExample: schemas?.response?.examples != null,
+                line: 0,
+              };
+            }),
           });
         }
       } else if (result.errors.length > 0) {

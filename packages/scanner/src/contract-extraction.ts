@@ -2,12 +2,18 @@
  * Runtime contract extraction — dynamically imports .contract.ts modules
  * and extracts metadata from exported contract objects.
  *
- * This is the shared extraction layer used by scanner, CLI, and MCP.
- * Produces NormalizedContractMeta — a protocol-agnostic contract model.
+ * Scanner is duck-typing-only (no @glubean/sdk dependency). We recognize
+ * shapes without importing types.
  *
- * Supports:
- * - HttpContract (from contract.http.with())
- * - ProtocolContract (from contract.register() with adapter v2)
+ * Output:
+ *   - NormalizedContractMeta — JSON-safe contract projection (mirrors
+ *     ExtractedContractProjection from sdk, plus `exportName`)
+ *   - NormalizedFlowMeta — JSON-safe flow projection (mirrors
+ *     ExtractedFlowProjection, plus `exportName`)
+ *
+ * Schema conversion: anywhere scanner sees a value with `.toJSONSchema()`
+ * it invokes that method. This handles Zod schemas embedded inside
+ * adapter-defined `schemas` opaque blobs without knowing the protocol.
  */
 
 import { pathToFileURL } from "node:url";
@@ -15,7 +21,7 @@ import { resolve, basename } from "node:path";
 import { readdirSync, statSync } from "node:fs";
 
 // =============================================================================
-// Types
+// Types — mirror sdk's ExtractedContractProjection / ExtractedFlowProjection
 // =============================================================================
 
 /** Case lifecycle. */
@@ -45,7 +51,11 @@ export interface NormalizedParamMeta {
   deprecated?: boolean;
 }
 
-/** Normalized case metadata. Protocol-agnostic. */
+/**
+ * Protocol-agnostic case metadata. Mirrors sdk's `ExtractedCaseMeta`.
+ * `schemas` and `meta` are adapter-defined JSON-safe blobs; scanner treats
+ * them as opaque but converts any embedded `.toJSONSchema()` methods.
+ */
 export interface NormalizedCaseMeta {
   key: string;
   description?: string;
@@ -55,61 +65,88 @@ export interface NormalizedCaseMeta {
   deprecatedReason?: string;
   requires?: CaseRequires;
   defaultRun?: CaseDefaultRun;
-  schemaMount?: string;
-  /** Protocol-specific expectations. HTTP: { status: 200 }, gRPC: { code: 0 } */
-  protocolExpect?: Record<string, unknown>;
-  responseSchema: unknown | null;
-  /** Response headers schema (OpenAPI + runtime validation) */
-  responseHeaders?: unknown | null;
-  /** Response content-type (HTTP-specific) */
-  responseContentType?: string;
-  /** Named response examples for OpenAPI docs */
-  examples?: Record<string, NormalizedExample>;
-  /** Per-path-param metadata */
-  paramSchemas?: Record<string, NormalizedParamMeta>;
-  /** Per-query-param metadata */
-  querySchemas?: Record<string, NormalizedParamMeta>;
-  /** Fully merged extensions (defaults < contract < case). Keys are x-* OpenAPI extensions. */
+  tags?: string[];
   extensions?: Record<string, unknown>;
+  /** Adapter-defined payload shape (opaque to scanner). */
+  schemas?: unknown;
+  /** Adapter-defined free-form meta (opaque). */
+  meta?: unknown;
 }
 
-/** Normalized contract metadata. Protocol-agnostic. Evolved from ExtractedContract. */
+/**
+ * Protocol-agnostic contract metadata. Mirrors `ExtractedContractProjection`.
+ */
 export interface NormalizedContractMeta {
   id: string;
   exportName: string;
   protocol: string;
-  /** Protocol-agnostic target. HTTP: "GET /users", gRPC: "Greeter/SayHello" */
+  /** Protocol-agnostic target (HTTP: "POST /users"). */
   target: string;
   description?: string;
   feature?: string;
   instanceName?: string;
-  security?: unknown;
-  schemaMount?: string;
-  requestSchema: unknown | null;
-  /** Request content type (HTTP-specific; default application/json) */
-  requestContentType?: string;
-  /** Request headers schema (OpenAPI docs) */
-  requestHeaders?: unknown | null;
-  /** Single request example */
-  requestExample?: unknown;
-  /** Named request examples */
-  requestExamples?: Record<string, NormalizedExample>;
-  /** Contract-level deprecation reason (propagates to all cases) */
+  tags?: string[];
   deprecated?: string;
-  /** Contract-level merged extensions (defaults < contract). Keys are x-* OpenAPI extensions. */
   extensions?: Record<string, unknown>;
-  protocolMeta?: Record<string, unknown>;
+  schemas?: unknown;
+  meta?: unknown;
   cases: NormalizedCaseMeta[];
 }
 
 /**
- * @deprecated Alias for NormalizedContractMeta. Use NormalizedContractMeta directly.
+ * @deprecated Alias for NormalizedContractMeta. Use directly.
  */
 export type ExtractedContract = NormalizedContractMeta;
 
-/** Result of extracting contracts from one or more files. */
+// --- Flow --------------------------------------------------------------------
+
+/**
+ * Single step in a flow projection. Discriminated by `kind`.
+ */
+export type NormalizedFlowStep =
+  | {
+      kind: "contract-call";
+      name?: string;
+      contractId: string;
+      caseKey: string;
+      protocol: string;
+      target: string;
+      inputs?: NormalizedFieldMapping[];
+      outputs?: NormalizedFieldMapping[];
+    }
+  | {
+      kind: "compute";
+      name?: string;
+      reads: string[];
+      writes: string[];
+    };
+
+export interface NormalizedFieldMapping {
+  target: string;
+  source:
+    | { kind: "path"; path: string }
+    | { kind: "literal"; value: unknown }
+    | { kind: "pass-through" };
+}
+
+/**
+ * Protocol-agnostic flow metadata. Mirrors `ExtractedFlowProjection`.
+ */
+export interface NormalizedFlowMeta {
+  id: string;
+  exportName: string;
+  protocol: "flow";
+  description?: string;
+  tags?: string[];
+  extensions?: Record<string, unknown>;
+  setupDynamic?: true;
+  steps: NormalizedFlowStep[];
+}
+
+/** Result of extracting contracts/flows from one or more files. */
 export interface ExtractionResult {
   contracts: NormalizedContractMeta[];
+  flows?: NormalizedFlowMeta[];
   errors: Array<{ file: string; error: string }>;
 }
 
@@ -118,73 +155,23 @@ export interface ExtractionResult {
 // =============================================================================
 
 /**
- * Check if a value looks like an HttpContract (duck-typing).
- * HttpContract extends Array<Test> and has id + endpoint.
- */
-export function isHttpContract(val: unknown): val is {
-  id: string;
-  endpoint: string;
-  description?: string;
-  feature?: string;
-  instanceName?: string;
-  security?: unknown;
-  deprecated?: string;
-  extensions?: Record<string, unknown>;
-  requestContentType?: string;
-  requestHeaders?: { toJSONSchema?: () => unknown };
-  requestExample?: unknown;
-  requestExamples?: Record<string, { value: unknown; summary?: string; description?: string }>;
-  request?: { toJSONSchema?: () => unknown };
-  _caseSchemas?: Record<string, {
-    expectStatus?: number;
-    responseSchema?: { toJSONSchema?: () => unknown };
-    responseHeaders?: { toJSONSchema?: () => unknown };
-    responseContentType?: string;
-    example?: unknown;
-    examples?: Record<string, { value: unknown; summary?: string; description?: string }>;
-    paramSchemas?: Record<string, {
-      schema?: { toJSONSchema?: () => unknown };
-      description?: string;
-      required?: boolean;
-      deprecated?: boolean;
-    }>;
-    querySchemas?: Record<string, {
-      schema?: { toJSONSchema?: () => unknown };
-      description?: string;
-      required?: boolean;
-      deprecated?: boolean;
-    }>;
-    description?: string;
-    deferred?: string;
-    deprecated?: string;
-    severity?: string;
-    lifecycle?: string;
-    requires?: string;
-    defaultRun?: string;
-    extensions?: Record<string, unknown>;
-  }>;
-} {
-  return (
-    Array.isArray(val) &&
-    typeof (val as any).id === "string" &&
-    typeof (val as any).endpoint === "string"
-  );
-}
-
-/**
- * Check if a value looks like a ProtocolContract (duck-typing).
- * ProtocolContract extends Array<Test> and has _projection with protocol + target.
+ * Check if a value looks like a ProtocolContract.
+ * ProtocolContract extends Array<Test> and has `_projection` with protocol + target.
+ * (HTTP contracts now go through the same shape since the rewrite.)
  */
 export function isProtocolContract(val: unknown): val is {
   _projection: {
+    id?: string;
     protocol: string;
     target: string;
     description?: string;
     feature?: string;
     instanceName?: string;
-    security?: unknown;
-    schemaMount?: string;
-    requestSchema?: unknown;
+    tags?: string[];
+    deprecated?: string;
+    extensions?: Record<string, unknown>;
+    schemas?: unknown;
+    meta?: unknown;
     cases: Array<{
       key: string;
       description?: string;
@@ -194,12 +181,11 @@ export function isProtocolContract(val: unknown): val is {
       deprecatedReason?: string;
       requires?: string;
       defaultRun?: string;
-      schemaMount?: string;
-      protocolExpect?: Record<string, unknown>;
-      responseSchema?: unknown;
-      protocolMeta?: Record<string, unknown>;
+      tags?: string[];
+      extensions?: Record<string, unknown>;
+      schemas?: unknown;
+      meta?: unknown;
     }>;
-    protocolMeta?: Record<string, unknown>;
   };
 } {
   return (
@@ -207,18 +193,42 @@ export function isProtocolContract(val: unknown): val is {
     typeof (val as any)._projection === "object" &&
     (val as any)._projection !== null &&
     typeof (val as any)._projection.protocol === "string" &&
-    typeof (val as any)._projection.target === "string"
+    typeof (val as any)._projection.target === "string" &&
+    (val as any)._projection.protocol !== "flow"
+  );
+}
+
+/**
+ * Check if a value looks like a FlowContract.
+ * FlowContract extends Array<Test> and has `_flow.protocol === "flow"`.
+ */
+export function isFlowContract(val: unknown): val is {
+  _flow: {
+    id: string;
+    protocol: "flow";
+    description?: string;
+    tags?: string[];
+    extensions?: Record<string, unknown>;
+    setup?: (...args: any[]) => unknown;
+    teardown?: (...args: any[]) => unknown;
+    steps: Array<any>;
+  };
+} {
+  return (
+    Array.isArray(val) &&
+    typeof (val as any)._flow === "object" &&
+    (val as any)._flow !== null &&
+    (val as any)._flow.protocol === "flow"
   );
 }
 
 // =============================================================================
-// Schema conversion
+// Schema conversion — embedded .toJSONSchema() recursive walk
 // =============================================================================
 
 /**
- * Try to convert a SchemaLike to JSON Schema using Zod v4's toJSONSchema.
- * Uses the schema's own instance method to avoid cross-instance issues.
- * Returns null if the schema is not a Zod type or conversion fails.
+ * Convert a live schema (Zod/Valibot/etc.) to a JSON Schema plain object.
+ * Falls back to passing through or null.
  */
 export function schemaToJsonSchema(schema: unknown): unknown | null {
   if (!schema || typeof schema !== "object") return null;
@@ -227,150 +237,114 @@ export function schemaToJsonSchema(schema: unknown): unknown | null {
       return (schema as any).toJSONSchema();
     }
   } catch (err) {
-    console.error(`[glubean:scanner] toJSONSchema failed: ${err instanceof Error ? err.message : err}`);
+    console.error(
+      `[glubean:scanner] toJSONSchema failed: ${err instanceof Error ? err.message : err}`,
+    );
   }
   return null;
 }
 
-// =============================================================================
-// Mapping functions
-// =============================================================================
-
 /**
- * Map an HttpContract to NormalizedContractMeta.
+ * Recursively walk a value converting any embedded Zod/valibot schemas
+ * (detected by `.toJSONSchema()` method) to plain JSON Schema objects.
+ * Other values pass through as-is.
+ *
+ * Used by scanner to produce JSON-safe output even when adapter didn't run
+ * `.normalize()` (e.g. when we read `_projection` directly).
  */
-function httpContractToNormalized(
-  value: ReturnType<typeof isHttpContract extends (v: any) => v is infer T ? () => T : never>,
-  exportName: string,
-): NormalizedContractMeta {
-  const cases: NormalizedCaseMeta[] = [];
-
-  if (value._caseSchemas) {
-    for (const [key, meta] of Object.entries(value._caseSchemas)) {
-      // Lifecycle normalization
-      const lifecycle: CaseLifecycle =
-        meta.deprecated ? "deprecated" :
-        meta.deferred ? "deferred" :
-        "active";
-
-      // Map per-param metadata (convert schema objects to JSON Schema)
-      const mapParamMeta = (m?: Record<string, {
-        schema?: { toJSONSchema?: () => unknown };
-        description?: string;
-        required?: boolean;
-        deprecated?: boolean;
-      }>): Record<string, NormalizedParamMeta> | undefined => {
-        if (!m) return undefined;
-        const result: Record<string, NormalizedParamMeta> = {};
-        for (const [k, v] of Object.entries(m)) {
-          result[k] = {
-            schema: schemaToJsonSchema(v.schema),
-            description: v.description,
-            required: v.required,
-            deprecated: v.deprecated,
-          };
-        }
-        return result;
-      };
-
-      // Normalize examples: prefer meta.examples, fall back to meta.example (single)
-      let examples: Record<string, NormalizedExample> | undefined;
-      if (meta.examples) {
-        examples = {};
-        for (const [name, ex] of Object.entries(meta.examples)) {
-          examples[name] = { value: ex.value, summary: ex.summary, description: ex.description };
-        }
-      } else if (meta.example !== undefined) {
-        examples = { default: { value: meta.example } };
-      }
-
-      cases.push({
-        key,
-        description: meta.description,
-        lifecycle,
-        severity: (meta.severity as CaseSeverity) ?? "warning",
-        deferredReason: meta.deferred,
-        deprecatedReason: meta.deprecated,
-        requires: meta.requires as CaseRequires | undefined,
-        defaultRun: meta.defaultRun as CaseDefaultRun | undefined,
-        schemaMount: "response.body",
-        protocolExpect: meta.expectStatus != null
-          ? { status: meta.expectStatus }
-          : undefined,
-        responseSchema: schemaToJsonSchema(meta.responseSchema),
-        responseHeaders: schemaToJsonSchema(meta.responseHeaders),
-        responseContentType: meta.responseContentType,
-        examples,
-        paramSchemas: mapParamMeta(meta.paramSchemas),
-        querySchemas: mapParamMeta(meta.querySchemas),
-        extensions: meta.extensions,
-      });
-    }
+export function deepNormalizeSchemas(value: unknown, depth = 0): unknown {
+  if (depth > 20) return value;
+  if (value == null) return value;
+  if (typeof value !== "object") return value;
+  // Has toJSONSchema? Convert it.
+  if (typeof (value as any).toJSONSchema === "function") {
+    const converted = schemaToJsonSchema(value);
+    if (converted != null) return converted;
+    return null;
   }
-
-  return {
-    id: value.id,
-    exportName,
-    protocol: "http",
-    target: value.endpoint,
-    description: value.description,
-    feature: value.feature,
-    instanceName: value.instanceName,
-    security: value.security,
-    schemaMount: "response.body",
-    requestSchema: schemaToJsonSchema(value.request),
-    requestContentType: value.requestContentType,
-    requestHeaders: schemaToJsonSchema(value.requestHeaders),
-    requestExample: value.requestExample,
-    requestExamples: value.requestExamples
-      ? Object.fromEntries(
-          Object.entries(value.requestExamples).map(([k, ex]) => [
-            k,
-            { value: ex.value, summary: ex.summary, description: ex.description },
-          ]),
-        )
-      : undefined,
-    deprecated: value.deprecated,
-    extensions: value.extensions,
-    cases,
-  };
+  if (Array.isArray(value)) {
+    return value.map((v) => deepNormalizeSchemas(v, depth + 1));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = deepNormalizeSchemas(v, depth + 1);
+  }
+  return out;
 }
 
-/**
- * Map a ProtocolContract's _projection to NormalizedContractMeta.
- */
+// =============================================================================
+// Mapping: projection → NormalizedContractMeta
+// =============================================================================
+
 function protocolContractToNormalized(
   value: { _projection: any },
   exportName: string,
 ): NormalizedContractMeta {
   const proj = value._projection;
   return {
-    id: proj.id ?? exportName, // prefer injected id, fall back to export name
+    id: proj.id ?? exportName,
     exportName,
     protocol: proj.protocol,
     target: proj.target,
     description: proj.description,
     feature: proj.feature,
     instanceName: proj.instanceName,
-    security: proj.security,
-    schemaMount: proj.schemaMount,
-    // Normalize schemas: if adapter returned live schema objects, convert to JSON Schema
-    requestSchema: schemaToJsonSchema(proj.requestSchema) ?? proj.requestSchema ?? null,
-    protocolMeta: proj.protocolMeta,
-    cases: (proj.cases ?? []).map((c: any) => ({
+    tags: proj.tags,
+    deprecated: proj.deprecated,
+    extensions: proj.extensions,
+    schemas: proj.schemas != null ? deepNormalizeSchemas(proj.schemas) : undefined,
+    meta: proj.meta,
+    cases: (proj.cases ?? []).map((c: any): NormalizedCaseMeta => ({
       key: c.key,
       description: c.description,
-      lifecycle: c.lifecycle ?? "active",
-      severity: c.severity ?? "warning",
+      lifecycle: (c.lifecycle as CaseLifecycle) ?? "active",
+      severity: (c.severity as CaseSeverity) ?? "warning",
       deferredReason: c.deferredReason,
       deprecatedReason: c.deprecatedReason,
-      requires: c.requires,
-      defaultRun: c.defaultRun,
-      schemaMount: c.schemaMount,
-      protocolExpect: c.protocolExpect,
-      // Normalize: try JSON Schema conversion, fall back to raw value
-      responseSchema: schemaToJsonSchema(c.responseSchema) ?? c.responseSchema ?? null,
+      requires: c.requires as CaseRequires | undefined,
+      defaultRun: c.defaultRun as CaseDefaultRun | undefined,
+      tags: c.tags,
+      extensions: c.extensions,
+      schemas: c.schemas != null ? deepNormalizeSchemas(c.schemas) : undefined,
+      meta: c.meta,
     })),
+  };
+}
+
+function flowContractToNormalized(
+  value: { _flow: any },
+  exportName: string,
+): NormalizedFlowMeta {
+  const f = value._flow;
+  return {
+    id: f.id,
+    exportName,
+    protocol: "flow",
+    description: f.description,
+    tags: f.tags,
+    extensions: f.extensions,
+    setupDynamic: f.setup ? true : undefined,
+    // Steps: scanner cannot proxy-trace lens fns here (would require sdk
+    // import). Just flatten step kind + target info. FieldMappings are
+    // populated later by `normalizeFlow` if needed at display time.
+    steps: (f.steps ?? []).map((s: any): NormalizedFlowStep => {
+      if (s.kind === "compute") {
+        return {
+          kind: "compute",
+          name: s.name,
+          reads: [],
+          writes: [],
+        };
+      }
+      return {
+        kind: "contract-call",
+        name: s.name,
+        contractId: s.contract?._projection?.id ?? s.ref?.contractId ?? "",
+        caseKey: s.caseKey ?? s.ref?.caseKey ?? "",
+        protocol: s.ref?.protocol ?? "",
+        target: s.ref?.target ?? "",
+      };
+    }),
   };
 }
 
@@ -379,19 +353,22 @@ function protocolContractToNormalized(
 // =============================================================================
 
 /**
- * Extract contracts from a single file by dynamic import.
- * Supports HttpContract (.with()) and ProtocolContract (register() v2).
+ * Extract contracts + flows from a single file by dynamic import.
+ * One file's import failure does not block others.
  */
-export async function extractContractFromFile(filePath: string): Promise<ExtractionResult> {
+export async function extractContractFromFile(
+  filePath: string,
+): Promise<ExtractionResult> {
   const contracts: NormalizedContractMeta[] = [];
+  const flows: NormalizedFlowMeta[] = [];
   const errors: ExtractionResult["errors"] = [];
   const absolutePath = resolve(filePath);
 
   try {
     const mod = await import(pathToFileURL(absolutePath).href);
     for (const [exportName, value] of Object.entries(mod)) {
-      if (isHttpContract(value)) {
-        contracts.push(httpContractToNormalized(value, exportName));
+      if (isFlowContract(value)) {
+        flows.push(flowContractToNormalized(value, exportName));
       } else if (isProtocolContract(value)) {
         contracts.push(protocolContractToNormalized(value, exportName));
       }
@@ -401,7 +378,7 @@ export async function extractContractFromFile(filePath: string): Promise<Extract
     errors.push({ file: absolutePath, error: message });
   }
 
-  return { contracts, errors };
+  return { contracts, flows: flows.length > 0 ? flows : undefined, errors };
 }
 
 // =============================================================================
@@ -409,16 +386,21 @@ export async function extractContractFromFile(filePath: string): Promise<Extract
 // =============================================================================
 
 /**
- * Find all .contract.{ts,js,mjs} files in a directory tree.
+ * Find all .contract.{ts,js,mjs} and .flow.{ts,js,mjs} files in a directory tree.
  */
-function findContractFiles(dir: string): string[] {
+function findContractAndFlowFiles(dir: string): string[] {
   const files: string[] = [];
   const walk = (d: string) => {
     for (const entry of readdirSync(d)) {
       const full = resolve(d, entry);
       if (entry === "node_modules" || entry.startsWith(".")) continue;
       if (statSync(full).isDirectory()) walk(full);
-      else if (basename(entry).includes(".contract.")) files.push(full);
+      else {
+        const base = basename(entry);
+        if (base.includes(".contract.") || base.includes(".flow.")) {
+          files.push(full);
+        }
+      }
     }
   };
   walk(dir);
@@ -426,21 +408,40 @@ function findContractFiles(dir: string): string[] {
 }
 
 /**
- * Extract contracts from all .contract.{ts,js,mjs} files in a project.
- * Each file is imported independently — one file's failure does not block others.
+ * Extract contracts + flows from all recognized files in a project.
  */
-export async function extractContractsFromProject(dir: string): Promise<ExtractionResult> {
-  const contractFiles = findContractFiles(dir);
-  if (contractFiles.length === 0) return { contracts: [], errors: [] };
+export async function extractContractsFromProject(
+  dir: string,
+): Promise<ExtractionResult> {
+  const files = findContractAndFlowFiles(dir);
+  if (files.length === 0) return { contracts: [], errors: [] };
 
   const allContracts: NormalizedContractMeta[] = [];
+  const allFlows: NormalizedFlowMeta[] = [];
   const allErrors: ExtractionResult["errors"] = [];
 
-  for (const filePath of contractFiles) {
-    const { contracts, errors } = await extractContractFromFile(filePath);
+  for (const filePath of files) {
+    const { contracts, flows, errors } = await extractContractFromFile(filePath);
     allContracts.push(...contracts);
+    if (flows) allFlows.push(...flows);
     allErrors.push(...errors);
   }
 
-  return { contracts: allContracts, errors: allErrors };
+  return {
+    contracts: allContracts,
+    flows: allFlows.length > 0 ? allFlows : undefined,
+    errors: allErrors,
+  };
+}
+
+// =============================================================================
+// Backward-compat: isHttpContract — removed permanently in v0.2.
+// =============================================================================
+
+/** @deprecated Removed in v0.2 — HTTP now goes through isProtocolContract. */
+export function isHttpContract(_val: unknown): never {
+  throw new Error(
+    "isHttpContract() was removed in v0.2. HTTP contracts now use the unified " +
+      "isProtocolContract() shape (_projection.protocol === 'http').",
+  );
 }
