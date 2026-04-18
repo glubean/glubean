@@ -3,6 +3,7 @@
  */
 
 import type { ContractStaticMeta } from "./extractor-static.js";
+import type { NormalizedFlowMeta } from "./contract-extraction.js";
 
 /** Export metadata for a single test export */
 export interface ExportMeta {
@@ -93,6 +94,11 @@ export interface BundleMetadata {
    * Independent from test exports — consumed by projection/coverage tools.
    */
   contracts?: ContractStaticMeta[];
+  /**
+   * Flow metadata extracted from .flow.ts files (v0.2+).
+   * Populated from the scanner's runtime extractor (`_extracted` on FlowContract).
+   */
+  flows?: NormalizedFlowMeta[];
 }
 
 /** Result of scanning a directory */
@@ -114,6 +120,11 @@ export interface ScanResult {
    * Independent from test exports — consumed by projection/coverage tools.
    */
   contracts: ContractStaticMeta[];
+  /**
+   * Flow metadata extracted from .flow.ts files (v0.2+).
+   * Independent from contracts — consumed by projection/visualization tools.
+   */
+  flows?: NormalizedFlowMeta[];
 }
 
 /** Options for scanning */

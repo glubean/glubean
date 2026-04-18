@@ -496,6 +496,48 @@ test("traceComputeFn handles method calls + arithmetic permissively", () => {
   expect(r.writes).toContain("greeting");
 });
 
+test("lens purity: method call in lens fn throws LensPurityError", async () => {
+  const { LensPurityError } = await import("./contract-core.js");
+  // Users who accidentally call a method on the traced state / response
+  // must see a clear error, not silently lose projection mappings.
+  expect(() => extractMappings((s: any) => ({ body: { id: s.name.toUpperCase() } })))
+    .toThrow(LensPurityError);
+
+  expect(() => extractMappings((s: any) => ({ body: { id: s.name.toUpperCase() } })))
+    .toThrow(/must be a pure select\/repack function/);
+});
+
+test("lens purity: normalizeFlow wraps LensPurityError with step context", async () => {
+  contract.register("lens_bad", makeMockAdapter({ withFlow: true }));
+  const c = (contract as any).lens_bad("c", {
+    target: "/x",
+    cases: { ok: {} },
+  }) as ProtocolContract<MockSpec>;
+
+  // Build a flow with an impure `in` lens — should throw at build/normalize time
+  expect(() => {
+    contract
+      .flow("broken-flow")
+      .step(c.case("ok") as any, {
+        in: (s: any) => ({ body: { x: s.name.toUpperCase() } }),
+      })
+      .build();
+  }).toThrow(/broken-flow.*in lens.*pure select\/repack/s);
+});
+
+test("lens purity: pure lens with spread + nested access still works", () => {
+  // Pass-through spread + multi-level access should NOT throw
+  const mappings = extractMappingsOut((s: any, res: any) => ({
+    ...s,
+    id: res.body.userId,
+    createdAt: res.body.meta.ts,
+  }));
+  expect(mappings.find((m) => m.target === "state.id")).toBeDefined();
+  expect(
+    mappings.find((m) => m.target === "state.createdAt" && (m.source as any).path === "response.body.meta.ts"),
+  ).toBeDefined();
+});
+
 test("extractMappingsOut tracks state pass-through + response.body access", () => {
   const mappings = extractMappingsOut((s: any, res: any) => ({
     ...s,

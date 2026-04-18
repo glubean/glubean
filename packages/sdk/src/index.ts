@@ -1568,6 +1568,7 @@ export {
   extractMappingsOut,
   traceComputeFn,
   getAdapter,
+  LensPurityError,
 } from "./contract-core.js";
 export type {
   // Protocol-agnostic enums

@@ -1583,6 +1583,63 @@ function securityToOpenApi(security: unknown, instanceName?: string): { name: st
   return null;
 }
 
+/**
+ * Walk an extracted flow projection and annotate matching OpenAPI operations
+ * with `x-glubean-flow-sequence` extensions. Only flows where every step is
+ * a `contract-call` with `protocol === "http"` are emitted — mixed-protocol
+ * or compute-heavy flows are skipped (extension is path-keyed and only
+ * makes sense for all-HTTP flows).
+ *
+ * Extension shape per operation:
+ *   x-glubean-flow-sequence: [{ flowId, step, totalSteps, stepName? }, ...]
+ * Operations referenced by multiple flows receive multiple entries.
+ */
+export function injectFlowSequenceExtensions(
+  spec: Record<string, unknown>,
+  flows: Array<{
+    id: string;
+    steps: Array<{
+      kind: "contract-call" | "compute";
+      name?: string;
+      protocol?: string;
+      target?: string;
+    }>;
+  }>,
+): void {
+  const paths = (spec.paths ?? {}) as Record<string, Record<string, any>>;
+  for (const flow of flows) {
+    const httpSteps = flow.steps.filter(
+      (s) => s.kind === "contract-call" && s.protocol === "http",
+    );
+    // Require ALL steps to be HTTP contract-calls (no compute, no other protocols)
+    if (httpSteps.length !== flow.steps.length || httpSteps.length === 0) continue;
+
+    const total = httpSteps.length;
+    httpSteps.forEach((step, idx) => {
+      if (!step.target) return;
+      const m = step.target.match(
+        /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+)$/i,
+      );
+      if (!m) return;
+      const method = m[1].toLowerCase();
+      const path = m[2];
+      const pathEntry = paths[path];
+      if (!pathEntry) return;
+      const operation = pathEntry[method];
+      if (!operation || typeof operation !== "object") return;
+
+      const existing = (operation["x-glubean-flow-sequence"] as unknown[]) ?? [];
+      existing.push({
+        flowId: flow.id,
+        step: idx + 1,
+        totalSteps: total,
+        ...(step.name ? { stepName: step.name } : {}),
+      });
+      operation["x-glubean-flow-sequence"] = existing;
+    });
+  }
+}
+
 export function contractsToOpenApi(
   rawContracts: SharedExtractedContract[],
   title = "API Specification",
@@ -1874,6 +1931,15 @@ server.registerTool(
     }
 
     const spec = contractsToOpenApi(result.contracts, input.title);
+
+    // Annotate operations referenced by all-HTTP flows with
+    // `x-glubean-flow-sequence` so agents / Cloud / viewers can see which
+    // endpoint plays which role in which flow. Skip flows that include
+    // non-HTTP steps (the extension is path-keyed and only meaningful when
+    // every step maps to an OpenAPI operation).
+    if (result.flows && result.flows.length > 0) {
+      injectFlowSequenceExtensions(spec, result.flows);
+    }
 
     return {
       content: [{

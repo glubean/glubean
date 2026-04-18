@@ -598,6 +598,10 @@ export async function runFlow<State>(
 /**
  * Normalize a RuntimeFlowProjection to JSON-safe ExtractedFlowProjection.
  * Runs Proxy dry-run of lens functions to extract FieldMappings.
+ *
+ * Lens purity is enforced here: if a `step.bindings.in` or `.out` lens
+ * violates purity (method call, `new`, etc.), `LensPurityError` is thrown
+ * with step context so the author sees which step needs fixing.
  */
 export function normalizeFlow<State>(
   runtime: RuntimeFlowProjection<State> & { id: string },
@@ -609,11 +613,43 @@ export function normalizeFlow<State>(
     tags: runtime.tags,
     extensions: runtime.extensions,
     setupDynamic: runtime.setup ? true : undefined,
-    steps: runtime.steps.map<ExtractedFlowStep>((s) => {
+    steps: runtime.steps.map<ExtractedFlowStep>((s, idx) => {
+      const stepLabel = s.name ??
+        (s.kind === "contract-call" ? `${s.contract._projection.id}#${s.caseKey}` : `step-${idx + 1}`);
+
       if (s.kind === "compute") {
         const { reads, writes } = traceComputeFn(s.fn);
         return { kind: "compute", name: s.name, reads, writes };
       }
+
+      let inputs: FieldMapping[] | undefined;
+      if (s.bindings?.in) {
+        try {
+          inputs = extractMappings(s.bindings.in);
+        } catch (err) {
+          if (err instanceof LensPurityError) {
+            throw new Error(
+              `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (in lens): ${err.message}`,
+            );
+          }
+          throw err;
+        }
+      }
+
+      let outputs: FieldMapping[] | undefined;
+      if (s.bindings?.out) {
+        try {
+          outputs = extractMappingsOut(s.bindings.out);
+        } catch (err) {
+          if (err instanceof LensPurityError) {
+            throw new Error(
+              `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (out lens): ${err.message}`,
+            );
+          }
+          throw err;
+        }
+      }
+
       return {
         kind: "contract-call",
         name: s.name,
@@ -621,10 +657,8 @@ export function normalizeFlow<State>(
         caseKey: s.caseKey,
         protocol: s.ref.protocol,
         target: s.ref.target,
-        inputs: s.bindings?.in ? extractMappings(s.bindings.in) : undefined,
-        outputs: s.bindings?.out
-          ? extractMappingsOut(s.bindings.out)
-          : undefined,
+        inputs,
+        outputs,
       };
     }),
   };
@@ -634,36 +668,28 @@ export function normalizeFlow<State>(
  * Run a pure lens `fn: (state) => output` with a tracing Proxy, extracting
  * FieldMappings from state paths to output paths.
  *
- * Pure-lens enforcement: method calls / Symbol.iterator / length on state
- * proxy cause the result to be returned without panicking (we just accept
- * best-effort). Adapters that need strict enforcement can re-run with a
- * stricter proxy in tests.
+ * Pure-lens enforcement: method calls, `new`, and coercion on the state
+ * proxy raise `LensPurityError`. Errors are **not** swallowed — the caller
+ * (typically `normalizeFlow`) wraps them with step context and re-throws,
+ * so authors see the failure at flow build time rather than silently
+ * losing projection data.
  */
 export function extractMappings(fn: (state: any) => any): FieldMapping[] {
   const proxy = makeLensProxy("state");
-  let result: unknown;
-  try {
-    result = fn(proxy);
-  } catch {
-    return [];
-  }
+  const result = fn(proxy);
   return collectMappings(result, []);
 }
 
 /**
  * Extract FieldMappings from `out: (state, response) => newState`.
+ * Same purity contract as `extractMappings`.
  */
 export function extractMappingsOut(
   fn: (state: any, response: any) => any,
 ): FieldMapping[] {
   const stateProxy = makeLensProxy("state");
   const resProxy = makeLensProxy("response");
-  let result: unknown;
-  try {
-    result = fn(stateProxy, resProxy);
-  } catch {
-    return [];
-  }
+  const result = fn(stateProxy, resProxy);
   // outputs target is always state.X
   return collectMappings(result, ["state"]);
 }
@@ -722,26 +748,70 @@ interface TracedValue {
 }
 
 function isTracedValue(v: unknown): v is TracedValue {
+  // Lens proxy uses a callable function target (for apply-trap purity
+  // enforcement), so the proxy itself reports `typeof === "function"` in
+  // V8. Accept either object or function.
   return (
-    typeof v === "object" &&
+    (typeof v === "object" || typeof v === "function") &&
     v !== null &&
     (v as any)[TRACE_MARKER] !== undefined
   );
 }
 
 /**
+ * Raised by the strict lens Proxy when a user lens fn attempts an operation
+ * that breaks the "pure field access + repack" contract. Caught and re-
+ * thrown with step context by `normalizeFlow`.
+ */
+export class LensPurityError extends Error {
+  readonly path: string;
+  readonly operation: string;
+  constructor(path: string, operation: string) {
+    super(
+      `Flow step in/out lens must be a pure select/repack function ` +
+        `(no method calls, branches, or arithmetic). ` +
+        `Illegal operation: "${operation}" on path "${path}". ` +
+        `If you need computation, move it to a .compute(s => ...) step between ` +
+        `this .step() and the next one.`,
+    );
+    this.name = "LensPurityError";
+    this.path = path;
+    this.operation = operation;
+  }
+}
+
+/**
  * Strict lens proxy — records top-level property access path as a TracedValue
  * on read. Used for `.step()` in/out lenses where we want precise field
  * mappings. Trace marker is a Symbol so it doesn't leak through spread.
+ *
+ * Enforces the lens purity invariant (contract-flow v9 §3.1 + §3.3):
+ * method calls / coercion / method dispatch on state or response throw
+ * `LensPurityError`. Authors who need computation must move it to a
+ * `.compute(s => ...)` step.
  */
 function makeLensProxy(rootPath: string): any {
   function childProxy(path: string): any {
-    // Target is an empty object; we expose path only via TRACE_MARKER symbol.
-    return new Proxy({}, {
+    // Use a callable **arrow** function target so `apply` trap fires on
+    // method calls. Arrow functions don't own `prototype`, so ownKeys can
+    // return [] without violating Proxy invariants (regular functions own
+    // a non-configurable `prototype` that would have to be surfaced).
+    const target = (() => {}) as unknown as object;
+    return new Proxy(target, {
       get(_target, prop) {
         if (prop === TRACE_MARKER) return path;
         if (typeof prop === "symbol") return undefined;
         return childProxy(`${path}.${String(prop)}`);
+      },
+      apply(_target, _thisArg, _args) {
+        // Method call — forbidden. Extract the leaf segment as the offending op.
+        const dot = path.lastIndexOf(".");
+        const op = dot >= 0 ? path.slice(dot + 1) : path;
+        const owner = dot >= 0 ? path.slice(0, dot) : path;
+        throw new LensPurityError(owner, `${op}()`);
+      },
+      construct(_target, _args) {
+        throw new LensPurityError(path, "new");
       },
       // ownKeys returns nothing so spread copies no fields.
       ownKeys() {

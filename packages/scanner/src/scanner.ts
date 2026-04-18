@@ -9,6 +9,7 @@ import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from ".
 import { extractAliasesFromSource, extractContractCases } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
+import type { NormalizedFlowMeta } from "./contract-extraction.js";
 import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.js";
 
 /** File system interface for runtime abstraction */
@@ -46,6 +47,7 @@ const DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"];
 
 const TEST_FILE_SUFFIXES = [".test.ts", ".test.js", ".test.mjs"];
 const CONTRACT_FILE_SUFFIXES = [".contract.ts", ".contract.js", ".contract.mjs"];
+const FLOW_FILE_SUFFIXES = [".flow.ts", ".flow.js", ".flow.mjs"];
 
 function isTestFile(filePath: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
@@ -53,6 +55,10 @@ function isTestFile(filePath: string): boolean {
 
 function isContractFile(filePath: string): boolean {
   return CONTRACT_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
+}
+
+function isFlowFile(filePath: string): boolean {
+  return FLOW_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
 }
 
 /**
@@ -149,9 +155,10 @@ export class Scanner {
       }
     }
 
-    // Check for at least one test or contract file
+    // Check for at least one test, contract, or flow file
     let foundTestFile = false;
     let foundContractFile = false;
+    let foundFlowFile = false;
 
     try {
       for await (
@@ -162,16 +169,17 @@ export class Scanner {
       ) {
         if (isTestFile(filePath)) foundTestFile = true;
         else if (isContractFile(filePath)) foundContractFile = true;
-        if (foundTestFile || foundContractFile) break;
+        else if (isFlowFile(filePath)) foundFlowFile = true;
+        if (foundTestFile || foundContractFile || foundFlowFile) break;
       }
     } catch (err) {
       errors.push(`Failed to scan directory: ${err}`);
     }
 
-    if (!foundTestFile && !foundContractFile) {
+    if (!foundTestFile && !foundContractFile && !foundFlowFile) {
       errors.push(
-        "No test or contract files found. " +
-          "Ensure your files are named *.test.ts or *.contract.ts.",
+        "No test, contract, or flow files found. " +
+          "Ensure your files are named *.test.ts, *.contract.ts, or *.flow.ts.",
       );
     }
 
@@ -227,12 +235,14 @@ export class Scanner {
     // Phase 1: collect .extend() aliases from all .ts files
     const aliases = await this.collectAliases(dir, skipDirs, extensions);
 
-    // Phase 2: collect test files and contract files
+    // Phase 2: collect test, contract, and flow files
     const testFiles: string[] = [];
     const contractFiles: string[] = [];
+    const flowFiles: string[] = [];
     for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
       if (isTestFile(filePath)) testFiles.push(filePath);
       else if (isContractFile(filePath)) contractFiles.push(filePath);
+      else if (isFlowFile(filePath)) flowFiles.push(filePath);
     }
 
     // Phase 3: Extract test metadata from each test file
@@ -334,10 +344,40 @@ export class Scanner {
       }
     }
 
-    if (Object.keys(files).length === 0 && contracts.length === 0) {
+    // Phase 5: Extract flow metadata from flow files.
+    // extractContractFromFile already returns both contracts and flows; we also
+    // call it on .flow.ts files so single-file flow modules are picked up.
+    const flows: NormalizedFlowMeta[] = [];
+    const allFlowSourceFiles = [...flowFiles, ...contractFiles]; // contract files can also export flows
+    const seenFlowIds = new Set<string>();
+    for (const filePath of allFlowSourceFiles) {
+      const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
+      const result = await extractContractFromFile(absolutePath);
+      if (result.flows) {
+        for (const flow of result.flows) {
+          if (!seenFlowIds.has(flow.id)) {
+            flows.push(flow);
+            seenFlowIds.add(flow.id);
+          }
+        }
+      }
+      // Errors already surfaced in contract phase for shared files; only add
+      // new errors for flow-only files
+      if (flowFiles.includes(filePath) && result.errors.length > 0) {
+        for (const err of result.errors) {
+          warnings.push(`Flow import failed: ${err.file} — ${err.error}`);
+        }
+      }
+    }
+
+    if (
+      Object.keys(files).length === 0 &&
+      contracts.length === 0 &&
+      flows.length === 0
+    ) {
       warnings.push(
-        "No Glubean test or contract files found. " +
-          "Ensure your files are named *.test.ts or *.contract.ts.",
+        "No Glubean test, contract, or flow files found. " +
+          "Ensure your files are named *.test.ts, *.contract.ts, or *.flow.ts.",
       );
     }
 
@@ -349,6 +389,7 @@ export class Scanner {
       tags: Array.from(allTags),
       warnings,
       contracts,
+      ...(flows.length > 0 ? { flows } : {}),
     };
   }
 }

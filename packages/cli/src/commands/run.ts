@@ -145,12 +145,18 @@ function isGlob(target: string): boolean {
   return /[*?{[]/.test(target);
 }
 
+const TEST_FILE_SUFFIXES = [".test.ts", ".contract.ts", ".flow.ts"];
+
+function isGlubeanTestFile(name: string): boolean {
+  return TEST_FILE_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
+
 async function walkTestFiles(dir: string, result: string[]): Promise<void> {
   const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (DEFAULT_SKIP_DIRS.includes(entry.name)) continue;
     const full = resolve(dir, entry.name);
-    if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".contract.ts"))) {
+    if (entry.isFile() && isGlubeanTestFile(entry.name)) {
       result.push(full);
     } else if (entry.isDirectory()) {
       await walkTestFiles(full, result);
@@ -179,7 +185,7 @@ async function resolveTestFiles(target: string): Promise<string[]> {
     const files: string[] = [];
     for await (const entry of glob(target, { cwd: process.cwd() })) {
       const full = resolve(process.cwd(), entry);
-      if (full.endsWith(".test.ts") || full.endsWith(".contract.ts")) {
+      if (isGlubeanTestFile(full)) {
         const s = await stat(full).catch(() => null);
         if (s?.isFile()) files.push(full);
       }
