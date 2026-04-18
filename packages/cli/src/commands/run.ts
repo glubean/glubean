@@ -411,7 +411,7 @@ export async function runCommand(
       `\n${colors.red}❌ No test files found for target: ${target}${colors.reset}`,
     );
     console.error(
-      `${colors.dim}Glubean looks for files matching *.test.ts or *.contract.ts in the target directory.${colors.reset}`,
+      `${colors.dim}Glubean looks for files matching *.test.ts, *.contract.ts, or *.flow.ts in the target directory.${colors.reset}`,
     );
     console.error(
       `${colors.dim}Run "glubean run tests/" or "glubean run path/to/file.test.ts".${colors.reset}\n`,
