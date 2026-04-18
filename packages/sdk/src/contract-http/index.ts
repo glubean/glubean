@@ -1,15 +1,38 @@
 /**
  * Built-in HTTP adapter for the Glubean contract system.
  *
- * HTTP ships with the SDK (users get `contract.http.with()` zero-config),
- * but internally it implements the same `ContractProtocolAdapter` interface
- * that future protocol plugins (@glubean/contract-grpc etc.) will use.
+ * Shipped with @glubean/sdk — zero-config for the common HTTP case.
+ * Registered as an adapter (via `contract.register("http", httpAdapter)`)
+ * in `../index.ts` at SDK load time.
  *
- * This module is re-exported and auto-registered by `@glubean/sdk`'s main
- * entry point. End users do not import from here directly.
- *
- * Populated in P2 of the v0.2.0 rewrite
- * (`internal/30-execution/2026-04-18/contract-rewrite-plan.md`).
+ * Future plugin protocols (gRPC / GraphQL / Kafka / ...) will ship as
+ * separate npm packages (`@glubean/contract-grpc` etc.) that do
+ * `contract.register("grpc", grpcAdapter)` on import.
  */
 
-export {};
+export { httpAdapter } from "./adapter.js";
+export { createHttpFactory, createHttpRoot } from "./factory.js";
+
+export type {
+  // User-facing authoring types
+  HttpContractSpec,
+  HttpContractDefaults,
+  HttpSecurityScheme,
+  HttpContractRoot,
+  HttpContractFactory,
+  ContractCase,
+  ContractExpect,
+  ContractExample,
+  NormalizedHeaders,
+  ParamValue,
+  RequestSpec,
+  // Adapter-level payload types
+  HttpPayloadSchemas,
+  HttpSafeSchemas,
+  HttpContractMeta,
+  HttpParamSchema,
+  HttpParamMeta,
+  HttpFlowCaseOutput,
+  InferHttpInputs,
+  InferHttpOutput,
+} from "./types.js";

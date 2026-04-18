@@ -234,7 +234,17 @@ function dispatchContract<
     _projection: enrichedProjection,
     _spec: spec as Spec,
     case(key: string): ContractCaseRef<any, any> {
-      return makeContractCaseRef(protocol, id, projection.target, key, contractObj as unknown as ProtocolContract<Spec, SafeSchemas, SafeMeta>, spec as Spec);
+      // Delegate fail-fast validation to adapter (e.g. HTTP rejects
+      // function-valued body/params/query/headers).
+      adapter.validateCaseForFlow?.(spec as Spec, key, id);
+      return makeContractCaseRef(
+        protocol,
+        id,
+        projection.target,
+        key,
+        contractObj as unknown as ProtocolContract<Spec, SafeSchemas, SafeMeta>,
+        spec as Spec,
+      );
     },
   }) as unknown as ProtocolContract<Spec, SafeSchemas, SafeMeta>;
 

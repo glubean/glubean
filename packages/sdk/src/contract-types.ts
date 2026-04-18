@@ -306,6 +306,21 @@ export interface ContractProtocolAdapter<
     caseKey: string;
     resolvedInputs: unknown;
   }) => Promise<unknown>;
+
+  /**
+   * Optional: validate that a case can be referenced in a flow. Called by
+   * ProtocolContract.case(key). HTTP's implementation rejects cases with
+   * function-valued input fields (body/params/query/headers) because those
+   * depend on case-local setup state unavailable in flow mode. See
+   * contract-flow v9 §5.1.1 for rationale.
+   *
+   * Throws on invalid case; returns undefined on success.
+   */
+  validateCaseForFlow?: (
+    spec: Spec,
+    caseKey: string,
+    contractId: string,
+  ) => void;
 }
 
 /**

@@ -1562,7 +1562,6 @@ export { definePlugin } from "./plugin.js";
 
 // Contract API — generic core (HTTP adapter self-registers via ./contract-http)
 export {
-  contract,
   runFlow,
   normalizeFlow,
   extractMappings,
@@ -1607,7 +1606,66 @@ export type {
   ExtractedComputeStep,
   FieldMapping,
 } from "./contract-types.js";
-// HTTP-specific types are re-exported by ./contract-http/index.ts (P2).
+// HTTP adapter — built-in, registers itself at SDK load time
+import { contract as _contract } from "./contract-core.js";
+import { httpAdapter } from "./contract-http/adapter.js";
+import { createHttpRoot } from "./contract-http/factory.js";
+import type { HttpContractRoot } from "./contract-http/types.js";
+import type { ContractProtocolAdapter } from "./contract-types.js";
+import type { FlowBuilder, FlowMeta } from "./contract-types.js";
+
+_contract.register("http", httpAdapter);
+// After register(), contract.http is the generic dispatcher. Wrap it in the
+// factory so users get `contract.http.with("name", {...})("id", spec)` UX.
+{
+  const dispatcher = _contract.http as Parameters<typeof createHttpRoot>[0];
+  (_contract as unknown as { http: unknown }).http = createHttpRoot(dispatcher);
+}
+
+/**
+ * The `contract` namespace — typed with built-in HTTP adapter.
+ *
+ *   - `contract.http.with("name", defaults)` — scoped HTTP factory (built-in)
+ *   - `contract.flow(id)` — protocol-agnostic flow builder
+ *   - `contract.register(protocol, adapter)` — plugin extension point
+ *   - `contract[protocol](id, spec)` — attached by `register()`
+ */
+export const contract: {
+  http: HttpContractRoot;
+  flow: (idOrMeta: string | FlowMeta) => FlowBuilder<unknown>;
+  register: <Spec, Rt = unknown, RtM = unknown, Sf = unknown, SfM = unknown>(
+    protocol: string,
+    adapter: ContractProtocolAdapter<Spec, Rt, RtM, Sf, SfM>,
+  ) => void;
+  [protocol: string]: unknown;
+} = _contract as any;
+
+// Re-export HTTP-specific types + value exports
+export {
+  createHttpFactory,
+  createHttpRoot,
+} from "./contract-http/factory.js";
+export type {
+  HttpContractSpec,
+  HttpContractDefaults,
+  HttpSecurityScheme,
+  HttpContractRoot,
+  HttpContractFactory,
+  ContractCase,
+  ContractExpect,
+  ContractExample,
+  NormalizedHeaders,
+  ParamValue,
+  RequestSpec,
+  HttpPayloadSchemas,
+  HttpSafeSchemas,
+  HttpContractMeta,
+  HttpParamSchema,
+  HttpParamMeta,
+  HttpFlowCaseOutput,
+  InferHttpInputs,
+  InferHttpOutput,
+} from "./contract-http/index.js";
 
 // Session API
 export { defineSession, session } from "./session.js";
