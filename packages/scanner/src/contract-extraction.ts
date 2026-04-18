@@ -201,6 +201,13 @@ export function isProtocolContract(val: unknown): val is {
 /**
  * Check if a value looks like a FlowContract.
  * FlowContract extends Array<Test> and has `_flow.protocol === "flow"`.
+ *
+ * May also carry `_extracted` — a pre-computed ExtractedFlowProjection
+ * populated by the SDK's flow builder via `normalizeFlow(_flow)`. When
+ * present it is the source of truth for scanner output (full field
+ * mappings, compute reads/writes). When absent we degrade to duck-typing
+ * `_flow` directly (no lens proxy tracing in scanner since it is
+ * dependency-free).
  */
 export function isFlowContract(val: unknown): val is {
   _flow: {
@@ -211,6 +218,15 @@ export function isFlowContract(val: unknown): val is {
     extensions?: Record<string, unknown>;
     setup?: (...args: any[]) => unknown;
     teardown?: (...args: any[]) => unknown;
+    steps: Array<any>;
+  };
+  _extracted?: {
+    id: string;
+    protocol: "flow";
+    description?: string;
+    tags?: string[];
+    extensions?: Record<string, unknown>;
+    setupDynamic?: true;
     steps: Array<any>;
   };
 } {
@@ -312,9 +328,50 @@ function protocolContractToNormalized(
 }
 
 function flowContractToNormalized(
-  value: { _flow: any },
+  value: { _flow: any; _extracted?: any },
   exportName: string,
 ): NormalizedFlowMeta {
+  // Prefer the pre-computed extracted projection. The SDK's flow builder
+  // populates `_extracted` via `normalizeFlow(_flow)` — this path carries
+  // full FieldMapping data for `.step()` lenses and reads/writes for
+  // `.compute()` nodes. Scanner just attaches `exportName`.
+  if (value._extracted) {
+    const ex = value._extracted;
+    return {
+      id: ex.id,
+      exportName,
+      protocol: "flow",
+      description: ex.description,
+      tags: ex.tags,
+      extensions: ex.extensions,
+      setupDynamic: ex.setupDynamic,
+      steps: (ex.steps ?? []).map((s: any): NormalizedFlowStep => {
+        if (s.kind === "compute") {
+          return {
+            kind: "compute",
+            name: s.name,
+            reads: s.reads ?? [],
+            writes: s.writes ?? [],
+          };
+        }
+        return {
+          kind: "contract-call",
+          name: s.name,
+          contractId: s.contractId ?? "",
+          caseKey: s.caseKey ?? "",
+          protocol: s.protocol ?? "",
+          target: s.target ?? "",
+          inputs: s.inputs,
+          outputs: s.outputs,
+        };
+      }),
+    };
+  }
+
+  // Fallback: duck-type `_flow` directly. Lens tracing is unavailable
+  // here (scanner is dep-free); callers downstream lose FieldMappings +
+  // compute reads/writes. In practice this only fires for flows
+  // constructed outside the canonical SDK path (e.g. test fixtures).
   const f = value._flow;
   return {
     id: f.id,
@@ -324,17 +381,9 @@ function flowContractToNormalized(
     tags: f.tags,
     extensions: f.extensions,
     setupDynamic: f.setup ? true : undefined,
-    // Steps: scanner cannot proxy-trace lens fns here (would require sdk
-    // import). Just flatten step kind + target info. FieldMappings are
-    // populated later by `normalizeFlow` if needed at display time.
     steps: (f.steps ?? []).map((s: any): NormalizedFlowStep => {
       if (s.kind === "compute") {
-        return {
-          kind: "compute",
-          name: s.name,
-          reads: [],
-          writes: [],
-        };
+        return { kind: "compute", name: s.name, reads: [], writes: [] };
       }
       return {
         kind: "contract-call",
@@ -346,6 +395,31 @@ function flowContractToNormalized(
       };
     }),
   };
+}
+
+// =============================================================================
+// FlowBuilder auto-build
+// =============================================================================
+
+/**
+ * If `val` is an unbuilt FlowBuilder (from `contract.flow(id).step(...)`
+ * without a trailing `.build()`), call `.build()` to resolve it to a
+ * FlowContract. Scanner is dep-free, so we duck-type the builder shape.
+ */
+function autoBuildFlowBuilder(val: unknown): unknown {
+  if (
+    typeof val === "object" &&
+    val !== null &&
+    (val as any).__glubean_type === "flow-builder" &&
+    typeof (val as any).build === "function"
+  ) {
+    try {
+      return (val as { build(): unknown }).build();
+    } catch {
+      return val;
+    }
+  }
+  return val;
 }
 
 // =============================================================================
@@ -366,7 +440,12 @@ export async function extractContractFromFile(
 
   try {
     const mod = await import(pathToFileURL(absolutePath).href);
-    for (const [exportName, value] of Object.entries(mod)) {
+    for (const [exportName, rawValue] of Object.entries(mod)) {
+      // Auto-resolve unbuilt FlowBuilder exports. User code like
+      // `export const signup = contract.flow(...).step(...)` returns a
+      // FlowBuilder (not a FlowContract) because `.build()` is optional.
+      // Scanner must build it to reach the `_flow` projection.
+      const value = autoBuildFlowBuilder(rawValue);
       if (isFlowContract(value)) {
         flows.push(flowContractToNormalized(value, exportName));
       } else if (isProtocolContract(value)) {

@@ -606,6 +606,13 @@ export interface FlowBuilder<State = unknown> {
  */
 export interface FlowContract<State = unknown> extends Array<Test> {
   readonly _flow: RuntimeFlowProjection<State> & { id: string };
+  /**
+   * Pre-computed JSON-safe extracted projection. Populated by the flow
+   * builder via `normalizeFlow(_flow)` so downstream consumers (scanner,
+   * CLI, MCP, Cloud) don't need to import the SDK to get field mappings
+   * for `.step()` lenses and reads/writes for `.compute()` nodes.
+   */
+  readonly _extracted: ExtractedFlowProjection;
 }
 
 // =============================================================================

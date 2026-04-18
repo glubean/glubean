@@ -451,12 +451,18 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
 
     const arr: Test[] = [flowTest];
     const runtimeWithId = { ...runtime, id: meta.id };
+
+    // Pre-compute extracted projection so downstream consumers (scanner,
+    // CLI, MCP, Cloud) get full field mappings + compute reads/writes
+    // without having to import the SDK to call normalizeFlow themselves.
+    const extracted = normalizeFlow(runtimeWithId);
+
     const resultHandle = Object.assign(arr, {
       _flow: runtimeWithId,
+      _extracted: extracted,
     }) as FlowContract<any>;
 
-    // Register flow in the registry (with extracted projection for scanner display)
-    const extracted = normalizeFlow(runtimeWithId);
+    // Register flow in the registry
     const flowRegistryMeta: FlowRegistryMeta = {
       id: extracted.id,
       description: extracted.description,

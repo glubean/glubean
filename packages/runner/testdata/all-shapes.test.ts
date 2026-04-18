@@ -90,3 +90,13 @@ export const onlyBuilder = test("only-builder-flow")
 export const skipBuilder = test("skip-builder-flow")
   .meta({ skip: true })
   .step("step-y", async () => {});
+
+// ---------------------------------------------------------------------------
+// 13. contract.flow — un-built FlowBuilder (no .build())
+//     Exercises autoResolve's `isFlowBuilder` branch.
+// ---------------------------------------------------------------------------
+import { contract } from "@glubean/sdk";
+export const signupFlow = contract
+  .flow("signup-flow")
+  .meta({ tags: ["e2e"] })
+  .setup(async () => ({ email: "alice@test" }));

@@ -574,8 +574,15 @@ async function executeCaseInFlowHttp(input: {
   const effectiveQuery = mergeSlot(caseSpec.query, patch.query);
   const effectiveHeaders = mergeSlot(caseSpec.headers, patch.headers);
 
-  // Rule 1: case setup throw → teardown does NOT run
-  const caseState = caseSpec.setup ? await caseSpec.setup(ctx) : undefined;
+  // Rule 1: case setup throw → teardown does NOT run. Track whether setup
+  // SUCCEEDED via a separate flag, not via state-is-undefined — a setup may
+  // legitimately return `undefined` and we still owe it a teardown call.
+  let setupRan = false;
+  let caseState: unknown = undefined;
+  if (caseSpec.setup) {
+    caseState = await caseSpec.setup(ctx);
+    setupRan = true;
+  }
 
   try {
     const { method, path } = parseEndpoint(spec.endpoint);
@@ -659,11 +666,13 @@ async function executeCaseInFlowHttp(input: {
 
     return { status: res.status, headers: responseHeaders, body };
   } finally {
-    // Rule 1: case.teardown runs in finally regardless of downstream outcome.
-    // Its errors are logged but MUST NOT mask the primary exception.
-    if (caseSpec.teardown && caseState !== undefined) {
+    // Rule 1: case.teardown runs in finally whenever setup succeeded,
+    // regardless of downstream outcome AND regardless of the state value
+    // returned by setup (undefined is a valid return). Teardown errors are
+    // logged but MUST NOT mask the primary exception.
+    if (caseSpec.teardown && setupRan) {
       try {
-        await caseSpec.teardown(ctx, caseState);
+        await caseSpec.teardown(ctx, caseState as any);
       } catch (tdErr) {
         ctx.log?.(`case.teardown("${caseKey}") failed: ${String(tdErr)}`);
       }

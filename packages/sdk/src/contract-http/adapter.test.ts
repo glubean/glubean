@@ -321,6 +321,59 @@ test("flow step returns adapter CaseOutput shape for out lens", async () => {
   expect(outState).toEqual({ status: 201, id: "u1" });
 });
 
+test("Rule 1: case teardown runs when setup returns undefined (not gated on state value)", async () => {
+  const client = makeMockClient({ status: 200 });
+  const api = contract.http.with("api", { client });
+  const order: string[] = [];
+  const c = api("c", {
+    endpoint: "POST /x",
+    cases: {
+      ok: {
+        description: "x",
+        expect: { status: 200 },
+        body: {},
+        // setup returns undefined legitimately — still owes a teardown
+        setup: async () => { order.push("setup"); return undefined as any; },
+        teardown: async () => { order.push("teardown"); },
+      },
+    },
+  });
+
+  const flowObj = contract
+    .flow("f")
+    .step(c.case("ok"))
+    .build() as FlowContract<unknown>;
+
+  await runFlow(flowObj, makeCtx());
+  expect(order).toEqual(["setup", "teardown"]);
+});
+
+test("Rule 1: case teardown does NOT run when setup itself throws", async () => {
+  const client = makeMockClient({ status: 200 });
+  const api = contract.http.with("api", { client });
+  const order: string[] = [];
+  const c = api("c", {
+    endpoint: "POST /x",
+    cases: {
+      ok: {
+        description: "x",
+        expect: { status: 200 },
+        body: {},
+        setup: async () => { order.push("setup"); throw new Error("setup fail"); },
+        teardown: async () => { order.push("teardown"); },
+      },
+    },
+  });
+
+  const flowObj = contract
+    .flow("f")
+    .step(c.case("ok"))
+    .build() as FlowContract<unknown>;
+
+  await expect(runFlow(flowObj, makeCtx())).rejects.toThrow("setup fail");
+  expect(order).toEqual(["setup"]);
+});
+
 test("Rule 1: case teardown runs even if flow step request throws", async () => {
   const client = makeMockClient({ status: 500 }); // will fail status assertion
   const api = contract.http.with("api", { client });
