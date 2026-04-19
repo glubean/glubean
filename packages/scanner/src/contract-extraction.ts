@@ -439,7 +439,22 @@ export async function extractContractFromFile(
   const absolutePath = resolve(filePath);
 
   try {
-    const mod = await import(pathToFileURL(absolutePath).href);
+    // Cache-bust Node's ESM module cache by appending the file's mtime
+    // as a query string to the import URL. Without this, long-running
+    // hosts (MCP server, `glubean run --watch`, editor integrations)
+    // keep serving the first import of a file for the lifetime of the
+    // process — so a user editing a contract and re-running extraction
+    // sees stale metadata. Keying on mtime keeps unchanged files served
+    // from cache (fast repeat extraction) while re-importing only what
+    // actually changed.
+    let mtimeKey: number;
+    try {
+      mtimeKey = statSync(absolutePath).mtimeMs;
+    } catch {
+      mtimeKey = 0; // fall back to a single cached instance per process
+    }
+    const importUrl = `${pathToFileURL(absolutePath).href}?t=${mtimeKey}`;
+    const mod = await import(importUrl);
     for (const [exportName, rawValue] of Object.entries(mod)) {
       // Auto-resolve unbuilt FlowBuilder exports. User code like
       // `export const signup = contract.flow(...).step(...)` returns a
