@@ -1,6 +1,13 @@
 import { test, expect, describe } from "vitest";
-import { formatMdOutline, formatJson, lintDescription } from "./contracts.js";
+import {
+  formatMdOutline,
+  formatJson,
+  formatFlowsMdSection,
+  flowToJson,
+  lintDescription,
+} from "./contracts.js";
 import type { ContractStaticMeta } from "@glubean/scanner/static";
+import type { NormalizedFlowMeta } from "@glubean/scanner";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -200,5 +207,108 @@ describe("lintDescription", () => {
     expect(lintDescription("c", "k", "邮箱和密码注册成功，返回完整用户信息")).toBeUndefined();
     expect(lintDescription("c", "k", "Duplicate email is rejected")).toBeUndefined();
     expect(lintDescription("c", "k", "Unauthenticated access is blocked")).toBeUndefined();
+  });
+});
+
+// ── Flow rendering ──────────────────────────────────────────────────────────
+
+const sampleFlow: NormalizedFlowMeta = {
+  id: "signup-flow",
+  exportName: "signupFlow",
+  protocol: "flow",
+  description: "End-to-end signup path",
+  tags: ["e2e"],
+  setupDynamic: true,
+  steps: [
+    {
+      kind: "contract-call",
+      name: "register",
+      contractId: "create-user",
+      caseKey: "ok",
+      protocol: "http",
+      target: "POST /users",
+      inputs: [
+        { target: "body.email", source: { kind: "path", path: "state.email" } },
+      ],
+      outputs: [
+        { target: "state.userId", source: { kind: "path", path: "response.body.id" } },
+      ],
+    },
+    {
+      kind: "compute",
+      name: "derive",
+      reads: ["state.userId"],
+      writes: ["trackingId"],
+    },
+    {
+      kind: "contract-call",
+      contractId: "get-user",
+      caseKey: "ok",
+      protocol: "http",
+      target: "GET /users/:id",
+      inputs: [
+        { target: "params.id", source: { kind: "path", path: "state.userId" } },
+      ],
+    },
+  ],
+};
+
+describe("formatFlowsMdSection", () => {
+  test("renders flow with contract-call + compute steps and field mappings", () => {
+    const md = formatFlowsMdSection([sampleFlow]);
+    expect(md).toContain("## Flows");
+    expect(md).toContain("### signup-flow");
+    expect(md).toContain("e2e");
+    expect(md).toContain("End-to-end signup path");
+    expect(md).toContain("setup: *<dynamic>*");
+    // Contract-call step 1
+    expect(md).toContain("1. **create-user#ok**");
+    expect(md).toContain("body.email ← state.email");
+    expect(md).toContain("state.userId ← response.body.id");
+    // Compute step 2
+    expect(md).toContain("2. **<compute>** — derive");
+    expect(md).toContain("reads: state.userId");
+    expect(md).toContain("writes: trackingId");
+    // Contract-call step 3
+    expect(md).toContain("3. **get-user#ok**");
+    expect(md).toContain("params.id ← state.userId");
+  });
+
+  test("returns empty string for empty flows", () => {
+    expect(formatFlowsMdSection([])).toBe("");
+  });
+});
+
+describe("flowToJson", () => {
+  test("emits JSON-safe object mirroring extracted projection", () => {
+    const obj = flowToJson(sampleFlow);
+    expect(obj.id).toBe("signup-flow");
+    expect(obj.tags).toEqual(["e2e"]);
+    expect(obj.setupDynamic).toBe(true);
+    expect(Array.isArray(obj.steps)).toBe(true);
+    const steps = obj.steps as any[];
+    expect(steps[0].kind).toBe("contract-call");
+    expect(steps[0].contractId).toBe("create-user");
+    expect(steps[1].kind).toBe("compute");
+    expect(steps[1].reads).toEqual(["state.userId"]);
+    // JSON-safe round-trip
+    const cloned = JSON.parse(JSON.stringify(obj));
+    expect(cloned).toEqual(obj);
+  });
+});
+
+describe("formatJson with flows", () => {
+  test("includes flows[] when provided", () => {
+    const out = formatJson([], [sampleFlow]);
+    const parsed = JSON.parse(out);
+    expect(parsed.flows).toBeDefined();
+    expect(parsed.flows.length).toBe(1);
+    expect(parsed.flows[0].id).toBe("signup-flow");
+  });
+
+  test("omits flows key when empty", () => {
+    const out = formatJson([], []);
+    const parsed = JSON.parse(out);
+    expect(parsed.flows).toBeUndefined();
   });
 });

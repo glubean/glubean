@@ -7,6 +7,11 @@
 
 import { resolve } from "node:path";
 import { extractContractsFromProject } from "@glubean/scanner";
+import type {
+  NormalizedFlowMeta,
+  NormalizedFlowStep,
+  NormalizedFieldMapping,
+} from "@glubean/scanner";
 import type { ContractStaticMeta, ContractCaseStaticMeta } from "@glubean/scanner/static";
 
 // ── Description lint ────────────────────────────────────────────────────────
@@ -168,10 +173,13 @@ export function formatMdOutline(contracts: ContractStaticMeta[]): string {
 
 // ── JSON formatter ──────────────────────────────────────────────────────────
 
-export function formatJson(contracts: ContractStaticMeta[]): string {
+export function formatJson(
+  contracts: ContractStaticMeta[],
+  flows: NormalizedFlowMeta[] = [],
+): string {
   const features = groupByFeature(contracts);
   const summary = computeSummary(contracts);
-  const output = {
+  const output: Record<string, unknown> = {
     generated: new Date().toISOString(),
     features: features.map((f) => ({
       name: f.name,
@@ -195,7 +203,106 @@ export function formatJson(contracts: ContractStaticMeta[]): string {
     })),
     summary,
   };
+  if (flows.length > 0) {
+    output.flows = flows.map(flowToJson);
+  }
   return JSON.stringify(output, null, 2) + "\n";
+}
+
+// ── Flow formatters ─────────────────────────────────────────────────────────
+
+function formatMappingArrow(m: NormalizedFieldMapping): string {
+  if (m.source.kind === "path") {
+    return `${m.target} ← ${m.source.path}`;
+  }
+  if (m.source.kind === "literal") {
+    return `${m.target} = ${JSON.stringify(m.source.value)}`;
+  }
+  return `${m.target} ← (pass-through)`;
+}
+
+function formatFlowStep(step: NormalizedFlowStep, index: number): string[] {
+  const lines: string[] = [];
+  if (step.kind === "compute") {
+    const name = step.name ? ` — ${step.name}` : "";
+    lines.push(`${index + 1}. **<compute>**${name}`);
+    const hasAny = (step.reads.length ?? 0) > 0 || (step.writes.length ?? 0) > 0;
+    if (hasAny) {
+      if (step.reads.length > 0) lines.push(`   - reads: ${step.reads.join(", ")}`);
+      if (step.writes.length > 0) lines.push(`   - writes: ${step.writes.join(", ")}`);
+    } else {
+      lines.push("   - *(mappings not available)*");
+    }
+    return lines;
+  }
+  // contract-call
+  const name = step.name ? ` — ${step.name}` : "";
+  const target = step.target ? ` (${step.protocol} · ${step.target})` : "";
+  lines.push(`${index + 1}. **${step.contractId}#${step.caseKey}**${name}${target}`);
+  if (step.inputs && step.inputs.length > 0) {
+    lines.push("   - inputs:");
+    for (const m of step.inputs) lines.push(`     - ${formatMappingArrow(m)}`);
+  }
+  if (step.outputs && step.outputs.length > 0) {
+    lines.push("   - outputs:");
+    for (const m of step.outputs) lines.push(`     - ${formatMappingArrow(m)}`);
+  }
+  return lines;
+}
+
+export function formatFlowsMdSection(flows: NormalizedFlowMeta[]): string {
+  if (flows.length === 0) return "";
+  const lines: string[] = [];
+  lines.push("## Flows");
+  lines.push("");
+  for (const f of flows) {
+    const tagSuffix = f.tags && f.tags.length > 0 ? ` *(${f.tags.join(", ")})*` : "";
+    lines.push(`### ${f.id}${tagSuffix}`);
+    if (f.description) {
+      lines.push("");
+      lines.push(f.description);
+    }
+    lines.push("");
+    if (f.setupDynamic) {
+      lines.push("- setup: *<dynamic>*");
+    }
+    for (let i = 0; i < f.steps.length; i++) {
+      for (const line of formatFlowStep(f.steps[i], i)) {
+        lines.push(line);
+      }
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+export function flowToJson(f: NormalizedFlowMeta): Record<string, unknown> {
+  return {
+    id: f.id,
+    description: f.description,
+    tags: f.tags,
+    setupDynamic: f.setupDynamic,
+    steps: f.steps.map((s) => {
+      if (s.kind === "compute") {
+        return {
+          kind: "compute",
+          name: s.name,
+          reads: s.reads,
+          writes: s.writes,
+        };
+      }
+      return {
+        kind: "contract-call",
+        name: s.name,
+        contractId: s.contractId,
+        caseKey: s.caseKey,
+        protocol: s.protocol,
+        target: s.target,
+        inputs: s.inputs,
+        outputs: s.outputs,
+      };
+    }),
+  };
 }
 
 // ── Command ─────────────────────────────────────────────────────────────────
@@ -220,6 +327,7 @@ export async function contractsCommand(
   const format = options.format ?? "md-outline";
 
   const result = await extractContractsFromProject(dir);
+  const flows = result.flows ?? [];
 
   // Surface import errors
   if (result.errors.length > 0) {
@@ -229,10 +337,10 @@ export async function contractsCommand(
     }
   }
 
-  if (result.contracts.length === 0) {
+  if (result.contracts.length === 0 && flows.length === 0) {
     console.error(
-      `${colors.yellow}No contracts found.${colors.reset} ` +
-      `Ensure .contract.ts files exist and use contract.http.with().`,
+      `${colors.yellow}No contracts or flows found.${colors.reset} ` +
+      `Ensure .contract.ts / .flow.ts files exist and use contract.http.with() or contract.flow().`,
     );
     process.exit(1);
   }
@@ -251,27 +359,53 @@ export async function contractsCommand(
       : ec.feature,
     deprecated: ec.deprecated,
     line: 0,
-    cases: ec.cases.map((c) => ({
-      key: c.key,
-      description: c.description,
-      expectStatus: (c.protocolExpect as any)?.status,
-      deferred: c.deferredReason,
-      deprecated: c.deprecatedReason,
-      lifecycle: c.lifecycle,
-      severity: c.severity,
-      requires: c.requires as any,
-      defaultRun: c.defaultRun as any,
-      hasHeaderSchema: c.responseHeaders != null,
-      hasExample: c.examples != null,
-      line: 0,
-    })),
+    cases: ec.cases.map((c) => {
+      // Scanner emits `schemas` as an opaque blob after v0.2. For HTTP
+      // contracts the shape is { response: { status, headers, examples, ... } }.
+      const schemas = c.schemas as
+        | {
+            response?: {
+              status?: number;
+              headers?: unknown;
+              examples?: unknown;
+            };
+          }
+        | undefined;
+      return {
+        key: c.key,
+        description: c.description,
+        expectStatus: schemas?.response?.status,
+        deferred: c.deferredReason,
+        deprecated: c.deprecatedReason,
+        lifecycle: c.lifecycle,
+        severity: c.severity,
+        requires: c.requires as any,
+        defaultRun: c.defaultRun as any,
+        hasHeaderSchema: schemas?.response?.headers != null,
+        hasExample: schemas?.response?.examples != null,
+        line: 0,
+      };
+    }),
   }));
 
   // Output projection
   if (format === "json") {
-    process.stdout.write(formatJson(contracts));
+    process.stdout.write(formatJson(contracts, flows));
   } else {
-    process.stdout.write(formatMdOutline(contracts));
+    const contractsMd = contracts.length > 0 ? formatMdOutline(contracts) : "";
+    const flowsMd = flows.length > 0 ? formatFlowsMdSection(flows) : "";
+    if (contractsMd && flowsMd) {
+      process.stdout.write(contractsMd.trimEnd() + "\n\n" + flowsMd);
+    } else {
+      // Even if contracts are empty, render a minimal header + flows block
+      if (!contractsMd) {
+        const date = new Date().toISOString().slice(0, 10);
+        process.stdout.write(
+          `# Contract Specification\n\nGenerated: ${date} | ${flows.length} flow(s)\n\n`,
+        );
+      }
+      process.stdout.write(contractsMd || flowsMd);
+    }
   }
 
   // Lint warnings (stderr, so they don't pollute piped output)

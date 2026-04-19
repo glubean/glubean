@@ -9,6 +9,7 @@ import {
   diagnoseProjectConfig,
   discoverTestsFromFile,
   filterLocalDebugEvents,
+  injectFlowSequenceExtensions,
   runLocalTestsFromFile,
   type LocalRunSnapshot,
   MCP_TOOL_NAMES,
@@ -837,4 +838,86 @@ test("contractsToOpenApi: request body emits schema + example(s) (P1 regression)
   expect(content.examples.default).toEqual({ value: { name: "Alice" } });
   expect(content.examples.admin?.value).toEqual({ name: "Admin" });
   expect(content.examples.admin?.summary).toBe("Admin user");
+});
+
+test("injectFlowSequenceExtensions annotates all-HTTP flow paths (P2 regression)", () => {
+  // Build a minimal OpenAPI spec stub with two operations
+  const spec: Record<string, unknown> = {
+    paths: {
+      "/users": { post: { operationId: "create-user" } },
+      "/users/:id": { get: { operationId: "get-user" } },
+    },
+  };
+
+  const flows = [
+    {
+      id: "signup-flow",
+      steps: [
+        {
+          kind: "contract-call" as const,
+          name: "register",
+          protocol: "http",
+          target: "POST /users",
+        },
+        {
+          kind: "contract-call" as const,
+          protocol: "http",
+          target: "GET /users/:id",
+        },
+      ],
+    },
+  ];
+
+  injectFlowSequenceExtensions(spec, flows);
+
+  const postOp = (spec as any).paths["/users"].post;
+  const getOp = (spec as any).paths["/users/:id"].get;
+  expect(postOp["x-glubean-flow-sequence"]).toEqual([
+    { flowId: "signup-flow", step: 1, totalSteps: 2, stepName: "register" },
+  ]);
+  expect(getOp["x-glubean-flow-sequence"]).toEqual([
+    { flowId: "signup-flow", step: 2, totalSteps: 2 },
+  ]);
+});
+
+test("injectFlowSequenceExtensions skips flows with non-HTTP or compute steps", () => {
+  const spec: Record<string, unknown> = {
+    paths: { "/users": { post: { operationId: "create-user" } } },
+  };
+
+  const flows = [
+    {
+      id: "mixed-flow",
+      steps: [
+        { kind: "contract-call" as const, protocol: "http", target: "POST /users" },
+        { kind: "compute" as const, name: "derive" }, // breaks all-HTTP constraint
+      ],
+    },
+  ];
+
+  injectFlowSequenceExtensions(spec, flows);
+  // Post operation should NOT be annotated because the flow isn't all-HTTP
+  expect((spec as any).paths["/users"].post["x-glubean-flow-sequence"]).toBeUndefined();
+});
+
+test("injectFlowSequenceExtensions accumulates entries when an operation is in multiple flows", () => {
+  const spec: Record<string, unknown> = {
+    paths: { "/users": { post: { operationId: "create-user" } } },
+  };
+
+  const flows = [
+    {
+      id: "signup",
+      steps: [{ kind: "contract-call" as const, protocol: "http", target: "POST /users" }],
+    },
+    {
+      id: "admin-signup",
+      steps: [{ kind: "contract-call" as const, protocol: "http", target: "POST /users" }],
+    },
+  ];
+
+  injectFlowSequenceExtensions(spec, flows);
+  const ext = (spec as any).paths["/users"].post["x-glubean-flow-sequence"];
+  expect(ext).toHaveLength(2);
+  expect(ext.map((e: any) => e.flowId)).toEqual(["signup", "admin-signup"]);
 });

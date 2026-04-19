@@ -88,6 +88,27 @@ export function isEachBuilder(
   );
 }
 
+/**
+ * Type guard — check if a value is an un-built `FlowBuilder`
+ * (from `contract.flow(id)...`).
+ *
+ * The builder carries `__glubean_type === "flow-builder"` and a `build()`
+ * method that returns a `FlowContract` (array-extending with `_flow`).
+ */
+export function isFlowBuilder(
+  obj: unknown,
+): obj is {
+  __glubean_type: "flow-builder";
+  build(): Test<unknown>[] & { _flow?: unknown };
+} {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    (obj as Record<string, unknown>).__glubean_type === "flow-builder" &&
+    typeof (obj as Record<string, unknown>).build === "function"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Auto-resolve helpers
 // ---------------------------------------------------------------------------
@@ -95,11 +116,14 @@ export function isEachBuilder(
 /**
  * If the value is a `TestBuilder`, call `.build()` to get a `Test`.
  * If the value is an `EachBuilder`, call `.build()` to get a `Test[]`.
+ * If the value is a `FlowBuilder`, call `.build()` to get a `FlowContract`
+ * (array-extending Test[] with a `_flow` projection carrier).
  * Otherwise return as-is.
  */
 export function autoResolve(value: unknown): unknown {
   if (isTestBuilder(value)) return value.build();
   if (isEachBuilder(value)) return value.build();
+  if (isFlowBuilder(value)) return value.build();
   return value;
 }
 

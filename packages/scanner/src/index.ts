@@ -3,13 +3,19 @@
  *
  * Scanner for Glubean test files.
  *
- * Supports two extraction modes:
- * - **Static analysis**: Uses regex patterns to extract metadata
- *   without importing files. Works everywhere.
- * - **Runtime extraction**: Imports test files via tsx subprocess and reads
- *   metadata from the SDK's global registry (100% accurate).
+ * Two independent extraction paths:
  *
- * @example Static analysis (default)
+ * - **Static analysis (tests)** — regex-based, no `import()`. Discovers
+ *   `test()` / `test.each()` / `test.pick()` call sites and returns case
+ *   metadata from source alone. Always safe; never executes user code.
+ *
+ * - **Runtime extraction (contracts + flows)** — dynamic `import()` of
+ *   `.contract.ts` and `.flow.ts` files. Recognizes `ProtocolContract`
+ *   (via `_projection.protocol`) and `FlowContract` (via
+ *   `_flow.protocol === "flow"`). Required because contracts/flows
+ *   encode schemas and cases as runtime object shapes.
+ *
+ * @example Static analysis
  * ```ts
  * import { createScanner } from "@glubean/scanner";
  *
@@ -18,12 +24,11 @@
  * console.log(`Found ${result.testCount} tests`);
  * ```
  *
- * @example Pure static analysis (no file system)
+ * @example Runtime contract extraction
  * ```ts
- * import { extractFromSource } from "@glubean/scanner";
+ * import { extractContractsFromProject } from "@glubean/scanner";
  *
- * const content = fs.readFileSync("test.ts", "utf-8");
- * const exports = extractFromSource(content);
+ * const { contracts, flows, errors } = await extractContractsFromProject(".");
  * ```
  */
 
@@ -41,19 +46,24 @@ export type { FileSystem, Hasher, MetadataExtractor } from "./scanner.js";
 export { createStaticExtractor, extractAliasesFromSource, extractContractCases, extractFromSource, isGlubeanFile } from "./extractor-static.js";
 export type { ContractStaticMeta, ContractCaseStaticMeta } from "./extractor-static.js";
 
-// Re-export runtime contract extraction
+// Re-export runtime contract + flow extraction
 export {
   extractContractFromFile,
   extractContractsFromProject,
-  isHttpContract,
   isProtocolContract,
+  isFlowContract,
+  isHttpContract, // deprecated-throw, kept for diagnostic
   schemaToJsonSchema,
+  deepNormalizeSchemas,
 } from "./contract-extraction.js";
 export type {
   NormalizedContractMeta,
   NormalizedCaseMeta,
   NormalizedExample,
   NormalizedParamMeta,
+  NormalizedFlowMeta,
+  NormalizedFlowStep,
+  NormalizedFieldMapping,
   ExtractedContract,
   ExtractionResult,
   CaseLifecycle,

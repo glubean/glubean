@@ -40,11 +40,22 @@ test("resolveModuleTests — discovers all expected test IDs", () => {
     "only-builder-flow",
     "only-me",
     pickId,
+    "signup-flow",
     "skip-builder-flow",
     "skip-me",
   ].sort();
 
   expect(ids).toEqual(expected);
+});
+
+test("resolveModuleTests — un-built FlowBuilder is auto-resolved via .build()", () => {
+  const tests = resolveModuleTests(mod);
+  const signup = tests.find((t) => t.exportName === "signupFlow");
+  expect(signup).toBeDefined();
+  expect(signup!.id).toBe("signup-flow");
+  // FlowContract build() returns a [Test] array — the single orchestrator
+  // Test has type "simple" and runFlow is invoked inside its fn.
+  expect(signup!.type).toBe("simple");
 });
 
 test("resolveModuleTests — simple test (id === exportName)", () => {
