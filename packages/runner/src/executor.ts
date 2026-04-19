@@ -231,7 +231,18 @@ export class TestExecutor {
   private _sessionState: Record<string, unknown> = {};
   private _sessionSetupDone = false;
   private _sessionSetupFailed = false;
+  private _sessionSetupError?: { error?: string; stack?: string; reason?: string };
   private _sessionSetupPromise?: Promise<void>;
+  // vars/secrets captured from the first `run()` call — reused by the
+  // internally-triggered session setup/teardown so session.ts can
+  // resolve `{{...}}` placeholders (e.g. base URLs, credentials). The
+  // CLI bypasses this by calling RunOrchestrator.runSessionSetup
+  // directly with envVars; in-process callers (VSCode extension, SDK
+  // consumers) would otherwise hit session setup with empty env.
+  private _sessionEnv: { vars: Record<string, string>; secrets: Record<string, string> } = {
+    vars: {},
+    secrets: {},
+  };
 
   // ── Zero-project state (scratch mode) ─────────────────────────────────
   private _zeroProjectSetup = false;
@@ -296,7 +307,7 @@ export class TestExecutor {
       const sessionUrl = pathToFileURL(this._sessionFile).href;
       const ctx: ExecutionContext = {
         ...createContextWithSession(
-          { vars: {}, secrets: {} },
+          { vars: this._sessionEnv.vars, secrets: this._sessionEnv.secrets },
           this._sessionState,
         ),
         sessionMode: "teardown",
@@ -339,7 +350,10 @@ export class TestExecutor {
         this._sessionFile = sessionFile;
         const sessionUrl = pathToFileURL(sessionFile).href;
         const ctx: ExecutionContext = {
-          ...createContextWithSession({ vars: {}, secrets: {} }, {}),
+          ...createContextWithSession(
+            { vars: this._sessionEnv.vars, secrets: this._sessionEnv.secrets },
+            {},
+          ),
           sessionMode: "setup",
         };
 
@@ -347,6 +361,24 @@ export class TestExecutor {
           if (event.type === "session:set") {
             this._sessionState[event.key] = event.value;
           } else if (event.type === "status" && event.status === "failed") {
+            this._sessionSetupFailed = true;
+            // Capture the underlying error so the outer "Session setup
+            // failed. Test skipped." message can include the real cause.
+            this._sessionSetupError = {
+              error: event.error,
+              stack: event.stack,
+              reason: event.reason,
+            };
+          } else if (event.type === "error") {
+            // Session file failed to even load (e.g. import error).
+            // Only record the first error so we don't overwrite a more
+            // specific status failure.
+            if (!this._sessionSetupError) {
+              this._sessionSetupError = {
+                error: event.message,
+                reason: event.reason,
+              };
+            }
             this._sessionSetupFailed = true;
           }
         }
@@ -426,11 +458,29 @@ export class TestExecutor {
   ): AsyncGenerator<ExecutionEvent> {
     // Auto-session: run setup on first call (skip for __session__ calls to avoid recursion)
     if (this._sessionEnabled && testId !== "__session__") {
+      // Capture env from the first real test run so session setup can
+      // resolve `{{VAR}}` placeholders. Later calls don't overwrite —
+      // session runs once per executor lifetime.
+      if (!this._sessionSetupDone && !this._sessionSetupPromise) {
+        this._sessionEnv = {
+          vars: { ...(context.vars ?? {}) },
+          secrets: { ...(context.secrets ?? {}) },
+        };
+      }
       const testDir = dirname(fileURLToPath(testUrl));
       await this._ensureSessionSetup(testDir);
 
       if (this._sessionSetupFailed) {
-        yield { type: "status", status: "failed", error: "Session setup failed. Test skipped." };
+        const detail = this._sessionSetupError?.error;
+        yield {
+          type: "status",
+          status: "failed",
+          error: detail
+            ? `Session setup failed — test skipped. Cause: ${detail}`
+            : "Session setup failed. Test skipped.",
+          ...(this._sessionSetupError?.stack && { stack: this._sessionSetupError.stack }),
+          ...(this._sessionSetupError?.reason && { reason: this._sessionSetupError.reason }),
+        };
         return;
       }
 
