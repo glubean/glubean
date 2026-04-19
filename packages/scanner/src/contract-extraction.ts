@@ -426,6 +426,11 @@ function autoBuildFlowBuilder(val: unknown): unknown {
 // File-level extraction
 // =============================================================================
 
+// Per-path mtime cache used by extractContractFromFile() to decide when
+// to bust Node's ESM module cache on re-import. See the comment inside
+// that function for the full reasoning.
+const _importMtimeCache = new Map<string, number>();
+
 /**
  * Extract contracts + flows from a single file by dynamic import.
  * One file's import failure does not block others.
@@ -439,21 +444,36 @@ export async function extractContractFromFile(
   const absolutePath = resolve(filePath);
 
   try {
-    // Cache-bust Node's ESM module cache by appending the file's mtime
-    // as a query string to the import URL. Without this, long-running
-    // hosts (MCP server, `glubean run --watch`, editor integrations)
-    // keep serving the first import of a file for the lifetime of the
-    // process — so a user editing a contract and re-running extraction
-    // sees stale metadata. Keying on mtime keeps unchanged files served
-    // from cache (fast repeat extraction) while re-importing only what
-    // actually changed.
-    let mtimeKey: number;
+    // Cache-bust Node's ESM module cache so long-running hosts (MCP server,
+    // editor integrations) see edits to a contract file on the next
+    // extraction. Plain `await import(url)` serves the same module for the
+    // process's lifetime, so without this a user editing a contract never
+    // sees the change until the host restarts. Strategy: append
+    // `?t=<mtimeMs>` ONLY when the file has changed since our last import.
+    // Unchanged files reuse the same URL (cheap) and still hit Node's
+    // cache; changed files get a fresh URL that triggers re-import.
+    //
+    // Why the conditional query, not always-on? Some ESM-aware tools
+    // (e.g. Vite/Vitest) reserve query strings on import URLs for their
+    // own transform pipeline. Leaving the URL clean unless we have a
+    // real reason to bust keeps those tools working in their default path.
+    let mtimeKey = 0;
     try {
       mtimeKey = statSync(absolutePath).mtimeMs;
     } catch {
-      mtimeKey = 0; // fall back to a single cached instance per process
+      // stat failure: proceed without cache-bust.
     }
-    const importUrl = `${pathToFileURL(absolutePath).href}?t=${mtimeKey}`;
+    const baseUrl = pathToFileURL(absolutePath).href;
+    const lastSeen = _importMtimeCache.get(absolutePath);
+    let importUrl: string;
+    if (lastSeen === undefined || lastSeen === mtimeKey) {
+      // First import or unchanged file: clean URL.
+      importUrl = baseUrl;
+    } else {
+      // File changed since last import: new URL forces re-import.
+      importUrl = `${baseUrl}?t=${mtimeKey}`;
+    }
+    _importMtimeCache.set(absolutePath, mtimeKey);
     const mod = await import(importUrl);
     for (const [exportName, rawValue] of Object.entries(mod)) {
       // Auto-resolve unbuilt FlowBuilder exports. User code like
