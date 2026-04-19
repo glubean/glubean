@@ -218,38 +218,57 @@ interface DiscoveredTest {
   meta: DiscoveredTestMeta;
 }
 
-async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
+export async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
   const content = await readFile(filePath, "utf-8");
 
-  if (filePath.includes(".contract.")) {
-    // Runtime extraction via shared function (supports .with() syntax)
+  if (filePath.includes(".contract.") || filePath.includes(".flow.")) {
+    // Runtime extraction via shared function (supports .with() syntax).
+    // Returns BOTH contracts and flows; v0.2+ flow files often export only
+    // flows, so we must emit one DiscoveredTest per flow in addition to
+    // per contract case.
     const result = await extractContractFromFile(filePath);
 
-    if (result.contracts.length > 0) {
-      const results: DiscoveredTest[] = [];
-      for (const ec of result.contracts) {
-        for (const c of ec.cases) {
-          results.push({
-            exportName: ec.exportName,
-            meta: {
-              id: `${ec.id}.${c.key}`,
-              description: c.description,
-              requires: c.requires,
-              defaultRun: c.defaultRun,
-              deferred: c.deferredReason,
-              deprecated: c.deprecatedReason,
-            },
-          });
-        }
+    const results: DiscoveredTest[] = [];
+
+    for (const ec of result.contracts) {
+      for (const c of ec.cases) {
+        results.push({
+          exportName: ec.exportName,
+          meta: {
+            id: `${ec.id}.${c.key}`,
+            description: c.description,
+            requires: c.requires,
+            defaultRun: c.defaultRun,
+            deferred: c.deferredReason,
+            deprecated: c.deprecatedReason,
+          },
+        });
       }
-      return results;
     }
 
-    // Runtime failed — fall back to static regex (old syntax)
+    // Each flow has a single orchestrator Test (setup → steps → teardown).
+    // Discover it as one runnable entry with the flow id.
+    if (result.flows) {
+      for (const flow of result.flows) {
+        results.push({
+          exportName: flow.exportName,
+          meta: {
+            id: flow.id,
+            description: flow.description,
+            // Flow-level meta.skip was propagated to TestMeta.deferred
+            // by the flow builder (contract-core.ts), surfaced via the
+            // extracted projection's description where applicable.
+          },
+        });
+      }
+    }
+
+    if (results.length > 0) return results;
+
+    // Runtime failed — fall back to static regex (old syntax, contracts only)
     if (result.errors.length > 0) {
       const contracts = extractContractCases(content);
       if (contracts.length > 0) {
-        const results: DiscoveredTest[] = [];
         for (const c of contracts) {
           for (const caseItem of c.cases) {
             results.push({
