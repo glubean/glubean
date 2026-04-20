@@ -103,6 +103,26 @@ export interface GraphQLResponse<T = unknown> {
 }
 
 /**
+ * Extended result type returned by the client. Contains the full
+ * `GraphQLResponse` shape plus transport envelope fields used by
+ * the contract adapter layer (negative-transport assertions,
+ * `classifyFailure`, flow `out` lens inspection).
+ *
+ * Additive since v0.2.0 — users who only destructure `{ data, errors }`
+ * see no change. Users who need transport info read the new fields.
+ *
+ * @template T Shape of the `data` field
+ */
+export interface GraphQLResult<T = unknown> extends GraphQLResponse<T> {
+  /** HTTP status from the underlying POST (200 on most GraphQL success, even with `errors`). */
+  httpStatus: number;
+  /** Response headers (lowercased keys). */
+  headers: Record<string, string | string[]>;
+  /** Raw response body string — present when available (null on network error). */
+  rawBody: string | null;
+}
+
+/**
  * Options for a single GraphQL request.
  */
 export interface GraphQLRequestOptions {
@@ -198,7 +218,7 @@ export interface GraphQLClient {
   query<T = unknown>(
     query: string,
     options?: GraphQLRequestOptions,
-  ): Promise<GraphQLResponse<T>>;
+  ): Promise<GraphQLResult<T>>;
 
   /**
    * Execute a GraphQL mutation.
@@ -223,7 +243,7 @@ export interface GraphQLClient {
   mutate<T = unknown>(
     mutation: string,
     options?: GraphQLRequestOptions,
-  ): Promise<GraphQLResponse<T>>;
+  ): Promise<GraphQLResult<T>>;
 }
 
 // =============================================================================
@@ -344,7 +364,7 @@ export function createGraphQLClient(
   async function execute<T>(
     query: string,
     requestOptions?: GraphQLRequestOptions,
-  ): Promise<GraphQLResponse<T>> {
+  ): Promise<GraphQLResult<T>> {
     const opName = requestOptions?.operationName ?? parseOperationName(query) ?? "anonymous";
 
     const mergedHeaders: Record<string, string> = {
@@ -361,19 +381,37 @@ export function createGraphQLClient(
       body.operationName = opName;
     }
 
-    const response = await http
-      .post(endpoint, {
-        json: body,
-        headers: mergedHeaders,
-        throwHttpErrors: false,
-      })
-      .json<GraphQLResponse<T>>();
+    const res = await http.post(endpoint, {
+      json: body,
+      headers: mergedHeaders,
+      throwHttpErrors: false,
+    });
 
-    if (throwOnGraphQLErrors && response.errors && response.errors.length > 0) {
-      throw new GraphQLResponseError(response.errors, response);
+    const rawBody = await res.text();
+    const headers: Record<string, string | string[]> = {};
+    res.headers.forEach((value, key) => {
+      headers[key.toLowerCase()] = value;
+    });
+
+    let parsed: GraphQLResponse<T>;
+    try {
+      parsed = rawBody ? (JSON.parse(rawBody) as GraphQLResponse<T>) : { data: null };
+    } catch {
+      parsed = { data: null };
     }
 
-    return response;
+    const result: GraphQLResult<T> = {
+      ...parsed,
+      httpStatus: res.status,
+      headers,
+      rawBody,
+    };
+
+    if (throwOnGraphQLErrors && result.errors && result.errors.length > 0) {
+      throw new GraphQLResponseError(result.errors, result);
+    }
+
+    return result;
   }
 
   return {
