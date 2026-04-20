@@ -318,6 +318,21 @@ describe("classifyFailure", () => {
     expect(classify(13)!.kind).toBe("server");
   });
 
+  test("code 8 (RESOURCE_EXHAUSTED) is transient + retryable (backpressure semantics)", () => {
+    // Reviewer D-2 (2026-04-20): RESOURCE_EXHAUSTED 更像 backpressure 而非
+    // server error. Retryable with backoff is the standard interpretation.
+    const c = classify(8)!;
+    expect(c.kind).toBe("transient");
+    expect(c.retryable).toBe(true);
+  });
+
+  test("code 10 (ABORTED) is semantic (optimistic-concurrency default)", () => {
+    // Reviewer D-2: product-specific interpretations may want transient,
+    // but default stays semantic since ABORTED commonly indicates
+    // optimistic-concurrency failure.
+    expect(classify(10)!.kind).toBe("semantic");
+  });
+
   test("DeadlineExceededError classifies as transient", () => {
     const err = new Error("deadline");
     err.name = "DeadlineExceededError";
@@ -433,6 +448,314 @@ describe("executeCaseInFlow + flow integration", () => {
       "x-contract-tag": "b",
       "x-lens-tag": "d",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Direct grpcAdapter.execute (non-flow) path — reviewer gap priority #2
+// ---------------------------------------------------------------------------
+//
+// 20 unit tests above exercise the flow path. The non-flow `execute`
+// wrapper goes through executeCase(ctx, caseSpec, spec), which has its own
+// merge/assert/verify/teardown logic. Add direct coverage so we catch
+// divergence between the two paths (reviewer 2026-04-20 priority #2).
+
+describe("grpcAdapter.execute (non-flow path)", () => {
+  test("execute: happy unary call with status + message assertions", async () => {
+    const client = makeMockGrpcClient({
+      message: { greeting: "hello alice" },
+      statusCode: 0,
+    });
+
+    const spec: GrpcContractSpec = {
+      target: "Greeter/SayHello",
+      client,
+      cases: {
+        ok: {
+          description: "greet alice",
+          expect: {
+            statusCode: 0,
+            message: { greeting: "hello alice" },
+          },
+          request: { name: "alice" },
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any);
+
+    expect(client._calls).toHaveLength(1);
+    expect(client._calls[0].method).toBe("SayHello");
+    expect(client._calls[0].request).toEqual({ name: "alice" });
+  });
+
+  test("execute: deep-merges defaultRequest + case.request", async () => {
+    const client = makeMockGrpcClient({ message: {} });
+
+    const spec: GrpcContractSpec = {
+      target: "Svc/Call",
+      client,
+      defaultRequest: { currency: "USD", tier: "standard" },
+      cases: {
+        ok: {
+          description: "merge",
+          request: { amount: 100, tier: "premium" }, // overrides default tier
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any);
+
+    expect(client._calls[0].request).toEqual({
+      currency: "USD",      // from defaultRequest
+      tier: "premium",      // case override of default
+      amount: 100,          // from case
+    });
+  });
+
+  test("execute: runs setup → teardown lifecycle (teardown even on assert failure)", async () => {
+    const client = makeMockGrpcClient({
+      message: { unexpected: "field" },
+      statusCode: 0,
+    });
+
+    const order: string[] = [];
+
+    const spec: GrpcContractSpec = {
+      target: "Svc/Call",
+      client,
+      cases: {
+        ok: {
+          description: "setup-teardown",
+          setup: async () => {
+            order.push("setup");
+            return { tag: "abc" };
+          },
+          teardown: async () => {
+            order.push("teardown");
+          },
+          expect: {
+            statusCode: 0,
+            message: { expected: "different" }, // will fail toMatchObject
+          },
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await expect(
+      grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any),
+    ).rejects.toThrow();
+
+    // Rule 1: teardown runs even on assert failure
+    expect(order).toEqual(["setup", "teardown"]);
+  });
+
+  test("execute: function-valued request receives setup state", async () => {
+    const client = makeMockGrpcClient({ message: {} });
+
+    const spec: GrpcContractSpec = {
+      target: "Svc/Call",
+      client,
+      cases: {
+        ok: {
+          description: "function request",
+          setup: async () => ({ userId: "u-1", authToken: "t-1" }),
+          request: (state: any) => ({ userId: state.userId }),
+          metadata: (state: any) => ({ authorization: `Bearer ${state.authToken}` }),
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any);
+
+    expect(client._calls[0].request).toEqual({ userId: "u-1" });
+    const opts = client._calls[0].options as { metadata: Record<string, string> };
+    expect(opts.metadata).toMatchObject({ authorization: "Bearer t-1" });
+  });
+
+  test("execute: non-zero statusCode fails assertion with helpful message", async () => {
+    const client = makeMockGrpcClient({
+      statusCode: 5, // NOT_FOUND
+      statusDetails: "user not found",
+    });
+
+    const spec: GrpcContractSpec = {
+      target: "Svc/GetUser",
+      client,
+      cases: {
+        ok: {
+          description: "expects OK but server returns NOT_FOUND",
+          expect: { statusCode: 0 },
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await expect(
+      grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any),
+    ).rejects.toThrow(/status code 0.*got 5.*user not found/);
+  });
+
+  test("execute: expected non-zero statusCode passes (negative case)", async () => {
+    const client = makeMockGrpcClient({
+      statusCode: 5,
+      statusDetails: "not found",
+    });
+
+    const spec: GrpcContractSpec = {
+      target: "Svc/GetUser",
+      client,
+      cases: {
+        notFound: {
+          description: "user missing returns NOT_FOUND",
+          expect: { statusCode: 5 },
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await grpcAdapter.execute(ctx, spec.cases.notFound as any, spec as any);
+
+    // No throw — assertion passes because expectation matched
+    expect(client._calls).toHaveLength(1);
+  });
+
+  test("execute: verify callback receives GrpcCaseResult<unknown>", async () => {
+    const client = makeMockGrpcClient({
+      message: { id: "u-1" },
+      statusCode: 0,
+      responseMetadata: { "x-tracked": "yes" },
+      duration: 42,
+    });
+
+    let capturedResult: any;
+    const spec: GrpcContractSpec = {
+      target: "Svc/Call",
+      client,
+      cases: {
+        ok: {
+          description: "verify receives result",
+          expect: { statusCode: 0 },
+          verify: (_ctx, res) => {
+            capturedResult = res;
+          },
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any);
+
+    expect(capturedResult).toMatchObject({
+      message: { id: "u-1" },
+      status: { code: 0 },
+      responseMetadata: { "x-tracked": "yes" },
+      duration: 42,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Schema validation failure path — reviewer gap priority #3
+// ---------------------------------------------------------------------------
+//
+// Ensures ctx.validate reject paths propagate correctly through both
+// execute and executeCaseInFlow. Users who first-time write a Zod schema
+// will hit this path on their first server-shape divergence.
+
+describe("schema validation failure path", () => {
+  // Minimal SchemaLike that rejects everything — simulates a Zod schema
+  // whose .safeParse returns { success: false }.
+  const rejectSchema = {
+    safeParse: (_data: unknown) => ({
+      success: false as const,
+      error: { issues: [{ message: "schema rejects all" }] },
+    }),
+  };
+
+  test("execute: response-message schema failure throws via ctx.validate", async () => {
+    const client = makeMockGrpcClient({
+      message: { anything: "server-returns-this" },
+      statusCode: 0,
+    });
+
+    const spec: GrpcContractSpec = {
+      target: "Svc/Call",
+      client,
+      cases: {
+        ok: {
+          description: "schema will reject",
+          expect: {
+            statusCode: 0,
+            schema: rejectSchema as any,
+          },
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await expect(
+      grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any),
+    ).rejects.toThrow(/validate failed/);
+  });
+
+  test("execute: response-metadata schema failure throws via ctx.validate", async () => {
+    const client = makeMockGrpcClient({
+      message: {},
+      statusCode: 0,
+      responseMetadata: { "x-tag": "value" },
+    });
+
+    const spec: GrpcContractSpec = {
+      target: "Svc/Call",
+      client,
+      cases: {
+        ok: {
+          description: "metadata schema rejects",
+          expect: {
+            statusCode: 0,
+            metadata: rejectSchema as any,
+          },
+        },
+      },
+    };
+
+    const ctx = makeCtx();
+    await expect(
+      grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any),
+    ).rejects.toThrow(/validate failed/);
+  });
+
+  test("executeCaseInFlow: schema failure still propagates (flow path parity)", async () => {
+    const client = makeMockGrpcClient({
+      message: { any: "shape" },
+      statusCode: 0,
+    });
+    const svcContracts = (contract as any).grpc.with("svc", { client });
+    const svcContract = svcContracts("svc-flow", {
+      target: "Svc/Call",
+      cases: {
+        ok: {
+          description: "schema rejects in flow",
+          expect: {
+            statusCode: 0,
+            schema: rejectSchema as any,
+          },
+        },
+      },
+    });
+
+    const flowObj = contract
+      .flow("schema-fail-flow")
+      .setup(async () => ({}))
+      .step(svcContract.case("ok"))
+      .build() as FlowContract<unknown>;
+
+    await expect(runFlow(flowObj, makeCtx())).rejects.toThrow(/validate failed/);
   });
 });
 

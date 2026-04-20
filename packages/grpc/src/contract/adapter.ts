@@ -559,6 +559,7 @@ function statusToClassification(code: number): FailureClassification | undefined
     case 1: // CANCELLED
     case 4: // DEADLINE_EXCEEDED
     case 14: // UNAVAILABLE
+    case 8: // RESOURCE_EXHAUSTED — backpressure / quota; retryable with backoff
       return { kind: "transient", source: "trace", retryable: true, message: `gRPC ${code}` };
     case 3: // INVALID_ARGUMENT
     case 9: // FAILED_PRECONDITION
@@ -566,13 +567,13 @@ function statusToClassification(code: number): FailureClassification | undefined
       return { kind: "client", source: "trace", message: `gRPC ${code}` };
     case 5: // NOT_FOUND
     case 6: // ALREADY_EXISTS
-    case 10: // ABORTED
+    case 10: // ABORTED — typically optimistic-concurrency; leave as semantic
+              // but note product-specific interpretations may want transient
       return { kind: "semantic", source: "trace", message: `gRPC ${code}` };
     case 7: // PERMISSION_DENIED
     case 16: // UNAUTHENTICATED
       return { kind: "auth", source: "trace", message: `gRPC ${code}` };
     case 2: // UNKNOWN
-    case 8: // RESOURCE_EXHAUSTED
     case 12: // UNIMPLEMENTED
     case 13: // INTERNAL
     case 15: // DATA_LOSS
