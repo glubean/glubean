@@ -478,3 +478,34 @@ export function graphql(
 
 // Re-export data loader for convenience (spec: `import { fromGql } from "@glubean/graphql"`)
 export { fromGql } from "./data.js";
+
+// Side-effect: register the contract adapter so `contract.graphql.with(...)` works.
+// Kept at the bottom so transport exports land first, parallel to @glubean/grpc.
+import "./contract/index.js";
+
+// Re-export contract surface for type consumers
+export {
+  graphqlAdapter,
+  createGraphqlFactory,
+  createGraphqlRoot,
+} from "./contract/index.js";
+export type {
+  GraphqlContractCase,
+  GraphqlContractDefaults,
+  GraphqlContractExample,
+  GraphqlContractExpect,
+  GraphqlContractFactory,
+  GraphqlContractMeta,
+  GraphqlContractRoot,
+  GraphqlContractSafeMeta,
+  GraphqlContractSpec,
+  GraphqlCaseResult,
+  GraphqlErrorsExpect,
+  GraphqlFlowCaseOutput,
+  GraphqlPayloadSchemas,
+  GraphqlSafeSchemas,
+  GraphqlTypeDef,
+  GraphqlTypeDefs,
+  InferGraphqlVariables,
+  InferGraphqlResponse,
+} from "./contract/index.js";
