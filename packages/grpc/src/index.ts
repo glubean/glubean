@@ -1,8 +1,17 @@
 /**
- * gRPC plugin for Glubean tests.
+ * @glubean/grpc 0.2.0 — single-package owner of both:
+ *   - Transport / test-plugin layer (this file — unchanged from 0.1.x)
+ *   - Contract adapter layer (`./contract/`, registered via side-effect import)
  *
- * Provides a thin wrapper over `@grpc/grpc-js` that simplifies
- * unary gRPC calls with auto-tracing via Glubean events.
+ * Importing this package (side-effect) registers the gRPC contract adapter:
+ *   `contract.register("grpc", grpcAdapter)` → `contract.grpc.with(...)` UX.
+ *
+ * See `./contract/index.ts` for the registration logic. See
+ * `internal/40-discovery/proposals/contract-grpc-graphql-expansion.md` §5.1
+ * for the single-package rationale ("contract is a first-class citizen").
+ *
+ * Transport (this file) — provides a thin wrapper over `@grpc/grpc-js` that
+ * simplifies unary gRPC calls with auto-tracing via Glubean events.
  *
  * ## Usage
  *
@@ -495,3 +504,37 @@ export const GRPC_REDACTION_SCOPES = [
     handler: "json" as const,
   },
 ];
+
+// -----------------------------------------------------------------------------
+// Contract layer — side-effect register on import of @glubean/grpc
+// -----------------------------------------------------------------------------
+//
+// This import runs `contract.register("grpc", grpcAdapter)` and wraps the
+// generic dispatcher with `createGrpcRoot` so users get the
+// `contract.grpc.with("name", { client })` UX as soon as they import
+// "@glubean/grpc". See ./contract/index.ts.
+import "./contract/index.js";
+
+// Re-export contract surface for type consumers
+export {
+  grpcAdapter,
+  createGrpcFactory,
+  createGrpcRoot,
+} from "./contract/index.js";
+export type {
+  GrpcContractCase,
+  GrpcContractDefaults,
+  GrpcContractExample,
+  GrpcContractExpect,
+  GrpcContractFactory,
+  GrpcContractMeta,
+  GrpcContractRoot,
+  GrpcContractSafeMeta,
+  GrpcContractSpec,
+  GrpcCaseResult,
+  GrpcFlowCaseOutput,
+  GrpcPayloadSchemas,
+  GrpcSafeSchemas,
+  InferGrpcRequest,
+  InferGrpcResponse,
+} from "./contract/index.js";
