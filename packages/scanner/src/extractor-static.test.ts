@@ -1185,6 +1185,25 @@ export const sayHello = contract.grpc("say-hello", {
   expect(result[0].endpoint).toBe("greeter.Greeter/SayHello");
 });
 
+test("extractContractCases — graphql protocol", () => {
+  const source = `
+export const getUser = contract.graphql("get-user", {
+  endpoint: "/graphql",
+  cases: {
+    ok: { description: "success", expect: { httpStatus: 200 } },
+    unauth: { description: "no token", expect: { httpStatus: 401 } },
+  },
+});
+`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(1);
+  expect(result[0].protocol).toBe("graphql");
+  expect(result[0].endpoint).toBe("/graphql");
+  expect(result[0].contractId).toBe("get-user");
+  expect(result[0].cases).toHaveLength(2);
+  expect(result[0].cases.map((c) => c.key)).toEqual(["ok", "unauth"]);
+});
+
 test("extractContractCases — no contracts returns empty", () => {
   const source = `
 import { test } from "@glubean/sdk";
