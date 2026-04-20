@@ -5,9 +5,10 @@
  * Registered as an adapter (via `contract.register("http", httpAdapter)`)
  * in `../index.ts` at SDK load time.
  *
- * Future plugin protocols (gRPC / GraphQL / Kafka / ...) will ship as
- * separate npm packages (`@glubean/contract-grpc` etc.) that do
- * `contract.register("grpc", grpcAdapter)` on import.
+ * Other protocols use the single-package model — each protocol package
+ * (`@glubean/grpc`, `@glubean/graphql`, ...) owns both its transport/test
+ * plugin layer and its contract adapter. Side-effect registration on
+ * `import "@glubean/grpc"` wires `contract.register("grpc", grpcAdapter)`.
  */
 
 export { httpAdapter } from "./adapter.js";

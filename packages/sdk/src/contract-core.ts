@@ -65,7 +65,9 @@ const RESERVED_PROTOCOL_NAMES = new Set([
 
 /**
  * Register an adapter. Called by built-in HTTP adapter on SDK load, and by
- * external adapter plugins (`@glubean/contract-grpc` etc.) on their import.
+ * external protocol packages (`@glubean/grpc`, `@glubean/graphql` etc.) on
+ * their import — single-package model, each protocol package owns both
+ * transport + contract adapter.
  */
 function register<
   Spec,
@@ -380,7 +382,7 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
       if (!adapter) {
         throw new Error(
           `contract.flow(${JSON.stringify(meta.id)}).step: unknown protocol "${ref.protocol}". ` +
-            `Did you forget to import a contract plugin package (e.g. "@glubean/contract-grpc")?`,
+            `Did you forget to import a contract plugin package (e.g. "@glubean/grpc")?`,
         );
       }
       if (!adapter.executeCaseInFlow) {
