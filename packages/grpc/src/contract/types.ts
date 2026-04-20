@@ -21,6 +21,7 @@ import type {
   CaseSeverity,
   Extensions,
 } from "@glubean/sdk";
+import type { GrpcClient } from "../index.js";
 
 // =============================================================================
 // Instance defaults (contract.grpc.with)
@@ -35,6 +36,8 @@ import type {
  * across contracts authored under this instance.
  */
 export interface GrpcContractDefaults {
+  /** Default gRPC client for all contracts in this instance. */
+  client?: GrpcClient;
   /** Tags inherited by all contracts in this instance. */
   tags?: string[];
   /** Default feature grouping key. */
@@ -97,6 +100,9 @@ export interface GrpcContractExpect<T = unknown> {
  * discipline as HTTP's function-valued body/params/query/headers).
  */
 export interface GrpcContractCase<Req = unknown, Res = unknown, S = void> {
+  /** Per-case gRPC client override. */
+  client?: GrpcClient;
+
   /** Why this case exists — required. */
   description: string;
 
@@ -184,6 +190,9 @@ export interface GrpcContractSpec<
 > {
   /** Wire-format target: "ServiceName/MethodName". */
   target: string;
+
+  /** Default gRPC client for all cases. */
+  client?: GrpcClient;
 
   description?: string;
   feature?: string;
