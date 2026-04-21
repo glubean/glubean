@@ -6,38 +6,52 @@
  * (`Expectation.extend`, `contract.register`) to provide:
  *
  * - **Plugin identity** — every manifest has a `name`, tracked for diagnostics.
- * - **Conflict detection** — duplicate matcher/protocol names across plugins
- *   throw with messages that name both plugins.
+ * - **Conflict detection** — duplicate matcher/protocol names throw, whether the
+ *   prior registration was from another plugin manifest or from a direct call
+ *   to the low-level primitive.
  * - **Idempotent install** — re-installing the same plugin (by `name`) is a no-op.
+ * - **Failed-setup isolation** — if a plugin's `setup()` throws, the plugin is
+ *   marked as setup-failed; retrying the same plugin in the same process raises
+ *   a clear error rather than silently re-registering matchers/contracts.
  * - **Install-order hooks** — `setup()` runs after matchers/contracts are registered.
  *
  * `installPlugin` is the recommended surface for plugin authors. The primitives
  * (`Expectation.extend`, `contract.register`) remain public for inline patching
- * or prototyping, but bypass identity tracking and conflict detection.
+ * or prototyping. `installPlugin` still detects collisions against them — a
+ * plugin trying to register a matcher/protocol that a direct primitive call
+ * already owns will throw.
  *
  * @see {@link PluginManifest} in `./types.js`
  */
 
 import type { PluginManifest } from "./types.js";
 import { Expectation } from "./expect.js";
-import { contract } from "./contract-core.js";
+import { contract, getAdapter } from "./contract-core.js";
 
 /**
- * Registry of installed plugins, keyed by manifest `name`.
- * Used for duplicate detection and `listInstalledPlugins()`.
+ * Registry of fully installed plugins (matchers + contracts + setup all
+ * succeeded), keyed by manifest `name`. Feeds `listInstalledPlugins()`.
  * @internal
  */
 const installed = new Map<string, PluginManifest>();
 
 /**
- * Reverse index: which plugin registered which matcher name?
- * Used for conflict error messages. Keyed by matcher name → plugin name.
+ * Plugins whose `setup()` threw. Matchers/contracts they registered remain
+ * on the globals (irreversible), but the plugin is NOT in `installed`.
+ * Retrying such a plugin in the same process throws immediately.
+ * @internal
+ */
+const setupFailures = new Map<string, Error>();
+
+/**
+ * Reverse index: which plugin owns which matcher name?
+ * Keyed by matcher name → plugin name.
  * @internal
  */
 const matcherOwners = new Map<string, string>();
 
 /**
- * Reverse index: which plugin registered which protocol name?
+ * Reverse index: which plugin owns which protocol name?
  * Keyed by protocol name → plugin name.
  * @internal
  */
@@ -46,14 +60,23 @@ const protocolOwners = new Map<string, string>();
 /**
  * Install one or more plugin manifests. Drives registration in strict order:
  *
- * 1. For each plugin in the order given, register all its matchers
- * 2. Then register all its contracts
- * 3. Then run its `setup()` (if present, awaited)
- * 4. Record it in the installed-plugins registry
+ * 1. Validate the manifest shape.
+ * 2. Check each matcher/protocol name for conflicts (both across plugins and
+ *    against direct primitive registrations). Throws on first conflict.
+ * 3. Register all matchers via `Expectation.extend`.
+ * 4. Register all contracts via `contract.register`.
+ * 5. Run `setup()` if present (awaited).
+ * 6. Record the plugin in the installed registry.
  *
  * Subsequent calls with an already-installed plugin (same `name`) are no-ops.
- * Cross-plugin name collisions (matcher or protocol) throw, with an error
- * message that names both the existing owner and the incoming plugin.
+ * Subsequent calls with a previously-setup-failed plugin throw.
+ *
+ * **Failure semantics**: if `setup()` throws, the process is left in a
+ * partially-initialized state (matchers/contracts from this plugin are on
+ * the globals but `installed` does not list the plugin). This state is
+ * **not recoverable within the same process** — the only clean remedy is to
+ * restart. Retrying the same plugin raises a clear error instead of silently
+ * re-registering.
  *
  * @param plugins One or more manifests to install, in order.
  *
@@ -77,9 +100,8 @@ export async function installPlugin(
       );
     }
 
+    // Fast-path: successful re-install is idempotent.
     if (installed.has(plugin.name)) {
-      // Idempotent: re-install is a no-op. Surface a quiet warning so developers
-      // can spot accidental double-installs during hot-reload / test iteration.
       if (typeof process !== "undefined" && process.env?.["GLUBEAN_DEBUG"]) {
         process.stderr.write(
           `[glubean:debug] installPlugin: skipping duplicate install of "${plugin.name}"\n`,
@@ -88,9 +110,24 @@ export async function installPlugin(
       continue;
     }
 
-    // --- Matchers ---------------------------------------------------------
+    // Failed-setup path: matchers/contracts from a prior failed attempt are
+    // still on the globals, so re-registering them would double-register.
+    // Throw with full context rather than silently continuing.
+    const prevFailure = setupFailures.get(plugin.name);
+    if (prevFailure) {
+      throw new Error(
+        `installPlugin("${plugin.name}"): previous setup() attempt failed in this process ` +
+          `and left matchers/contracts partially registered. This state is not recoverable — ` +
+          `restart the process to retry. Original error: ${prevFailure.message}`,
+      );
+    }
+
+    // --- Pre-flight conflict checks --------------------------------------
+    // Done BEFORE any mutation so a conflict on the Nth matcher doesn't leave
+    // the first N-1 matchers on the prototype.
+
     if (plugin.matchers) {
-      for (const [name, fn] of Object.entries(plugin.matchers)) {
+      for (const name of Object.keys(plugin.matchers)) {
         const existingOwner = matcherOwners.get(name);
         if (existingOwner) {
           throw new Error(
@@ -99,17 +136,22 @@ export async function installPlugin(
               `Each matcher name can only be owned by one plugin.`,
           );
         }
-        // Expectation.extend does its own "already exists" check against the
-        // prototype (covers inline patches that bypass installPlugin). It
-        // throws on conflict, which we let propagate.
-        Expectation.extend({ [name]: fn });
-        matcherOwners.set(name, plugin.name);
+        // Catch matchers registered via a direct `Expectation.extend()` call
+        // that bypassed installPlugin. Expectation.extend itself would throw
+        // when we try to register, but with a generic message — pre-check so
+        // the error names the plugin that's trying to register.
+        if (name in Expectation.prototype) {
+          throw new Error(
+            `installPlugin("${plugin.name}"): matcher "${name}" already exists on Expectation.prototype ` +
+              `(likely registered by a direct Expectation.extend() call or a built-in matcher). ` +
+              `Matcher names must be unique across the entire process.`,
+          );
+        }
       }
     }
 
-    // --- Contracts --------------------------------------------------------
     if (plugin.contracts) {
-      for (const [protocol, adapter] of Object.entries(plugin.contracts)) {
+      for (const protocol of Object.keys(plugin.contracts)) {
         const existingOwner = protocolOwners.get(protocol);
         if (existingOwner) {
           throw new Error(
@@ -118,18 +160,46 @@ export async function installPlugin(
               `Each protocol name can only be owned by one plugin.`,
           );
         }
-        // Note: contract.register currently has no built-in duplicate check
-        // — our reverse index above is the only guard against plugin-level
-        // conflicts. Inline `contract.register` usage (bypassing installPlugin)
-        // will silently overwrite; document this limitation.
+        // Catch protocols registered via a direct `contract.register()` call
+        // that bypassed installPlugin. Unlike Expectation.extend, the current
+        // contract.register has no built-in duplicate guard — it would
+        // silently overwrite the live adapter. Pre-check via getAdapter().
+        if (getAdapter(protocol)) {
+          throw new Error(
+            `installPlugin("${plugin.name}"): protocol "${protocol}" is already present in the contract registry ` +
+              `(likely registered by a direct contract.register() call). ` +
+              `Protocol names must be unique across the entire process.`,
+          );
+        }
+      }
+    }
+
+    // --- Mutations (past this point, prototype/registry get modified) ----
+
+    if (plugin.matchers) {
+      for (const [name, fn] of Object.entries(plugin.matchers)) {
+        Expectation.extend({ [name]: fn });
+        matcherOwners.set(name, plugin.name);
+      }
+    }
+
+    if (plugin.contracts) {
+      for (const [protocol, adapter] of Object.entries(plugin.contracts)) {
         contract.register(protocol, adapter as Parameters<typeof contract.register>[1]);
         protocolOwners.set(protocol, plugin.name);
       }
     }
 
-    // --- Setup hook -------------------------------------------------------
+    // --- Setup hook (failure leaves partial state) -----------------------
+
     if (plugin.setup) {
-      await plugin.setup();
+      try {
+        await plugin.setup();
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        setupFailures.set(plugin.name, error);
+        throw error;
+      }
     }
 
     installed.set(plugin.name, plugin);
@@ -137,8 +207,8 @@ export async function installPlugin(
 }
 
 /**
- * Return a snapshot array of all currently installed plugin manifests, in
- * install order. Useful for diagnostics, debug tools, and MCP metadata export.
+ * Return a snapshot array of all successfully installed plugin manifests, in
+ * install order. Plugins whose `setup()` threw are **not** included.
  *
  * The returned array is a shallow copy — mutating it does not affect the
  * installed state. Manifest objects themselves are returned by reference.
@@ -150,7 +220,7 @@ export function listInstalledPlugins(): PluginManifest[] {
 /**
  * Clear all installed-plugin bookkeeping. **Test-only.** Does **not** unregister
  * matchers from `Expectation.prototype` or protocols from the contract registry
- * — those are permanent once installed.
+ * — those are permanent once installed. Also clears the setup-failure log.
  *
  * Intended for test suites that install plugins and need to reset the tracking
  * maps between test cases.
@@ -161,4 +231,5 @@ export function __resetInstalledPluginsForTesting(): void {
   installed.clear();
   matcherOwners.clear();
   protocolOwners.clear();
+  setupFailures.clear();
 }

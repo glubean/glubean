@@ -5,6 +5,8 @@ import {
   installPlugin,
   listInstalledPlugins,
 } from "./install-plugin.js";
+import { Expectation } from "./expect.js";
+import { contract } from "./contract-core.js";
 import type { PluginManifest } from "./types.js";
 
 // Note: these tests install into the real Expectation prototype and
@@ -147,6 +149,117 @@ describe("installPlugin — validation", () => {
     await expect(installPlugin("not-a-manifest" as any)).rejects.toThrow(
       /expected a PluginManifest with a string `name` field/,
     );
+  });
+});
+
+describe("installPlugin — primitive-path conflict detection", () => {
+  test("plugin cannot register a matcher name already on Expectation.prototype from inline extend", async () => {
+    // Simulate a direct Expectation.extend() call that bypassed installPlugin.
+    Expectation.extend({
+      toHaveInlineRegisteredMatcher: () => ({ passed: true, message: "inline" }),
+    });
+
+    await expect(
+      installPlugin({
+        name: "test-plugin-primitive-matcher-conflict",
+        matchers: {
+          toHaveInlineRegisteredMatcher: () => ({ passed: true, message: "from plugin" }),
+        },
+      }),
+    ).rejects.toThrow(
+      /matcher "toHaveInlineRegisteredMatcher" already exists on Expectation\.prototype/,
+    );
+  });
+
+  test("plugin cannot register a protocol already present in contract registry from direct contract.register", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stubAdapter: any = {
+      project: () => ({ cases: {} }),
+      execute: async () => ({}),
+    };
+
+    // Direct primitive call, bypassing installPlugin.
+    contract.register("installInlineRegisteredProto", stubAdapter);
+
+    await expect(
+      installPlugin({
+        name: "test-plugin-primitive-protocol-conflict",
+        contracts: { installInlineRegisteredProto: stubAdapter },
+      }),
+    ).rejects.toThrow(
+      /protocol "installInlineRegisteredProto" is already present in the contract registry/,
+    );
+  });
+});
+
+describe("installPlugin — failed-setup isolation", () => {
+  test("setup() failure marks plugin as unrecoverable; retry throws with original error in message", async () => {
+    const plugin: PluginManifest = {
+      name: "test-plugin-setup-fails",
+      matchers: {
+        toHaveSetupFailMatcher: () => ({ passed: true, message: "ok" }),
+      },
+      setup() {
+        throw new Error("database connect failed");
+      },
+    };
+
+    await expect(installPlugin(plugin)).rejects.toThrow("database connect failed");
+
+    // Not listed as installed (setup never succeeded).
+    expect(listInstalledPlugins()).toEqual([]);
+
+    // Retry in same process: throws with unrecoverable-state message referencing the original error.
+    await expect(installPlugin(plugin)).rejects.toThrow(
+      /previous setup\(\) attempt failed.*database connect failed/s,
+    );
+  });
+
+  test("setup() failure does NOT block unrelated plugins from installing", async () => {
+    const failing: PluginManifest = {
+      name: "test-plugin-setup-fails-isolated",
+      setup() {
+        throw new Error("boom");
+      },
+    };
+
+    const unrelated: PluginManifest = {
+      name: "test-plugin-unrelated-ok",
+      matchers: {
+        toHaveUnrelatedOkMatcher: () => ({ passed: true, message: "ok" }),
+      },
+    };
+
+    await expect(installPlugin(failing)).rejects.toThrow("boom");
+
+    // Unrelated plugin installs normally.
+    await installPlugin(unrelated);
+    expect(listInstalledPlugins().map((p) => p.name)).toEqual(["test-plugin-unrelated-ok"]);
+  });
+});
+
+describe("installPlugin — pre-flight conflict check is atomic", () => {
+  test("a conflict on the Nth matcher does not leave the first N-1 matchers registered", async () => {
+    // First plugin claims "toHaveAtomicMatcherB".
+    await installPlugin({
+      name: "test-plugin-atomic-first",
+      matchers: {
+        toHaveAtomicMatcherB: () => ({ passed: true, message: "first" }),
+      },
+    });
+
+    // Second plugin would register A then conflict on B — A must NOT end up on the prototype.
+    await expect(
+      installPlugin({
+        name: "test-plugin-atomic-second",
+        matchers: {
+          toHaveAtomicMatcherA: () => ({ passed: true, message: "second-a" }),
+          toHaveAtomicMatcherB: () => ({ passed: true, message: "second-b" }),
+        },
+      }),
+    ).rejects.toThrow(/matcher "toHaveAtomicMatcherB" is already registered/);
+
+    expect("toHaveAtomicMatcherA" in Expectation.prototype).toBe(false);
   });
 });
 
