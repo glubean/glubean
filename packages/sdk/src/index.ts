@@ -480,7 +480,9 @@ export * from "./types.js";
 export { fromCsv, fromDir, fromJson, fromJsonl, fromYaml, toArray } from "./data.js";
 export type { FromCsvOptions, FromDirConcatOptions, FromDirOptions, FromJsonOptions, FromYamlOptions } from "./data.js";
 export { configure, resolveTemplate } from "./configure.js";
-export { definePlugin } from "./plugin.js";
+export { definePlugin, defineClientFactory } from "./plugin.js";
+export { installPlugin, listInstalledPlugins } from "./install-plugin.js";
+// PluginManifest and ClientFactory are re-exported via `export * from "./types.js"` below.
 export { defineSession, session } from "./session.js";
 export { Expectation, ExpectFailError } from "./expect.js";
 export type { AssertEmitter, AssertionEmission, CustomMatchers, MatcherFn, MatcherResult } from "./expect.js";

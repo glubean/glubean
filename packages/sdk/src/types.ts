@@ -1093,6 +1093,85 @@ export interface PluginFactory<T> {
 }
 
 /**
+ * Client factory — the new name for what used to be called `PluginFactory`.
+ *
+ * This is produced by `defineClientFactory()` and consumed by
+ * `configure({ plugins: { name: factory } })` for per-file lazy client injection.
+ *
+ * Structurally identical to `PluginFactory`. Kept as a separate alias so plugin
+ * authors can use the semantically correct name. The old `PluginFactory` name
+ * remains for backward compatibility with existing imports.
+ */
+export type ClientFactory<T> = PluginFactory<T>;
+
+/**
+ * Plugin manifest — declarative description of what a plugin registers globally.
+ *
+ * Produced by `definePlugin(manifest)`, consumed by `installPlugin(...manifests)`.
+ *
+ * A manifest can declare:
+ * - **matchers** — custom assertion matchers (installed via `Expectation.extend`)
+ * - **contracts** — protocol adapters (installed via `contract.register`)
+ * - **setup()** — one-time registration-time hook (no GlubeanRuntime available yet)
+ *
+ * Per-file client injection is **not** part of the manifest — use
+ * `defineClientFactory()` + `configure({ plugins })` for that.
+ *
+ * @example
+ * ```ts
+ * import { definePlugin } from "@glubean/sdk";
+ *
+ * export default definePlugin({
+ *   name: "@glubean/graphql",
+ *   matchers: { toHaveGraphqlData, toHaveGraphqlErrorCode },
+ *   contracts: { graphql: graphqlAdapter },
+ *   setup() {
+ *     // Optional: wrap the dispatcher after registration
+ *     const dispatcher = (contract as any).graphql;
+ *     (contract as any).graphql = createGraphqlRoot(dispatcher);
+ *   },
+ * });
+ * ```
+ */
+export interface PluginManifest {
+  /** Unique plugin identity. Used for duplicate detection and error messages. */
+  name: string;
+
+  /** Optional semver version string for diagnostics. */
+  version?: string;
+
+  /**
+   * Custom matchers to register via `Expectation.extend`. Key is the matcher
+   * name (e.g. `"toHaveGraphqlData"`), value is the matcher function.
+   */
+  matchers?: Record<string, import("./expect.js").MatcherFn>;
+
+  /**
+   * Protocol adapters to register via `contract.register`. Key is the protocol
+   * name (e.g. `"graphql"`), value is the adapter.
+   */
+  contracts?: Record<
+    string,
+    import("./contract-types.js").ContractProtocolAdapter<
+      any, any, any, any, any
+    >
+  >;
+
+  /**
+   * One-time registration hook. Runs after matchers/contracts are registered,
+   * at plugin install time (process startup — no runtime exists yet).
+   *
+   * Use for work that must observe the post-registration global state — typical
+   * use case is dispatcher wrapping (e.g. `contract.graphql = createRoot(dispatcher)`).
+   *
+   * **Do not** read `vars` / `secrets` / `http` / `session` here — they do not
+   * yet exist at install time. For runtime-aware work use `defineClientFactory`
+   * (per-file) or `test.extend` (per-test) instead.
+   */
+  setup?(): void | Promise<void>;
+}
+
+/**
  * Metadata about the currently running test.
  *
  * This is exposed to plugins so they can make deterministic decisions
