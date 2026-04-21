@@ -482,6 +482,7 @@ export type { FromCsvOptions, FromDirConcatOptions, FromDirOptions, FromJsonOpti
 export { configure, resolveTemplate } from "./configure.js";
 export { definePlugin, defineClientFactory } from "./plugin.js";
 export { installPlugin, listInstalledPlugins } from "./install-plugin.js";
+export { bootstrap, discoverSetupFile } from "./bootstrap.js";
 // PluginManifest and ClientFactory are re-exported via `export * from "./types.js"` below.
 export { defineSession, session } from "./session.js";
 export { Expectation, ExpectFailError } from "./expect.js";

@@ -23,6 +23,15 @@ export {
   type InternalRuntime,
 } from "./runtime-carrier.js";
 
+// Internal-only test hooks for plugin manifest state. Public callers use
+// `installPlugin` / `bootstrap` / `listInstalledPlugins` from the main export.
+export {
+  __resetInstalledPluginsForTesting,
+} from "./install-plugin.js";
+export {
+  __resetBootstrapForTesting,
+} from "./bootstrap.js";
+
 /**
  * Global registry for test metadata.
  * Populated at import time when test files are loaded.
