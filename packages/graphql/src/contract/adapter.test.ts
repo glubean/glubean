@@ -269,6 +269,57 @@ describe("project + normalize", () => {
 });
 
 // ---------------------------------------------------------------------------
+// endpoint — projection-only contract (RFR P1 addressed 2026-04-21)
+// ---------------------------------------------------------------------------
+//
+// `spec.endpoint` / `defaults.endpoint` travel on projection meta for
+// markdown + scanner + MCP display, but the adapter does NOT redirect the
+// live call. Runtime dispatches through the supplied GraphQLClient, whose
+// endpoint is fixed at construction time.
+
+describe("endpoint is projection-only (not runtime override)", () => {
+  test("execute: spec.endpoint is NOT forwarded to client.query options", async () => {
+    const client = makeMockGqlClient({ data: {}, httpStatus: 200 });
+
+    const spec: GraphqlContractSpec = {
+      endpoint: "/this-endpoint-must-not-reach-the-client",
+      client,
+      cases: { ok: { description: "ok", query: "{ hi }" } },
+    };
+
+    await graphqlAdapter.execute(makeCtx(), spec.cases.ok as any, spec as any);
+
+    expect(client._calls).toHaveLength(1);
+    // Adapter must never smuggle an endpoint into client call options — the
+    // mock records every option it receives; none should be an `endpoint` key.
+    expect(client._calls[0]).not.toHaveProperty("endpoint");
+  });
+
+  test("project: spec.endpoint surfaces on projection meta for display", () => {
+    const spec: GraphqlContractSpec = {
+      endpoint: "/graphql/v2",
+      cases: { ok: { description: "ok", query: "{ hi }" } },
+    };
+    const projection = graphqlAdapter.project(spec);
+    expect(projection.meta?.endpoint).toBe("/graphql/v2");
+    expect(projection.target).toBe("/graphql/v2");
+  });
+
+  test("instance default endpoint merges into meta for projection display only", () => {
+    const client = makeMockGqlClient({ data: {}, httpStatus: 200 });
+    const api = (contract as any).graphql.with("api", {
+      client,
+      endpoint: "/display-only",
+    });
+    const c = api("c", {
+      cases: { ok: { description: "ok", query: "{ hi }" } },
+    });
+    // Projection meta reflects the instance-level endpoint (for markdown).
+    expect(c._projection.meta.endpoint).toBe("/display-only");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // renderTarget + toMarkdown
 // ---------------------------------------------------------------------------
 

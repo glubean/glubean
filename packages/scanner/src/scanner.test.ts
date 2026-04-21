@@ -484,6 +484,44 @@ export const greeter = contract.grpc("greeter", {
   expect(result.warnings.some((w) => w.includes("Contract import failed"))).toBe(true);
 });
 
+test("scan() fallback: scoped graphql .with() file fails closed on import failure (matches README contract)", async () => {
+  // Pins the scoped-authoring behavior called out in
+  // @glubean/graphql README "Phase 1 limitations" #4 and in the GraphQL
+  // RFR (P1-B reply 2026-04-21): the static extractor regex matches only
+  // `contract.graphql("id", {...})` (direct form, rejected by runtime).
+  // Real cookbook-style `api("id", {...})` authoring requires the
+  // runtime-import fallback — when that import fails the scanner fails
+  // closed with a warning instead of silently producing zero contracts.
+  const source = `
+import { contract } from "@glubean/sdk";
+const api = contract.graphql.with("user-api", { client });
+export const getUser = api("get-user", {
+  cases: {
+    ok: {
+      description: "success",
+      query: "query GetUser($id: ID!) { user(id: $id) { name } }",
+      variables: { id: "u-1" },
+      expect: { httpStatus: 200 },
+    },
+  },
+});
+`;
+
+  const fs = createMockFsWithFiles({
+    "contracts/users.contract.ts": source,
+  });
+
+  const scanner = new Scanner(fs as any, mockHasher, "2.0", emptyExtractor);
+  const result = await scanner.scan("/project");
+
+  // No contracts extracted — scoped-form is invisible to the static regex
+  // (which only matches `contract.<proto>("id", {...})` starting with the
+  // `contract.` identifier), and the runtime import fallback fails.
+  expect(result.contracts).toHaveLength(0);
+  // Import failure warning surfaced — same discipline as scoped HTTP / gRPC
+  expect(result.warnings.some((w) => w.includes("Contract import failed"))).toBe(true);
+});
+
 test("scan() fallback: mixed HTTP + protocol file fails closed on import failure", async () => {
   // Runtime import will fail (fake path), and file mixes HTTP + custom protocol
   // → no static fallback, even though HTTP contracts are extractable

@@ -178,7 +178,7 @@ Instance defaults (`GraphqlContractDefaults`):
 | Option | Type | Description |
 |--------|------|-------------|
 | `client` | `GraphQLClient` | Default client (from `configure({ plugins })`) |
-| `endpoint` | `string` | Default endpoint (fallback if neither client nor spec provides one) |
+| `endpoint` | `string` | **Projection-only.** Travels on `meta.endpoint` for markdown / scanner / MCP display. Does NOT redirect the runtime call — the call goes through `client`, whose endpoint is fixed at construction. Multi-endpoint = multiple clients. |
 | `tags` | `string[]` | Tags inherited by all contracts in this instance |
 | `feature` | `string` | Grouping key for projection |
 | `headers` | `Record<string, string>` | Default headers merged into every case |
@@ -190,7 +190,7 @@ Creates one contract. Spec shape (`GraphqlContractSpec`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `endpoint` | `string` | Endpoint URL (falls back to client endpoint / instance default) |
+| `endpoint` | `string` | **Projection-only.** Shown in projection meta and markdown; does not override the runtime client's endpoint. See `GraphqlContractDefaults.endpoint` above. |
 | `description` | `string` | Contract-level description |
 | `types` | `GraphqlTypeDefs` | Explicit type declarations (Phase 2 `.gql` projection hint; opaque in Phase 1) |
 | `defaultOperation` | `"query" \| "mutation"` | Default operation type for cases (default: `"query"`) |
@@ -211,7 +211,6 @@ Case shape (`GraphqlContractCase<Vars, Res, S>`):
 | `operationName` | `string` | Display hint; defaults to parse from `query` |
 | `variables` | `Vars \| (state) => Vars` | Variables; deep-merged over `defaultVariables` |
 | `headers` | `Record<string, string> \| fn` | Per-call headers |
-| `endpoint` | `string` | Per-case endpoint override (rare) |
 | `expect` | `GraphqlContractExpect<Res>` | `httpStatus` / `data` / `errors` / `schema` / `headers` / `headersMatch` |
 | `setup` / `teardown` | `(ctx, state?) => Promise<void>` | Lifecycle |
 | `verify` | `(ctx, GraphqlCaseResult) => Promise<void>` | Business-logic check after transport + schema + data assertions |
@@ -341,6 +340,36 @@ instance `defaults.headers` < contract `defaultHeaders` < case `headers` < flow-
 - Export surface gained contract types (`GraphqlContractSpec`, `GraphqlContractCase`, etc.).
 
 If you currently use `@glubean/graphql` only as a transport plugin and do not import `contract.graphql` anywhere, you only need to rebuild; no source changes are required.
+
+## Known Phase 1 limitations
+
+A few edges are deliberately simple in Phase 1. Reviewed in
+[../internal/30-execution/2026-04-20-multi-protocol-contract/request-for-review-graphql.md](../../internal/30-execution/2026-04-20-multi-protocol-contract/request-for-review-graphql.md).
+
+1. **`endpoint` is projection-only.** Shown in meta / markdown for
+   scanner + MCP, but the adapter does not override the bound endpoint
+   of the supplied `GraphQLClient`. Express multi-endpoint via multiple
+   clients (`api_v1 = graphql({endpoint: "/v1"}); api_v2 = ...`).
+2. **`variablesSchema` is contract-level only.** If two cases in the
+   same contract have materially different `variables` shapes (e.g.
+   different operations), a contract-level schema will lose fidelity.
+   Workaround: split into separate contracts, or run ad-hoc
+   per-case variable assertions via `verify`. Phase 2 ergonomics
+   work may add per-case `variablesSchema` override.
+3. **Use `throwOnGraphQLErrors: false` (default) with contracts.** If
+   you construct the underlying client with `throwOnGraphQLErrors: true`
+   the adapter will observe a thrown `GraphQLResponseError` instead of
+   the normal envelope — this bypasses the 3-layer assertion path
+   (`expect.errors`, `expect.data`, `expect.schema` no longer runs).
+   The `graphql({...})` plugin factory defaults to `false`; only
+   standalone `createGraphQLClient(http, { throwOnGraphQLErrors: true })`
+   is affected.
+4. **Scoped-style authoring (`contract.graphql.with("api", ...)(...)`)
+   requires runtime import for scanner discovery.** The static
+   extractor regex matches only `contract.graphql("id", {...})` (the
+   direct form, which the runtime rejects). Scoped authoring therefore
+   depends on `glubean scan`'s runtime-import fallback — same
+   behavior as gRPC, same caveat as `@glubean/grpc` v0.2.0.
 
 ## Scope
 

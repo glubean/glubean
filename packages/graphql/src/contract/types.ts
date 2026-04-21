@@ -9,9 +9,13 @@
  * with GraphQL-specific design:
  *
  *   - **Target model:** GraphQL typically has a single `/graphql` endpoint,
- *     so `endpoint` is spec-level (not per-case). Display target uses
- *     `operationName` (extracted from the query or declared). Contract
- *     identity = `contractId + caseKey`, NOT operationName (proposal §3.2).
+ *     so `endpoint` is spec-level (not per-case). `endpoint` is
+ *     **projection-only** in Phase 1 — it travels on `meta.endpoint`
+ *     for markdown / scanner / MCP display, but the adapter dispatches
+ *     through the supplied `GraphQLClient` whose endpoint was fixed at
+ *     construction time. Multi-endpoint is expressed by multiple
+ *     clients, not by per-contract endpoint strings. Contract identity
+ *     = `contractId + caseKey`, NOT operationName (proposal §3.2).
  *
  *   - **Selection-set-per-case coupling (proposal §3.2 b):** unlike
  *     HTTP/gRPC where response shape is determined by endpoint/method,
@@ -78,15 +82,28 @@ export type GraphqlTypeDefs = Record<string, GraphqlTypeDef>;
  * Defaults for a GraphQL contract instance
  * (`contract.graphql.with("name", {...})`).
  *
- * Connection-level settings (endpoint, auth) can be captured here so every
- * contract under the instance inherits them. The `client` binding is the
- * primary reason to use `.with`: supplying a pre-configured GraphQLClient
- * lets the adapter call through it instead of rebuilding per contract.
+ * The `client` binding is the primary reason to use `.with`: supplying a
+ * pre-configured GraphQLClient lets the adapter call through it without
+ * rebuilding per contract. The GraphQLClient is itself bound to an
+ * endpoint at construction time (via `createGraphQLClient(http, { endpoint })`
+ * or the `graphql({ endpoint })` plugin factory) — the contract layer
+ * does not override that at runtime.
  */
 export interface GraphqlContractDefaults {
   /** Default GraphQL client for all contracts in this instance. */
   client?: GraphQLClient;
-  /** Default endpoint (fallback if neither client nor spec provides one). */
+  /**
+   * Default endpoint **for projection / display only.**
+   *
+   * This value travels on the projection meta (`meta.endpoint`) so the
+   * scanner, `glubean contracts` markdown, and MCP surfaces can show
+   * which endpoint the contract points at. At runtime the adapter
+   * dispatches through the supplied `client`, whose endpoint was fixed
+   * at client-construction time. Changing `endpoint` here does **not**
+   * redirect the live call — use a different client instead
+   * (e.g. `api_v1 = graphql({endpoint: "/v1/graphql"})`,
+   *  `api_v2 = graphql({endpoint: "/v2/graphql"})`).
+   */
   endpoint?: string;
   /** Tags inherited by all contracts in this instance. */
   tags?: string[];
@@ -209,9 +226,6 @@ export interface GraphqlContractCase<
   /** Per-call headers (merged with instance + contract defaults). */
   headers?: Record<string, string> | ((state: S) => Record<string, string>);
 
-  /** Per-case endpoint override (rare — usually single endpoint per spec). */
-  endpoint?: string;
-
   /** Setup runs before the call. Return value flows to variables/headers fn + teardown. */
   setup?: (ctx: TestContext) => Promise<S>;
 
@@ -285,7 +299,15 @@ export interface GraphqlContractSpec<
     GraphqlContractCase<Vars, Res>
   >,
 > {
-  /** Endpoint URL (falls back to client endpoint / instance default). */
+  /**
+   * Endpoint URL **for projection / display only.**
+   *
+   * Travels on the projection `meta.endpoint`. The adapter does NOT use
+   * this to redirect the runtime call — the call is dispatched through
+   * the supplied `client`, whose endpoint was fixed at construction time
+   * (see `GraphqlContractDefaults.endpoint` for the full rationale). To
+   * target a different endpoint at runtime, construct a separate client.
+   */
   endpoint?: string;
 
   /** Default GraphQL client for all cases. */
