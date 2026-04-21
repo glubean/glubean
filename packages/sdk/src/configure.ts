@@ -60,11 +60,7 @@ import type {
   GlubeanRuntime,
   Trace,
   HttpClient,
-  HttpRequestOptions,
-  PluginActivation,
-  PluginEntry,
   PluginFactory,
-  RequestMatcher,
   ReservedConfigureKeys,
   ResolvePlugins,
 } from "./types.js";
@@ -371,193 +367,16 @@ function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
 /** Reserved keys that plugins cannot shadow. */
 const RESERVED_KEYS = new Set(["vars", "secrets", "http"]);
 
-function normalizePluginEntry<T>(
-  entry: PluginFactory<T> | PluginEntry<T>,
-): PluginEntry<T> {
-  if ("factory" in entry) return entry as PluginEntry<T>;
-  return { factory: entry as PluginFactory<T> };
-}
-
-function toMethodList(value?: string | string[]): string[] {
-  if (!value) return [];
-  const list = Array.isArray(value) ? value : [value];
-  return list.map((method) => method.toUpperCase());
-}
-
-function toUrlString(input: string | URL | Request): string {
-  if (input instanceof Request) return input.url;
-  if (input instanceof URL) return input.toString();
-  return input;
-}
-
-function toPathname(input: string | URL | Request): string {
-  try {
-    if (input instanceof Request) return new URL(input.url).pathname;
-    if (input instanceof URL) return input.pathname;
-    const isAbsolute = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(input);
-    const parsed = isAbsolute ? new URL(input) : new URL(input, "http://glubean.local");
-    return parsed.pathname;
-  } catch {
-    return "";
-  }
-}
-
-function matchesPattern(value: string, pattern: string | RegExp): boolean {
-  if (pattern instanceof RegExp) return pattern.test(value);
-  return value.startsWith(pattern);
-}
-
-function matchesRequestMatcher(
-  matcher: RequestMatcher,
-  method: string,
-  url: string | URL | Request,
-): boolean {
-  const methods = toMethodList(matcher.method);
-  if (methods.length > 0 && !methods.includes(method)) {
-    return false;
-  }
-
-  if (matcher.url) {
-    const rawUrl = toUrlString(url);
-    if (!matchesPattern(rawUrl, matcher.url)) {
-      return false;
-    }
-  }
-
-  if (matcher.path) {
-    const pathname = toPathname(url);
-    if (!matchesPattern(pathname, matcher.path)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function evaluateRequestActivation(
-  activation: PluginActivation | undefined,
-  method: string,
-  url: string | URL | Request,
-): { active: boolean; reason?: string } {
-  const rules = activation?.requests;
-  if (!rules) return { active: true };
-
-  const exclude = rules.exclude ?? [];
-  if (exclude.some((matcher) => matchesRequestMatcher(matcher, method, url))) {
-    return {
-      active: false,
-      reason: "request matches activation.requests.exclude",
-    };
-  }
-
-  const include = rules.include ?? [];
-  if (include.length > 0 && !include.some((matcher) => matchesRequestMatcher(matcher, method, url))) {
-    return {
-      active: false,
-      reason: "request does not match activation.requests.include",
-    };
-  }
-
-  return { active: true };
-}
-
-function evaluateTagActivation(
-  activation: PluginActivation | undefined,
-  runtime: InternalRuntime,
-): { active: boolean; reason?: string } {
-  const rules = activation?.tags;
-  if (!rules) return { active: true };
-
-  const runtimeTags = new Set(runtime.test?.tags ?? []);
-  const disable = rules.disable ?? [];
-  for (const tag of disable) {
-    if (runtimeTags.has(tag)) {
-      return {
-        active: false,
-        reason: `test tag "${tag}" matches activation.tags.disable`,
-      };
-    }
-  }
-
-  const enable = rules.enable ?? [];
-  if (enable.length > 0) {
-    const matched = enable.some((tag) => runtimeTags.has(tag));
-    if (!matched) {
-      return {
-        active: false,
-        reason: `current test tags do not match activation.tags.enable (${enable.join(", ")})`,
-      };
-    }
-  }
-
-  return { active: true };
-}
-
-function buildActivationAwareHttpClient(
-  pluginName: string,
-  activation: PluginActivation | undefined,
-  http: HttpClient,
-): HttpClient {
-  if (!activation?.requests) return http;
-
-  function assertRequestActive(
-    method: string,
-    url: string | URL | Request,
-  ): void {
-    const decision = evaluateRequestActivation(activation, method, url);
-    if (decision.active) return;
-    throw new Error(
-      `Plugin "${pluginName}" is inactive for request ${method} ${toUrlString(url)}: ${decision.reason}.`,
-    );
-  }
-
-  const METHODS = ["get", "post", "put", "patch", "delete", "head"] as const;
-  
-  const wrapped: any = function (
-    url: string | URL | Request,
-    options?: HttpRequestOptions,
-  ) {
-    const method = (options?.method ?? (url instanceof Request ? url.method : "GET")).toUpperCase();
-    assertRequestActive(method, url);
-    return http(url, options);
-  };
-
-  for (const methodName of METHODS) {
-    wrapped[methodName] = (url: string | URL | Request, options?: HttpRequestOptions) => {
-      assertRequestActive(methodName.toUpperCase(), url);
-      return http[methodName](url, options);
-    };
-  }
-
-  wrapped.extend = (options: HttpRequestOptions): HttpClient =>
-    buildActivationAwareHttpClient(
-      pluginName,
-      activation,
-      http.extend(options),
-    );
-
-  return wrapped as HttpClient;
-}
-
 /**
  * Resolve (or retrieve cached) the real plugin instance for the current runtime.
  *
  * @internal
  */
 function resolvePlugin(
-  name: string,
-  
-  entry: PluginEntry<any>,
+  factory: PluginFactory<any>,
   cache: WeakMap<InternalRuntime, unknown>,
 ): unknown {
   const runtime = getRuntime();
-  const tagDecision = evaluateTagActivation(entry.activation, runtime);
-  if (!tagDecision.active) {
-    const testId = runtime.test?.id;
-    throw new Error(
-      `Plugin "${name}" is inactive${testId ? ` for test "${testId}"` : ""}: ${tagDecision.reason}.`,
-    );
-  }
 
   if (cache.has(runtime)) return cache.get(runtime);
 
@@ -566,11 +385,7 @@ function resolvePlugin(
   const augmented: GlubeanRuntime = {
     vars: runtime.vars,
     secrets: runtime.secrets,
-    http: buildActivationAwareHttpClient(
-      name,
-      entry.activation,
-      runtime.http,
-    ),
+    http: runtime.http,
     test: runtime.test,
     requireVar,
     requireSecret,
@@ -581,7 +396,7 @@ function resolvePlugin(
     log: runtime.log?.bind(runtime) ?? noop,
   };
 
-  const instance = entry.factory.create(augmented);
+  const instance = factory.create(augmented);
   cache.set(runtime, instance);
   return instance;
 }
@@ -596,60 +411,49 @@ function resolvePlugin(
  *
  * @internal
  */
-function buildLazyPlugin(
-  name: string,
-  
-  entry: PluginEntry<any>,
-): unknown {
+function buildLazyPlugin(factory: PluginFactory<any>): unknown {
   const cache = new WeakMap<InternalRuntime, unknown>();
 
   return new Proxy(Object.create(null), {
     get(_target, prop, receiver) {
-      const instance = resolvePlugin(name, entry, cache);
-      
+      const instance = resolvePlugin(factory, cache);
       const value = Reflect.get(instance as any, prop, receiver);
       return typeof value === "function"
-        
         ? value.bind(instance as any)
         : value;
     },
     set(_target, prop, value) {
-      const instance = resolvePlugin(name, entry, cache);
-      
+      const instance = resolvePlugin(factory, cache);
       return Reflect.set(instance as any, prop, value);
     },
     has(_target, prop) {
-      const instance = resolvePlugin(name, entry, cache);
-      
+      const instance = resolvePlugin(factory, cache);
       return Reflect.has(instance as any, prop);
     },
     ownKeys() {
-      const instance = resolvePlugin(name, entry, cache);
-      
+      const instance = resolvePlugin(factory, cache);
       return Reflect.ownKeys(instance as any);
     },
     getOwnPropertyDescriptor(_target, prop) {
-      const instance = resolvePlugin(name, entry, cache);
-      
+      const instance = resolvePlugin(factory, cache);
       return Object.getOwnPropertyDescriptor(instance as any, prop);
     },
   });
 }
 
 function buildLazyPlugins(
-  
-  plugins: Record<string, PluginFactory<any> | PluginEntry<any>>,
+  plugins: Record<string, PluginFactory<any>>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
-  for (const [name, rawEntry] of Object.entries(plugins)) {
+  for (const [name, factory] of Object.entries(plugins)) {
     if (RESERVED_KEYS.has(name)) {
       throw new Error(
         `Plugin name "${name}" conflicts with a reserved configure() field. ` +
           `Choose a different key (reserved: ${[...RESERVED_KEYS].join(", ")}).`,
       );
     }
-    result[name] = buildLazyPlugin(name, normalizePluginEntry(rawEntry));
+    result[name] = buildLazyPlugin(factory);
   }
 
   return result;
@@ -711,10 +515,7 @@ export function configure<
   V extends Record<string, string> = Record<string, string>,
   S extends Record<string, string> = Record<string, string>,
   
-  P extends Record<string, PluginFactory<any> | PluginEntry<any>> = Record<
-    string,
-    never
-  >,
+  P extends Record<string, PluginFactory<any>> = Record<string, never>,
 >(
   options: ConfigureOptions & {
     vars?: { [K in keyof V]: string };
