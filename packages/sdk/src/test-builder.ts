@@ -1,3 +1,13 @@
+/**
+ * @module test-builder
+ *
+ * Fluent builder for multi-step tests (`TestBuilder`).
+ *
+ * Entry point: `test("id")` (no callback) returns a `TestBuilder`.
+ * Chain `.setup()` → `.step()` → `.teardown()` to define the test workflow.
+ * State flows between steps via the return value of each step function.
+ * `.build()` is optional — the builder auto-registers via microtask.
+ */
 import type {
   ExtensionFn,
   SetupFunction,

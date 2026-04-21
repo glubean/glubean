@@ -1,3 +1,14 @@
+/**
+ * @module test-utils
+ *
+ * Internal helpers shared by `test-builder`, `each-builder`, and `test-extend`.
+ *
+ * - `interpolateTemplate` — replaces `$key` / `$index` placeholders in ID templates
+ * - `resolveBaseMeta` — normalises string | TestMeta to TestMeta
+ * - `normalizeEachTable` — accepts array or plain-object map, injects `_pick` for maps
+ * - `selectPickExamples` — picks examples from a named map (respects `GLUBEAN_PICK` env)
+ * - `globToRegExp` — converts `*` glob patterns to RegExp (used by selectPickExamples)
+ */
 import type { TestMeta } from "./types.js";
 
 /**

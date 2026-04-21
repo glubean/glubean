@@ -1,3 +1,13 @@
+/**
+ * @module each-builder
+ *
+ * Data-driven builder for multi-step tests (`EachBuilder`).
+ *
+ * Entry point: `test.each(table)("id-$key")` (no callback) returns an `EachBuilder`.
+ * Same fluent API as `TestBuilder`, but each step/setup/teardown also receives
+ * the data row (`row`) as a third argument. One `Test` is generated per row.
+ * Also exports `EachStepFunction`, `EachSetupFunction`, `EachTeardownFunction` types.
+ */
 import type {
   ExtensionFn,
   SetupFunction,

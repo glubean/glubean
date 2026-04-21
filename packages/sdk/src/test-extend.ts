@@ -1,3 +1,13 @@
+/**
+ * @module test-extend
+ *
+ * Fixture extension system for augmenting `TestContext` (`test.extend()`).
+ *
+ * `test.extend(fixtures)` returns an `ExtendedTest` function whose `ctx`
+ * includes the resolved fixture properties alongside the base `TestContext`.
+ * Supports chained `.extend()`, `.each()`, and `.pick()`.
+ * Also exports the `ExtendedTest` interface and `EachOptions`.
+ */
 import type {
   ExtensionFn,
   ResolveExtensions,
