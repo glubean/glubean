@@ -12,6 +12,16 @@
 
 import type { RegisteredTestMeta } from "./types.js";
 
+export {
+  getRuntime,
+  setRuntime,
+  runWithRuntime,
+  installCarrier,
+  createGlobalThisCarrier,
+  type RuntimeCarrier,
+  type InternalRuntime,
+} from "./runtime-carrier.js";
+
 /**
  * Global registry for test metadata.
  * Populated at import time when test files are loaded.

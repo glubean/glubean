@@ -9,22 +9,7 @@
 import { parseArgs } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
-
-/* eslint-disable no-var */
-declare global {
-  var __glubeanRuntime: {
-    vars: Record<string, string>;
-    secrets: Record<string, string>;
-    session: Record<string, unknown>;
-    http: Record<string, unknown>;
-    test: Record<string, unknown>;
-    trace: (t: import("@glubean/sdk").Trace) => void;
-    action: (a: import("@glubean/sdk").GlubeanAction) => void;
-    event: (ev: import("@glubean/sdk").GlubeanEvent) => void;
-    log: (message: string, data?: unknown) => void;
-  };
-}
-/* eslint-enable no-var */
+import { setRuntime, type InternalRuntime } from "@glubean/sdk/internal";
 import ky, { type KyInstance, type Options as KyOptions, type NormalizedOptions } from "ky";
 import type {
   Trace,
@@ -1193,7 +1178,7 @@ function withEnvFallback(
 }
 
 
-globalThis.__glubeanRuntime = {
+setRuntime({
   vars: withEnvFallback(rawVars),
   secrets: withEnvFallback(rawSecrets),
   session: sessionData,
@@ -1211,7 +1196,7 @@ globalThis.__glubeanRuntime = {
   action: ctx.action,
   event: ctx.event,
   log: ctx.log,
-};
+} as unknown as InternalRuntime);
 
 try {
   // Dynamic import - LOAD phase
@@ -1526,7 +1511,8 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
   // the per-test state via currentTestCtx().
   await testContext.run(trc, async () => {
 
-  // Runtime metadata is now served via ALS getter on __glubeanRuntime.test
+  // Runtime metadata is served via the `test` getter on the carrier runtime,
+  // which reads from TestRunContext ALS (see setRuntime() call above).
   emitEvent({
     type: "start",
     id: test.meta.id,

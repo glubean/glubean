@@ -55,51 +55,33 @@ import type {
   ConfigureHttpOptions,
   ConfigureOptions,
   ConfigureResult,
-  GlubeanAction,
-  GlubeanEvent,
   GlubeanRuntime,
-  Trace,
   HttpClient,
   PluginFactory,
   ReservedConfigureKeys,
   ResolvePlugins,
 } from "./types.js";
+import {
+  getRuntime as getCarrierRuntime,
+  type InternalRuntime,
+} from "./runtime-carrier.js";
+
+// Re-export for back-compat with anything that imported InternalRuntime from configure.ts.
+export type { InternalRuntime };
 
 // =============================================================================
-// Runtime global slot
+// Runtime accessor
 // =============================================================================
 
 /**
- * Shape of the runtime context injected by the harness before test execution.
- * This is the internal shape — the public `GlubeanRuntime` in types.ts adds
- * helper methods (requireVar, requireSecret, resolveTemplate) for plugins.
- *
- * @internal
- */
-export interface InternalRuntime {
-  vars: Record<string, string>;
-  secrets: Record<string, string>;
-  /** Session key-value store. Set during session setup, available to all tests. */
-  session: Record<string, unknown>;
-  http: HttpClient;
-  test?: GlubeanRuntime["test"];
-  trace?(t: Trace): void;
-  action?(a: GlubeanAction): void;
-  event?(ev: GlubeanEvent): void;
-  log?(message: string, data?: unknown): void;
-}
-
-/**
- * Get the current runtime context from the global slot.
- * Throws a clear error if accessed outside of test execution (e.g., at scan time).
+ * Get the current runtime context, throwing if accessed outside test execution.
+ * Thin wrapper over the carrier's optional `getRuntime()` that preserves the
+ * legacy throw-on-missing contract.
  *
  * @internal
  */
 function getRuntime(): InternalRuntime {
-  
-  const runtime = (globalThis as any).__glubeanRuntime as
-    | InternalRuntime
-    | undefined;
+  const runtime = getCarrierRuntime();
   if (!runtime) {
     throw new Error(
       "configure() values can only be accessed during test execution. " +

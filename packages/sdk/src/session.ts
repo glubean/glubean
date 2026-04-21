@@ -1,4 +1,5 @@
 import type { SessionDefinition } from "./types.js";
+import { getRuntime } from "./runtime-carrier.js";
 
 /**
  * Define a session setup/teardown lifecycle for cross-file state sharing.
@@ -35,7 +36,7 @@ export function defineSession(def: SessionDefinition): SessionDefinition {
 // =============================================================================
 
 function getRuntimeSession(): Record<string, unknown> {
-  const runtime = (globalThis as any).__glubeanRuntime;
+  const runtime = getRuntime();
   if (!runtime) {
     throw new Error(
       "session can only be accessed during test execution. " +

@@ -22,6 +22,7 @@ import type {
 import { attachNetworkTracer } from "./network.js";
 import { collectNavigationMetrics } from "./metrics.js";
 import { createWrappedLocator, type WrappedLocator } from "./locator.js";
+import { getRuntime } from "@glubean/sdk/internal";
 
 /**
  * A GlubeanPage that also exposes every Puppeteer `Page` method/property
@@ -288,12 +289,9 @@ export class GlubeanBrowser {
       }
     });
 
-    // Read testId lazily from the runtime global — the harness updates it
+    // Read testId lazily from the runtime carrier — the harness updates it
     // before each test runs, so reading at newPage() time is always fresh.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const runtimeTestId = (globalThis as any).__glubeanRuntime?.test?.id as
-      | string
-      | undefined;
+    const runtimeTestId = getRuntime()?.test?.id as string | undefined;
     return GlubeanPage._create(
       rawPage,
       this._baseUrl,
