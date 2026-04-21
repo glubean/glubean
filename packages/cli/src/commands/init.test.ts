@@ -40,6 +40,7 @@ test("init --no-interactive creates basic project files", async () => {
     expect(await fileExists(join(dir, ".env"))).toBe(true);
     expect(await fileExists(join(dir, ".env.secrets"))).toBe(true);
     expect(await fileExists(join(dir, ".gitignore"))).toBe(true);
+    expect(await fileExists(join(dir, "glubean.setup.ts"))).toBe(true);
     expect(await fileExists(join(dir, "README.md"))).toBe(true);
     expect(await fileExists(join(dir, "context/openapi.sample.json"))).toBe(true);
     expect(await fileExists(join(dir, "tests/demo.test.ts"))).toBe(true);
@@ -303,6 +304,7 @@ test("init --contract-first creates contract-first project", async () => {
     expect(await fileExists(join(dir, ".env"))).toBe(true);
     expect(await fileExists(join(dir, ".env.secrets"))).toBe(true);
     expect(await fileExists(join(dir, ".gitignore"))).toBe(true);
+    expect(await fileExists(join(dir, "glubean.setup.ts"))).toBe(true);
     expect(await fileExists(join(dir, "contracts/README.md"))).toBe(true);
     expect(await fileExists(join(dir, "contracts/health.contract.ts"))).toBe(true);
     expect(await fileExists(join(dir, "types/README.md"))).toBe(true);

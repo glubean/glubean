@@ -634,6 +634,11 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       description: "Git ignore rules",
     },
     {
+      path: "glubean.setup.ts",
+      content: GLUBEAN_SETUP_TEMPLATE,
+      description: "Plugin bootstrap entry (installs manifest-based plugins)",
+    },
+    {
       path: "README.md",
       content: () => readCliTemplate("README.md"),
       description: "Project README",
@@ -930,6 +935,31 @@ export const createUser = userApi("create-user", {
 - Use business language in descriptions, not technical jargon
 `;
 
+const GLUBEAN_SETUP_TEMPLATE = `/**
+ * Glubean plugin installation entry point.
+ *
+ * Runs once per process on \`glubean run\` / \`glubean contracts\` / MCP /
+ * VSCode scan — wherever a Glubean tool needs plugin-registered matchers
+ * and protocol adapters to be available before test files or \`.contract.ts\`
+ * modules are imported.
+ *
+ * Add your project's plugins here. Example:
+ *
+ *   import { installPlugin } from "@glubean/sdk";
+ *   import graphqlPlugin from "@glubean/graphql";
+ *   import grpcPlugin from "@glubean/grpc";
+ *
+ *   await installPlugin(graphqlPlugin, grpcPlugin);
+ *
+ * If your project only uses HTTP contracts and built-in matchers, this
+ * file can stay empty — the framework works out of the box.
+ */
+
+// No plugins installed by default. Uncomment and add imports above once
+// you pull in @glubean/graphql, @glubean/grpc, or a custom plugin package.
+export {};
+`;
+
 const EXAMPLE_CONTRACT = `import { contract, configure } from "@glubean/sdk";
 
 const { http: api } = configure({
@@ -1007,6 +1037,11 @@ async function initContractFirst(overwrite: boolean): Promise<void> {
       path: ".gitignore",
       content: GITIGNORE,
       description: "Git ignore rules",
+    },
+    {
+      path: "glubean.setup.ts",
+      content: GLUBEAN_SETUP_TEMPLATE,
+      description: "Plugin bootstrap entry (installs manifest-based plugins)",
     },
     {
       path: "contracts/README.md",

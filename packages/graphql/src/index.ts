@@ -536,7 +536,6 @@ export {
   createGraphqlFactory,
   createGraphqlRoot,
   graphqlMatchers,
-  registerGraphqlMatchers,
 } from "./contract/index.js";
 export type {
   GraphqlContractCase,

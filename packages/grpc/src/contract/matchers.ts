@@ -207,48 +207,18 @@ const toHaveGrpcMetadata = (
 };
 
 // =============================================================================
-// Registration — side effect
+// Matcher collection — consumed by the plugin manifest
 // =============================================================================
 
 /**
- * Register gRPC matchers onto the shared `Expectation` prototype. Called
- * from `./index.ts` during the same side-effect block that registers the
- * contract adapter; users get matchers + adapter from a single
- * `import "@glubean/grpc"`.
- *
- * Idempotent: catches the "matcher already exists" error thrown by
- * `Expectation.extend` when the module is evaluated more than once
- * (duplicate imports, Vitest isolation boundaries, etc.).
- */
-/**
  * Collection of gRPC custom matchers, keyed by matcher name.
  *
- * Exposed as a single object so the plugin manifest (`grpc/src/index.ts`)
- * can reference it via `manifest.matchers`. Also consumed by
- * `registerGrpcMatchers()` for the legacy direct-install path.
+ * Consumed by the plugin manifest in `grpc/src/index.ts` as
+ * `manifest.matchers`. `installPlugin` drives the actual
+ * `Expectation.extend` call — plugin authors never need to touch it directly.
  */
 export const grpcMatchers = {
   toHaveGrpcStatus,
   toHaveGrpcOk,
   toHaveGrpcMetadata,
 } as const;
-
-/**
- * @deprecated Prefer installing via the plugin manifest:
- *   `await installPlugin((await import("@glubean/grpc")).default)`.
- *
- * Retained for backward compatibility with code that directly invokes this
- * function. Internally swallows "already exists" errors so repeated direct
- * calls are idempotent.
- */
-export function registerGrpcMatchers(): void {
-  try {
-    Expectation.extend(grpcMatchers);
-  } catch (err) {
-    if (err instanceof Error && /already exists/.test(err.message)) {
-      // Idempotent — re-import in a second harness instance is fine.
-      return;
-    }
-    throw err;
-  }
-}

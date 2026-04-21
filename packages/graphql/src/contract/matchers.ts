@@ -1,11 +1,12 @@
 /**
  * GraphQL custom matchers for `ctx.expect()`.
  *
- * Registered as a side effect of `import "@glubean/graphql"` (see
- * `./index.ts`). No extra import or configure step required — the
- * matchers become available on every `ctx.expect(res)` call and are
- * fully typed via the `CustomMatchers<T>` declaration merging block
- * below.
+ * Installed on `Expectation.prototype` when `installPlugin(graphqlPlugin)`
+ * runs (typically via `glubean.setup.ts` → `bootstrap()`). The
+ * `declare module "@glubean/sdk/expect"` block below publishes ambient
+ * types so `ctx.expect(res).toHaveGraphqlData(...)` is fully typed wherever
+ * `@glubean/graphql` is referenced, even if the actual runtime install
+ * happens elsewhere in the project.
  *
  * Matchers work on any object that carries GraphQL response shape, including:
  *   - `GraphQLResult<T>` from `@glubean/graphql` transport
@@ -352,9 +353,9 @@ const toHaveGraphqlExtension = (
 /**
  * Collection of GraphQL custom matchers, keyed by matcher name.
  *
- * Exposed as a single object so the plugin manifest (`graphql/src/index.ts`)
- * can reference it via `manifest.matchers` without duplicating names. Also
- * consumed by `registerGraphqlMatchers()` for the legacy direct-install path.
+ * Consumed by the plugin manifest in `graphql/src/index.ts` as
+ * `manifest.matchers`. `installPlugin` drives the actual `Expectation.extend`
+ * call — plugin authors never need to touch it directly.
  */
 export const graphqlMatchers = {
   toHaveHttpStatus,
@@ -363,22 +364,3 @@ export const graphqlMatchers = {
   toHaveGraphqlErrorCode,
   toHaveGraphqlExtension,
 } as const;
-
-/**
- * @deprecated Prefer installing via the plugin manifest:
- *   `await installPlugin((await import("@glubean/graphql")).default)`.
- *
- * Retained for backward compatibility with code that directly invokes this
- * function. Internally swallows "already exists" errors so repeated direct
- * calls are idempotent.
- */
-export function registerGraphqlMatchers(): void {
-  try {
-    Expectation.extend(graphqlMatchers);
-  } catch (err) {
-    if (err instanceof Error && /already exists/.test(err.message)) {
-      return;
-    }
-    throw err;
-  }
-}
