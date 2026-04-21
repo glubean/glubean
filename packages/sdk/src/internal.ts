@@ -18,6 +18,7 @@ export {
   runWithRuntime,
   installCarrier,
   createGlobalThisCarrier,
+  createAlsCarrier,
   type RuntimeCarrier,
   type InternalRuntime,
 } from "./runtime-carrier.js";
