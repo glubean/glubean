@@ -26,7 +26,7 @@
 
 import type { PluginManifest } from "./types.js";
 import { Expectation } from "./expect.js";
-import { contract, getAdapter } from "./contract-core.js";
+import { contract, getAdapter, __unregisterProtocolForTesting } from "./contract-core.js";
 
 /**
  * Registry of fully installed plugins (matchers + contracts + setup all
@@ -218,16 +218,37 @@ export function listInstalledPlugins(): PluginManifest[] {
 }
 
 /**
- * Clear all installed-plugin bookkeeping. **Test-only.** Does **not** unregister
- * matchers from `Expectation.prototype` or protocols from the contract registry
- * — those are permanent once installed. Also clears the setup-failure log.
+ * Clear all installed-plugin state. **Test-only.**
  *
- * Intended for test suites that install plugins and need to reset the tracking
- * maps between test cases.
+ * Performs a **true reset**:
+ *   1. Unregisters every matcher previously installed via a plugin manifest
+ *      from `Expectation.prototype`.
+ *   2. Unregisters every protocol adapter previously installed via a plugin
+ *      manifest from the contract registry (`_adapters` + `contract[protocol]`).
+ *   3. Clears all internal tracking maps (`installed`, `matcherOwners`,
+ *      `protocolOwners`, `setupFailures`).
+ *
+ * **Scope limits:**
+ * - Only touches registrations introduced via `installPlugin`. Matchers /
+ *   protocols registered via a direct call to the primitive (bypassing
+ *   `installPlugin`) are **not** tracked by the owner maps and therefore
+ *   will not be removed.
+ * - Built-in Expectation matchers (defined on the class body, not added
+ *   via `extend()`) are unaffected because `delete` on a class-syntax
+ *   method is a no-op.
+ *
+ * Intended for test suites that install plugins, need to simulate a
+ * fresh process, and then install again.
  *
  * @internal
  */
 export function __resetInstalledPluginsForTesting(): void {
+  for (const [name] of matcherOwners) {
+    Expectation.__removeMatcherForTesting(name);
+  }
+  for (const [protocol] of protocolOwners) {
+    __unregisterProtocolForTesting(protocol);
+  }
   installed.clear();
   matcherOwners.clear();
   protocolOwners.clear();

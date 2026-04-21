@@ -57,31 +57,28 @@ afterAll(async () => {
   await rm(FIXTURE_ROOT, { recursive: true, force: true });
 });
 
-describe("PM-1 Phase 2 round 1 — glubean_openapi pipeline with mixed-protocol contracts", () => {
-  test("mixed HTTP + graphql in one file still emits HTTP endpoints in OpenAPI", async () => {
-    // glubean.setup.ts — installs the graphql plugin so its adapter exists on
-    // the contract namespace by the time the .contract.ts file is imported.
-    await writeFile(
-      join(fixtureDir, "glubean.setup.ts"),
-      `
+/**
+ * Build a mixed-protocol fixture (HTTP + graphql in a single .contract.ts)
+ * with a glubean.setup.ts that installs the graphql manifest. Returns nothing;
+ * caller inspects `fixtureDir` directly.
+ */
+async function writeMixedProtocolFixture(): Promise<void> {
+  await writeFile(
+    join(fixtureDir, "glubean.setup.ts"),
+    `
 import { installPlugin } from "@glubean/sdk";
 import graphqlPlugin from "@glubean/graphql";
 await installPlugin(graphqlPlugin);
 `,
-    );
+  );
 
-    // Mixed-protocol contract file. Without bootstrap, the graphql call
-    // throws at import time (contract.graphql is undefined) which would
-    // tear down the entire module, losing the HTTP contract as collateral
-    // damage. This is exactly the scenario Phase 2 round-1 P1 fixed.
-    const contractsDir = join(fixtureDir, "contracts");
-    await mkdir(contractsDir, { recursive: true });
-    await writeFile(
-      join(contractsDir, "users.contract.ts"),
-      `
+  const contractsDir = join(fixtureDir, "contracts");
+  await mkdir(contractsDir, { recursive: true });
+  await writeFile(
+    join(contractsDir, "users.contract.ts"),
+    `
 import { contract } from "@glubean/sdk";
 
-// HTTP contract — should always land in OpenAPI paths.
 const httpApi = contract.http.with("userHttp", {
   baseUrl: "https://api.example.com",
 });
@@ -98,8 +95,6 @@ export const getUserHttp = httpApi("get-user-http", {
   },
 });
 
-// GraphQL contract in the SAME file — if bootstrap is missing, this line
-// throws at import time and takes the file's HTTP exports down with it.
 const gqlApi = contract.graphql.with("userGql", {
   endpoint: "https://api.example.com/graphql",
 });
@@ -115,7 +110,12 @@ export const getUserGql = gqlApi("get-user-gql", {
   },
 });
 `,
-    );
+  );
+}
+
+describe("PM-1 Phase 2 round 1 — glubean_openapi pipeline with mixed-protocol contracts", () => {
+  test("mixed HTTP + graphql in one file still emits HTTP endpoints in OpenAPI", async () => {
+    await writeMixedProtocolFixture();
 
     // Full pipeline: exactly what glubean_openapi handler runs now.
     await bootstrap(fixtureDir);
@@ -141,5 +141,45 @@ export const getUserGql = gqlApi("get-user-gql", {
     // OpenAPI converts `:id` to `{id}`.
     expect(paths).toHaveProperty("/users/{id}");
     expect(paths["/users/{id}"]).toHaveProperty("get");
+  });
+
+  test("negative: without bootstrap, mixed-protocol file fails import and drops its HTTP endpoint", async () => {
+    // The inverse of the positive case: prove that SKIPPING bootstrap is
+    // what the missing-bootstrap regression would look like. This is the
+    // guarantee we couldn't provide in earlier RFR rounds because
+    // `contract.register` and `Expectation.extend` were irreversible.
+    //
+    // Phase 2 round-1 `__resetInstalledPluginsForTesting` now tears down
+    // graphql's adapter + matchers, so `contract.graphql` is genuinely
+    // undefined for this test body.
+    //
+    // Expected behavior:
+    //   - The mixed file import throws at `contract.graphql.with(...)`
+    //   - `extractContractsFromProject` surfaces the file in `result.errors`
+    //   - Both HTTP and graphql contracts from that file are LOST
+    //   - OpenAPI has no `/users/{id}` path
+    //
+    // If this test starts passing the ORIGINAL assertions (HTTP endpoint
+    // still present) it means bootstrap stopped being necessary — likely
+    // because someone made graphql self-register again. That would undo
+    // the whole Phase 2 point and needs a review conversation.
+
+    // beforeEach already called __resetInstalledPluginsForTesting(); at this
+    // point graphql is fully un-registered.
+    await writeMixedProtocolFixture();
+
+    // Deliberately DO NOT call bootstrap(fixtureDir).
+    const result = await extractContractsFromProject(fixtureDir);
+
+    // File failed to import — error surfaces, contracts list is empty.
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0].file).toContain("users.contract.ts");
+    expect(result.contracts).toEqual([]);
+
+    const spec = contractsToOpenApi(result.contracts, "No-Bootstrap API");
+    const paths = spec.paths as Record<string, Record<string, unknown>>;
+    // HTTP endpoint is gone — the import error took it down along with
+    // the graphql contract in the same file.
+    expect(paths).not.toHaveProperty("/users/{id}");
   });
 });

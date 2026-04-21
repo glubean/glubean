@@ -484,6 +484,25 @@ export class Expectation<T> {
     }
   }
 
+  /**
+   * Test-only: remove a matcher previously added via `extend()` from
+   * `Expectation.prototype`. Used by `__resetInstalledPluginsForTesting` in
+   * `install-plugin.ts` to restore a clean state between test scenarios.
+   *
+   * Does nothing if `name` refers to a built-in matcher (we detect this by
+   * whether it exists on an ancestor that is NOT the direct prototype — but
+   * for simplicity we only delete own-prototype entries, so built-ins
+   * defined on the class itself are untouched by `delete`).
+   *
+   * @internal
+   */
+  static __removeMatcherForTesting(name: string): void {
+    // `delete` on a prototype method defined via class syntax is a no-op
+    // (non-configurable), but matchers added via extend() use simple
+    // assignment, which creates configurable properties that delete removes.
+    delete (Expectation.prototype as unknown as Record<string, unknown>)[name];
+  }
+
   // -------------------------------------------------------------------------
   // Internal emit helper
   // -------------------------------------------------------------------------

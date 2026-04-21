@@ -53,6 +53,23 @@ export function getAdapter(
   return _adapters.get(protocol);
 }
 
+/**
+ * Test-only: unregister a protocol adapter + remove its dispatcher from the
+ * `contract` namespace. Used by `__resetInstalledPluginsForTesting` in
+ * `install-plugin.ts` to restore a clean state between test scenarios.
+ *
+ * Not exposed via the public `contract` object — callers must import it
+ * directly from `@glubean/sdk/internal`. Reserved protocol names
+ * (`register`, `flow`, `getAdapter`) are refused.
+ *
+ * @internal
+ */
+export function __unregisterProtocolForTesting(protocol: string): void {
+  if (RESERVED_PROTOCOL_NAMES.has(protocol)) return;
+  _adapters.delete(protocol);
+  delete (contract as Record<string, unknown>)[protocol];
+}
+
 // =============================================================================
 // contract.register + dispatcher
 // =============================================================================
