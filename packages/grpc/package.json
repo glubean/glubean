@@ -2,6 +2,10 @@
   "name": "@glubean/grpc",
   "version": "0.2.0",
   "type": "module",
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/contract/index.js"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

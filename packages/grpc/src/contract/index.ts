@@ -32,6 +32,7 @@
 import { contract } from "@glubean/sdk";
 import { grpcAdapter } from "./adapter.js";
 import { createGrpcRoot } from "./factory.js";
+import { registerGrpcMatchers } from "./matchers.js";
 import type { GrpcContractRoot } from "./types.js";
 
 // Step 1: register the adapter. After this, `contract.grpc` exists as the
@@ -44,6 +45,10 @@ contract.register("grpc", grpcAdapter);
   const dispatcher = (contract as any).grpc as Parameters<typeof createGrpcRoot>[0];
   (contract as unknown as { grpc: GrpcContractRoot }).grpc = createGrpcRoot(dispatcher);
 }
+
+// Step 3: register gRPC custom matchers so
+// `ctx.expect(res).toHaveGrpcStatus(0)` works out of the box.
+registerGrpcMatchers();
 
 // Re-exports for type consumers who import from the package directly.
 export { grpcAdapter } from "./adapter.js";

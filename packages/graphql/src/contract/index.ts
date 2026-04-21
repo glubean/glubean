@@ -35,6 +35,7 @@
 import { contract } from "@glubean/sdk";
 import { graphqlAdapter } from "./adapter.js";
 import { createGraphqlRoot } from "./factory.js";
+import { registerGraphqlMatchers } from "./matchers.js";
 import type { GraphqlContractRoot } from "./types.js";
 
 // Step 1: register the adapter. After this, `contract.graphql` exists as the
@@ -47,6 +48,12 @@ contract.register("graphql", graphqlAdapter);
   const dispatcher = (contract as any).graphql as Parameters<typeof createGraphqlRoot>[0];
   (contract as unknown as { graphql: GraphqlContractRoot }).graphql = createGraphqlRoot(dispatcher);
 }
+
+// Step 3: register GraphQL custom matchers so
+// `ctx.expect(res).toHaveGraphqlData({...})` / `.toHaveGraphqlNoErrors()` /
+// `.toHaveHttpStatus(200)` / `.toHaveGraphqlErrorCode("UNAUTHENTICATED")`
+// work out of the box for any `@glubean/graphql` user.
+registerGraphqlMatchers();
 
 // Re-exports for type consumers who import from the package directly.
 export { graphqlAdapter } from "./adapter.js";

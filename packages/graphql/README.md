@@ -291,6 +291,36 @@ Reads a GraphQL document file relative to the test file. Prefer this for full ID
 
 ---
 
+## Custom matchers
+
+`import "@glubean/graphql"` side-effect registers GraphQL matchers onto the
+shared `ctx.expect()` surface. No extra import or configure field needed.
+
+```ts
+import "@glubean/graphql";
+
+// Works on GraphQLResult (transport) and GraphqlCaseResult (contract verify / flow out lens)
+ctx.expect(res).toHaveHttpStatus(200);                // transport-layer
+ctx.expect(res).toHaveGraphqlNoErrors();              // errors absent / empty
+ctx.expect(res).toHaveGraphqlData({ user: { name: "Alice" } }); // partial data match
+ctx.expect(res).toHaveGraphqlErrorCode("UNAUTHENTICATED");       // case-insensitive
+ctx.expect(res).toHaveGraphqlExtension("tracing");    // extensions key present
+ctx.expect(res).not.toHaveGraphqlNoErrors();          // negation
+```
+
+> **Why `toHaveHttpStatus` and not `toHaveStatus`?** The GraphQL envelope
+> (CG-10) uses `httpStatus` instead of `status` so it doesn't shadow the
+> native `Response.status` semantics. The built-in `toHaveStatus` reads
+> `actual.status` and won't find the envelope's status; use
+> `toHaveHttpStatus` for GraphQL responses.
+
+All matchers inherit `.not` negation, `.orFail()` chaining, and soft-by-default
+semantics from `@glubean/sdk`'s `Expectation`. Types come through
+`CustomMatchers<T>` declaration merging automatically — no user-side
+`declare module` required.
+
+---
+
 ## Tracing
 
 Every GraphQL call inherits HTTP-level tracing via `ctx.http` and injects `X-Glubean-Op: <operationName>` so individual operations are distinguishable in the dashboard instead of showing a generic `POST /graphql`.

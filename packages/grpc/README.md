@@ -282,6 +282,30 @@ Close the underlying gRPC channel.
 
 ---
 
+## Custom matchers
+
+`import "@glubean/grpc"` side-effect registers gRPC matchers onto the shared
+`ctx.expect()` surface. No extra import or configure field needed.
+
+```ts
+import "@glubean/grpc";
+
+// Works on GrpcCallResult (transport) and GrpcCaseResult (contract verify / flow out lens)
+ctx.expect(res).toHaveGrpcStatus(0);                  // exact code
+ctx.expect(res).toHaveGrpcOk();                       // convenience for code 0
+ctx.expect(res).toHaveGrpcStatus(5, "user lookup");   // with context label
+ctx.expect(res).toHaveGrpcMetadata("x-request-id");   // presence
+ctx.expect(res).toHaveGrpcMetadata("x-tenant", "acme"); // value
+ctx.expect(res).not.toHaveGrpcStatus(0);              // negation
+```
+
+All matchers inherit `.not` negation, `.orFail()` chaining, and soft-by-default
+semantics from `@glubean/sdk`'s `Expectation`. Types come through
+`CustomMatchers<T>` declaration merging automatically — no user-side
+`declare module` required.
+
+---
+
 ## Tracing
 
 Every RPC call emits a single `trace` event with the full request/response cycle:
