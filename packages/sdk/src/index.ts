@@ -8,11 +8,11 @@ import type {
 } from "./types.js";
 import { registerTest } from "./internal.js";
 import { toArray } from "./data.js";
-import { TestBuilder } from "./test-builder.js";
-import { EachBuilder } from "./each-builder.js";
-import { createExtendedTest } from "./test-extend.js";
-import type { ExtendedTest } from "./test-extend.js";
-import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, selectPickExamples } from "./test-utils.js";
+import { TestBuilder } from "./test/builder.js";
+import { EachBuilder } from "./test/each-builder.js";
+import { createExtendedTest } from "./test/extend.js";
+import type { ExtendedTest } from "./test/extend.js";
+import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, selectPickExamples } from "./test/utils.js";
 
 /**
  * Glubean SDK spec version.
@@ -364,10 +364,10 @@ export namespace test {
 // =============================================================================
 // Builder + data-driven re-exports
 // =============================================================================
-export { TestBuilder } from "./test-builder.js";
-export { EachBuilder } from "./each-builder.js";
-export type { EachStepFunction, EachSetupFunction, EachTeardownFunction } from "./each-builder.js";
-export type { ExtendedTest } from "./test-extend.js";
+export { TestBuilder } from "./test/builder.js";
+export { EachBuilder } from "./test/each-builder.js";
+export type { EachStepFunction, EachSetupFunction, EachTeardownFunction } from "./test/each-builder.js";
+export type { ExtendedTest } from "./test/extend.js";
 
 // =============================================================================
 // Contract API

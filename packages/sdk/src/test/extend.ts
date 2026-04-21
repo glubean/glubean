@@ -15,12 +15,12 @@ import type {
   Test,
   TestContext,
   TestMeta,
-} from "./types.js";
-import { registerTest } from "./internal.js";
-import { toArray } from "./data.js";
-import { TestBuilder } from "./test-builder.js";
+} from "../types.js";
+import { registerTest } from "../internal.js";
+import { toArray } from "../data.js";
+import { TestBuilder } from "./builder.js";
 import { EachBuilder } from "./each-builder.js";
-import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, selectPickExamples } from "./test-utils.js";
+import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, selectPickExamples } from "./utils.js";
 
 /** Keys that cannot be used as extension names (they shadow core TestContext). */
 export const EXTEND_RESERVED_KEYS = new Set(["vars", "secrets", "http"]);

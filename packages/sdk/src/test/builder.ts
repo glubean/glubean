@@ -18,9 +18,9 @@ import type {
   Test,
   TestContext,
   TestMeta,
-} from "./types.js";
-import { registerTest } from "./internal.js";
-import { toArray } from "./data.js";
+} from "../types.js";
+import { registerTest } from "../internal.js";
+import { toArray } from "../data.js";
 
 /**
  * Builder class for creating tests with a fluent API.

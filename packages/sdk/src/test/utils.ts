@@ -9,7 +9,7 @@
  * - `selectPickExamples` — picks examples from a named map (respects `GLUBEAN_PICK` env)
  * - `globToRegExp` — converts `*` glob patterns to RegExp (used by selectPickExamples)
  */
-import type { TestMeta } from "./types.js";
+import type { TestMeta } from "../types.js";
 
 /**
  * Interpolate `$key` placeholders in a template string with data values.

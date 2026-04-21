@@ -17,10 +17,10 @@ import type {
   Test,
   TestContext,
   TestMeta,
-} from "./types.js";
-import { registerTest } from "./internal.js";
-import { toArray } from "./data.js";
-import { interpolateTemplate } from "./test-utils.js";
+} from "../types.js";
+import { registerTest } from "../internal.js";
+import { toArray } from "../data.js";
+import { interpolateTemplate } from "./utils.js";
 
 /**
  * Step function for data-driven builder tests.
