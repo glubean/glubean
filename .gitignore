@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .tmp-test*/
+.tmp-dbg*/
+.DS_Store
 
 # tsc inline output (build outputs go to dist/)
 packages/*/src/**/*.js
