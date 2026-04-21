@@ -1920,6 +1920,8 @@ server.registerTool(
   },
   async (input: { dir?: string; title?: string }) => {
     const rootDir = resolveRootDir(input.dir);
+    // Bootstrap project plugins so non-HTTP protocol contract extraction works.
+    await bootstrap(rootDir);
     const result = await sharedExtractFromProject(rootDir);
 
     if (result.contracts.length === 0) {
