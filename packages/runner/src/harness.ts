@@ -1007,7 +1007,33 @@ function normalizeOptions(options?: KyOptionsWithSchema): KyOptionsWithSchema | 
 }
 
 /**
- * Run pre-request schema validations (query params, request body).
+ * Normalize a HeadersInit value (Headers instance, plain object, or array of
+ * tuples) into a plain Record<string, string> suitable for schema validation.
+ */
+function normalizeHeadersForValidation(
+  headers: unknown,
+): Record<string, string> {
+  if (headers == null) return {};
+  if (typeof Headers !== "undefined" && headers instanceof Headers) {
+    return Object.fromEntries(headers.entries());
+  }
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(
+      headers.filter((p): p is [string, string] => Array.isArray(p) && p.length === 2),
+    );
+  }
+  if (typeof headers === "object") {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers as Record<string, unknown>)) {
+      if (v != null) out[k] = String(v);
+    }
+    return out;
+  }
+  return {};
+}
+
+/**
+ * Run pre-request schema validations (query params, request body, request headers).
  * Extracts schema option from the options object.
  */
 
@@ -1025,6 +1051,13 @@ function runPreRequestSchemaValidation(options?: KyOptionsWithSchema): void {
   if (schemaOpts.request && options?.json !== undefined) {
     const { schema, severity } = resolveSchemaEntry(schemaOpts.request);
     runSchemaValidation(options.json, schema, "request body", severity);
+  }
+
+  // Validate request headers (per-call only; client-level defaults not included)
+  if (schemaOpts.requestHeaders && options?.headers != null) {
+    const { schema, severity } = resolveSchemaEntry(schemaOpts.requestHeaders);
+    const headers = normalizeHeadersForValidation(options.headers);
+    runSchemaValidation(headers, schema, "request headers", severity);
   }
 }
 
@@ -1074,7 +1107,7 @@ function wrapKy(instance: KyInstance, label = "base"): Record<string, unknown> {
     options?: KyOptionsWithSchema,
   ) {
     const normalized = normalizeOptions(options);
-    // Run pre-request validations (query, request body)
+    // Run pre-request validations (query, request body, request headers)
     runPreRequestSchemaValidation(normalized);
     // Strip schema option before passing to ky (ky doesn't know about it)
     let kyOptions: KyOptions | undefined;
@@ -1083,6 +1116,26 @@ function wrapKy(instance: KyInstance, label = "base"): Record<string, unknown> {
       kyOptions = rest;
     } else {
       kyOptions = normalized;
+    }
+    // Inject afterResponse hook for response headers validation (fires once per final response)
+    const responseHeadersSchema = normalized?.schema?.responseHeaders;
+    if (responseHeadersSchema) {
+      const { schema, severity } = resolveSchemaEntry(responseHeadersSchema);
+      type AfterResponseHook = NonNullable<NonNullable<KyOptions["hooks"]>["afterResponse"]>[number];
+      const headersHook: AfterResponseHook = (_req, _opts, response) => {
+        const headersObj = normalizeHeadersForValidation(response.headers);
+        runSchemaValidation(headersObj, schema, "response headers", severity);
+      };
+      kyOptions = {
+        ...kyOptions,
+        hooks: {
+          ...kyOptions?.hooks,
+          afterResponse: [
+            ...(kyOptions?.hooks?.afterResponse ?? []),
+            headersHook,
+          ],
+        },
+      };
     }
     if (glubeanDebug) {
       process.stderr.write(`[glubean:debug] ky.call [${label}] url=${String(input)} per-call-options=${JSON.stringify(kyOptions ?? null)}\n`);

@@ -1558,14 +1558,21 @@ export type SchemaEntry<T> =
 /**
  * Schema configuration for automatic HTTP request/response validation.
  *
+ * Headers (request and response) are validated as a normalized
+ * `Record<string, string>` — `Headers` instances and `string[][]` forms are
+ * flattened before validation so schemas can be written against a plain object.
+ *
  * @example
  * ```ts
  * ctx.http.post(url, {
  *   json: payload,
+ *   headers: { "X-Tenant-Id": "t1" },
  *   schema: {
  *     request: RequestBodySchema,
  *     response: ResponseSchema,
  *     query: QueryParamsSchema,
+ *     requestHeaders: z.object({ "X-Tenant-Id": z.string() }),
+ *     responseHeaders: z.object({ "content-type": z.string() }),
  *   },
  * });
  * ```
@@ -1577,6 +1584,15 @@ export interface HttpSchemaOptions {
   response?: SchemaEntry<unknown>;
   /** Validate the query/searchParams before sending */
   query?: SchemaEntry<unknown>;
+  /**
+   * Validate the per-call request headers before sending.
+   *
+   * Only the headers passed on this call are checked — client-level defaults
+   * (e.g. `configure({ http: { headers } })`) are not included.
+   */
+  requestHeaders?: SchemaEntry<Record<string, string>>;
+  /** Validate the response headers after receiving (fires on final attempt). */
+  responseHeaders?: SchemaEntry<Record<string, string>>;
 }
 
 // =============================================================================

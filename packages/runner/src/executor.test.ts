@@ -1530,6 +1530,72 @@ export const httpSchemaWithSeverityTest = test(
     ctx.assert(true, "continued");
   },
 );
+
+export const httpRequestHeadersSchemaPassTest = test(
+  { id: "httpRequestHeadersSchemaPassTest", name: "HTTP Request Headers Pass" },
+  async (ctx) => {
+    try {
+      await ctx.http.get("https://httpbin.org/get", {
+        headers: { "X-Tenant-Id": "t1" },
+        schema: {
+          requestHeaders: z.object({ "X-Tenant-Id": z.string() }),
+        },
+      });
+    } catch {
+      // network error is fine
+    }
+    ctx.assert(true, "continued");
+  },
+);
+
+export const httpRequestHeadersSchemaFailTest = test(
+  { id: "httpRequestHeadersSchemaFailTest", name: "HTTP Request Headers Fail" },
+  async (ctx) => {
+    try {
+      await ctx.http.get("https://httpbin.org/get", {
+        headers: { "X-Tenant-Id": "t1" },
+        schema: {
+          requestHeaders: z.object({ "X-Required": z.string() }),
+        },
+      });
+    } catch {
+      // network error is fine
+    }
+    ctx.assert(true, "continued");
+  },
+);
+
+export const httpResponseHeadersSchemaPassTest = test(
+  { id: "httpResponseHeadersSchemaPassTest", name: "HTTP Response Headers Pass" },
+  async (ctx) => {
+    try {
+      await ctx.http.get("https://httpbin.org/get", {
+        schema: {
+          responseHeaders: z.object({ "content-type": z.string() }),
+        },
+      });
+    } catch {
+      // network error is fine
+    }
+    ctx.assert(true, "continued");
+  },
+);
+
+export const httpResponseHeadersSchemaFailTest = test(
+  { id: "httpResponseHeadersSchemaFailTest", name: "HTTP Response Headers Fail" },
+  async (ctx) => {
+    try {
+      await ctx.http.get("https://httpbin.org/get", {
+        schema: {
+          responseHeaders: z.object({ "x-never-sent": z.string() }),
+        },
+      });
+    } catch {
+      // network error is fine
+    }
+    ctx.assert(true, "continued");
+  },
+);
 `;
 
 test("HTTP schema - query validation passes with valid params", { timeout: 15_000 }, async () => {
@@ -1620,6 +1686,76 @@ test("HTTP schema - severity: warn does not fail test", { timeout: 15_000 }, asy
   expect(queryValidation).toBeDefined();
   expect(queryValidation!.success).toBe(false);
   expect(queryValidation!.severity).toBe("warn");
+});
+
+test("HTTP schema - request headers validation passes", { timeout: 15_000 }, async () => {
+  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "httpRequestHeadersSchemaPassTest",
+    { vars: {}, secrets: {} },
+  );
+
+  const validations = getSchemaValidations(result.events);
+  const headersValidation = validations.find((v) => v.label === "request headers");
+  expect(headersValidation).toBeDefined();
+  expect(headersValidation!.success).toBe(true);
+});
+
+test("HTTP schema - request headers validation fails", { timeout: 15_000 }, async () => {
+  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "httpRequestHeadersSchemaFailTest",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(false);
+  expect(result.failedAssertionCount).toBeGreaterThan(0);
+
+  const validations = getSchemaValidations(result.events);
+  const headersValidation = validations.find((v) => v.label === "request headers");
+  expect(headersValidation).toBeDefined();
+  expect(headersValidation!.success).toBe(false);
+});
+
+test("HTTP schema - response headers validation passes", { timeout: 15_000 }, async () => {
+  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "httpResponseHeadersSchemaPassTest",
+    { vars: {}, secrets: {} },
+  );
+
+  const validations = getSchemaValidations(result.events);
+  const headersValidation = validations.find((v) => v.label === "response headers");
+  expect(headersValidation).toBeDefined();
+  expect(headersValidation!.success).toBe(true);
+});
+
+test("HTTP schema - response headers validation fails", { timeout: 15_000 }, async () => {
+  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "httpResponseHeadersSchemaFailTest",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(false);
+  expect(result.failedAssertionCount).toBeGreaterThan(0);
+
+  const validations = getSchemaValidations(result.events);
+  const headersValidation = validations.find((v) => v.label === "response headers");
+  expect(headersValidation).toBeDefined();
+  expect(headersValidation!.success).toBe(false);
 });
 
 // =============================================================================
