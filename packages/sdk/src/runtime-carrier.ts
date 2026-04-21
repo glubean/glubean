@@ -4,21 +4,22 @@
  *
  * **Public API is zero-change.** All user-facing surfaces (`ctx.http`,
  * `ctx.vars`, `ctx.secrets`, `ctx.session`) continue to work exactly as
- * before. This module only refactors the *internal* wiring so that the
- * mechanism (globalThis today, AsyncLocalStorage tomorrow) is swappable.
+ * before.
  *
- * ## Rounds
+ * ## Default impl
  *
- * - **R1:** default impl was `createGlobalThisCarrier()` — behavior 1:1
- *   equivalent to direct `globalThis.__glubeanRuntime` access. Shipped and
- *   verified; `createGlobalThisCarrier` is retained in source as a revert
- *   target.
- * - **R2 (current):** default impl is `createAlsCarrier()` — backed by
- *   {@link AsyncLocalStorage}. Concurrent `runWithRuntime()` callers are
- *   isolated (each sees their own runtime across async boundaries).
- *   `globalThis.__glubeanRuntime` is kept as a best-effort shim so legacy
- *   external plugins that read the global directly keep working through
- *   the next minor.
+ * {@link createAlsCarrier} — `AsyncLocalStorage`-backed with a closure-level
+ * module slot fallback. Concurrent `runWithRuntime()` callers are isolated
+ * (each sees their own runtime across async boundaries). All first-party
+ * packages (`runner` harness, `browser` plugin) read/write the carrier via
+ * `@glubean/sdk/internal`, never through `globalThis`.
+ *
+ * ## Retained alternate: {@link createGlobalThisCarrier}
+ *
+ * Historical R1 impl backed by `globalThis.__glubeanRuntime`. Not the default
+ * any longer — kept in source as a revert target and test fixture. Can be
+ * reinstalled via {@link installCarrier} if an ALS regression ever needs a
+ * one-line rollback.
  *
  * ## Audience
  *
@@ -67,9 +68,9 @@ export interface InternalRuntime {
  * Abstraction over where the current runtime lives.
  *
  * Implementations:
- * - {@link createGlobalThisCarrier} — R1 default, reads/writes
- *   `globalThis.__glubeanRuntime`. Behavior-equivalent to legacy direct access.
- * - Future ALS-backed carrier — R2, adds concurrent isolation.
+ * - {@link createAlsCarrier} — current default. Concurrent isolation via
+ *   AsyncLocalStorage.
+ * - {@link createGlobalThisCarrier} — retained revert target.
  *
  * @internal
  */
@@ -86,13 +87,11 @@ export interface RuntimeCarrier {
    * restored value.
    *
    * **Concurrency:**
-   * - R1 globalThis impl: single shared slot — two *concurrent* `runWith()`
-   *   calls race the slot. Sequential / single-in-flight safe.
-   * - R2 ALS impl (default): true isolation — concurrent `runWith()` callers
+   * - ALS impl (default): true isolation — concurrent `runWith()` callers
    *   each see their own `rt` via AsyncLocalStorage across all async
-   *   boundaries. The globalThis shim remains updated for legacy external
-   *   observers but loses isolation under concurrency (migrate to
-   *   {@link getRuntime} for correct behavior).
+   *   boundaries.
+   * - globalThis impl: single shared slot — two *concurrent* `runWith()`
+   *   calls race the slot. Sequential / single-in-flight safe.
    */
   runWith<T>(rt: InternalRuntime, fn: () => T): T;
 }
@@ -100,11 +99,9 @@ export interface RuntimeCarrier {
 const GLOBAL_SLOT = "__glubeanRuntime";
 
 /**
- * R1 default: globalThis-backed carrier.
- *
- * Behavior is 1:1 equivalent to legacy direct reads/writes of
- * `globalThis.__glubeanRuntime`. Used both as the production default (until
- * R2) and as a permanent revert target if R2 introduces regressions.
+ * globalThis-backed carrier. **Not the default** — retained in source as a
+ * revert target and test fixture. Uses `globalThis.__glubeanRuntime` as the
+ * single shared slot.
  *
  * @internal
  */
@@ -141,55 +138,37 @@ export function createGlobalThisCarrier(): RuntimeCarrier {
 }
 
 /**
- * R2 default: AsyncLocalStorage-backed carrier.
+ * Default carrier: AsyncLocalStorage-backed with a closure module slot.
  *
- * `get()` reads from the ALS store first (concurrent-safe), falling back to
- * the `globalThis.__glubeanRuntime` shim slot so that:
- * - legacy external plugins that still write/read the global directly keep
- *   working (shim contract);
- * - code running outside any `runWith()` scope (e.g. harness after a
- *   subprocess-level `setRuntime()`) still sees the runtime.
+ * Storage:
+ * - **ALS store** — authoritative for code running inside a
+ *   {@link RuntimeCarrier.runWith} scope. Propagates across all async
+ *   boundaries. Concurrent callers are fully isolated.
+ * - **Module slot** — closure-scoped variable set by {@link RuntimeCarrier.set}
+ *   for code running outside any `runWith()` scope (e.g. harness code after
+ *   a subprocess-level `setRuntime()` but before any `runWith()` wrap).
  *
- * Concurrent `runWith()` callers are isolated — each continuation chain
- * observes its own runtime via `als.getStore()` regardless of the shim.
+ * `get()` reads ALS first, falls back to the module slot. No `globalThis`
+ * access — external plugins must migrate to `@glubean/sdk/internal.getRuntime`.
  *
  * @internal
  */
 export function createAlsCarrier(): RuntimeCarrier {
   const als = new AsyncLocalStorage<InternalRuntime>();
+  let moduleSlot: InternalRuntime | undefined;
   return {
     get() {
-      const fromAls = als.getStore();
-      if (fromAls) return fromAls;
-      return (globalThis as any)[GLOBAL_SLOT] as InternalRuntime | undefined;
+      return als.getStore() ?? moduleSlot;
     },
     set(rt) {
-      // Shim write — external plugins reading the global directly observe
-      // this. Concurrent `runWith()` isolation is provided by ALS, not by
-      // this slot.
-      (globalThis as any)[GLOBAL_SLOT] = rt;
+      moduleSlot = rt;
     },
     runWith(rt, fn) {
-      const prev = (globalThis as any)[GLOBAL_SLOT];
-      (globalThis as any)[GLOBAL_SLOT] = rt;
-      let result: unknown;
-      try {
-        result = als.run(rt, fn);
-      } catch (err) {
-        (globalThis as any)[GLOBAL_SLOT] = prev;
-        throw err;
-      }
-      // Keep the shim in sync with the promise lifecycle for external
-      // observers. ALS itself has already captured `rt` for continuations
-      // inside `fn` — concurrent async callers read correct values via
-      // als.getStore() regardless of the shim.
-      if (result !== null && typeof result === "object" && typeof (result as PromiseLike<unknown>).then === "function") {
-        return (Promise.resolve(result as Promise<unknown>).finally(() => {
-          (globalThis as any)[GLOBAL_SLOT] = prev;
-        })) as ReturnType<typeof fn>;
-      }
-      (globalThis as any)[GLOBAL_SLOT] = prev;
-      return result as ReturnType<typeof fn>;
+      // ALS natively propagates `rt` across await boundaries — no manual
+      // save/restore of the module slot is needed. `als.run(rt, fn)` binds
+      // `rt` for the duration of `fn`'s continuation chain and unbinds
+      // automatically when the returned promise settles.
+      return als.run(rt, fn);
     },
   };
 }

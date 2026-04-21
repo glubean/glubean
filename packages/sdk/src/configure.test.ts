@@ -2,6 +2,11 @@ import { test, expect, describe } from "vitest";
 import { configure, resolveTemplate } from "./configure.js";
 import { session } from "./session.js";
 import { definePlugin } from "./plugin.js";
+import {
+  getRuntime as carrierGetRuntime,
+  setRuntime as carrierSetRuntime,
+  type InternalRuntime,
+} from "./runtime-carrier.js";
 import type { GlubeanRuntime, HttpClient, HttpRequestOptions } from "./types.js";
 
 // =============================================================================
@@ -9,8 +14,8 @@ import type { GlubeanRuntime, HttpClient, HttpRequestOptions } from "./types.js"
 // =============================================================================
 
 /**
- * Set up a fake runtime on the global slot.
- * Returns a cleanup function to remove it.
+ * Install a fake runtime into the active carrier.
+ * Returns a cleanup function that clears the slot.
  */
 function setRuntime(
   vars: Record<string, string> = {},
@@ -19,26 +24,24 @@ function setRuntime(
   test?: { id: string; tags: string[] },
   session?: Record<string, unknown>,
 ) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).__glubeanRuntime = {
+  const runtime: InternalRuntime = {
     vars,
     secrets,
     session: session ?? {},
     http: http ?? createMockHttp(),
     test,
   };
+  carrierSetRuntime(runtime);
   return () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    delete (globalThis as any).__glubeanRuntime;
+    carrierSetRuntime(undefined);
   };
 }
 
 /**
- * Remove the runtime slot (simulate scan-time / no harness).
+ * Remove the installed runtime (simulate scan-time / no harness).
  */
 function clearRuntime() {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  delete (globalThis as any).__glubeanRuntime;
+  carrierSetRuntime(undefined);
 }
 
 /**
@@ -160,9 +163,11 @@ test("vars - re-reads from runtime on each access (not cached)", () => {
     const { vars } = configure({ vars: { baseUrl: "{{base_url}}" } });
     expect(vars.baseUrl).toBe("https://v1.example.com");
 
-    // Simulate a new test execution with different vars
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).__glubeanRuntime.vars.base_url = "https://v2.example.com";
+    // Simulate a new test execution with different vars by mutating the
+    // installed runtime in place — `vars.baseUrl` is a lazy accessor that
+    // re-reads the current runtime's vars on each access.
+    const runtime = carrierGetRuntime();
+    if (runtime) runtime.vars.base_url = "https://v2.example.com";
     expect(vars.baseUrl).toBe("https://v2.example.com");
   } finally {
     cleanup();
