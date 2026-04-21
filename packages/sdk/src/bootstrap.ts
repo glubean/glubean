@@ -24,7 +24,7 @@
  * @see {@link installPlugin} in `./install-plugin.js`
  */
 
-import { dirname, parse, resolve } from "node:path";
+import { dirname, isAbsolute, parse, relative, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -40,11 +40,33 @@ const SETUP_FILE_NAMES = [
 ] as const;
 
 /**
- * Absolute paths of setup files we've already imported this process.
- * Second bootstrap() with the same resolved file is a fast-path no-op.
+ * Per-file load state, keyed by the absolute setup-file path.
+ *
+ * - `ok` — the setup file's import resolved. Subsequent `bootstrap()` calls
+ *   that would hit the same file are fast-path no-ops.
+ * - `failed` — the setup file's import threw. Subsequent `bootstrap()` calls
+ *   that would hit the same file re-throw the remembered error, consistent
+ *   with `installPlugin`'s "setup failure is process-unrecoverable" contract.
+ *
  * @internal
  */
-const loaded = new Set<string>();
+type LoadState =
+  | { status: "ok" }
+  | { status: "failed"; error: Error };
+
+const loadState = new Map<string, LoadState>();
+
+/**
+ * Return true iff `descendant` is the same as or nested inside `ancestor`.
+ * Both inputs must be absolute, normalized paths.
+ * @internal
+ */
+function isAncestorOrSame(ancestor: string, descendant: string): boolean {
+  const rel = relative(ancestor, descendant);
+  // Empty string → equal. Relative path that is not ".." prefixed and not
+  // absolute → descendant is inside ancestor. Anything else → outside.
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
 
 /**
  * Walk up from `startDir` searching for a Glubean setup file. Returns the
@@ -61,8 +83,25 @@ export function discoverSetupFile(
   startDir: string,
   stopDir?: string,
 ): string | undefined {
-  let dir = resolve(startDir);
-  const root = stopDir ? resolve(stopDir) : parse(dir).root;
+  const startAbs = resolve(startDir);
+  let root: string;
+  if (stopDir !== undefined) {
+    const stopAbs = resolve(stopDir);
+    // Reject a stopDir that is not an ancestor of (or equal to) startDir.
+    // Silently walking past a non-ancestor stopDir could pick up an unrelated
+    // setup file above it — reviewer-flagged bug. Fail loud instead.
+    if (!isAncestorOrSame(stopAbs, startAbs)) {
+      throw new Error(
+        `discoverSetupFile: stopDir "${stopAbs}" is not an ancestor of startDir "${startAbs}". ` +
+          "stopDir must be equal to or above startDir in the directory tree.",
+      );
+    }
+    root = stopAbs;
+  } else {
+    root = parse(startAbs).root;
+  }
+
+  let dir = startAbs;
   while (true) {
     for (const name of SETUP_FILE_NAMES) {
       const candidate = resolve(dir, name);
@@ -70,8 +109,9 @@ export function discoverSetupFile(
         return candidate;
       }
     }
+    if (dir === root) break;
     const parent = dirname(dir);
-    if (parent === dir || dir === root) break;
+    if (parent === dir) break;
     dir = parent;
   }
   return undefined;
@@ -92,9 +132,13 @@ export function discoverSetupFile(
  * - No setup file found → no-op (projects without plugins are fine, silent).
  * - Setup file found and not yet imported this process → import it and
  *   await the returned promise (the setup file may call `await installPlugin(...)`).
- * - Setup file found and already imported → no-op (idempotent).
- * - Setup file found but `import()` throws → the error is re-thrown as-is;
- *   the file path is recorded so a retry in the same process won't try again.
+ * - Setup file found and already imported successfully → no-op (idempotent).
+ * - Setup file found but `import()` throws → the error is recorded **and**
+ *   re-thrown. Every subsequent `bootstrap()` call that resolves to the same
+ *   file re-throws the remembered error rather than silently succeeding.
+ *   This is consistent with `installPlugin`'s "setup failure is
+ *   process-unrecoverable" contract: later scanner / runner / MCP callers
+ *   MUST see the failure, not a false success.
  *
  * @param startDir Starting directory for the walk-up search. Typically the
  *                 project root or the process cwd. Caller decides — the SDK
@@ -115,13 +159,28 @@ export async function bootstrap(
 ): Promise<void> {
   const setupFile = discoverSetupFile(startDir, stopDir);
   if (!setupFile) return;
-  if (loaded.has(setupFile)) return;
-  // Record before the import so a throwing setup file doesn't get retried in
-  // the same process (plugin-install failure is process-unrecoverable by
-  // design — see install-plugin.ts JSDoc).
-  loaded.add(setupFile);
+
+  const state = loadState.get(setupFile);
+  if (state?.status === "ok") {
+    // Fast path: already loaded successfully.
+    return;
+  }
+  if (state?.status === "failed") {
+    // Previous attempt threw. Re-throw the remembered error so downstream
+    // callers (scanner / runner / MCP) don't silently proceed with a
+    // half-initialized plugin registry.
+    throw state.error;
+  }
+
   const url = pathToFileURL(setupFile).href;
-  await import(url);
+  try {
+    await import(url);
+    loadState.set(setupFile, { status: "ok" });
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    loadState.set(setupFile, { status: "failed", error });
+    throw error;
+  }
 }
 
 /**
@@ -133,5 +192,5 @@ export async function bootstrap(
  * @internal
  */
 export function __resetBootstrapForTesting(): void {
-  loaded.clear();
+  loadState.clear();
 }

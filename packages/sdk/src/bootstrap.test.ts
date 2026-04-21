@@ -67,6 +67,20 @@ describe("discoverSetupFile", () => {
 
     expect(discoverSetupFile(subDir, subDir)).toBeUndefined();
   });
+
+  test("throws when stopDir is not an ancestor of startDir (unrelated paths)", async () => {
+    // stopDir pointing somewhere that isn't above startDir would otherwise let
+    // the walk silently escape past stopDir all the way to the filesystem root.
+    // Reviewer-flagged bug — must fail loudly.
+    const startSub = join(tmpRoot, "packages", "foo");
+    const unrelatedStop = join(tmpRoot, "packages", "bar");
+    await mkdir(startSub, { recursive: true });
+    await mkdir(unrelatedStop, { recursive: true });
+
+    expect(() => discoverSetupFile(startSub, unrelatedStop)).toThrow(
+      /stopDir .* is not an ancestor of startDir/,
+    );
+  });
 });
 
 describe("bootstrap", () => {
@@ -132,9 +146,11 @@ writeFileSync(${JSON.stringify(counterPath)}, String(prev + 1));
     await expect(bootstrap(tmpRoot, tmpRoot)).rejects.toThrow("setup blew up");
   });
 
-  test("does not retry a setup file that threw on first import (within same process)", async () => {
-    // Arrange: setup file always throws. First bootstrap() should throw and
-    // record the path as loaded; second bootstrap() should NOT re-import.
+  test("subsequent bootstrap() re-throws the remembered setup error (not a silent success)", async () => {
+    // Failed-import contract: once a setup file throws, every later
+    // bootstrap() that would hit the same file must surface the failure.
+    // Silent no-op would let downstream callers (scanner / runner / MCP)
+    // proceed with a half-initialized plugin registry.
     const setupPath = join(tmpRoot, "glubean.setup.mjs");
     await writeFile(
       setupPath,
@@ -145,9 +161,38 @@ writeFileSync(${JSON.stringify(counterPath)}, String(prev + 1));
       "persistent failure",
     );
 
-    // Second call: we expect silent no-op. The path was recorded as loaded
-    // BEFORE the import was awaited, so we don't retry — consistent with
-    // installPlugin's "failed setup is process-unrecoverable" stance.
-    await expect(bootstrap(tmpRoot, tmpRoot)).resolves.toBeUndefined();
+    // Subsequent calls re-throw the SAME error (or an equivalent Error).
+    await expect(bootstrap(tmpRoot, tmpRoot)).rejects.toThrow(
+      "persistent failure",
+    );
+    await expect(bootstrap(tmpRoot, tmpRoot)).rejects.toThrow(
+      "persistent failure",
+    );
+  });
+
+  test("does not re-invoke import() on the failure path — remembered error is thrown synchronously", async () => {
+    // Proves the fast-path for failures: we don't re-import, we re-throw
+    // the cached error. Counter file stays at "1" because the failing
+    // import only ran once.
+    const counterPath = join(tmpRoot, "counter");
+    const setupPath = join(tmpRoot, "glubean.setup.mjs");
+    await writeFile(
+      setupPath,
+      `
+import { writeFileSync, existsSync, readFileSync } from "node:fs";
+const prev = existsSync(${JSON.stringify(counterPath)})
+  ? parseInt(readFileSync(${JSON.stringify(counterPath)}, "utf8"), 10)
+  : 0;
+writeFileSync(${JSON.stringify(counterPath)}, String(prev + 1));
+throw new Error("after-counter");
+`,
+    );
+
+    await expect(bootstrap(tmpRoot, tmpRoot)).rejects.toThrow("after-counter");
+    await expect(bootstrap(tmpRoot, tmpRoot)).rejects.toThrow("after-counter");
+    await expect(bootstrap(tmpRoot, tmpRoot)).rejects.toThrow("after-counter");
+
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(counterPath, "utf8")).toBe("1");
   });
 });
