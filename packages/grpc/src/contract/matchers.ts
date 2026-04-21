@@ -220,13 +220,30 @@ const toHaveGrpcMetadata = (
  * `Expectation.extend` when the module is evaluated more than once
  * (duplicate imports, Vitest isolation boundaries, etc.).
  */
+/**
+ * Collection of gRPC custom matchers, keyed by matcher name.
+ *
+ * Exposed as a single object so the plugin manifest (`grpc/src/index.ts`)
+ * can reference it via `manifest.matchers`. Also consumed by
+ * `registerGrpcMatchers()` for the legacy direct-install path.
+ */
+export const grpcMatchers = {
+  toHaveGrpcStatus,
+  toHaveGrpcOk,
+  toHaveGrpcMetadata,
+} as const;
+
+/**
+ * @deprecated Prefer installing via the plugin manifest:
+ *   `await installPlugin((await import("@glubean/grpc")).default)`.
+ *
+ * Retained for backward compatibility with code that directly invokes this
+ * function. Internally swallows "already exists" errors so repeated direct
+ * calls are idempotent.
+ */
 export function registerGrpcMatchers(): void {
   try {
-    Expectation.extend({
-      toHaveGrpcStatus,
-      toHaveGrpcOk,
-      toHaveGrpcMetadata,
-    });
+    Expectation.extend(grpcMatchers);
   } catch (err) {
     if (err instanceof Error && /already exists/.test(err.message)) {
       // Idempotent — re-import in a second harness instance is fine.

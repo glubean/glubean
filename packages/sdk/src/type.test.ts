@@ -7,7 +7,7 @@
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { test as vitest_test } from "vitest";
-import { configure, definePlugin, test, type TestBuilder } from "./index.js";
+import { configure, defineClientFactory, test, type TestBuilder } from "./index.js";
 import type { ExtensionFn, ResolveExtensions, TestContext } from "./types.js";
 
 // =============================================================================
@@ -159,13 +159,13 @@ withAuth.pick({
 // configure() with 3+ plugins type inference
 // =============================================================================
 
-const gqlPlugin = definePlugin((_runtime) => ({
+const gqlPlugin = defineClientFactory((_runtime) => ({
   query: (_doc: string) => Promise.resolve({}),
 }));
 
-const cachePlugin = definePlugin((_runtime) => new Map<string, unknown>());
+const cachePlugin = defineClientFactory((_runtime) => new Map<string, unknown>());
 
-const metricsPlugin = definePlugin((_runtime) => ({
+const metricsPlugin = defineClientFactory((_runtime) => ({
   count: (_name: string) => {},
   gauge: (_name: string, _value: number) => {},
 }));

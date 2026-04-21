@@ -8,13 +8,18 @@
  * Uses a mock GrpcClient that records calls and returns canned responses.
  */
 
-import { test, expect, beforeEach, describe } from "vitest";
-// Import "@glubean/grpc" (this package) so its side-effect registers the
-// contract adapter. Inside the package, import via relative path.
-import "./index.js";
-import { contract, runFlow } from "@glubean/sdk";
+import { test, expect, beforeAll, beforeEach, describe } from "vitest";
+import { contract, installPlugin, runFlow } from "@glubean/sdk";
 import type { FlowContract, TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";
+import grpcPlugin from "../index.js";
+
+// Install the gRPC manifest once per test file. Replaces the old
+// `import "./index.js"` side-effect that used to register adapter + matchers
+// at module load. Registration is now explicit and identity-tracked.
+beforeAll(async () => {
+  await installPlugin(grpcPlugin);
+});
 
 import { grpcAdapter } from "./adapter.js";
 import { createGrpcRoot } from "./factory.js";

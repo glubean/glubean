@@ -1073,16 +1073,19 @@ export interface ConfigureResult<
 // =============================================================================
 
 /**
- * A plugin factory that creates a lazy instance of type T.
+ * A lazy client factory producing an instance of type T.
  * Used with `configure({ plugins: { key: factory } })`.
- * Plugin authors should use `definePlugin()` instead of implementing directly.
+ *
+ * Prefer the {@link ClientFactory} alias (same structure, clearer name).
+ * `PluginFactory` is retained as a historical name for existing importers;
+ * new code should write `ClientFactory<T>` and call `defineClientFactory`.
  *
  * @example
  * ```ts
- * import { definePlugin } from "@glubean/sdk";
+ * import { defineClientFactory } from "@glubean/sdk";
  *
- * export const myPlugin = (opts: MyOptions) =>
- *   definePlugin((runtime) => new MyClient(runtime, opts));
+ * export const myClient = (opts: MyOptions) =>
+ *   defineClientFactory((runtime) => new MyClient(runtime, opts));
  * ```
  */
 export interface PluginFactory<T> {
@@ -1179,7 +1182,7 @@ export interface PluginManifest {
  *
  * @example
  * ```ts
- * definePlugin((runtime) => ({
+ * defineClientFactory((runtime) => ({
  *   currentTest: runtime.test?.id ?? "unknown",
  *   tags: runtime.test?.tags ?? [],
  * }));
@@ -1202,7 +1205,7 @@ export interface GlubeanRuntimeTestMetadata {
  *
  * @example
  * ```ts
- * definePlugin((runtime) => {
+ * defineClientFactory((runtime) => {
  *   const baseUrl = runtime.requireVar("base_url");
  *   const token = runtime.requireSecret("api_key");
  *   const header = runtime.resolveTemplate("Bearer {{api_key}}");

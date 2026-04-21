@@ -58,8 +58,16 @@
  */
 
 import type * as grpcTypes from "@grpc/grpc-js";
-import { definePlugin } from "@glubean/sdk/plugin";
-import type { GlubeanRuntime, PluginFactory } from "@glubean/sdk";
+import { contract, defineClientFactory, definePlugin } from "@glubean/sdk";
+import type {
+  ClientFactory,
+  GlubeanRuntime,
+  PluginManifest,
+} from "@glubean/sdk";
+import { grpcAdapter } from "./contract/adapter.js";
+import { createGrpcRoot } from "./contract/factory.js";
+import { grpcMatchers } from "./contract/matchers.js";
+import type { GrpcContractRoot } from "./contract/types.js";
 
 let grpcJs: typeof grpcTypes;
 let protoLoader: typeof import("@grpc/proto-loader");
@@ -420,8 +428,8 @@ export interface GrpcPluginOptions {
  * });
  * ```
  */
-export function grpc(options: GrpcPluginOptions): PluginFactory<GrpcClient> {
-  return definePlugin((runtime: GlubeanRuntime) => {
+export function grpc(options: GrpcPluginOptions): ClientFactory<GrpcClient> {
+  return defineClientFactory((runtime: GlubeanRuntime) => {
     const resolvedAddress = runtime.resolveTemplate(options.address);
 
     const resolvedMetadata: Record<string, string> | undefined =
@@ -505,21 +513,52 @@ export const GRPC_REDACTION_SCOPES = [
   },
 ];
 
-// -----------------------------------------------------------------------------
-// Contract layer — side-effect register on import of @glubean/grpc
-// -----------------------------------------------------------------------------
-//
-// This import runs `contract.register("grpc", grpcAdapter)` and wraps the
-// generic dispatcher with `createGrpcRoot` so users get the
-// `contract.grpc.with("name", { client })` UX as soon as they import
-// "@glubean/grpc". See ./contract/index.ts.
-import "./contract/index.js";
+// =============================================================================
+// Plugin manifest (default export)
+// =============================================================================
+
+/**
+ * Plugin manifest for `@glubean/grpc`. Declares:
+ *
+ *   - `matchers`  — `toHaveGrpcStatus`, `toHaveGrpcOk`, `toHaveGrpcMetadata`
+ *   - `contracts` — `grpc` protocol adapter
+ *   - `setup()`   — wraps the auto-attached `contract.grpc` dispatcher with
+ *                   `createGrpcRoot` so `contract.grpc.with("name", { client })`
+ *                   UX works
+ *
+ * Install explicitly in your project's `glubean.setup.ts`:
+ *
+ * ```ts
+ * import { installPlugin } from "@glubean/sdk";
+ * import grpcPlugin from "@glubean/grpc";
+ * await installPlugin(grpcPlugin);
+ * ```
+ *
+ * **Note:** top-level `import "@glubean/grpc"` is **no longer** a side-effect
+ * registration. The manifest must be installed explicitly (directly or via
+ * `bootstrap(projectRoot)` which loads `glubean.setup.ts`).
+ */
+const grpcPlugin: PluginManifest = definePlugin({
+  name: "@glubean/grpc",
+  matchers: grpcMatchers,
+  contracts: { grpc: grpcAdapter },
+  setup() {
+    // Wrap the dispatcher attached by installPlugin with the scoped-defaults
+    // factory so `contract.grpc.with("name", { client })("case", spec)` works.
+    const dispatcher = (contract as unknown as { grpc: Parameters<typeof createGrpcRoot>[0] }).grpc;
+    (contract as unknown as { grpc: GrpcContractRoot }).grpc = createGrpcRoot(dispatcher);
+  },
+});
+
+export default grpcPlugin;
 
 // Re-export contract surface for type consumers
 export {
   grpcAdapter,
   createGrpcFactory,
   createGrpcRoot,
+  grpcMatchers,
+  registerGrpcMatchers,
 } from "./contract/index.js";
 export type {
   GrpcContractCase,

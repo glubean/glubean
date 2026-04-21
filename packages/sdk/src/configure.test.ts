@@ -1,7 +1,7 @@
 import { test, expect, describe } from "vitest";
 import { configure, resolveTemplate } from "./configure.js";
 import { session } from "./session.js";
-import { definePlugin } from "./plugin.js";
+import { defineClientFactory } from "./plugin.js";
 import {
   getRuntime as carrierGetRuntime,
   setRuntime as carrierSetRuntime,
@@ -934,7 +934,7 @@ test("plugins - create() called lazily on first property access", () => {
   try {
     const result = configure({
       plugins: {
-        myPlugin: definePlugin((_runtime) => {
+        myPlugin: defineClientFactory((_runtime) => {
           createCalled = true;
           return { greeting: "hello" };
         }),
@@ -957,7 +957,7 @@ test("plugins - result is cached (second access does not call create again)", ()
   try {
     const result = configure({
       plugins: {
-        counter: definePlugin((_runtime) => {
+        counter: defineClientFactory((_runtime) => {
           createCount++;
           return { count: createCount };
         }),
@@ -979,11 +979,11 @@ test("plugins - multiple plugins resolve independently", () => {
   try {
     const result = configure({
       plugins: {
-        a: definePlugin((_runtime) => {
+        a: defineClientFactory((_runtime) => {
           aCreated = true;
           return { name: "pluginA" };
         }),
-        b: definePlugin((_runtime) => {
+        b: defineClientFactory((_runtime) => {
           bCreated = true;
           return { name: "pluginB" };
         }),
@@ -1009,7 +1009,7 @@ test("plugins - factory receives augmented GlubeanRuntime with requireVar", () =
   try {
     const result = configure({
       plugins: {
-        test: definePlugin((runtime) => {
+        test: defineClientFactory((runtime) => {
           capturedRuntime = runtime;
           return { url: runtime.requireVar("base_url") };
         }),
@@ -1029,7 +1029,7 @@ test("plugins - factory receives augmented GlubeanRuntime with requireSecret", (
   try {
     const result = configure({
       plugins: {
-        test: definePlugin((runtime) => {
+        test: defineClientFactory((runtime) => {
           capturedRuntime = runtime;
           return { key: runtime.requireSecret("api_key") };
         }),
@@ -1051,7 +1051,7 @@ test("plugins - factory receives augmented GlubeanRuntime with resolveTemplate",
   try {
     const result = configure({
       plugins: {
-        test: definePlugin((runtime) => {
+        test: defineClientFactory((runtime) => {
           return {
             header: runtime.resolveTemplate("Bearer {{api_key}}"),
             mixed: runtime.resolveTemplate("{{base_url}}/api?key={{api_key}}"),
@@ -1071,7 +1071,7 @@ test("plugins - safe to destructure without runtime", () => {
   clearRuntime();
   const result = configure({
     plugins: {
-      test: definePlugin((_runtime) => ({ value: 42 })),
+      test: defineClientFactory((_runtime) => ({ value: 42 })),
     },
   });
 
@@ -1103,7 +1103,7 @@ test("configure({ plugins }) - returns plugin instances alongside vars/secrets/h
       secrets: { apiKey: "{{api_key}}" },
       http: { prefixUrl: "{{base_url}}" },
       plugins: {
-        myClient: definePlugin((runtime) => ({
+        myClient: defineClientFactory((runtime) => ({
           endpoint: runtime.requireVar("base_url"),
           token: runtime.requireSecret("api_key"),
         })),
@@ -1131,8 +1131,8 @@ test("configure({ plugins }) - TypeScript generic inference (verified by assignm
   try {
     const result = configure({
       plugins: {
-        alpha: definePlugin((_r) => ({ x: 1, y: "hello" })),
-        beta: definePlugin((_r) => ({ items: ["a", "b", "c"] })),
+        alpha: defineClientFactory((_r) => ({ x: 1, y: "hello" })),
+        beta: defineClientFactory((_r) => ({ items: ["a", "b", "c"] })),
       },
     });
 
@@ -1170,7 +1170,7 @@ test("plugins - throws on reserved key 'vars'", () => {
     () =>
       configure({
         // @ts-expect-error: "vars" is a reserved key — rejected at type level
-        plugins: { vars: definePlugin((_r) => ({ x: 1 })) },
+        plugins: { vars: defineClientFactory((_r) => ({ x: 1 })) },
       }),
   ).toThrow('Plugin name "vars" conflicts with a reserved configure() field');
 });
@@ -1180,7 +1180,7 @@ test("plugins - throws on reserved key 'secrets'", () => {
     () =>
       configure({
         // @ts-expect-error: "secrets" is a reserved key — rejected at type level
-        plugins: { secrets: definePlugin((_r) => ({ x: 1 })) },
+        plugins: { secrets: defineClientFactory((_r) => ({ x: 1 })) },
       }),
   ).toThrow('Plugin name "secrets" conflicts with a reserved configure() field');
 });
@@ -1190,7 +1190,7 @@ test("plugins - throws on reserved key 'http'", () => {
     () =>
       configure({
         // @ts-expect-error: "http" is a reserved key — rejected at type level
-        plugins: { http: definePlugin((_r) => ({ x: 1 })) },
+        plugins: { http: defineClientFactory((_r) => ({ x: 1 })) },
       }),
   ).toThrow('Plugin name "http" conflicts with a reserved configure() field');
 });

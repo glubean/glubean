@@ -8,12 +8,16 @@
  *   - Integration: matchers chain with `.not` and soft assertion semantics
  */
 
-import { test, expect, describe } from "vitest";
-
-// Side-effect import registers the matchers (same entry users will use).
-import "./index.js";
-
+import { test, expect, beforeAll, describe } from "vitest";
+import { installPlugin } from "@glubean/sdk";
 import { Expectation } from "@glubean/sdk/expect";
+import grpcPlugin from "../index.js";
+
+// Install the gRPC manifest once per test file so the custom matchers land
+// on Expectation.prototype before any `new Expectation(...)` is instantiated.
+beforeAll(async () => {
+  await installPlugin(grpcPlugin);
+});
 
 // ---------------------------------------------------------------------------
 // Harness — minimal Expectation with in-memory assertion sink

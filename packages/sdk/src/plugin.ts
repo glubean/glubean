@@ -1,22 +1,22 @@
 /**
  * Plugin authoring helpers.
  *
- * Two concepts live here:
+ * Two APIs live here, one per concept:
  *
  * 1. **`definePlugin(manifest)`** — declare a plugin manifest for global
  *    registration (matchers, protocol adapters, one-time setup). Consumed by
  *    {@link installPlugin} in `./install-plugin.js`. This is the primary API
- *    for plugin packages like `@glubean/graphql`.
+ *    for plugin packages like `@glubean/graphql` and `@glubean/grpc`.
  *
  * 2. **`defineClientFactory(create)`** — declare a lazy client factory for
- *    per-file injection via `configure({ plugins })`. This is the renamed
- *    form of the legacy `definePlugin((runtime) => T)` signature; the name
- *    now describes what it actually is (a client factory, not a plugin).
+ *    per-file injection via `configure({ plugins })`. This is what the
+ *    legacy `definePlugin((runtime) => T)` signature used to do; the name
+ *    has been corrected to describe what it actually is (a client factory,
+ *    not a plugin).
  *
- * For backward compatibility, `definePlugin` accepts BOTH signatures during
- * Phase 1 of the plugin-system rewrite: passing a function is still supported
- * and routes to `defineClientFactory` with a `@deprecated` hint. Phase 3 will
- * remove the function overload, leaving only the manifest form.
+ * The legacy `definePlugin((runtime) => T)` overload was removed in Phase 3.
+ * Migrate call sites to `defineClientFactory((runtime) => T)` for the same
+ * behavior and better naming.
  *
  * @module plugin
  */
@@ -24,7 +24,6 @@
 import type {
   ClientFactory,
   GlubeanRuntime,
-  PluginFactory,
   PluginManifest,
 } from "./types.js";
 
@@ -63,42 +62,18 @@ export function defineClientFactory<T>(
  * bootstrap time. A manifest can declare custom matchers, protocol adapters,
  * and a one-time `setup()` hook. See {@link PluginManifest}.
  *
- * **Phase 1 backward compatibility**: for migration convenience, passing a
- * function `(runtime) => T` instead of a manifest still works — it is routed
- * to {@link defineClientFactory} and returns a `ClientFactory<T>`. This
- * overload is deprecated and will be removed in a future release.
- *
- * @example Plugin manifest (recommended)
+ * @example Plugin manifest
  * ```ts
  * export default definePlugin({
  *   name: "@glubean/graphql",
  *   matchers: { toHaveGraphqlData, toHaveGraphqlErrorCode },
  *   contracts: { graphql: graphqlAdapter },
+ *   setup() {
+ *     // Optional one-time registration work
+ *   },
  * });
  * ```
- *
- * @example Legacy client factory (deprecated)
- * ```ts
- * // Deprecated — use defineClientFactory instead.
- * export const myPlugin = (opts: Opts) =>
- *   definePlugin((runtime) => new MyClient(runtime, opts));
- * ```
  */
-export function definePlugin(manifest: PluginManifest): PluginManifest;
-/**
- * @deprecated Use `defineClientFactory` instead. This overload is kept for
- * Phase 1 backward compatibility and will be removed in a future release.
- */
-export function definePlugin<T>(
-  create: (runtime: GlubeanRuntime) => T,
-): PluginFactory<T>;
-export function definePlugin<T>(
-  arg: PluginManifest | ((runtime: GlubeanRuntime) => T),
-): PluginManifest | PluginFactory<T> {
-  if (typeof arg === "function") {
-    // Legacy client-factory usage — route to defineClientFactory.
-    return defineClientFactory(arg);
-  }
-  // Manifest form — return as-is. `installPlugin` will validate the shape.
-  return arg;
+export function definePlugin(manifest: PluginManifest): PluginManifest {
+  return manifest;
 }
