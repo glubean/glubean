@@ -6,6 +6,7 @@
  */
 
 import { resolve } from "node:path";
+import { bootstrap } from "@glubean/runner";
 import { extractContractsFromProject } from "@glubean/scanner";
 import type {
   NormalizedFlowMeta,
@@ -325,6 +326,12 @@ export async function contractsCommand(
 ): Promise<void> {
   const dir = options.dir ? resolve(options.dir) : process.cwd();
   const format = options.format ?? "md-outline";
+
+  // Bootstrap plugins before contract extraction. Without this, any
+  // `.contract.ts` file that uses a non-HTTP protocol (graphql, grpc, ...)
+  // would fail-closed at `getAdapter(protocol)` because the adapter would
+  // not yet be registered — see plugin-manifest-proposal.md D2.
+  await bootstrap(dir);
 
   const result = await extractContractsFromProject(dir);
   const flows = result.flows ?? [];

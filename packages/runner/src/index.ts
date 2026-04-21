@@ -43,6 +43,11 @@ export {
   discoverSessionFile,
   RunOrchestrator,
 } from "./orchestrator.js";
+
+// Plugin bootstrap — locates and imports `glubean.setup.ts` so plugin
+// registrations run before test execution / scanner dynamic imports.
+// Must be awaited at the top of any entry point that observes plugin state.
+export { bootstrap, discoverSetupFile } from "./bootstrap.js";
 export type {
   FileScheduleEntry,
   OrchestratorOptions,

@@ -18,7 +18,7 @@ import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-import { LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import { bootstrap, LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { createScanner, extractFromSource, scan } from "@glubean/scanner";
 import { extractContractCases } from "@glubean/scanner/static";
@@ -1249,6 +1249,8 @@ server.registerTool(
   },
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
+    // Bootstrap project plugins so non-HTTP protocol contract extraction works.
+    await bootstrap(rootDir);
     const result = await sharedExtractFromProject(rootDir);
     const { errors } = result;
     // Translate new-shape contracts to legacy HTTP view (§P4 shim).
@@ -1535,6 +1537,8 @@ server.registerTool(
   },
   async (input: { dir?: string }) => {
     const rootDir = resolveRootDir(input.dir);
+    // Bootstrap project plugins so non-HTTP protocol contract extraction works.
+    await bootstrap(rootDir);
     const result = await sharedExtractFromProject(rootDir);
 
     if (result.contracts.length === 0) {

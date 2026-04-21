@@ -52,8 +52,17 @@
  * @module graphql
  */
 
-import { definePlugin } from "@glubean/sdk/plugin";
-import type { GlubeanRuntime, HttpClient, PluginFactory } from "@glubean/sdk";
+import { contract, defineClientFactory, definePlugin } from "@glubean/sdk";
+import type {
+  ClientFactory,
+  GlubeanRuntime,
+  HttpClient,
+  PluginManifest,
+} from "@glubean/sdk";
+import { graphqlAdapter } from "./contract/adapter.js";
+import { createGraphqlRoot } from "./contract/factory.js";
+import { graphqlMatchers } from "./contract/matchers.js";
+import type { GraphqlContractRoot } from "./contract/types.js";
 
 // =============================================================================
 // Types
@@ -460,8 +469,8 @@ export function createGraphQLClient(
  */
 export function graphql(
   options: GraphQLClientOptions,
-): PluginFactory<GraphQLClient> {
-  return definePlugin((runtime: GlubeanRuntime) => {
+): ClientFactory<GraphQLClient> {
+  return defineClientFactory((runtime: GlubeanRuntime) => {
     const resolved: GraphQLClientOptions = {
       ...options,
       endpoint: runtime.resolveTemplate(options.endpoint),
@@ -479,15 +488,55 @@ export function graphql(
 // Re-export data loader for convenience (spec: `import { fromGql } from "@glubean/graphql"`)
 export { fromGql } from "./data.js";
 
-// Side-effect: register the contract adapter so `contract.graphql.with(...)` works.
-// Kept at the bottom so transport exports land first, parallel to @glubean/grpc.
-import "./contract/index.js";
+// =============================================================================
+// Plugin manifest (default export)
+// =============================================================================
+
+/**
+ * Plugin manifest for `@glubean/graphql`. Declares:
+ *
+ *   - `matchers`   — 5 GraphQL-specific matchers (`toHaveGraphqlData`,
+ *                    `toHaveGraphqlNoErrors`, `toHaveGraphqlErrorCode`,
+ *                    `toHaveGraphqlExtension`, `toHaveHttpStatus`)
+ *   - `contracts`  — `graphql` protocol adapter
+ *   - `setup()`    — wraps the auto-attached `contract.graphql` dispatcher
+ *                    with `createGraphqlRoot` so `contract.graphql.with(...)`
+ *                    UX works
+ *
+ * Install explicitly in your project's `glubean.setup.ts`:
+ *
+ * ```ts
+ * import { installPlugin } from "@glubean/sdk";
+ * import graphqlPlugin from "@glubean/graphql";
+ * await installPlugin(graphqlPlugin);
+ * ```
+ *
+ * **Note:** top-level `import "@glubean/graphql"` is **no longer** a side-effect
+ * registration. The manifest must be explicitly installed (directly or via
+ * `bootstrap(projectRoot)` which loads `glubean.setup.ts`).
+ */
+const graphqlPlugin: PluginManifest = definePlugin({
+  name: "@glubean/graphql",
+  matchers: graphqlMatchers,
+  contracts: { graphql: graphqlAdapter },
+  setup() {
+    // Replace the auto-attached dispatcher with the scoped-defaults factory
+    // so `contract.graphql.with("api", { client })("case", spec)` works.
+    // Runs after installPlugin calls contract.register().
+    const dispatcher = (contract as unknown as { graphql: Parameters<typeof createGraphqlRoot>[0] }).graphql;
+    (contract as unknown as { graphql: GraphqlContractRoot }).graphql = createGraphqlRoot(dispatcher);
+  },
+});
+
+export default graphqlPlugin;
 
 // Re-export contract surface for type consumers
 export {
   graphqlAdapter,
   createGraphqlFactory,
   createGraphqlRoot,
+  graphqlMatchers,
+  registerGraphqlMatchers,
 } from "./contract/index.js";
 export type {
   GraphqlContractCase,

@@ -1,63 +1,23 @@
 /**
- * GraphQL contract surface for @glubean/graphql 0.2.0.
+ * GraphQL contract surface for @glubean/graphql.
  *
- * This module makes `@glubean/graphql` a single-package owner of both:
- *   - Transport / client layer (existing `../index.ts`, unchanged)
- *   - Contract adapter layer (this directory)
+ * This module previously registered `contract.graphql` + GraphQL matchers as
+ * side effects at import time. In the plugin-manifest era that responsibility
+ * moved to the default export of `@glubean/graphql/src/index.ts`, which
+ * projects install explicitly via `installPlugin(...)` / `bootstrap()`.
  *
- * Mirrors the same single-package design as `@glubean/grpc` 0.2.0.
- * See `internal/00-product/positioning-v3.md` §12.0 resolved and
- * `internal/40-discovery/proposals/contract-grpc-graphql-expansion.md` §6.1.
+ * This file is now **side-effect-free** — it only re-exports the adapter,
+ * factory, types, and the matcher collection so the manifest in
+ * `../index.ts` can reference them.
  *
- * Side-effect on import:
- *   1. `contract.register("graphql", graphqlAdapter)` — registers dispatcher
- *   2. Wrap dispatcher with `createGraphqlRoot` so
- *      `contract.graphql.with(name, defaults)` UX works
- *
- * After this module loads, users can:
- *
- *   import "@glubean/graphql"; // side-effect: registers graphql contract adapter
- *   import { contract } from "@glubean/sdk";
- *
- *   const api = contract.graphql.with("api", { client });
- *   export const getUser = api("get-user", {
- *     cases: {
- *       ok: {
- *         description: "success",
- *         query: `query GetUser($id: ID!) { user(id: $id) { name } }`,
- *         variables: { id: "1" },
- *         expect: { data: { user: { name: "Alice" } } },
- *       },
- *     },
- *   });
+ * If you need the legacy "import this and matchers appear" behavior for a
+ * one-off script, call `registerGraphqlMatchers()` directly. The standard
+ * path for tests is the manifest.
  */
 
-import { contract } from "@glubean/sdk";
-import { graphqlAdapter } from "./adapter.js";
-import { createGraphqlRoot } from "./factory.js";
-import { registerGraphqlMatchers } from "./matchers.js";
-import type { GraphqlContractRoot } from "./types.js";
-
-// Step 1: register the adapter. After this, `contract.graphql` exists as the
-// generic dispatcher attached by `contract.register()`.
-contract.register("graphql", graphqlAdapter);
-
-// Step 2: wrap dispatcher with the scoped-defaults factory so
-// `contract.graphql.with(name, defaults)` UX works.
-{
-  const dispatcher = (contract as any).graphql as Parameters<typeof createGraphqlRoot>[0];
-  (contract as unknown as { graphql: GraphqlContractRoot }).graphql = createGraphqlRoot(dispatcher);
-}
-
-// Step 3: register GraphQL custom matchers so
-// `ctx.expect(res).toHaveGraphqlData({...})` / `.toHaveGraphqlNoErrors()` /
-// `.toHaveHttpStatus(200)` / `.toHaveGraphqlErrorCode("UNAUTHENTICATED")`
-// work out of the box for any `@glubean/graphql` user.
-registerGraphqlMatchers();
-
-// Re-exports for type consumers who import from the package directly.
 export { graphqlAdapter } from "./adapter.js";
 export { createGraphqlFactory, createGraphqlRoot } from "./factory.js";
+export { graphqlMatchers, registerGraphqlMatchers } from "./matchers.js";
 export type {
   GraphqlContractCase,
   GraphqlContractDefaults,

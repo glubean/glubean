@@ -23,14 +23,13 @@ export {
   type InternalRuntime,
 } from "./runtime-carrier.js";
 
-// Internal-only test hooks for plugin manifest state. Public callers use
-// `installPlugin` / `bootstrap` / `listInstalledPlugins` from the main export.
+// Internal-only test hook for plugin install state. Public callers use
+// `installPlugin` / `listInstalledPlugins` from the main export. The matching
+// bootstrap reset lives in `@glubean/runner/internal` alongside the bootstrap
+// implementation (see runner/src/bootstrap.ts).
 export {
   __resetInstalledPluginsForTesting,
 } from "./install-plugin.js";
-export {
-  __resetBootstrapForTesting,
-} from "./bootstrap.js";
 
 /**
  * Global registry for test metadata.

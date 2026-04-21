@@ -9,6 +9,7 @@
 import { parseArgs } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
+import { bootstrap } from "./bootstrap.js";
 import { setRuntime, type InternalRuntime } from "@glubean/sdk/internal";
 import ky, { type KyInstance, type Options as KyOptions, type NormalizedOptions } from "ky";
 import type {
@@ -1199,6 +1200,13 @@ setRuntime({
 } as unknown as InternalRuntime);
 
 try {
+  // Bootstrap project plugins before loading user code. Without this, any
+  // test module that uses plugin-registered primitives (custom matchers,
+  // `contract.graphql(...)`, `contract.grpc(...)`, ...) would either fail
+  // on first access or silently fall through to the default behavior — see
+  // plugin-manifest-proposal.md D2.
+  await bootstrap(process.cwd());
+
   // Dynamic import - LOAD phase
   console.log(
     JSON.stringify({

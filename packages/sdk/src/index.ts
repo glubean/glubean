@@ -482,7 +482,9 @@ export type { FromCsvOptions, FromDirConcatOptions, FromDirOptions, FromJsonOpti
 export { configure, resolveTemplate } from "./configure.js";
 export { definePlugin, defineClientFactory } from "./plugin.js";
 export { installPlugin, listInstalledPlugins } from "./install-plugin.js";
-export { bootstrap, discoverSetupFile } from "./bootstrap.js";
+// bootstrap / discoverSetupFile live in @glubean/runner — they are tool-level
+// helpers for locating and loading glubean.setup.ts, not part of the SDK
+// authoring surface. See runner's public exports.
 // PluginManifest and ClientFactory are re-exported via `export * from "./types.js"` below.
 export { defineSession, session } from "./session.js";
 export { Expectation, ExpectFailError } from "./expect.js";

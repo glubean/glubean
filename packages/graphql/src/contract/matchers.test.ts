@@ -10,13 +10,17 @@
  *   - Integration: matchers chain with `.not` and work on GraphqlCaseResult shape
  */
 
-import { test, expect, describe } from "vitest";
-
-// Side-effect import registers matchers (same entry users will use).
-import "./index.js";
-
+import { test, expect, beforeAll, describe } from "vitest";
+import { installPlugin } from "@glubean/sdk";
 import { Expectation } from "@glubean/sdk/expect";
+import graphqlPlugin from "../index.js";
 import type { GraphQLResult } from "../index.js";
+
+// Install the GraphQL manifest once per test file so the custom matchers land
+// on Expectation.prototype before any `new Expectation(...)` is instantiated.
+beforeAll(async () => {
+  await installPlugin(graphqlPlugin);
+});
 
 function makeExpectation<T>(actual: T) {
   const emissions: Array<{ passed: boolean; message: string }> = [];

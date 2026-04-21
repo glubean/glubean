@@ -1,9 +1,9 @@
 /**
  * Glubean browser plugin factory.
  *
- * Uses `definePlugin()` from the SDK to create a lazily-initialized browser
- * connection. Returns a `GlubeanBrowser` with a `newPage(ctx)` method that
- * creates fully instrumented pages wired to the test context.
+ * Uses `defineClientFactory()` from the SDK to create a lazily-initialized
+ * browser connection. Returns a `GlubeanBrowser` with a `newPage(ctx)` method
+ * that creates fully instrumented pages wired to the test context.
  *
  * Supports three connection modes:
  * - `launch: true` — auto-detect and start local Chrome headless
@@ -13,7 +13,7 @@
  * @module plugin
  */
 
-import { definePlugin } from "@glubean/sdk/plugin";
+import { defineClientFactory } from "@glubean/sdk";
 import type { GlubeanRuntime } from "@glubean/sdk";
 import type { Browser } from "puppeteer-core";
 import { type BrowserOptions, GlubeanBrowser } from "./page.js";
@@ -94,7 +94,7 @@ function resolveLaunchOptions(
 }
 
 export function browser(options: BrowserOptions): { __type: GlubeanBrowser; create: (runtime: GlubeanRuntime) => GlubeanBrowser } {
-  return definePlugin((runtime: GlubeanRuntime): GlubeanBrowser => {
+  return defineClientFactory((runtime: GlubeanRuntime): GlubeanBrowser => {
     const baseUrl = options.baseUrl
       ? runtime.vars[options.baseUrl] ?? undefined
       : undefined;

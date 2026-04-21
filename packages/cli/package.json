@@ -38,6 +38,7 @@
     "tsx": "^4.19.0"
   },
   "devDependencies": {
+    "@glubean/graphql": "workspace:*",
     "@types/node": "^22.0.0",
     "@types/archiver": "^6.0.0"
   },

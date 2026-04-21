@@ -10,12 +10,18 @@
  * GraphQLResult envelopes.
  */
 
-import { test, expect, beforeEach, describe } from "vitest";
-// Side-effect: registers adapter so contract.graphql.with(...) works.
-import "./index.js";
-import { contract, runFlow } from "@glubean/sdk";
+import { test, expect, beforeAll, beforeEach, describe } from "vitest";
+import { contract, installPlugin, runFlow } from "@glubean/sdk";
 import type { FlowContract, TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";
+import graphqlPlugin from "../index.js";
+
+// Install the GraphQL manifest once per test file. Replaces the old
+// `import "./index.js"` side-effect that used to register adapter + matchers
+// at module load. Now registration is explicit and identity-tracked.
+beforeAll(async () => {
+  await installPlugin(graphqlPlugin);
+});
 
 import { graphqlAdapter } from "./adapter.js";
 import { createGraphqlRoot } from "./factory.js";
