@@ -143,6 +143,12 @@ importers:
         specifier: ^4.3.6
         version: 4.3.6
     devDependencies:
+      '@glubean/graphql':
+        specifier: workspace:*
+        version: link:../graphql
+      '@glubean/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.15

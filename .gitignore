@@ -3,6 +3,7 @@ dist/
 .tmp-test*/
 .tmp-dbg*/
 .tmp-bootstrap-integration*/
+.tmp-openapi-integration*/
 .DS_Store
 
 # tsc inline output (build outputs go to dist/)

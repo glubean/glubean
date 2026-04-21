@@ -32,6 +32,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@glubean/graphql": "workspace:*",
+    "@glubean/sdk": "workspace:*",
     "@types/node": "^22.0.0"
   },
   "repository": {
