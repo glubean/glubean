@@ -101,6 +101,12 @@ function createMockContext(
     setTimeout: () => {},
     retryCount: 0,
     getMemoryUsage: () => null, // Not available in test environment
+    session: {
+      get: () => undefined,
+      require: (key: string) => { throw new Error(`session.require: key "${key}" not set`); },
+      set: () => {},
+      entries: () => ({}),
+    },
   };
 }
 
