@@ -53,8 +53,6 @@ export {
   isProtocolContract,
   isFlowContract,
   isHttpContract, // deprecated-throw, kept for diagnostic
-  schemaToJsonSchema,
-  deepNormalizeSchemas,
 } from "./contract-extraction.js";
 export type {
   NormalizedContractMeta,

@@ -146,6 +146,7 @@ test("dispatcher validates 1:1 case key match between spec and projection", () =
         ],
       };
     },
+    normalize: (p) => p as any,
   };
   contract.register("bad1", badProjectExtra);
   expect(() =>
@@ -161,6 +162,7 @@ test("dispatcher validates 1:1 case key match between spec and projection", () =
         cases: [{ key: "ok", lifecycle: "active", severity: "warning" }],
       };
     },
+    normalize: (p) => p as any,
   };
   contract.register("bad2", badProjectMissing);
   expect(() =>
@@ -179,6 +181,7 @@ test("dispatcher validates 1:1 case key match between spec and projection", () =
         ],
       };
     },
+    normalize: (p) => p as any,
   };
   contract.register("bad3", badDupe);
   expect(() =>
@@ -251,6 +254,48 @@ test("deferred/deprecated lifecycle propagates to skip() at runtime", async () =
   await c.find((t) => t.meta.id === "c.old")!.fn!(ctx);
   expect(skipReasons).toContain("not yet");
   expect(skipReasons.some((r) => r.includes("gone"))).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// dispatcher → adapter.normalize → _extracted wiring
+//
+// The invariant: every ProtocolContract carrier MUST expose `_extracted`
+// equal to `adapter.normalize(_projection)`. Scanner / MCP / CLI / Cloud all
+// read `_extracted` as the JSON-safe form. If dispatcher forgets to call
+// normalize, these consumers silently fall back to generic recursion and
+// lose protocol-specific normalization (HTTP `security` preservation,
+// gRPC `requestExample` literal passthrough, etc.).
+// ---------------------------------------------------------------------------
+
+test("dispatcher calls adapter.normalize and exposes result as _extracted", () => {
+  contract.register("mock_extracted", makeMockAdapter());
+  const c = (contract as any).mock_extracted("my-contract", {
+    target: "/x",
+    cases: { ok: {}, bad: {} },
+  }) as ProtocolContract<MockSpec>;
+
+  // The mock adapter's normalize() returns a safe projection with
+  // `schemas: {}` at both contract and case level, plus the injected `id`.
+  expect((c as any)._extracted).toBeDefined();
+  expect((c as any)._extracted.id).toBe("my-contract");
+  expect((c as any)._extracted.protocol).toBe("mock_extracted");
+  expect((c as any)._extracted.schemas).toEqual({});
+  expect((c as any)._extracted.cases.length).toBe(2);
+  expect((c as any)._extracted.cases[0].schemas).toEqual({});
+});
+
+test("_extracted equals adapter.normalize(_projection) exactly", () => {
+  const adapter = makeMockAdapter();
+  contract.register("mock_equiv", adapter);
+  const c = (contract as any).mock_equiv("c-id", {
+    target: "/users",
+    cases: { ok: { description: "happy" } },
+  }) as ProtocolContract<MockSpec>;
+
+  // Dispatcher's _extracted must match what we'd get by calling normalize
+  // manually against _projection. If dispatcher skips normalize, this fails.
+  const manual = adapter.normalize!({ ...c._projection, id: (c._projection as any).id } as any);
+  expect((c as any)._extracted).toEqual(manual);
 });
 
 // ---------------------------------------------------------------------------
@@ -385,6 +430,7 @@ test("runFlow runs flow.teardown in outer finally on step failure (Rule 2)", asy
         cases: [{ key: "ok", lifecycle: "active", severity: "warning" }],
       };
     },
+    normalize: (p) => p as any,
   };
   (adapter as any).executeCaseInFlow = async () => {
     throw new Error("step failed");

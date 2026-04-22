@@ -240,7 +240,17 @@ export interface ContractProtocolAdapter<
    * protocol-agnostic skeleton (no `schemas` / `meta`). See `contract-flow.md`
    * §3.5.3 rule 3.
    */
-  normalize?: (
+  /**
+   * Convert the runtime projection (may contain live refs like Zod schemas)
+   * into the JSON-safe `Extracted` form consumed by downstream (scanner /
+   * MCP / CLI / cloud). SDK's `dispatchContract` calls this unconditionally
+   * at contract construction and stores the result on the carrier as
+   * `_extracted` — scanner reads that directly. Adapter is responsible for
+   * knowing which fields are schemas (convert Zod → JSON Schema) vs literal
+   * example data (pass through) vs protocol-specific metadata that must
+   * survive normalize (e.g. HTTP `security`).
+   */
+  normalize: (
     projection: ContractProjection<RuntimeSchemas, RuntimeMeta> & { id: string },
   ) => ExtractedContractProjection<SafeSchemas, SafeMeta>;
 
@@ -355,6 +365,18 @@ export interface ProtocolContract<
    * Runtime projection with `id` injected by core. Consumers duck-type this.
    */
   readonly _projection: ContractProjection<PayloadSchemas, Meta> & { id: string };
+
+  /**
+   * JSON-safe extracted projection — result of `adapter.normalize(_projection)`,
+   * computed by the dispatcher at contract construction. Scanner / MCP / CLI
+   * / cloud read this field directly as the canonical safe form. Never
+   * contains live refs (Zod schemas converted to plain JSON Schema etc.).
+   *
+   * Typed with the same generic slot as `_projection` for structural
+   * compatibility; at runtime it is always the Safe shape produced by
+   * the adapter's `normalize`.
+   */
+  readonly _extracted: ExtractedContractProjection<PayloadSchemas, Meta> & { id: string };
 
   /**
    * Adapter-private runtime spec carrier. Holds the merged executable spec

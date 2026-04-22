@@ -81,6 +81,34 @@ const RESERVED_PROTOCOL_NAMES = new Set([
 ]);
 
 /**
+ * Re-run `adapter.normalize(_projection)` and refresh `_extracted` on the
+ * carrier. Called by scoped factories (HTTP / gRPC / GraphQL `contract.with`)
+ * after they mutate `_projection` to attach post-dispatch metadata like
+ * `instanceName` and HTTP `security` — otherwise `_extracted` would reflect
+ * the pre-mutation projection and downstream (scanner / MCP / cloud) would
+ * see stale data.
+ *
+ * Looks up the adapter by `contract._projection.protocol`. Throws if the
+ * adapter is no longer registered (programming error — factory should not
+ * outlive its adapter).
+ */
+export function rebuildExtractedProjection(
+  contract: { _projection: { protocol: string; id: string }; _extracted?: unknown },
+): void {
+  const protocol = contract._projection.protocol;
+  const adapter = _adapters.get(protocol);
+  if (!adapter) {
+    throw new Error(
+      `rebuildExtractedProjection: no adapter registered for protocol "${protocol}". ` +
+        `Ensure the protocol plugin is installed before the factory runs.`,
+    );
+  }
+  (contract as { _extracted: unknown })._extracted = adapter.normalize(
+    contract._projection as Parameters<typeof adapter.normalize>[0],
+  );
+}
+
+/**
  * Register an adapter. Called by built-in HTTP adapter on SDK load, and by
  * external protocol packages (`@glubean/grpc`, `@glubean/graphql` etc.) on
  * their import — single-package model, each protocol package owns both
@@ -247,10 +275,17 @@ function dispatchContract<
   // Core injects id into both _projection and _spec carrier
   const enrichedProjection = { ...projection, id };
 
+  // Dispatcher-level invariant: call adapter.normalize once and store the
+  // JSON-safe result as _extracted. Scanner / MCP / CLI / cloud read this
+  // directly. Declared required on ContractProtocolAdapter so failure to
+  // implement is a compile error, not a silent runtime hole.
+  const extracted = adapter.normalize(enrichedProjection);
+
   const arr: Test[] = [...tests];
 
   const contractObj = Object.assign(arr, {
     _projection: enrichedProjection,
+    _extracted: extracted,
     _spec: spec as Spec,
     case(key: string): ContractCaseRef<any, any> {
       // Delegate fail-fast validation to adapter (e.g. HTTP rejects

@@ -487,6 +487,35 @@ test("normalize preserves apiKey security object verbatim", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// dispatcher auto-wires _extracted — regression against the "adapter.normalize
+// is declared but never called" gap. Prior to this, every test in this file
+// that reads the safe form had to call `httpAdapter.normalize!(...)` manually
+// (see the `!` non-null assertions). After the fix, dispatcher always calls
+// normalize and stores the result as _extracted on the carrier.
+// ---------------------------------------------------------------------------
+
+test("HTTP carrier exposes _extracted auto-populated from httpAdapter.normalize", async () => {
+  const { httpAdapter } = await import("./adapter.js");
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client, security: "bearer" });
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: { ok: { description: "x", expect: { status: 200 } } },
+  });
+
+  // Invariant 1: dispatcher populated _extracted
+  expect((c as any)._extracted).toBeDefined();
+
+  // Invariant 2: _extracted === what adapter.normalize would produce manually
+  const manual = httpAdapter.normalize!({ ...c._projection });
+  expect((c as any)._extracted).toEqual(manual);
+
+  // Invariant 3: protocol-specific normalization survives (HTTP `security`
+  // field is explicitly preserved by normalizeHttp's "must survive" branch)
+  expect(((c as any)._extracted.schemas as any)?.security).toBe("bearer");
+});
+
+// ---------------------------------------------------------------------------
 // classifyFailure
 // ---------------------------------------------------------------------------
 

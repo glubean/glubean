@@ -379,6 +379,7 @@ export {
   extractMappingsOut,
   traceComputeFn,
   getAdapter,
+  rebuildExtractedProjection,
   LensPurityError,
 } from "./contract-core.js";
 export type {

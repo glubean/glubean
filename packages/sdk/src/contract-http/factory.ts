@@ -16,6 +16,7 @@
 
 import type { Extensions } from "../contract-types.js";
 import type { ProtocolContract } from "../contract-types.js";
+import { rebuildExtractedProjection } from "../contract-core.js";
 import type {
   ContractCase,
   HttpContractDefaults,
@@ -124,4 +125,7 @@ function applyInstanceMetadata(
   if (security != null && proj.schemas) {
     proj.schemas.security = security;
   }
+  // Refresh `_extracted` after mutating `_projection` — dispatcher's
+  // initial normalize ran before these factory-only fields were attached.
+  rebuildExtractedProjection(contract);
 }

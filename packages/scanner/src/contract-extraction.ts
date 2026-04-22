@@ -187,6 +187,9 @@ export function isProtocolContract(val: unknown): val is {
       meta?: unknown;
     }>;
   };
+  // `_extracted` is always populated by the SDK dispatcher
+  // (adapter.normalize output). Scanner reads it as the JSON-safe form.
+  _extracted: Record<string, unknown>;
 } {
   return (
     Array.isArray(val) &&
@@ -194,7 +197,9 @@ export function isProtocolContract(val: unknown): val is {
     (val as any)._projection !== null &&
     typeof (val as any)._projection.protocol === "string" &&
     typeof (val as any)._projection.target === "string" &&
-    (val as any)._projection.protocol !== "flow"
+    (val as any)._projection.protocol !== "flow" &&
+    typeof (val as any)._extracted === "object" &&
+    (val as any)._extracted !== null
   );
 }
 
@@ -239,78 +244,34 @@ export function isFlowContract(val: unknown): val is {
 }
 
 // =============================================================================
-// Schema conversion — embedded .toJSONSchema() recursive walk
-// =============================================================================
-
-/**
- * Convert a live schema (Zod/Valibot/etc.) to a JSON Schema plain object.
- * Falls back to passing through or null.
- */
-export function schemaToJsonSchema(schema: unknown): unknown | null {
-  if (!schema || typeof schema !== "object") return null;
-  try {
-    if (typeof (schema as any).toJSONSchema === "function") {
-      return (schema as any).toJSONSchema();
-    }
-  } catch (err) {
-    console.error(
-      `[glubean:scanner] toJSONSchema failed: ${err instanceof Error ? err.message : err}`,
-    );
-  }
-  return null;
-}
-
-/**
- * Recursively walk a value converting any embedded Zod/valibot schemas
- * (detected by `.toJSONSchema()` method) to plain JSON Schema objects.
- * Other values pass through as-is.
- *
- * Used by scanner to produce JSON-safe output even when adapter didn't run
- * `.normalize()` (e.g. when we read `_projection` directly).
- */
-export function deepNormalizeSchemas(value: unknown, depth = 0): unknown {
-  if (depth > 20) return value;
-  if (value == null) return value;
-  if (typeof value !== "object") return value;
-  // Has toJSONSchema? Convert it.
-  if (typeof (value as any).toJSONSchema === "function") {
-    const converted = schemaToJsonSchema(value);
-    if (converted != null) return converted;
-    return null;
-  }
-  if (Array.isArray(value)) {
-    return value.map((v) => deepNormalizeSchemas(v, depth + 1));
-  }
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    out[k] = deepNormalizeSchemas(v, depth + 1);
-  }
-  return out;
-}
-
-// =============================================================================
 // Mapping: projection → NormalizedContractMeta
+//
+// Reads the adapter-produced `_extracted` (JSON-safe form). The SDK's
+// `dispatchContract` populates this field unconditionally by calling
+// `adapter.normalize(_projection)` at construction time. Adapter is the
+// authoritative source of protocol-specific normalization (which fields
+// are schemas vs literal examples vs protocol metadata that must survive).
 // =============================================================================
 
-function protocolContractToNormalized(
-  value: { _projection: any },
+export function protocolContractToNormalized(
+  value: { _projection: any; _extracted: any },
   exportName: string,
 ): NormalizedContractMeta {
-  const proj = value._projection;
+  const ex = value._extracted;
   return {
-    id: proj.id ?? exportName,
+    id: ex.id ?? exportName,
     exportName,
-    protocol: proj.protocol,
-    target: proj.target,
-    description: proj.description,
-    feature: proj.feature,
-    instanceName: proj.instanceName,
-    tags: proj.tags,
-    deprecated: proj.deprecated,
-    extensions: proj.extensions,
-    schemas: proj.schemas != null ? deepNormalizeSchemas(proj.schemas) : undefined,
-    meta: proj.meta,
-    cases: (proj.cases ?? []).map((c: any): NormalizedCaseMeta => ({
+    protocol: ex.protocol,
+    target: ex.target,
+    description: ex.description,
+    feature: ex.feature,
+    instanceName: ex.instanceName,
+    tags: ex.tags,
+    deprecated: ex.deprecated,
+    extensions: ex.extensions,
+    schemas: ex.schemas,
+    meta: ex.meta,
+    cases: (ex.cases ?? []).map((c: any): NormalizedCaseMeta => ({
       key: c.key,
       description: c.description,
       lifecycle: (c.lifecycle as CaseLifecycle) ?? "active",
@@ -321,7 +282,7 @@ function protocolContractToNormalized(
       defaultRun: c.defaultRun as CaseDefaultRun | undefined,
       tags: c.tags,
       extensions: c.extensions,
-      schemas: c.schemas != null ? deepNormalizeSchemas(c.schemas) : undefined,
+      schemas: c.schemas,
       meta: c.meta,
     })),
   };

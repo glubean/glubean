@@ -17,6 +17,7 @@
  */
 
 import type { Extensions, ProtocolContract } from "@glubean/sdk";
+import { rebuildExtractedProjection } from "@glubean/sdk";
 import type {
   GraphqlContractCase,
   GraphqlContractDefaults,
@@ -81,6 +82,9 @@ function applyInstanceMetadata(
     & typeof contract._projection
     & { instanceName?: string };
   proj.instanceName = instanceName;
+  // Refresh `_extracted` after mutating `_projection` — dispatcher's
+  // initial normalize ran before `instanceName` was attached.
+  rebuildExtractedProjection(contract);
 }
 
 /**
