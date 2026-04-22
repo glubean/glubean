@@ -126,6 +126,20 @@ export interface ProjectRunnerOptions {
    * threshold evaluation at CLI level).
    */
   metricCollector?: MetricCollector;
+
+  /**
+   * Optional pre-constructed `TestExecutor`. When provided, the facade uses
+   * this instance instead of building its own via
+   * `TestExecutor.fromSharedConfig(...)`. Intended for tests that want to
+   * observe executor behavior (e.g. spy on `finalize()`), but also usable
+   * by callers who want to pre-configure the executor with extra options
+   * not surfaced in `ProjectRunnerOptions`.
+   *
+   * The facade still owns `executor.finalize()` — it is always drained in
+   * the generator's `finally` block regardless of how the executor was
+   * constructed.
+   */
+  executor?: TestExecutor;
 }
 
 // =============================================================================
@@ -187,10 +201,13 @@ export class ProjectRunner {
     yield { type: "discovery:done", totalFiles: fileGroups.size, totalTests: tests.length };
 
     // ── 4. Build executor (shared across all files) ──────────────────
-    const executor = TestExecutor.fromSharedConfig(sharedConfig, {
-      cwd: rootDir,
-      ...(this.options.inspectBrk !== undefined && { inspectBrk: this.options.inspectBrk }),
-    });
+    const executor = this.options.executor ?? TestExecutor.fromSharedConfig(
+      sharedConfig,
+      {
+        cwd: rootDir,
+        ...(this.options.inspectBrk !== undefined && { inspectBrk: this.options.inspectBrk }),
+      },
+    );
     const orchestrator = new RunOrchestrator(executor);
     const sessionState: Record<string, unknown> = {};
     let sessionSetupSucceeded = false;

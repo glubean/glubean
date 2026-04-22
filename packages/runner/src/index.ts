@@ -1,68 +1,111 @@
-export { generateSummary, TestExecutor } from "./executor.js";
-export { buildRunContext } from "./run_context.js";
+/**
+ * `@glubean/runner` public API.
+ *
+ * Three tiers of intended use:
+ *
+ * 1. **Recommended top-level API** — `ProjectRunner` facade. New consumers
+ *    (VSCode extension, third-party embedders, future tooling) should start
+ *    here. Handles the full "run a project's tests" pipeline (bootstrap +
+ *    env + session + per-file batched TestExecutor loop) with a typed
+ *    event stream.
+ *
+ * 2. **Entry-point infrastructure** — `bootstrap()` / `loadProjectEnv()`
+ *    and friends. Every tool that touches a Glubean project calls these
+ *    early in its lifecycle regardless of whether it uses the facade.
+ *
+ * 3. **Execution primitives** — `TestExecutor`, `RunOrchestrator`,
+ *    `MetricCollector`, `discoverSessionFile`, etc. Pre-facade API,
+ *    retained because CLI still uses them directly (migration tracked
+ *    as RF-1b in backlog). Treat as legacy; new code should prefer the
+ *    facade. These may become internal once all first-party consumers
+ *    migrate.
+ *
+ * Anything not exported here is considered internal. That includes:
+ *   - Deeper orchestrator helpers (`buildExecutionOrder`,
+ *     `collectSessionUpdates`, scheduling types)
+ *   - Test-resolution utilities beyond `resolveModuleTests`
+ *     (`autoResolve`, `findTestById`, `findTestByExport`, `is*` guards,
+ *     `ResolvedTest`)
+ *   - Threshold math helpers (`aggregate`, `parseExpression`)
+ *   - Rarely-used config utilities (`SHARED_RUN_DEFAULTS`,
+ *     `WORKER_RUN_DEFAULTS`, `toExecutionOptions`)
+ *   - Internal event-stream types (`EventHandler`, `ExecutionBatchResult`,
+ *     `Summary`, `ExecutionOptions`, `ExecutionResult`, `ExecutorOptions`,
+ *     `SingleExecutionOptions`)
+ *
+ * None of these are used outside this package (`@glubean/cli`,
+ * `@glubean/mcp`, and `/Users/peisong/glubean/vscode` all verified as of
+ * 2026-04-22). If a future consumer needs one, promote it to a public
+ * export with a rationale rather than back-channeling.
+ */
+
+// =============================================================================
+// 1. Recommended top-level API
+// =============================================================================
+
+/** Facade — `ProjectRunner` wraps the full run pipeline. Start here for new code. */
+export { ProjectRunner } from "./project-runner.js";
 export type {
-  EventHandler,
-  ExecutionBatchResult,
-  Summary,
+  ProjectRunEvent,
+  ProjectRunnerOptions,
+  ProjectRunnerTest,
+} from "./project-runner.js";
+
+// =============================================================================
+// 2. Entry-point infrastructure
+// =============================================================================
+
+/**
+ * Plugin bootstrap — locate and import `glubean.setup.ts` so plugin
+ * registrations (matchers / protocol adapters) are in place before
+ * scanner runtime extraction or test execution.
+ *
+ * MUST be awaited at the top of any entry point that observes plugin
+ * registrations (CLI `run`, CLI `contracts`, MCP tool handlers, VSCode
+ * scan path, runner harness).
+ */
+export { bootstrap, discoverSetupFile } from "./bootstrap.js";
+
+/**
+ * Canonical project-env loader. Returns `{ vars, secrets }` with
+ * `${NAME}` expansion applied cross-file (vars ↔ secrets) and
+ * process.env fallback. CLI / MCP / VSCode all route through this.
+ */
+export { loadEnvFile, loadProjectEnv, expandVars } from "./env.js";
+export type { ProjectEnv } from "./env.js";
+
+// =============================================================================
+// 3. Execution primitives (pre-facade; review after RF-1b migration)
+// =============================================================================
+
+/** Legacy subprocess orchestrator. `ProjectRunner` uses it internally. */
+export { TestExecutor, generateSummary } from "./executor.js";
+export type {
   ExecutionContext,
   ExecutionEvent,
-  ExecutionOptions,
-  ExecutionResult,
-  ExecutorOptions,
-  SingleExecutionOptions,
   TimelineEvent,
 } from "./executor.js";
 
+/** Per-run metadata (git sha, hostname, versions, timestamp). */
+export { buildRunContext } from "./run_context.js";
+
+/** Config helpers — callers use `LOCAL_RUN_DEFAULTS` as the base shape. */
 export {
   LOCAL_RUN_DEFAULTS,
   normalizePositiveTimeoutMs,
-  SHARED_RUN_DEFAULTS,
-  toExecutionOptions,
   toSingleExecutionOptions,
-  WORKER_RUN_DEFAULTS,
 } from "./config.js";
 export type { SharedRunConfig } from "./config.js";
 
+/** Session lifecycle orchestration (used by CLI pre-RF-1b). */
 export {
-  autoResolve,
-  findTestByExport,
-  findTestById,
-  isEachBuilder,
-  isTest,
-  isTestBuilder,
-  resolveModuleTests,
-} from "./resolve.js";
-export type { ResolvedTest } from "./resolve.js";
-
-export { aggregate, evaluateThresholds, MetricCollector, parseExpression } from "./thresholds.js";
-
-export {
-  buildExecutionOrder,
-  collectSessionUpdates,
   createContextWithSession,
   discoverSessionFile,
   RunOrchestrator,
 } from "./orchestrator.js";
 
-// Plugin bootstrap — locates and imports `glubean.setup.ts` so plugin
-// registrations run before test execution / scanner dynamic imports.
-// Must be awaited at the top of any entry point that observes plugin state.
-export { bootstrap, discoverSetupFile } from "./bootstrap.js";
+/** Threshold metric accumulation + evaluation. */
+export { evaluateThresholds, MetricCollector } from "./thresholds.js";
 
-// Canonical project-env loader. CLI / MCP / VSCode all route through this
-// to get {vars, secrets} with `${NAME}` expansion.
-export { loadEnvFile, loadProjectEnv, expandVars } from "./env.js";
-export type { ProjectEnv } from "./env.js";
-
-// ProjectRunner facade — single top-level API for "run the tests of a project".
-// Wraps loadProjectEnv + bootstrap + RunOrchestrator + TestExecutor loop into
-// one coherent pipeline with a typed event stream. CLI / MCP / VSCode all
-// consume it rather than re-assembling primitives.
-export { ProjectRunner } from "./project-runner.js";
-export type { ProjectRunEvent, ProjectRunnerOptions, ProjectRunnerTest } from "./project-runner.js";
-export type {
-  FileScheduleEntry,
-  OrchestratorOptions,
-  SessionLifecycleEvent,
-  SessionState,
-} from "./orchestrator.js";
+/** Test discovery helper; VSCode extension uses it to extract tests from a module. */
+export { resolveModuleTests } from "./resolve.js";
