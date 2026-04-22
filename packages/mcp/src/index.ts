@@ -18,7 +18,8 @@ import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-import { bootstrap, loadProjectEnv, LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import { bootstrap, loadProjectEnv, LOCAL_RUN_DEFAULTS, ProjectRunner, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import type { ProjectRunnerTest } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { createScanner, extractFromSource, scan } from "@glubean/scanner";
 import { extractContractCases } from "@glubean/scanner/static";
@@ -794,105 +795,139 @@ export async function runLocalTestsFromFile(args: {
     ...LOCAL_RUN_DEFAULTS,
     failFast: Boolean(args.stopOnFailure),
     concurrency: Math.max(1, args.concurrency ?? 1),
-    // When AI requests traces, auto-enable full trace + schema + truncation
+    // When AI requests traces, auto-enable full trace + schema + truncation.
     ...(includeTraces && {
       emitFullTrace: true,
       inferSchema: true,
       truncateArrays: true,
     }),
   };
-  const executor = TestExecutor.fromSharedConfig(shared, {
-    cwd: projectRoot,
-  }).withSession(projectRoot);
 
-  const concurrency = shared.concurrency;
-  const stopOnFailure = shared.failFast;
+  // Prepare facade input: per-test descriptors the runner will batch into
+  // one tsx subprocess (per-file batched — one subprocess for this whole file).
+  const facadeTests: ProjectRunnerTest[] = selected.map((t) => ({
+    filePath: absolutePath,
+    exportName: t.exportName,
+    meta: {
+      id: t.id,
+      name: t.name,
+      tags: t.tags,
+      only: t.only,
+      skip: t.skip,
+    } as ProjectRunnerTest["meta"],
+  }));
 
-  const results: LocalRunResult[] = [];
-  let nextIndex = 0;
-  let stop = false;
+  // Index results by testId as events stream in. Each test's events flow
+  // between its `start` and `status` events; we key the accumulator by the
+  // current testId observed from `start`.
+  const resultsByTestId = new Map<string, LocalRunResult>();
+  const accumulators = new Map<string, {
+    start: number;
+    logs: LocalRunResult["logs"];
+    assertions: LocalRunResult["assertions"];
+    traces: LocalRunResult["traces"];
+    statusSuccess: boolean;
+    errorMessage?: string;
+    errorStack?: string;
+  }>();
 
-  const runNext = async (): Promise<void> => {
-    while (!stop) {
-      const index = nextIndex++;
-      if (index >= selected.length) return;
+  const runner = new ProjectRunner({
+    rootDir: projectRoot,
+    sharedConfig: shared,
+    vars,
+    secrets,
+    tests: facadeTests,
+    sessionStartDir: testDir,
+  });
 
-      const test = selected[index];
-      const start = Date.now();
+  let currentTestId: string | undefined;
 
-      const logs: LocalRunResult["logs"] = [];
-      const assertions: LocalRunResult["assertions"] = [];
-      const traces: LocalRunResult["traces"] = [];
+  for await (const evt of runner.run()) {
+    if (evt.type !== "file:event") continue; // MCP only cares about test-level events
 
-      let statusSuccess = false;
-      let errorMessage: string | undefined;
-      let errorStack: string | undefined;
-
-      for await (
-        const event of executor.run(fileUrl, test.id, {
-          vars,
-          secrets,
-        }, { ...toSingleExecutionOptions(shared), exportName: test.exportName })
-      ) {
-        switch (event.type) {
-          case "log":
-            if (includeLogs) {
-              logs.push({ message: event.message, data: event.data });
-            }
-            break;
-          case "assertion":
-            assertions.push({
-              passed: event.passed,
-              message: event.message,
-              actual: event.actual,
-              expected: event.expected,
-            });
-            break;
-          case "trace":
-            if (includeTraces) traces.push(stripTraceHeaders(event.data, traceConfig));
-            break;
-          case "status":
-            statusSuccess = event.status === "completed";
-            if (event.error) errorMessage = event.error;
-            if (event.stack) errorStack = event.stack;
-            break;
-          case "error":
-            errorMessage = event.message;
-            break;
-        }
+    const event = evt.event;
+    switch (event.type) {
+      case "start": {
+        currentTestId = event.id;
+        accumulators.set(event.id, {
+          start: Date.now(),
+          logs: [],
+          assertions: [],
+          traces: [],
+          statusSuccess: false,
+        });
+        break;
       }
+      case "log": {
+        if (!includeLogs || !currentTestId) break;
+        const acc = accumulators.get(currentTestId);
+        if (acc) acc.logs.push({ message: event.message, data: event.data });
+        break;
+      }
+      case "assertion": {
+        if (!currentTestId) break;
+        const acc = accumulators.get(currentTestId);
+        if (acc) {
+          acc.assertions.push({
+            passed: event.passed,
+            message: event.message,
+            actual: event.actual,
+            expected: event.expected,
+          });
+        }
+        break;
+      }
+      case "trace": {
+        if (!includeTraces || !currentTestId) break;
+        const acc = accumulators.get(currentTestId);
+        if (acc) acc.traces.push(stripTraceHeaders(event.data, traceConfig));
+        break;
+      }
+      case "status": {
+        if (!currentTestId) break;
+        const acc = accumulators.get(currentTestId);
+        if (!acc) break;
+        acc.statusSuccess = event.status === "completed";
+        if (event.error) acc.errorMessage = event.error;
+        if (event.stack) acc.errorStack = event.stack;
 
-      const allAssertionsPassed = assertions.every((a) => a.passed);
-      const success = statusSuccess && allAssertionsPassed && !errorMessage;
-
-      const result: LocalRunResult = {
-        exportName: test.exportName,
-        id: test.id,
-        name: test.name,
-        success,
-        durationMs: Date.now() - start,
-        assertions,
-        logs,
-        traces,
-        error: errorMessage ? { message: errorMessage, stack: errorStack } : undefined,
-      };
-      results.push(result);
-
-      if (!success && stopOnFailure) {
-        stop = true;
-        return;
+        // Finalize this test's result.
+        const allAssertionsPassed = acc.assertions.every((a) => a.passed);
+        const success = acc.statusSuccess && allAssertionsPassed && !acc.errorMessage;
+        const testMeta = selected.find((t) => t.id === currentTestId);
+        const result: LocalRunResult = {
+          exportName: testMeta?.exportName ?? "",
+          id: currentTestId,
+          name: testMeta?.name ?? currentTestId,
+          success,
+          durationMs: Date.now() - acc.start,
+          assertions: acc.assertions,
+          logs: acc.logs,
+          traces: acc.traces,
+          error: acc.errorMessage
+            ? { message: acc.errorMessage, stack: acc.errorStack }
+            : undefined,
+        };
+        resultsByTestId.set(currentTestId, result);
+        currentTestId = undefined;
+        break;
+      }
+      case "error": {
+        if (!currentTestId) break;
+        const acc = accumulators.get(currentTestId);
+        if (acc && !acc.errorMessage) acc.errorMessage = event.message;
+        break;
       }
     }
-  };
+  }
 
-  const workers = Array.from(
-    { length: Math.min(concurrency, selected.length || 1) },
-    () => runNext(),
-  );
-  await Promise.all(workers);
-
-  // Session teardown (no-op if no session.ts was discovered)
-  for await (const _event of executor.finalize()) {}
+  // Preserve the original `selected` order (also matches AI-agent
+  // expectation: results in the order they were listed).
+  const results: LocalRunResult[] = [];
+  for (const t of selected) {
+    const r = resultsByTestId.get(t.id);
+    if (r) results.push(r);
+  }
 
   const passed = results.filter((r) => r.success).length;
   const failed = results.filter((r) => !r.success).length;
