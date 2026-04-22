@@ -841,9 +841,32 @@ export async function runLocalTestsFromFile(args: {
   });
 
   let currentTestId: string | undefined;
+  // Capture orchestration-level failures so we surface them to the MCP
+  // caller instead of silently returning `results: []` (which looks like
+  // "no tests" success). Populated by `run:failed` / `bootstrap:failed` /
+  // `session:setup:failed` events from the facade.
+  let orchestrationError: string | undefined;
 
   for await (const evt of runner.run()) {
-    if (evt.type !== "file:event") continue; // MCP only cares about test-level events
+    // Surface non-file failure events so callers can distinguish them from
+    // "clean empty run" outcomes.
+    if (evt.type === "bootstrap:failed") {
+      orchestrationError = `Bootstrap failed: ${evt.error.message}`;
+      continue;
+    }
+    if (evt.type === "session:setup:failed") {
+      orchestrationError = `Session setup failed${evt.error ? `: ${evt.error}` : ""}`;
+      continue;
+    }
+    if (evt.type === "run:failed") {
+      // Prefer the more specific earlier error if we already captured one.
+      if (!orchestrationError) {
+        orchestrationError = `Run failed (${evt.reason})${evt.error ? `: ${evt.error}` : ""}`;
+      }
+      continue;
+    }
+
+    if (evt.type !== "file:event") continue; // MCP only cares about test-level events below
 
     const event = evt.event;
     switch (event.type) {
@@ -939,6 +962,7 @@ export async function runLocalTestsFromFile(args: {
     secrets,
     results,
     summary: { total: results.length, passed, failed },
+    ...(orchestrationError !== undefined && { error: orchestrationError }),
   };
 }
 

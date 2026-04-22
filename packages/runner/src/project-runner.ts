@@ -195,33 +195,118 @@ export class ProjectRunner {
     const sessionState: Record<string, unknown> = {};
     let sessionSetupSucceeded = false;
 
-    // ── 5. Session setup ─────────────────────────────────────────────
-    const sessionFile = noSession ? undefined : discoverSessionFile(sessionStartDir, rootDir);
-    yield { type: "session:discovered", sessionFile };
+    // Wrap all post-executor-construction work in try/finally so the
+    // executor's own cleanup path (zero-project scratch teardown, any
+    // future finalizers) always runs — even on early return from
+    // session-setup failure or signal abort. This also covers the case
+    // where the generator is abandoned by its caller (iterator .return()
+    // triggers the finally block).
+    try {
+      // ── 5. Session setup ───────────────────────────────────────────
+      const sessionFile = noSession ? undefined : discoverSessionFile(sessionStartDir, rootDir);
+      yield { type: "session:discovered", sessionFile };
 
-    if (sessionFile) {
-      yield { type: "session:setup:start", sessionFile };
-      let setupFailed = false;
-      let failureInfo: { error?: string; stack?: string } | undefined;
+      if (sessionFile) {
+        yield { type: "session:setup:start", sessionFile };
+        let setupFailed = false;
+        let failureInfo: { error?: string; stack?: string } | undefined;
 
-      for await (const event of orchestrator.runSessionSetup(
-        sessionFile,
-        { vars: envVars, secrets, interactive },
-        toSingleExecutionOptions(sharedConfig),
-      )) {
-        if (event.type === "session:set") {
-          sessionState[event.key] = event.value;
-        } else if (event.type === "status" && event.status === "failed") {
-          setupFailed = true;
-          failureInfo = { error: event.error, stack: event.stack };
+        for await (const event of orchestrator.runSessionSetup(
+          sessionFile,
+          { vars: envVars, secrets, interactive },
+          toSingleExecutionOptions(sharedConfig),
+        )) {
+          if (event.type === "session:set") {
+            sessionState[event.key] = event.value;
+          } else if (event.type === "status" && event.status === "failed") {
+            setupFailed = true;
+            failureInfo = { error: event.error, stack: event.stack };
+          }
+          yield { type: "session:setup:event", event };
         }
-        yield { type: "session:setup:event", event };
+
+        if (setupFailed) {
+          yield { type: "session:setup:failed", ...(failureInfo ?? {}) };
+
+          // Best-effort teardown before bailing.
+          yield { type: "session:teardown:start", sessionFile };
+          for await (const event of orchestrator.runSessionTeardown(
+            sessionFile,
+            { vars: envVars, secrets },
+            sessionState,
+            toSingleExecutionOptions(sharedConfig),
+          )) {
+            yield { type: "session:teardown:event", event };
+          }
+          yield { type: "session:teardown:done" };
+
+          yield {
+            type: "run:failed",
+            reason: "session-setup-failed",
+            ...(failureInfo?.error !== undefined && { error: failureInfo.error }),
+          };
+          return;
+        }
+
+        sessionSetupSucceeded = true;
+        yield { type: "session:setup:done", stateKeys: Object.keys(sessionState) };
       }
 
-      if (setupFailed) {
-        yield { type: "session:setup:failed", ...(failureInfo ?? {}) };
+      // ── 6. File loop (per-file batched) ────────────────────────────
+      let passedCount = 0;
+      let failedCount = 0;
+      let skippedCount = 0;
+      const failureLimit = sharedConfig.failAfter ??
+        (sharedConfig.failFast ? 1 : undefined);
 
-        // Best-effort teardown before bailing.
+      for (const [filePath, fileTests] of fileGroups) {
+        if (signal?.aborted) break;
+        if (failureLimit !== undefined && failedCount >= failureLimit) break;
+
+        const testFileUrl = pathToFileURL(resolve(filePath)).href;
+        const testIds = fileTests.map((t) => t.meta.id);
+        const exportNames: Record<string, string> = {};
+        for (const t of fileTests) exportNames[t.meta.id] = t.exportName;
+
+        yield { type: "file:start", filePath, testCount: fileTests.length };
+        const fileStart = Date.now();
+
+        for await (const event of executor.run(
+          testFileUrl,
+          "",
+          {
+            vars: envVars,
+            secrets,
+            ...(Object.keys(sessionState).length > 0 && { session: sessionState }),
+          },
+          {
+            ...toSingleExecutionOptions(sharedConfig),
+            testIds,
+            exportNames,
+            ...(fileTests.some((t) => t.meta.parallel) && sharedConfig.concurrency > 1
+              ? { concurrency: sharedConfig.concurrency }
+              : {}),
+          },
+        )) {
+          if (event.type === "session:set") {
+            sessionState[event.key] = event.value;
+          }
+          if (event.type === "metric") {
+            metricCollector.add(event.name, event.value);
+          }
+          if (event.type === "status") {
+            if (event.status === "completed") passedCount += 1;
+            else if (event.status === "skipped") skippedCount += 1;
+            else failedCount += 1;
+          }
+          yield { type: "file:event", filePath, event };
+        }
+
+        yield { type: "file:complete", filePath, duration: Date.now() - fileStart };
+      }
+
+      // ── 7. Session teardown ────────────────────────────────────────
+      if (sessionFile && sessionSetupSucceeded) {
         yield { type: "session:teardown:start", sessionFile };
         for await (const event of orchestrator.runSessionTeardown(
           sessionFile,
@@ -232,97 +317,27 @@ export class ProjectRunner {
           yield { type: "session:teardown:event", event };
         }
         yield { type: "session:teardown:done" };
-
-        yield {
-          type: "run:failed",
-          reason: "session-setup-failed",
-          ...(failureInfo?.error !== undefined && { error: failureInfo.error }),
-        };
-        return;
       }
 
-      sessionSetupSucceeded = true;
-      yield { type: "session:setup:done", stateKeys: Object.keys(sessionState) };
-    }
-
-    // ── 6. File loop (per-file batched) ──────────────────────────────
-    let passedCount = 0;
-    let failedCount = 0;
-    let skippedCount = 0;
-    const failureLimit = sharedConfig.failAfter ??
-      (sharedConfig.failFast ? 1 : undefined);
-
-    for (const [filePath, fileTests] of fileGroups) {
-      if (signal?.aborted) break;
-      if (failureLimit !== undefined && failedCount >= failureLimit) break;
-
-      const testFileUrl = pathToFileURL(resolve(filePath)).href;
-      const testIds = fileTests.map((t) => t.meta.id);
-      const exportNames: Record<string, string> = {};
-      for (const t of fileTests) exportNames[t.meta.id] = t.exportName;
-
-      yield { type: "file:start", filePath, testCount: fileTests.length };
-      const fileStart = Date.now();
-
-      for await (const event of executor.run(
-        testFileUrl,
-        "",
-        {
-          vars: envVars,
-          secrets,
-          ...(Object.keys(sessionState).length > 0 && { session: sessionState }),
-        },
-        {
-          ...toSingleExecutionOptions(sharedConfig),
-          testIds,
-          exportNames,
-          ...(fileTests.some((t) => t.meta.parallel) && sharedConfig.concurrency > 1
-            ? { concurrency: sharedConfig.concurrency }
-            : {}),
-        },
-      )) {
-        // Accumulate session writes back into our running state so the next
-        // file's subprocess spawn sees them.
-        if (event.type === "session:set") {
-          sessionState[event.key] = event.value;
+      // ── 8. Done ────────────────────────────────────────────────────
+      yield { type: "run:complete", passedCount, failedCount, skippedCount };
+    } finally {
+      // Drain executor.finalize() — zero-project scratch cleanup and any
+      // future executor-level finalizers. Safe to call even after session
+      // teardown already ran (executor.finalize() guards on _sessionSetupDone,
+      // which stays false when sessions are driven by RunOrchestrator rather
+      // than executor auto-session). Discard yielded events; this is pure
+      // cleanup, not part of the user-visible run.
+      try {
+        for await (const _ of executor.finalize()) {
+          // intentionally drain
         }
-
-        // Record metrics for optional consumer-side threshold evaluation.
-        if (event.type === "metric") {
-          metricCollector.add(event.name, event.value);
-        }
-
-        // Track pass/fail counts by consuming status events. Each test in the
-        // batch emits one "status" event; "start" events give us per-test
-        // boundaries but final counting happens on "status".
-        if (event.type === "status") {
-          if (event.status === "completed") passedCount += 1;
-          else if (event.status === "skipped") skippedCount += 1;
-          else failedCount += 1;
-        }
-
-        yield { type: "file:event", filePath, event };
+      } catch {
+        // Finalize errors are non-fatal — surface silently to avoid masking
+        // the primary run outcome. Could be upgraded to a warning event
+        // later if needed.
       }
-
-      yield { type: "file:complete", filePath, duration: Date.now() - fileStart };
     }
-
-    // ── 7. Session teardown ──────────────────────────────────────────
-    if (sessionFile && sessionSetupSucceeded) {
-      yield { type: "session:teardown:start", sessionFile };
-      for await (const event of orchestrator.runSessionTeardown(
-        sessionFile,
-        { vars: envVars, secrets },
-        sessionState,
-        toSingleExecutionOptions(sharedConfig),
-      )) {
-        yield { type: "session:teardown:event", event };
-      }
-      yield { type: "session:teardown:done" };
-    }
-
-    // ── 8. Done ──────────────────────────────────────────────────────
-    yield { type: "run:complete", passedCount, failedCount, skippedCount };
   }
 }
 
