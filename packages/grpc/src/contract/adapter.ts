@@ -292,11 +292,18 @@ function projectGrpc(
     };
   });
 
+  // Read factory-provided metadata from the internal `_factory` channel
+  // populated by `mergeGrpcDefaults`.
+  const factory = (spec as unknown as {
+    _factory?: { instanceName: string };
+  })._factory;
+
   return {
     protocol: "grpc",
     target: spec.target,
     description: spec.description,
     feature: spec.feature,
+    instanceName: factory?.instanceName,
     tags: spec.tags,
     extensions: spec.extensions,
     deprecated: spec.deprecated,

@@ -388,11 +388,19 @@ function projectHttp(
   const { method, path } = parseEndpoint(spec.endpoint);
   const normalizedReq = normalizeRequest(spec.request);
 
+  // Read factory-provided metadata from the internal `_factory` channel
+  // populated by `mergeHttpDefaults`. Absent when `contract.http(...)` is
+  // called without `.with(...)` (which is forbidden and throws earlier).
+  const factory = (spec as unknown as {
+    _factory?: { instanceName: string; security?: unknown };
+  })._factory;
+
   return {
     protocol: "http",
     target: spec.endpoint,
     description: spec.description,
     feature: spec.feature,
+    instanceName: factory?.instanceName,
     tags: spec.tags,
     extensions: spec.extensions,
     deprecated: spec.deprecated,
@@ -407,6 +415,9 @@ function projectHttp(
             examples: normalizedReq.examples,
           }
         : undefined,
+      ...(factory?.security !== undefined
+        ? { security: factory.security as HttpPayloadSchemas["security"] }
+        : {}),
     },
     cases: Object.entries(spec.cases).map(([key, c]) => {
       const effectiveDeprecated = c.deprecated ?? spec.deprecated;

@@ -16,7 +16,6 @@
 
 import type { Extensions } from "../contract-types.js";
 import type { ProtocolContract } from "../contract-types.js";
-import { rebuildExtractedProjection } from "../contract-core.js";
 import type {
   ContractCase,
   HttpContractDefaults,
@@ -54,13 +53,24 @@ function mergeHttpDefaults(
   if (!defaults) return spec;
   const mergedTags = [...(defaults.tags ?? []), ...(spec.tags ?? [])];
   const mergedExtensions = mergeExtensions(defaults.extensions, spec.extensions);
-  return {
+  // Embed the factory's instanceName + security into the spec via a private
+  // `_factory` channel. `projectHttp` reads this at projection time so the
+  // produced `_projection` (and therefore `_extracted`) already carry these
+  // fields — no post-dispatch mutation needed.
+  const baseMerged = {
     ...spec,
     client: spec.client ?? defaults.client,
     feature: spec.feature ?? defaults.feature,
     tags: mergedTags.length > 0 ? mergedTags : undefined,
     extensions: mergedExtensions,
   };
+  if (defaults._name) {
+    (baseMerged as unknown as { _factory: { instanceName: string; security?: HttpSecurityScheme } })._factory = {
+      instanceName: defaults._name,
+      security: defaults.security,
+    };
+  }
+  return baseMerged;
 }
 
 /**
@@ -83,10 +93,7 @@ export function createHttpFactory(
       );
     }
     const merged = mergeHttpDefaults(defaults, spec as HttpContractSpec);
-    const result = dispatch(id, merged as HttpContractSpec<Cases>);
-    // Attach instanceName + security after dispatch so they appear in projection
-    applyInstanceMetadata(result, defaults._name, defaults.security);
-    return result;
+    return dispatch(id, merged as HttpContractSpec<Cases>);
   };
 
   factory.with = (name: string, more: HttpContractDefaults): HttpContractFactory => {
@@ -111,21 +118,3 @@ export function createHttpRoot(dispatch: HttpDispatch): HttpContractRoot {
   return createHttpFactory(dispatch) as unknown as HttpContractRoot;
 }
 
-function applyInstanceMetadata(
-  contract: ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>,
-  instanceName: string,
-  security: HttpSecurityScheme | undefined,
-): void {
-  // Mutate _projection to attach instanceName / security (not otherwise
-  // available to adapter.project since it doesn't know the factory defaults)
-  const proj = contract._projection as
-    & typeof contract._projection
-    & { instanceName?: string; schemas?: HttpPayloadSchemas };
-  proj.instanceName = instanceName;
-  if (security != null && proj.schemas) {
-    proj.schemas.security = security;
-  }
-  // Refresh `_extracted` after mutating `_projection` — dispatcher's
-  // initial normalize ran before these factory-only fields were attached.
-  rebuildExtractedProjection(contract);
-}

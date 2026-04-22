@@ -432,7 +432,6 @@ test("projection captures endpoint, method, cases, and meta", () => {
 });
 
 test("normalize produces JSON-safe projection", async () => {
-  const { httpAdapter } = await import("./adapter.js");
   const client = makeMockClient();
   const api = contract.http.with("api", { client });
   const c = api("fetch", {
@@ -445,15 +444,14 @@ test("normalize produces JSON-safe projection", async () => {
     },
   });
 
-  const extracted = httpAdapter.normalize!({ ...c._projection });
+  const extracted = c._extracted;
   expect(extracted.id).toBe("fetch");
   expect(extracted.protocol).toBe("http");
   const cloned = JSON.parse(JSON.stringify(extracted));
   expect(cloned).toEqual(extracted);
 });
 
-test("normalize preserves contract-level security from scoped factory", async () => {
-  const { httpAdapter } = await import("./adapter.js");
+test("normalize preserves contract-level security from scoped factory", () => {
   const client = makeMockClient();
   const api = contract.http.with("api", { client, security: "bearer" });
   const c = api("fetch", {
@@ -466,12 +464,11 @@ test("normalize preserves contract-level security from scoped factory", async ()
   // Runtime projection has security injected by the factory
   expect((c._projection.schemas as any)?.security).toBe("bearer");
 
-  const extracted = httpAdapter.normalize!({ ...c._projection });
-  expect((extracted.schemas as any)?.security).toBe("bearer");
+  // _extracted is the dispatcher-populated safe form (adapter.normalize output)
+  expect((c._extracted.schemas as any)?.security).toBe("bearer");
 });
 
-test("normalize preserves apiKey security object verbatim", async () => {
-  const { httpAdapter } = await import("./adapter.js");
+test("normalize preserves apiKey security object verbatim", () => {
   const client = makeMockClient();
   const apiKey = { type: "apiKey" as const, name: "X-API-Key", in: "header" as const };
   const api = contract.http.with("api", { client, security: apiKey });
@@ -482,8 +479,7 @@ test("normalize preserves apiKey security object verbatim", async () => {
     },
   });
 
-  const extracted = httpAdapter.normalize!({ ...c._projection });
-  expect((extracted.schemas as any)?.security).toEqual(apiKey);
+  expect((c._extracted.schemas as any)?.security).toEqual(apiKey);
 });
 
 // ---------------------------------------------------------------------------

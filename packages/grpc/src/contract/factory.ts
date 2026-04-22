@@ -15,7 +15,6 @@
  */
 
 import type { Extensions, ProtocolContract } from "@glubean/sdk";
-import { rebuildExtractedProjection } from "@glubean/sdk";
 import type {
   GrpcContractCase,
   GrpcContractDefaults,
@@ -60,7 +59,11 @@ function mergeGrpcDefaults(
     ...(defaults.metadata ?? {}),
     ...(spec.defaultMetadata ?? {}),
   };
-  return {
+  // Embed the factory's instanceName into the spec via a private `_factory`
+  // channel. `projectGrpc` reads this at projection time so the produced
+  // `_projection` (and `_extracted`) already carries it — no post-dispatch
+  // mutation needed.
+  const baseMerged = {
     ...spec,
     client: spec.client ?? defaults.client,
     feature: spec.feature ?? defaults.feature,
@@ -70,21 +73,12 @@ function mergeGrpcDefaults(
       Object.keys(mergedMetadata).length > 0 ? mergedMetadata : undefined,
     deadlineMs: spec.deadlineMs ?? defaults.deadlineMs,
   };
-}
-
-function applyInstanceMetadata(
-  contract: ProtocolContract<GrpcContractSpec, GrpcPayloadSchemas, GrpcContractMeta>,
-  instanceName: string,
-): void {
-  // Mutate _projection to attach instanceName (not otherwise available to
-  // adapter.project since it doesn't know the factory defaults).
-  const proj = contract._projection as
-    & typeof contract._projection
-    & { instanceName?: string };
-  proj.instanceName = instanceName;
-  // Refresh `_extracted` after mutating `_projection` — dispatcher's
-  // initial normalize ran before `instanceName` was attached.
-  rebuildExtractedProjection(contract);
+  if (defaults._name) {
+    (baseMerged as unknown as { _factory: { instanceName: string } })._factory = {
+      instanceName: defaults._name,
+    };
+  }
+  return baseMerged;
 }
 
 /**
@@ -111,9 +105,7 @@ export function createGrpcFactory(
       );
     }
     const merged = mergeGrpcDefaults(defaults, spec as GrpcContractSpec);
-    const result = dispatch(id, merged as GrpcContractSpec<Req, Res, Cases>);
-    applyInstanceMetadata(result, defaults._name);
-    return result;
+    return dispatch(id, merged as GrpcContractSpec<Req, Res, Cases>);
   };
 
   (factory as any).with = (

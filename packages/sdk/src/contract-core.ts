@@ -80,33 +80,6 @@ const RESERVED_PROTOCOL_NAMES = new Set([
   "getAdapter",
 ]);
 
-/**
- * Re-run `adapter.normalize(_projection)` and refresh `_extracted` on the
- * carrier. Called by scoped factories (HTTP / gRPC / GraphQL `contract.with`)
- * after they mutate `_projection` to attach post-dispatch metadata like
- * `instanceName` and HTTP `security` — otherwise `_extracted` would reflect
- * the pre-mutation projection and downstream (scanner / MCP / cloud) would
- * see stale data.
- *
- * Looks up the adapter by `contract._projection.protocol`. Throws if the
- * adapter is no longer registered (programming error — factory should not
- * outlive its adapter).
- */
-export function rebuildExtractedProjection(
-  contract: { _projection: { protocol: string; id: string }; _extracted?: unknown },
-): void {
-  const protocol = contract._projection.protocol;
-  const adapter = _adapters.get(protocol);
-  if (!adapter) {
-    throw new Error(
-      `rebuildExtractedProjection: no adapter registered for protocol "${protocol}". ` +
-        `Ensure the protocol plugin is installed before the factory runs.`,
-    );
-  }
-  (contract as { _extracted: unknown })._extracted = adapter.normalize(
-    contract._projection as Parameters<typeof adapter.normalize>[0],
-  );
-}
 
 /**
  * Register an adapter. Called by built-in HTTP adapter on SDK load, and by

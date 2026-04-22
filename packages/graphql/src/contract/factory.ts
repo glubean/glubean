@@ -17,7 +17,6 @@
  */
 
 import type { Extensions, ProtocolContract } from "@glubean/sdk";
-import { rebuildExtractedProjection } from "@glubean/sdk";
 import type {
   GraphqlContractCase,
   GraphqlContractDefaults,
@@ -62,7 +61,11 @@ function mergeGraphqlDefaults(
     ...(defaults.headers ?? {}),
     ...(spec.defaultHeaders ?? {}),
   };
-  return {
+  // Embed the factory's instanceName into the spec via a private `_factory`
+  // channel. `projectGraphql` reads this at projection time so the produced
+  // `_projection` (and `_extracted`) already carries it — no post-dispatch
+  // mutation needed.
+  const baseMerged = {
     ...spec,
     client: spec.client ?? defaults.client,
     endpoint: spec.endpoint ?? defaults.endpoint,
@@ -72,19 +75,12 @@ function mergeGraphqlDefaults(
     defaultHeaders:
       Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined,
   };
-}
-
-function applyInstanceMetadata(
-  contract: ProtocolContract<GraphqlContractSpec, GraphqlPayloadSchemas, GraphqlContractMeta>,
-  instanceName: string,
-): void {
-  const proj = contract._projection as
-    & typeof contract._projection
-    & { instanceName?: string };
-  proj.instanceName = instanceName;
-  // Refresh `_extracted` after mutating `_projection` — dispatcher's
-  // initial normalize ran before `instanceName` was attached.
-  rebuildExtractedProjection(contract);
+  if (defaults._name) {
+    (baseMerged as unknown as { _factory: { instanceName: string } })._factory = {
+      instanceName: defaults._name,
+    };
+  }
+  return baseMerged;
 }
 
 /**
@@ -111,9 +107,7 @@ export function createGraphqlFactory(
       );
     }
     const merged = mergeGraphqlDefaults(defaults, spec as GraphqlContractSpec);
-    const result = dispatch(id, merged as GraphqlContractSpec<Vars, Res, Cases>);
-    applyInstanceMetadata(result, defaults._name);
-    return result;
+    return dispatch(id, merged as GraphqlContractSpec<Vars, Res, Cases>);
   };
 
   (factory as any).with = (

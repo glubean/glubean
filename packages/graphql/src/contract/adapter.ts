@@ -371,11 +371,18 @@ function projectGraphql(
     };
   });
 
+  // Read factory-provided metadata from the internal `_factory` channel
+  // populated by `mergeGraphqlDefaults`.
+  const factory = (spec as unknown as {
+    _factory?: { instanceName: string };
+  })._factory;
+
   return {
     protocol: "graphql",
     target: spec.endpoint ?? "",
     description: spec.description,
     feature: spec.feature,
+    instanceName: factory?.instanceName,
     tags: spec.tags,
     extensions: spec.extensions,
     deprecated: spec.deprecated,
