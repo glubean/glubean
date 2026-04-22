@@ -18,7 +18,7 @@ import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-import { bootstrap, LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import { bootstrap, loadProjectEnv, LOCAL_RUN_DEFAULTS, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { createScanner, extractFromSource, scan } from "@glubean/scanner";
 import { extractContractCases } from "@glubean/scanner/static";
@@ -273,37 +273,9 @@ export async function findProjectRoot(startDir: string): Promise<string> {
   return startDir;
 }
 
-export async function loadEnvFile(envPath: string): Promise<Vars> {
-  try {
-    const content = await readFile(envPath, "utf-8");
-    return parseEnvContent(content);
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Simple KEY=VALUE parser for .env files.
- * Handles comments, empty lines, and quoted values.
- */
-function parseEnvContent(content: string): Vars {
-  const vars: Vars = {};
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eqIdx = trimmed.indexOf("=");
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    let value = trimmed.slice(eqIdx + 1).trim();
-    // Strip surrounding quotes
-    if ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    vars[key] = value;
-  }
-  return vars;
-}
+// Env loading lives in @glubean/runner as the canonical single source of
+// truth (handles dotenv parsing, `${NAME}` expansion, and vars/secrets
+// split). Use `loadProjectEnv(rootDir, envFileName)` below.
 
 /**
  * Derive the secrets file path from an env file path.
@@ -710,8 +682,9 @@ export async function diagnoseProjectConfig(args: {
     pathExists(resolve(projectRoot, "explore")),
   ]);
 
-  const envVars = envExists ? await loadEnvFile(envPath) : {};
-  const secrets = secretsExists ? await loadEnvFile(secretsPath) : {};
+  // loadProjectEnv handles missing-file-silent + `${NAME}` expansion +
+  // vars/secrets split. Existence flags above are kept for diagnostic reporting.
+  const { vars: envVars, secrets } = await loadProjectEnv(projectRoot, basename(envPath));
 
   const recommendations: string[] = [];
   if (!packageJsonExists) {
@@ -778,12 +751,7 @@ export async function runLocalTestsFromFile(args: {
   const traceConfig = await loadMcpTraceConfig(projectRoot);
 
   const envPath = await resolveEnvPath(projectRoot, args.envFile);
-  const secretsPath = deriveSecretsPath(envPath);
-
-  const [vars, secrets] = await Promise.all([
-    loadEnvFile(envPath),
-    loadEnvFile(secretsPath),
-  ]);
+  const { vars, secrets } = await loadProjectEnv(projectRoot, basename(envPath));
 
   const { fileUrl, tests, errors: discoveryErrors } = await discoverTestsFromFile(absolutePath);
 

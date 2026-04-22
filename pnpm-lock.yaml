@@ -180,6 +180,9 @@ importers:
       '@glubean/sdk':
         specifier: workspace:*
         version: link:../sdk
+      dotenv:
+        specifier: ^16.4.0
+        version: 16.6.1
       ky:
         specifier: ^1.14.0
         version: 1.14.3

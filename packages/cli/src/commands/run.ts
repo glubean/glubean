@@ -15,7 +15,7 @@ import { stat, readdir, readFile, writeFile, mkdir, rm } from "node:fs/promises"
 import { pathToFileURL } from "node:url";
 import { glob } from "node:fs/promises";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
-import { loadEnvFile } from "../lib/env.js";
+import { loadProjectEnv } from "@glubean/runner";
 import { resolveEnvFileName } from "../lib/active_env.js";
 import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import { CLI_VERSION } from "../version.js";
@@ -487,8 +487,14 @@ export async function runCommand(
     }
   }
 
-  const envVars = await loadEnvFile(envPath);
+  // Canonical env loading: reads both .env and .env.secrets, expands
+  // `${NAME}` references (same file forward refs, cross-file refs, and
+  // process.env fallback), splits back into {vars, secrets} with secrets
+  // winning on collision. See @glubean/runner:loadProjectEnv.
+  const { vars: envVars, secrets } = await loadProjectEnv(rootDir, envFileName);
 
+  // Warn separately on the missing-secrets case so users get a visual
+  // signal — loadProjectEnv itself treats missing files as silent empties.
   const secretsPath = resolve(rootDir, `${envFileName}.secrets`);
   let secretsExist = true;
   try {
@@ -496,8 +502,6 @@ export async function runCommand(
   } catch {
     secretsExist = false;
   }
-  const secrets = secretsExist ? await loadEnvFile(secretsPath) : {};
-
   if (!secretsExist && Object.keys(envVars).length > 0) {
     console.warn(
       `${colors.yellow}Warning: secrets file '${envFileName}.secrets' not found in ${rootDir}${colors.reset}`,

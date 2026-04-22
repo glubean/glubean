@@ -48,6 +48,11 @@ export {
 // registrations run before test execution / scanner dynamic imports.
 // Must be awaited at the top of any entry point that observes plugin state.
 export { bootstrap, discoverSetupFile } from "./bootstrap.js";
+
+// Canonical project-env loader. CLI / MCP / VSCode all route through this
+// to get {vars, secrets} with `${NAME}` expansion.
+export { loadEnvFile, loadProjectEnv, expandVars } from "./env.js";
+export type { ProjectEnv } from "./env.js";
 export type {
   FileScheduleEntry,
   OrchestratorOptions,
