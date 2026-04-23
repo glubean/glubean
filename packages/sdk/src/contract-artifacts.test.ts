@@ -61,7 +61,10 @@ function makeContract(
  * `getAdapter(protocol)` returns a value with `.artifacts`.
  */
 function makeAdapter(
-  artifacts?: Record<string, (...args: unknown[]) => unknown>,
+  artifacts?: Record<
+    string,
+    (projection: unknown, options?: unknown) => unknown
+  >,
 ): ContractProtocolAdapter<unknown, unknown, unknown, unknown, unknown> {
   return {
     async execute() {},
@@ -202,7 +205,8 @@ describe("renderArtifact", () => {
     contract.register(
       "p5",
       makeAdapter({
-        "options-echo": (p: unknown, opts?: Opts) => {
+        "options-echo": (p: unknown, options?: unknown) => {
+          const opts = options as Opts | undefined;
           if (opts) seen.producer.push(opts);
           return `${opts?.prefix ?? ""}prod:${(p as { id: string }).id}`;
         },

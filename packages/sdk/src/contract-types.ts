@@ -100,6 +100,29 @@ export interface FailureClassification {
 }
 
 // =============================================================================
+// Case spec authoring base
+// =============================================================================
+
+/**
+ * Minimum shape every case spec must satisfy. Adapter-specific case specs
+ * (HttpContractCase / GrpcContractCase / GraphqlContractCase / ...) extend
+ * this with protocol-specific fields.
+ *
+ * Core (`dispatchContract`) reads these fields directly from `spec.cases[key]`.
+ * Adapter-specific fields are opaque to core and passed through to the adapter.
+ */
+export interface BaseCaseSpec {
+  description?: string;
+  deferred?: string;
+  deprecated?: string;
+  severity?: CaseSeverity;
+  requires?: CaseRequires;
+  defaultRun?: CaseDefaultRun;
+  tags?: string[];
+  extensions?: Extensions;
+}
+
+// =============================================================================
 // Case & contract projection (Runtime + Extracted)
 // =============================================================================
 

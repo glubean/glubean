@@ -21,6 +21,7 @@
 
 import type { Test, TestContext } from "./types.js";
 import type {
+  BaseCaseSpec,
   ContractCaseRef,
   ContractProtocolAdapter,
   ContractProjection,
@@ -132,7 +133,7 @@ function register<
   (contract as any)[protocol] = (
     id: string,
     spec: Spec & {
-      cases?: Record<string, CaseSpecShape>;
+      cases?: Record<string, BaseCaseSpec>;
       tags?: string[];
     },
   ): ProtocolContract<Spec, SafeSchemas, SafeMeta> => {
@@ -155,7 +156,7 @@ function dispatchContract<
   adapter: ContractProtocolAdapter<Spec, RuntimeSchemas, RuntimeMeta, SafeSchemas, SafeMeta>,
   id: string,
   spec: Spec & {
-    cases?: Record<string, CaseSpecShape>;
+    cases?: Record<string, BaseCaseSpec>;
     tags?: string[];
   },
 ): ProtocolContract<Spec, SafeSchemas, SafeMeta> {
@@ -303,18 +304,6 @@ function dispatchContract<
 
   return contractObj;
 }
-
-type CaseSpecShape = {
-  description?: string;
-  deferred?: string;
-  deprecated?: string;
-  severity?: import("./contract-types.js").CaseSeverity;
-  requires?: import("./contract-types.js").CaseRequires;
-  defaultRun?: import("./contract-types.js").CaseDefaultRun;
-  tags?: string[];
-  // Arbitrary adapter-specific fields pass through
-  [key: string]: unknown;
-};
 
 function validateCaseKeys(
   protocol: string,

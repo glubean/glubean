@@ -474,6 +474,7 @@ export type {
   CaseSeverity,
   CaseRequires,
   CaseDefaultRun,
+  BaseCaseSpec,
   FailureKind,
   FailureClassification,
   Extensions,

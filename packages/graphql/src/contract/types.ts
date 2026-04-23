@@ -40,9 +40,7 @@
 
 import type { SchemaLike, TestContext } from "@glubean/sdk";
 import type {
-  CaseDefaultRun,
-  CaseRequires,
-  CaseSeverity,
+  BaseCaseSpec,
   Extensions,
 } from "@glubean/sdk";
 import type { GraphQLClient, GraphQLError } from "../index.js";
@@ -190,7 +188,7 @@ export interface GraphqlContractCase<
   Vars = Record<string, unknown>,
   Res = unknown,
   S = void,
-> {
+> extends BaseCaseSpec {
   /** Per-case client override. */
   client?: GraphQLClient;
 
@@ -234,18 +232,6 @@ export interface GraphqlContractCase<
 
   /** Business-logic verify — runs after transport + schema + data match. */
   verify?: (ctx: TestContext, res: GraphqlCaseResult<Res>) => void | Promise<void>;
-
-  /** Not yet executable; reason shown in skip message. */
-  deferred?: string;
-  /** Deprecated; value is the reason. */
-  deprecated?: string;
-  /** Additional tags (merged with contract-level tags). */
-  tags?: string[];
-  severity?: CaseSeverity;
-  requires?: CaseRequires;
-  defaultRun?: CaseDefaultRun;
-  /** Per-case extensions. */
-  extensions?: Extensions;
 }
 
 // =============================================================================

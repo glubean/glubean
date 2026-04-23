@@ -530,7 +530,7 @@ describe("grpcAdapter.execute (non-flow path)", () => {
 
     const order: string[] = [];
 
-    const spec: GrpcContractSpec = {
+    const spec = {
       target: "Svc/Call",
       client,
       cases: {
@@ -563,7 +563,7 @@ describe("grpcAdapter.execute (non-flow path)", () => {
   test("execute: function-valued request receives setup state", async () => {
     const client = makeMockGrpcClient({ message: {} });
 
-    const spec: GrpcContractSpec = {
+    const spec = {
       target: "Svc/Call",
       client,
       cases: {

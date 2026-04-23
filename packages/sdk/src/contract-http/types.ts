@@ -12,9 +12,7 @@
 
 import type { HttpClient, SchemaLike, TestContext } from "../types.js";
 import type {
-  CaseDefaultRun,
-  CaseRequires,
-  CaseSeverity,
+  BaseCaseSpec,
   Extensions,
 } from "../contract-types.js";
 
@@ -102,7 +100,7 @@ export interface ContractExpect<T = unknown> {
 // Case spec
 // =============================================================================
 
-export interface ContractCase<T = unknown, S = void> {
+export interface ContractCase<T = unknown, S = void> extends BaseCaseSpec {
   /** Per-case HTTP client override. */
   client?: HttpClient;
   /** Why this case exists — required. */
@@ -135,18 +133,6 @@ export interface ContractCase<T = unknown, S = void> {
 
   /** Business-logic verify — runs after status and schema validation. */
   verify?: (ctx: TestContext, res: T) => Promise<void>;
-
-  /** Not yet executable; reason shown in skip message. */
-  deferred?: string;
-  /** Deprecated; value is the reason. */
-  deprecated?: string;
-  /** Additional tags (merged with contract-level tags). */
-  tags?: string[];
-  severity?: CaseSeverity;
-  requires?: CaseRequires;
-  defaultRun?: CaseDefaultRun;
-  /** Per-case OpenAPI extensions. */
-  extensions?: Extensions;
 }
 
 // =============================================================================

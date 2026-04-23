@@ -16,9 +16,7 @@
 
 import type { SchemaLike, TestContext } from "@glubean/sdk";
 import type {
-  CaseDefaultRun,
-  CaseRequires,
-  CaseSeverity,
+  BaseCaseSpec,
   Extensions,
 } from "@glubean/sdk";
 import type { GrpcClient } from "../index.js";
@@ -99,7 +97,8 @@ export interface GrpcContractExpect<T = unknown> {
  * state. In flow mode these are rejected by `validateCaseForFlow` (same
  * discipline as HTTP's function-valued body/params/query/headers).
  */
-export interface GrpcContractCase<Req = unknown, Res = unknown, S = void> {
+export interface GrpcContractCase<Req = unknown, Res = unknown, S = void>
+  extends BaseCaseSpec {
   /** Per-case gRPC client override. */
   client?: GrpcClient;
 
@@ -129,18 +128,6 @@ export interface GrpcContractCase<Req = unknown, Res = unknown, S = void> {
 
   /** Business-logic verify — runs after status + schema + message match. */
   verify?: (ctx: TestContext, res: GrpcCaseResult<Res>) => void | Promise<void>;
-
-  /** Not yet executable; reason shown in skip message. */
-  deferred?: string;
-  /** Deprecated; value is the reason. */
-  deprecated?: string;
-  /** Additional tags (merged with contract-level tags). */
-  tags?: string[];
-  severity?: CaseSeverity;
-  requires?: CaseRequires;
-  defaultRun?: CaseDefaultRun;
-  /** Per-case extensions. */
-  extensions?: Extensions;
 }
 
 // =============================================================================

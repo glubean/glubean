@@ -731,7 +731,7 @@ describe("graphqlAdapter.execute (non-flow path)", () => {
     });
 
     const order: string[] = [];
-    const spec: GraphqlContractSpec = {
+    const spec = {
       client,
       cases: {
         ok: {
@@ -761,7 +761,7 @@ describe("graphqlAdapter.execute (non-flow path)", () => {
   test("execute: function-valued variables / headers receive setup state", async () => {
     const client = makeMockGqlClient({ data: {}, httpStatus: 200 });
 
-    const spec: GraphqlContractSpec = {
+    const spec = {
       client,
       cases: {
         ok: {

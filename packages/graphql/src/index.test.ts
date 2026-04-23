@@ -102,6 +102,7 @@ function createMockRuntime(
     action() {},
     event() {},
     log() {},
+    trace() {},
   };
 }
 
