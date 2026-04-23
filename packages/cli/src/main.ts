@@ -189,12 +189,18 @@ program
   .command("contracts")
   .description("Project contract specs as human-readable or machine-readable output")
   .option("-d, --dir <path>", "Project directory", ".")
-  .option("-f, --format <format>", "Output format: md-outline or json", "md-outline")
+  .option(
+    "-f, --format <format>",
+    "Output format: md-outline | json | openapi | list-formats | <registered kind>",
+    "md-outline",
+  )
+  .option("--title <title>", "API title (format=openapi only)")
   .action(async (options) => {
     const { contractsCommand } = await import("./commands/contracts.js");
     await contractsCommand({
       dir: options.dir,
-      format: options.format as "md-outline" | "json",
+      format: options.format,
+      title: options.title,
     });
   });
 

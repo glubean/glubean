@@ -14,6 +14,14 @@ import type {
   NormalizedFieldMapping,
 } from "@glubean/scanner";
 import type { ContractStaticMeta, ContractCaseStaticMeta } from "@glubean/scanner/static";
+import {
+  renderArtifact,
+  renderArtifactByName,
+  openapiArtifact,
+  listArtifactKinds,
+  listArtifactCapability,
+} from "@glubean/sdk";
+import type { ExtractedContractProjection } from "@glubean/sdk";
 
 // ── Description lint ────────────────────────────────────────────────────────
 
@@ -318,7 +326,18 @@ const colors = {
 
 export interface ContractsCommandOptions {
   dir?: string;
-  format?: "md-outline" | "json";
+  /**
+   * Output format:
+   *   - `md-outline` (default): feature-grouped markdown spec (legacy path)
+   *   - `json`: machine-readable projection
+   *   - `openapi`: OpenAPI 3.1 document via artifact registry
+   *   - `list-formats`: print registered artifact kinds + protocol capability
+   *   - `<kind>`: any kind registered via the artifact registry (dispatched
+   *     through `renderArtifactByName`)
+   */
+  format?: string;
+  /** OpenAPI info.title (only used when format=openapi). */
+  title?: string;
 }
 
 export async function contractsCommand(
@@ -332,6 +351,27 @@ export async function contractsCommand(
   // would fail-closed at `getAdapter(protocol)` because the adapter would
   // not yet be registered — see plugin-manifest-proposal.md D2.
   await bootstrap(dir);
+
+  // `--format list-formats`: introspection of artifact kinds. Resolves
+  // after bootstrap so plugin-contributed kinds (future proto/sdl/etc.)
+  // are visible. Output to stdout, no contract extraction needed.
+  if (format === "list-formats") {
+    const kinds = listArtifactKinds();
+    const lines: string[] = ["Registered artifact kinds:"];
+    for (const name of kinds) {
+      const cap = listArtifactCapability(name);
+      const parts: string[] = [];
+      if (cap.explicit.length > 0) parts.push(`explicit: ${cap.explicit.join(", ")}`);
+      if (cap.fallback.length > 0) parts.push(`fallback: ${cap.fallback.join(", ")}`);
+      if (cap.unsupported.length > 0) parts.push(`unsupported: ${cap.unsupported.join(", ")}`);
+      lines.push(`  ${name}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`);
+    }
+    // Plus static formats CLI handles directly
+    lines.push("  md-outline (legacy CLI formatter, not via artifact registry)");
+    lines.push("  json (legacy CLI formatter, not via artifact registry)");
+    process.stdout.write(lines.join("\n") + "\n");
+    return;
+  }
 
   const result = await extractContractsFromProject(dir);
   const flows = result.flows ?? [];
@@ -398,7 +438,21 @@ export async function contractsCommand(
   // Output projection
   if (format === "json") {
     process.stdout.write(formatJson(contracts, flows));
-  } else {
+  } else if (format === "openapi") {
+    // Dispatched through the artifact registry. Only HTTP contracts
+    // contribute (openapi kind has no defaultRender). Non-HTTP protocols
+    // are silently skipped — matches pre-CAR-1 behavior of MCP's former
+    // `contractsToOpenApi`.
+    const spec = renderArtifact(
+      openapiArtifact,
+      result.contracts as unknown as ExtractedContractProjection<
+        unknown,
+        unknown
+      >[],
+      { title: options.title },
+    );
+    process.stdout.write(JSON.stringify(spec, null, 2) + "\n");
+  } else if (format === "md-outline") {
     const contractsMd = contracts.length > 0 ? formatMdOutline(contracts) : "";
     const flowsMd = flows.length > 0 ? formatFlowsMdSection(flows) : "";
     if (contractsMd && flowsMd) {
@@ -412,6 +466,30 @@ export async function contractsCommand(
         );
       }
       process.stdout.write(contractsMd || flowsMd);
+    }
+  } else {
+    // Dynamic dispatch via artifact registry for any other registered kind
+    // name (future proto / sdl / asyncapi). Throws with a helpful error
+    // when the name isn't registered — listing available formats in the
+    // message.
+    try {
+      const out = renderArtifactByName(
+        format,
+        result.contracts as unknown as ExtractedContractProjection<
+          unknown,
+          unknown
+        >[],
+      );
+      const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
+      process.stdout.write(text.endsWith("\n") ? text : text + "\n");
+    } catch (err) {
+      console.error(
+        `${colors.yellow}⚠ Unknown format "${format}".${colors.reset} ${err instanceof Error ? err.message : String(err)}`,
+      );
+      console.error(
+        `${colors.dim}  Try 'glubean contracts --format list-formats' to see available formats.${colors.reset}`,
+      );
+      process.exit(1);
     }
   }
 
