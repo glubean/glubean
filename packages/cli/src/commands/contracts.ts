@@ -155,8 +155,12 @@ export function formatMdOutline(contracts: ContractStaticMeta[]): string {
     endpoint: c.endpoint,
     protocol: c.protocol,
     description: c.description,
+    // ContractStaticMeta doesn't carry instanceName — the CLI command
+    // already folded instanceName into `feature` upstream (hasInstances
+    // pre-pass). Leaving instanceName undefined here keeps
+    // assembleMarkdownDocument's own hasInstances branch off, so the
+    // already-prefixed feature string is used verbatim.
     feature: c.feature,
-    instanceName: c.instanceName,
     deprecated: c.deprecated,
     cases: c.cases.map((cs) => {
       const lifecycle =

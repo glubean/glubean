@@ -1,18 +1,14 @@
 import {
-  createContextWithSession,
-  discoverSessionFile,
   evaluateThresholds,
   type ExecutionEvent,
   MetricCollector,
-  normalizePositiveTimeoutMs,
-  RunOrchestrator,
+  ProjectRunner,
   TestExecutor,
-  toSingleExecutionOptions,
   buildRunContext,
 } from "@glubean/runner";
+import type { ProjectRunnerTest } from "@glubean/runner";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { stat, readdir, readFile, writeFile, mkdir, rm } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import { glob } from "node:fs/promises";
 import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
 import { loadProjectEnv } from "@glubean/runner";
@@ -731,61 +727,16 @@ export async function runCommand(
     fileGroups.set(entry.filePath, group);
   }
 
-  // ── Session discovery and setup ───────────────────────────────────────────
+  // ── Session + execution + teardown via ProjectRunner ─────────────────────
+  //
+  // Replaces the prior inline RunOrchestrator + per-file TestExecutor loop
+  // (~540 lines) with a single event-stream consumer. Per-event presentation
+  // handlers (trace / assertion / step / etc.) are byte-for-byte unchanged;
+  // only the outer wiring swaps from direct executor.run(...) to the facade.
+  //
+  // See internal/30-execution/2026-04-23-rf-1b-cli-migration/execution-log.md.
+
   const sessionState: Record<string, unknown> = {};
-  const sessionFile = options.noSession
-    ? undefined
-    : discoverSessionFile(startDir, rootDir);
-  const orchestrator = new RunOrchestrator(executor);
-
-  if (sessionFile) {
-    console.log(
-      `${colors.dim}Session: ${relative(process.cwd(), sessionFile)}${colors.reset}`,
-    );
-    let sessionFailed = false;
-
-    for await (const event of orchestrator.runSessionSetup(
-      sessionFile,
-      { vars: envVars, secrets, interactive },
-      toSingleExecutionOptions(shared),
-    )) {
-      if (event.type === "session:set") {
-        sessionState[event.key] = event.value;
-      } else if (event.type === "status" && event.status === "failed") {
-        sessionFailed = true;
-        console.log(
-          `  ${colors.red}✗ Session setup failed${event.error ? `: ${event.error}` : ""}${colors.reset}`,
-        );
-      } else if (event.type === "log") {
-        console.log(
-          `  ${colors.dim}[session] ${event.message}${colors.reset}`,
-        );
-      }
-    }
-
-    if (sessionFailed) {
-      // Best-effort teardown before exiting
-      for await (const _event of orchestrator.runSessionTeardown(
-        sessionFile,
-        { vars: envVars, secrets },
-        sessionState,
-        toSingleExecutionOptions(shared),
-      )) {
-        // Silently consume teardown events
-      }
-      console.log(
-        `\n${colors.red}Session setup failed. All tests skipped.${colors.reset}`,
-      );
-      process.exit(1);
-    }
-
-    const keyCount = Object.keys(sessionState).length;
-    if (keyCount > 0) {
-      console.log(
-        `${colors.dim}  ${keyCount} session value${keyCount > 1 ? "s" : ""} set${colors.reset}`,
-      );
-    }
-  }
 
   const compactUrl = (url: string): string => {
     try {
@@ -804,472 +755,579 @@ export async function runCommand(
     return `${colors.green}${status}${colors.reset}`;
   };
 
-  for (const [groupFilePath, fileTests] of fileGroups) {
-    if (isMultiFile) {
-      const relPath = relative(process.cwd(), groupFilePath);
-      console.log(`${colors.bold}📁 ${relPath}${colors.reset}`);
-    }
+  // Per-test state, scoped across file:event boundaries. Reset on each
+  // "start" event inside file:event handlers.
+  let currentGroupFilePath = "";
+  let currentTestMap: Map<string, (typeof testsToRun)[number]> | undefined;
+  let testId = "";
+  let testName = "";
+  let testItem: (typeof testsToRun)[number]["test"] | null = null;
+  let startTime = Date.now();
+  let testEvents: ExecutionEvent[] = [];
+  let assertions: Array<{
+    passed: boolean;
+    message: string;
+    actual?: unknown;
+    expected?: unknown;
+  }> = [];
+  let success = false;
+  let errorMsg: string | undefined;
+  let peakMemoryMB: string | undefined;
+  let stepAssertionCount = 0;
+  let stepTraceLines: string[] = [];
+  let testStarted = false;
 
-    if (failureLimit !== undefined && failed >= failureLimit) {
-      for (const { test } of fileTests) {
-        skipped++;
-        const name = test.meta.name || test.meta.id;
-        console.log(
-          `  ${colors.yellow}○${colors.reset} ${name} ${colors.dim}(skipped — fail-fast)${colors.reset}`,
-        );
-      }
-      continue;
-    }
-
-    // ── Skip tests based on requires/defaultRun capability profile ──
-    const runnableTests: typeof fileTests = [];
-    for (const ft of fileTests) {
-      const skipReason = shouldSkipTest(ft.test.meta, capabilityProfile);
-      if (skipReason) {
-        skipped++;
-        const name = ft.test.meta.name || ft.test.meta.id;
-        console.log(
-          `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${skipReason})${colors.reset}`,
-        );
-        // Record as a skipped test run for result output
-        collectedRuns.push({
-          testId: ft.test.meta.id,
-          testName: name,
-          tags: ft.test.meta.tags as string[] | undefined,
-          filePath: groupFilePath,
-          events: [{ type: "status", status: "skipped", reason: skipReason } as ExecutionEvent],
-          success: true,
-          durationMs: 0,
-          groupId: ft.test.meta.groupId,
-        });
-        continue;
-      }
-      runnableTests.push(ft);
-    }
-
-    if (runnableTests.length === 0) continue;
-
-    const testIds = runnableTests.map((ft) => ft.test.meta.id);
-    const exportNames: Record<string, string> = {};
-    for (const ft of runnableTests) {
-      exportNames[ft.test.meta.id] = ft.exportName;
-    }
-    const testMap = new Map(
-      runnableTests.map((ft) => [ft.test.meta.id, ft]),
-    );
-    const testFileUrl = pathToFileURL(groupFilePath).toString();
-
-    const batchTimeout = runnableTests.reduce((sum, ft) => {
-      return sum +
-        (normalizePositiveTimeoutMs(ft.test.meta.timeout) ??
-          shared.perTestTimeoutMs ?? 30_000);
-    }, 0);
-
-    let testId = "";
-    let testName = "";
-    let testItem: (typeof fileTests)[0]["test"] | null = null;
-    let startTime = Date.now();
-    let testEvents: ExecutionEvent[] = [];
-    let assertions: Array<{
-      passed: boolean;
-      message: string;
-      actual?: unknown;
-      expected?: unknown;
-    }> = [];
-    let success = false;
-    let errorMsg: string | undefined;
-    let peakMemoryMB: string | undefined;
-    let stepAssertionCount = 0;
-    let stepTraceLines: string[] = [];
-    let testStarted = false;
-
-    const addLogEntry = (
-      type: LogEntry["type"],
-      message: string,
-      data?: unknown,
-    ) => {
-      if (effectiveRun.logFile) {
-        logEntries.push({
-          timestamp: new Date().toISOString(),
-          testId,
-          testName,
-          type,
-          message,
-          data,
-        });
-      }
-    };
-
-    const finalizeTest = () => {
-      if (!testStarted) return;
-      testStarted = false;
-      const duration = Date.now() - startTime;
-      const allAssertionsPassed = assertions.every((a) => a.passed);
-      const finalSuccess = success && allAssertionsPassed;
-
-      collectedRuns.push({
+  const addLogEntry = (
+    type: LogEntry["type"],
+    message: string,
+    data?: unknown,
+  ) => {
+    if (effectiveRun.logFile) {
+      logEntries.push({
+        timestamp: new Date().toISOString(),
         testId,
         testName,
-        tags: testItem?.meta.tags,
-        filePath: groupFilePath,
-        events: testEvents,
-        success: finalSuccess,
-        durationMs: duration,
-        groupId: testItem?.meta.groupId,
+        type,
+        message,
+        data,
       });
+    }
+  };
 
-      addLogEntry("result", finalSuccess ? "PASSED" : "FAILED", {
-        duration,
-        success: finalSuccess,
-        peakMemoryMB,
-      });
+  const finalizeTest = () => {
+    if (!testStarted) return;
+    testStarted = false;
+    const duration = Date.now() - startTime;
+    const allAssertionsPassed = assertions.every((a) => a.passed);
+    const finalSuccess = success && allAssertionsPassed;
 
-      const peakMB = peakMemoryMB ? parseFloat(peakMemoryMB) : 0;
-      if (peakMB > overallPeakMemoryMB) {
-        overallPeakMemoryMB = peakMB;
-      }
+    collectedRuns.push({
+      testId,
+      testName,
+      tags: testItem?.meta.tags,
+      filePath: currentGroupFilePath,
+      events: testEvents,
+      success: finalSuccess,
+      durationMs: duration,
+      groupId: testItem?.meta.groupId,
+    });
 
-      const testHttpCalls = testEvents.filter((e) => e.type === "trace").length;
-      const testSteps = testEvents.filter((e) => e.type === "step_end").length;
-      const miniStats: string[] = [];
-      miniStats.push(`${duration}ms`);
-      if (testHttpCalls > 0) miniStats.push(`${testHttpCalls} calls`);
-      if (assertions.length > 0) miniStats.push(`${assertions.length} checks`);
-      if (testSteps > 0) miniStats.push(`${testSteps} steps`);
+    addLogEntry("result", finalSuccess ? "PASSED" : "FAILED", {
+      duration,
+      success: finalSuccess,
+      peakMemoryMB,
+    });
 
-      if (finalSuccess) {
-        console.log(
-          `    ${colors.green}✓ PASSED${colors.reset} ${colors.dim}(${miniStats.join(", ")})${colors.reset}`,
-        );
-        passed++;
-      } else {
-        console.log(
-          `    ${colors.red}✗ FAILED${colors.reset} ${colors.dim}(${miniStats.join(", ")})${colors.reset}`,
-        );
-        failed++;
-      }
-
-      if (peakMB > MEMORY_WARNING_THRESHOLD_MB) {
-        if (peakMB > CLOUD_MEMORY_LIMITS.free) {
-          console.log(
-            `      ${colors.yellow}⚠ Memory (${peakMemoryMB} MB) exceeds Free cloud runner limit (${CLOUD_MEMORY_LIMITS.free} MB).${colors.reset}`,
-          );
-        } else {
-          console.log(
-            `      ${colors.yellow}⚠ Memory (${peakMemoryMB} MB) is approaching Free cloud runner limit (${CLOUD_MEMORY_LIMITS.free} MB).${colors.reset}`,
-          );
-        }
-      }
-
-      for (const assertion of assertions) {
-        if (!assertion.passed) {
-          console.log(
-            `      ${colors.red}✗ ${assertion.message}${colors.reset}`,
-          );
-          if (assertion.expected !== undefined || assertion.actual !== undefined) {
-            if (assertion.expected !== undefined) {
-              console.log(
-                `        ${colors.dim}Expected: ${JSON.stringify(assertion.expected)}${colors.reset}`,
-              );
-            }
-            if (assertion.actual !== undefined) {
-              console.log(
-                `        ${colors.dim}Actual:   ${JSON.stringify(assertion.actual)}${colors.reset}`,
-              );
-            }
-          }
-        }
-      }
-
-      if (errorMsg) {
-        console.log(`      ${colors.red}Error: ${errorMsg}${colors.reset}`);
-      }
-    };
-
-    for await (
-      const event of executor.run(
-        testFileUrl,
-        "",
-        {
-          vars: envVars,
-          secrets,
-          ...(Object.keys(sessionState).length > 0 && { session: sessionState }),
-        },
-        {
-          ...toSingleExecutionOptions(shared),
-          timeout: batchTimeout,
-          testIds,
-          exportNames,
-          // Pass concurrency to harness when the batch has parallel-marked tests.
-          // The harness uses p-queue to run them concurrently within a single process.
-          ...(runnableTests.some((ft) => ft.test.meta.parallel) && shared.concurrency > 1
-            ? { concurrency: shared.concurrency }
-            : {}),
-        },
-      )
-    ) {
-      switch (event.type) {
-        case "start": {
-          const entry = testMap.get(event.id);
-          testId = event.id;
-          testName = entry?.test.meta.name || event.name || event.id;
-          testItem = entry?.test || null;
-          startTime = Date.now();
-          testEvents = [];
-          assertions = [];
-          success = false;
-          errorMsg = undefined;
-          peakMemoryMB = undefined;
-          stepAssertionCount = 0;
-          stepTraceLines = [];
-          testStarted = true;
-
-          const tags = testItem?.meta.tags?.length
-            ? ` ${colors.dim}[${testItem.meta.tags.join(", ")}]${colors.reset}`
-            : "";
-          console.log(
-            `  ${colors.cyan}●${colors.reset} ${testName}${tags}`,
-          );
-          if (testItem?.meta.description) {
-            console.log(
-              `    ${colors.dim}${testItem.meta.description}${colors.reset}`,
-            );
-          }
-          break;
-        }
-
-        case "status":
-          success = event.status === "completed";
-          if (event.error) {
-            errorMsg = event.error;
-            addLogEntry("error", event.error);
-          }
-          if (event.peakMemoryMB) peakMemoryMB = event.peakMemoryMB;
-          finalizeTest();
-          break;
-
-        case "error":
-          success = false;
-          if (!errorMsg) errorMsg = event.message;
-          addLogEntry("error", event.message);
-          break;
-
-        case "log":
-          addLogEntry("log", event.message);
-          if (event.message.startsWith("Loading test module:")) break;
-          console.log(`      ${colors.dim}${event.message}${colors.reset}`);
-          break;
-
-        case "assertion":
-          assertions.push({
-            passed: event.passed,
-            message: event.message,
-            actual: event.actual,
-            expected: event.expected,
-          });
-          stepAssertionCount++;
-          addLogEntry("assertion", event.message, {
-            passed: event.passed,
-            actual: event.actual,
-            expected: event.expected,
-          });
-          if (effectiveRun.verbose) {
-            const icon = event.passed ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
-            console.log(
-              `        ${icon} ${colors.dim}${event.message}${colors.reset}`,
-            );
-          }
-          break;
-
-        case "trace": {
-          const traceTarget = event.data.target ?? `${event.data.method ?? "?"} ${event.data.url ?? "?"}`;
-          const traceDuration = event.data.durationMs ?? event.data.duration ?? 0;
-          const traceProtocol = event.data.protocol ?? "http";
-          const traceMsg = `${traceTarget} → ${event.data.status} (${traceDuration}ms)`;
-          addLogEntry("trace", traceMsg, event.data);
-          traceCollector.push({
-            testId,
-            protocol: traceProtocol,
-            target: traceTarget,
-            method: event.data.method,
-            url: event.data.url,
-            status: event.data.status,
-          });
-          const displayTarget = event.data.method && event.data.url
-            ? `${colors.dim}${event.data.method}${colors.reset} ${compactUrl(event.data.url)}`
-            : `${colors.dim}${traceTarget}${colors.reset}`;
-          const compactTrace = `${displayTarget} ${colors.dim}→${colors.reset} ${
-            colorStatus(event.data.status)
-          } ${colors.dim}${traceDuration}ms${colors.reset}`;
-          stepTraceLines.push(compactTrace);
-          console.log(
-            `      ${colors.dim}↳${colors.reset} ${compactTrace}`,
-          );
-          if (effectiveRun.verbose && event.data.requestBody) {
-            console.log(
-              `        ${colors.dim}req: ${JSON.stringify(event.data.requestBody).slice(0, 120)}${colors.reset}`,
-            );
-          }
-          if (effectiveRun.verbose && event.data.responseBody) {
-            const body = JSON.stringify(event.data.responseBody);
-            console.log(
-              `        ${colors.dim}res: ${body.slice(0, 120)}${body.length > 120 ? "…" : ""}${colors.reset}`,
-            );
-          }
-          break;
-        }
-
-        case "action": {
-          const a = event.data;
-          if (a.category === "http:request") break;
-          const statusColor = a.status === "ok" ? colors.green : a.status === "error" ? colors.red : colors.yellow;
-          const statusIcon = a.status === "ok" ? "✓" : a.status === "error" ? "✗" : "⏱";
-          addLogEntry("action", `[${a.category}] ${a.target} ${a.duration}ms ${a.status}`, a);
-          console.log(
-            `      ${colors.dim}↳${colors.reset} ${colors.cyan}${a.category}${colors.reset} ${a.target} ${colors.dim}${a.duration}ms${colors.reset} ${statusColor}${statusIcon}${colors.reset}`,
-          );
-          break;
-        }
-
-        case "event": {
-          const ev = event.data;
-          addLogEntry("event", `[${ev.type}]`, ev);
-          if (effectiveRun.verbose) {
-            const summary = JSON.stringify(ev.data).slice(0, 80);
-            console.log(
-              `      ${colors.dim}[${ev.type}] ${summary}${colors.reset}`,
-            );
-          }
-          break;
-        }
-
-        case "metric": {
-          metricCollector.add(event.name, event.value);
-          const unit = event.unit ? ` ${event.unit}` : "";
-          const tagStr = event.tags
-            ? ` ${colors.dim}{${
-              Object.entries(event.tags)
-                .map(([k, v]) => `${k}=${v}`)
-                .join(", ")
-            }}${colors.reset}`
-            : "";
-          const metricMsg = `${event.name} = ${event.value}${unit}`;
-          addLogEntry("metric", metricMsg, {
-            name: event.name,
-            value: event.value,
-            unit: event.unit,
-            tags: event.tags,
-          });
-          if (effectiveRun.verbose) {
-            console.log(
-              `      ${colors.blue}📊 ${metricMsg}${colors.reset}${tagStr}`,
-            );
-          }
-          break;
-        }
-
-        case "step_start":
-          stepAssertionCount = 0;
-          stepTraceLines = [];
-          console.log(
-            `    ${colors.cyan}┌${colors.reset} ${colors.dim}step ${
-              event.index + 1
-            }/${event.total}${colors.reset} ${colors.bold}${event.name}${colors.reset}`,
-          );
-          break;
-
-        case "step_end": {
-          const stepIcon = event.status === "passed"
-            ? `${colors.green}✓${colors.reset}`
-            : event.status === "failed"
-            ? `${colors.red}✗${colors.reset}`
-            : `${colors.yellow}○${colors.reset}`;
-          const stepParts: string[] = [];
-          if (event.durationMs !== undefined) stepParts.push(`${event.durationMs}ms`);
-          if (event.assertions > 0) stepParts.push(`${event.assertions} assertions`);
-          const httpInStep = stepTraceLines.length;
-          if (httpInStep > 0) stepParts.push(`${httpInStep} API call${httpInStep > 1 ? "s" : ""}`);
-          console.log(
-            `    ${colors.cyan}└${colors.reset} ${stepIcon} ${colors.dim}${stepParts.join(" · ")}${colors.reset}`,
-          );
-          if (event.error) {
-            console.log(
-              `      ${colors.red}${event.error}${colors.reset}`,
-            );
-          }
-          break;
-        }
-
-        case "summary":
-          runStats.httpRequestTotal += event.data.httpRequestTotal;
-          runStats.httpErrorTotal += event.data.httpErrorTotal;
-          runStats.assertionTotal += event.data.assertionTotal;
-          runStats.assertionFailed += event.data.assertionFailed;
-          runStats.warningTotal += event.data.warningTotal;
-          runStats.warningTriggered += event.data.warningTriggered;
-          runStats.stepTotal += event.data.stepTotal;
-          runStats.stepPassed += event.data.stepPassed;
-          runStats.stepFailed += event.data.stepFailed;
-          break;
-
-        case "warning": {
-          const warnIcon = event.condition ? `${colors.green}✓${colors.reset}` : `${colors.yellow}⚠${colors.reset}`;
-          console.log(
-            `      ${warnIcon} ${colors.yellow}${event.message}${colors.reset}`,
-          );
-          break;
-        }
-
-        case "schema_validation":
-          if (effectiveRun.verbose) {
-            const icon = event.success ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
-            console.log(
-              `      ${icon} ${colors.dim}schema: ${event.label}${colors.reset}`,
-            );
-          }
-          break;
-
-        case "session:set":
-          // Accumulate session writes from tests for subsequent files
-          sessionState[event.key] = event.value;
-          // Do NOT fall through to testEvents — internal only
-          continue;
-      }
-
-      if (testStarted) testEvents.push(event);
+    const peakMB = peakMemoryMB ? parseFloat(peakMemoryMB) : 0;
+    if (peakMB > overallPeakMemoryMB) {
+      overallPeakMemoryMB = peakMB;
     }
 
-    if (!testStarted && errorMsg) {
-      // Harness failed before emitting any test start (e.g. module load error)
+    const testHttpCalls = testEvents.filter((e) => e.type === "trace").length;
+    const testSteps = testEvents.filter((e) => e.type === "step_end").length;
+    const miniStats: string[] = [];
+    miniStats.push(`${duration}ms`);
+    if (testHttpCalls > 0) miniStats.push(`${testHttpCalls} calls`);
+    if (assertions.length > 0) miniStats.push(`${assertions.length} checks`);
+    if (testSteps > 0) miniStats.push(`${testSteps} steps`);
+
+    if (finalSuccess) {
       console.log(
-        `  ${colors.red}✗ ${errorMsg}${colors.reset}`,
+        `    ${colors.green}✓ PASSED${colors.reset} ${colors.dim}(${miniStats.join(", ")})${colors.reset}`,
+      );
+      passed++;
+    } else {
+      console.log(
+        `    ${colors.red}✗ FAILED${colors.reset} ${colors.dim}(${miniStats.join(", ")})${colors.reset}`,
       );
       failed++;
     }
 
-    if (testStarted) {
-      if (!errorMsg) errorMsg = "Process exited before test completed";
-      finalizeTest();
-    }
-  }
-
-  // ── Session teardown ───────────────────────────────────────────────────
-  if (sessionFile) {
-    for await (const event of orchestrator.runSessionTeardown(
-      sessionFile,
-      { vars: envVars, secrets },
-      sessionState,
-      toSingleExecutionOptions(shared),
-    )) {
-      if (event.type === "log") {
+    if (peakMB > MEMORY_WARNING_THRESHOLD_MB) {
+      if (peakMB > CLOUD_MEMORY_LIMITS.free) {
         console.log(
-          `  ${colors.dim}[session] ${event.message}${colors.reset}`,
+          `      ${colors.yellow}⚠ Memory (${peakMemoryMB} MB) exceeds Free cloud runner limit (${CLOUD_MEMORY_LIMITS.free} MB).${colors.reset}`,
         );
-      } else if (event.type === "status" && event.status === "failed") {
+      } else {
         console.log(
-          `  ${colors.yellow}⚠ Session teardown failed${event.error ? `: ${event.error}` : ""}${colors.reset}`,
+          `      ${colors.yellow}⚠ Memory (${peakMemoryMB} MB) is approaching Free cloud runner limit (${CLOUD_MEMORY_LIMITS.free} MB).${colors.reset}`,
         );
       }
+    }
+
+    for (const assertion of assertions) {
+      if (!assertion.passed) {
+        console.log(
+          `      ${colors.red}✗ ${assertion.message}${colors.reset}`,
+        );
+        if (assertion.expected !== undefined || assertion.actual !== undefined) {
+          if (assertion.expected !== undefined) {
+            console.log(
+              `        ${colors.dim}Expected: ${JSON.stringify(assertion.expected)}${colors.reset}`,
+            );
+          }
+          if (assertion.actual !== undefined) {
+            console.log(
+              `        ${colors.dim}Actual:   ${JSON.stringify(assertion.actual)}${colors.reset}`,
+            );
+          }
+        }
+      }
+    }
+
+    if (errorMsg) {
+      console.log(`      ${colors.red}Error: ${errorMsg}${colors.reset}`);
+    }
+  };
+
+  // Pre-filter tests by capability profile so file:start can emit the
+  // ⊘ lines inline (preserves the pre-migration output layout where these
+  // lines appear between the file header and the first runnable test of
+  // the file). `runnableByFile` is what actually feeds ProjectRunner.
+  const fileCapabilitySkips = new Map<
+    string,
+    Array<{ ft: (typeof testsToRun)[number]; reason: string }>
+  >();
+  const runnableByFile = new Map<string, typeof testsToRun>();
+  for (const [filePath, fileTests] of fileGroups) {
+    const skips: Array<{ ft: (typeof testsToRun)[number]; reason: string }> = [];
+    const runnable: typeof testsToRun = [];
+    for (const ft of fileTests) {
+      const reason = shouldSkipTest(ft.test.meta, capabilityProfile);
+      if (reason) {
+        skips.push({ ft, reason });
+      } else {
+        runnable.push(ft);
+      }
+    }
+    if (skips.length > 0) fileCapabilitySkips.set(filePath, skips);
+    if (runnable.length > 0) runnableByFile.set(filePath, runnable);
+  }
+
+  // Flatten in fileGroups insertion order so ProjectRunner processes files
+  // in the same order the old inline loop did.
+  const runnableTests: typeof testsToRun = [];
+  for (const filePath of fileGroups.keys()) {
+    const runnable = runnableByFile.get(filePath);
+    if (runnable) runnableTests.push(...runnable);
+  }
+
+  // Files ProjectRunner actually started. Any fileGroups entry that never
+  // gets file:start is a fail-fast skip — handled post run:complete.
+  const startedFiles = new Set<string>();
+
+  const runner = new ProjectRunner({
+    rootDir,
+    sharedConfig: shared,
+    sessionStartDir: startDir,
+    vars: envVars,
+    secrets,
+    // Cast — CLI's DiscoveredTestMeta.requires is a plain `string | undefined`
+    // (scanner output, openly typed). ProjectRunnerTest narrows it to the
+    // CaseRequires literal union. Widening happens upstream at scanner.
+    tests: runnableTests.map((t) => ({
+      filePath: t.filePath,
+      exportName: t.exportName,
+      meta: t.test.meta,
+    })) as ProjectRunnerTest[],
+    noSession: !!options.noSession,
+    interactive,
+    ...(options.inspectBrk !== undefined && { inspectBrk: options.inspectBrk }),
+    metricCollector,
+    executor,
+  });
+
+  for await (const ev of runner.run()) {
+    switch (ev.type) {
+      case "bootstrap:start":
+      case "bootstrap:done":
+      case "discovery:done":
+      case "session:setup:start":
+      case "session:teardown:start":
+      case "session:teardown:done":
+        // Silent — either internal plumbing, or already covered by a more
+        // specific event (e.g. session:discovered already printed the
+        // "Session: <path>" header before setup:start arrived).
+        break;
+
+      case "bootstrap:failed":
+        console.error(
+          `\n${colors.red}Bootstrap failed: ${ev.error.message}${colors.reset}`,
+        );
+        process.exit(1);
+        break;
+
+      case "session:discovered":
+        if (ev.sessionFile) {
+          console.log(
+            `${colors.dim}Session: ${relative(process.cwd(), ev.sessionFile)}${colors.reset}`,
+          );
+        }
+        break;
+
+      case "session:setup:event": {
+        const se = ev.event;
+        if (se.type === "session:set") {
+          sessionState[se.key] = se.value;
+        } else if (se.type === "status" && se.status === "failed") {
+          console.log(
+            `  ${colors.red}✗ Session setup failed${se.error ? `: ${se.error}` : ""}${colors.reset}`,
+          );
+        } else if (se.type === "log") {
+          console.log(
+            `  ${colors.dim}[session] ${se.message}${colors.reset}`,
+          );
+        }
+        break;
+      }
+
+      case "session:setup:done": {
+        const count = ev.stateKeys.length;
+        if (count > 0) {
+          console.log(
+            `${colors.dim}  ${count} session value${count > 1 ? "s" : ""} set${colors.reset}`,
+          );
+        }
+        break;
+      }
+
+      case "session:setup:failed":
+        console.log(
+          `\n${colors.red}Session setup failed. All tests skipped.${colors.reset}`,
+        );
+        process.exit(1);
+        break;
+
+      case "session:teardown:event": {
+        const te = ev.event;
+        if (te.type === "log") {
+          console.log(
+            `  ${colors.dim}[session] ${te.message}${colors.reset}`,
+          );
+        } else if (te.type === "status" && te.status === "failed") {
+          console.log(
+            `  ${colors.yellow}⚠ Session teardown failed${te.error ? `: ${te.error}` : ""}${colors.reset}`,
+          );
+        }
+        break;
+      }
+
+      case "file:start": {
+        currentGroupFilePath = ev.filePath;
+        startedFiles.add(ev.filePath);
+        const runnable = runnableByFile.get(ev.filePath) ?? [];
+        currentTestMap = new Map(runnable.map((ft) => [ft.test.meta.id, ft]));
+
+        if (isMultiFile) {
+          const relPath = relative(process.cwd(), ev.filePath);
+          console.log(`${colors.bold}📁 ${relPath}${colors.reset}`);
+        }
+
+        // Inline capability-skip display — preserves pre-migration layout
+        // where ⊘ lines sit between the file header and the first runnable
+        // test of the file.
+        const skips = fileCapabilitySkips.get(ev.filePath);
+        if (skips) {
+          for (const { ft, reason } of skips) {
+            skipped++;
+            const name = ft.test.meta.name || ft.test.meta.id;
+            console.log(
+              `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${reason})${colors.reset}`,
+            );
+            collectedRuns.push({
+              testId: ft.test.meta.id,
+              testName: name,
+              tags: ft.test.meta.tags as string[] | undefined,
+              filePath: ev.filePath,
+              events: [{ type: "status", status: "skipped", reason } as ExecutionEvent],
+              success: true,
+              durationMs: 0,
+              groupId: ft.test.meta.groupId,
+            });
+          }
+        }
+        break;
+      }
+
+      case "file:event": {
+        const event = ev.event;
+        switch (event.type) {
+          case "start": {
+            const entry = currentTestMap?.get(event.id);
+            testId = event.id;
+            testName = entry?.test.meta.name || event.name || event.id;
+            testItem = entry?.test || null;
+            startTime = Date.now();
+            testEvents = [];
+            assertions = [];
+            success = false;
+            errorMsg = undefined;
+            peakMemoryMB = undefined;
+            stepAssertionCount = 0;
+            stepTraceLines = [];
+            testStarted = true;
+
+            const tags = testItem?.meta.tags?.length
+              ? ` ${colors.dim}[${testItem.meta.tags.join(", ")}]${colors.reset}`
+              : "";
+            console.log(
+              `  ${colors.cyan}●${colors.reset} ${testName}${tags}`,
+            );
+            if (testItem?.meta.description) {
+              console.log(
+                `    ${colors.dim}${testItem.meta.description}${colors.reset}`,
+              );
+            }
+            break;
+          }
+
+          case "status":
+            success = event.status === "completed";
+            if (event.error) {
+              errorMsg = event.error;
+              addLogEntry("error", event.error);
+            }
+            if (event.peakMemoryMB) peakMemoryMB = event.peakMemoryMB;
+            finalizeTest();
+            break;
+
+          case "error":
+            success = false;
+            if (!errorMsg) errorMsg = event.message;
+            addLogEntry("error", event.message);
+            break;
+
+          case "log":
+            addLogEntry("log", event.message);
+            if (event.message.startsWith("Loading test module:")) break;
+            console.log(`      ${colors.dim}${event.message}${colors.reset}`);
+            break;
+
+          case "assertion":
+            assertions.push({
+              passed: event.passed,
+              message: event.message,
+              actual: event.actual,
+              expected: event.expected,
+            });
+            stepAssertionCount++;
+            addLogEntry("assertion", event.message, {
+              passed: event.passed,
+              actual: event.actual,
+              expected: event.expected,
+            });
+            if (effectiveRun.verbose) {
+              const icon = event.passed ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
+              console.log(
+                `        ${icon} ${colors.dim}${event.message}${colors.reset}`,
+              );
+            }
+            break;
+
+          case "trace": {
+            const traceTarget = event.data.target ?? `${event.data.method ?? "?"} ${event.data.url ?? "?"}`;
+            const traceDuration = event.data.durationMs ?? event.data.duration ?? 0;
+            const traceProtocol = event.data.protocol ?? "http";
+            const traceMsg = `${traceTarget} → ${event.data.status} (${traceDuration}ms)`;
+            addLogEntry("trace", traceMsg, event.data);
+            traceCollector.push({
+              testId,
+              protocol: traceProtocol,
+              target: traceTarget,
+              method: event.data.method,
+              url: event.data.url,
+              status: event.data.status,
+            });
+            const displayTarget = event.data.method && event.data.url
+              ? `${colors.dim}${event.data.method}${colors.reset} ${compactUrl(event.data.url)}`
+              : `${colors.dim}${traceTarget}${colors.reset}`;
+            const compactTrace = `${displayTarget} ${colors.dim}→${colors.reset} ${
+              colorStatus(event.data.status)
+            } ${colors.dim}${traceDuration}ms${colors.reset}`;
+            stepTraceLines.push(compactTrace);
+            console.log(
+              `      ${colors.dim}↳${colors.reset} ${compactTrace}`,
+            );
+            if (effectiveRun.verbose && event.data.requestBody) {
+              console.log(
+                `        ${colors.dim}req: ${JSON.stringify(event.data.requestBody).slice(0, 120)}${colors.reset}`,
+              );
+            }
+            if (effectiveRun.verbose && event.data.responseBody) {
+              const body = JSON.stringify(event.data.responseBody);
+              console.log(
+                `        ${colors.dim}res: ${body.slice(0, 120)}${body.length > 120 ? "…" : ""}${colors.reset}`,
+              );
+            }
+            break;
+          }
+
+          case "action": {
+            const a = event.data;
+            if (a.category === "http:request") break;
+            const statusColor = a.status === "ok" ? colors.green : a.status === "error" ? colors.red : colors.yellow;
+            const statusIcon = a.status === "ok" ? "✓" : a.status === "error" ? "✗" : "⏱";
+            addLogEntry("action", `[${a.category}] ${a.target} ${a.duration}ms ${a.status}`, a);
+            console.log(
+              `      ${colors.dim}↳${colors.reset} ${colors.cyan}${a.category}${colors.reset} ${a.target} ${colors.dim}${a.duration}ms${colors.reset} ${statusColor}${statusIcon}${colors.reset}`,
+            );
+            break;
+          }
+
+          case "event": {
+            const evData = event.data;
+            addLogEntry("event", `[${evData.type}]`, evData);
+            if (effectiveRun.verbose) {
+              const summary = JSON.stringify(evData.data).slice(0, 80);
+              console.log(
+                `      ${colors.dim}[${evData.type}] ${summary}${colors.reset}`,
+              );
+            }
+            break;
+          }
+
+          case "metric": {
+            // ProjectRunner already accumulates into metricCollector (passed
+            // in above). CLI only handles verbose display + log entry.
+            const unit = event.unit ? ` ${event.unit}` : "";
+            const tagStr = event.tags
+              ? ` ${colors.dim}{${
+                Object.entries(event.tags)
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(", ")
+              }}${colors.reset}`
+              : "";
+            const metricMsg = `${event.name} = ${event.value}${unit}`;
+            addLogEntry("metric", metricMsg, {
+              name: event.name,
+              value: event.value,
+              unit: event.unit,
+              tags: event.tags,
+            });
+            if (effectiveRun.verbose) {
+              console.log(
+                `      ${colors.blue}📊 ${metricMsg}${colors.reset}${tagStr}`,
+              );
+            }
+            break;
+          }
+
+          case "step_start":
+            stepAssertionCount = 0;
+            stepTraceLines = [];
+            console.log(
+              `    ${colors.cyan}┌${colors.reset} ${colors.dim}step ${
+                event.index + 1
+              }/${event.total}${colors.reset} ${colors.bold}${event.name}${colors.reset}`,
+            );
+            break;
+
+          case "step_end": {
+            const stepIcon = event.status === "passed"
+              ? `${colors.green}✓${colors.reset}`
+              : event.status === "failed"
+              ? `${colors.red}✗${colors.reset}`
+              : `${colors.yellow}○${colors.reset}`;
+            const stepParts: string[] = [];
+            if (event.durationMs !== undefined) stepParts.push(`${event.durationMs}ms`);
+            if (event.assertions > 0) stepParts.push(`${event.assertions} assertions`);
+            const httpInStep = stepTraceLines.length;
+            if (httpInStep > 0) stepParts.push(`${httpInStep} API call${httpInStep > 1 ? "s" : ""}`);
+            console.log(
+              `    ${colors.cyan}└${colors.reset} ${stepIcon} ${colors.dim}${stepParts.join(" · ")}${colors.reset}`,
+            );
+            if (event.error) {
+              console.log(
+                `      ${colors.red}${event.error}${colors.reset}`,
+              );
+            }
+            break;
+          }
+
+          case "summary":
+            runStats.httpRequestTotal += event.data.httpRequestTotal;
+            runStats.httpErrorTotal += event.data.httpErrorTotal;
+            runStats.assertionTotal += event.data.assertionTotal;
+            runStats.assertionFailed += event.data.assertionFailed;
+            runStats.warningTotal += event.data.warningTotal;
+            runStats.warningTriggered += event.data.warningTriggered;
+            runStats.stepTotal += event.data.stepTotal;
+            runStats.stepPassed += event.data.stepPassed;
+            runStats.stepFailed += event.data.stepFailed;
+            break;
+
+          case "warning": {
+            const warnIcon = event.condition ? `${colors.green}✓${colors.reset}` : `${colors.yellow}⚠${colors.reset}`;
+            console.log(
+              `      ${warnIcon} ${colors.yellow}${event.message}${colors.reset}`,
+            );
+            break;
+          }
+
+          case "schema_validation":
+            if (effectiveRun.verbose) {
+              const icon = event.success ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
+              console.log(
+                `      ${icon} ${colors.dim}schema: ${event.label}${colors.reset}`,
+              );
+            }
+            break;
+
+          case "session:set":
+            // ProjectRunner accumulates internally for cross-file forwarding;
+            // CLI keeps its copy only for symmetry with pre-migration code
+            // paths (useful e.g. for debug logging).
+            sessionState[event.key] = event.value;
+            continue;
+        }
+
+        if (testStarted) testEvents.push(event);
+        break;
+      }
+
+      case "file:complete":
+        // Mirror the old inline loop's tail cleanup: if the harness died
+        // mid-test or emitted no start event, promote the leftover state
+        // to a visible failure row.
+        if (!testStarted && errorMsg) {
+          console.log(
+            `  ${colors.red}✗ ${errorMsg}${colors.reset}`,
+          );
+          failed++;
+        }
+        if (testStarted) {
+          if (!errorMsg) errorMsg = "Process exited before test completed";
+          finalizeTest();
+        }
+        break;
+
+      case "run:complete":
+        // Fail-fast skip display: any file ProjectRunner never started
+        // (because the failure limit kicked in between file groups) gets
+        // the old "○ (skipped — fail-fast)" lines here, preserving the
+        // pre-migration output layout.
+        if (failureLimit !== undefined && ev.failedCount >= failureLimit) {
+          for (const [filePath, fileTests] of fileGroups) {
+            if (startedFiles.has(filePath)) continue;
+            if (isMultiFile) {
+              const relPath = relative(process.cwd(), filePath);
+              console.log(`${colors.bold}📁 ${relPath}${colors.reset}`);
+            }
+            for (const { test } of fileTests) {
+              skipped++;
+              const name = test.meta.name || test.meta.id;
+              console.log(
+                `  ${colors.yellow}○${colors.reset} ${name} ${colors.dim}(skipped — fail-fast)${colors.reset}`,
+              );
+            }
+          }
+        }
+        break;
+
+      case "run:failed":
+        // Terminal failure — actual exit already happened in
+        // bootstrap:failed / session:setup:failed above.
+        break;
     }
   }
 
