@@ -134,13 +134,6 @@ Run tests locally and upload results in one step:
 npx glubean run --upload
 ```
 
-Or upload separately after running:
-
-```bash
-npx glubean run --result-json
-npx glubean upload results.json
-```
-
 ## What you get from the cloud
 
 Running locally is great for authoring and debugging. The cloud turns the same tests into **continuous verification** — no rewrites, no extra config.
