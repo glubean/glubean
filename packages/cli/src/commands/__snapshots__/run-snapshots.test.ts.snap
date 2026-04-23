@@ -1,5 +1,27 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > bootstrap-plugin-registration: contract.graphql contract imports + runs after installPlugin 1`] = `
+"
+🧪 Glubean Test Runner
+
+File: <FIXTURE_DIR>/tests/users.contract.ts
+
+Discovering tests...
+
+Running 1 test(s)...
+
+  ● get-user — ok
+    fetches a user
+    ✓ PASSED (<Nms>, 1 checks)
+
+─────────────────────────────────────
+Tests:  1 passed
+Total:  1
+Memory: <MEM> peak
+
+"
+`;
+
 exports[`glubean run — snapshot fixtures (RF-1b Phase A) > bootstrap-ran: glubean.setup.ts side-effect shows up in CLI output 1`] = `
 "
 🧪 Glubean Test Runner

@@ -117,6 +117,24 @@ function workspacePackageJson(name: string): string {
   );
 }
 
+/** Variant with @glubean/graphql added (for plugin-registration fixtures). */
+function workspacePackageJsonWithGraphql(name: string): string {
+  return JSON.stringify(
+    {
+      name,
+      type: "module",
+      version: "0.0.0",
+      dependencies: {
+        "@glubean/sdk": "workspace:*",
+        "@glubean/runner": "workspace:*",
+        "@glubean/graphql": "workspace:*",
+      },
+    },
+    null,
+    2,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: simple — one test file, 2 passing tests, no session/contracts
 // ---------------------------------------------------------------------------
@@ -369,6 +387,89 @@ export const noop = test("bootstrap-sentinel", async (ctx) => {
   // covers the path that does, locking the "⊘ — skipped (requires:
   // browser)" layout Phase B preserves.
   // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // Fixture: bootstrap-plugin-registration — proves that the CLI-level
+  // bootstrap() call actually reaches the plugin install path, not just
+  // evaluates setup.ts.
+  //
+  // Pre-RF-1b: CLI never bootstrapped; a `.contract.ts` using
+  // `contract.graphql.with(...)` would fail at CLI's extractContractFromFile
+  // discovery (parent-process) because `contract.graphql` was undefined.
+  // The run would surface 0 tests or an import error.
+  //
+  // Post-RF-1b: bootstrap() loads glubean.setup.ts → installPlugin(
+  // graphqlPlugin) registers the graphql adapter on the contract namespace
+  // → extractContractFromFile imports the contract file successfully →
+  // the test is discovered + runs.
+  //
+  // The snapshot captures the post-RF-1b working path. Any regression that
+  // breaks the bootstrap-to-installPlugin chain will make CLI's discovery
+  // fail and surface a diff (either "No tests found" or an import error).
+  // -------------------------------------------------------------------------
+
+  test("bootstrap-plugin-registration: contract.graphql contract imports + runs after installPlugin", async () => {
+    const dir = await prepareFixture("bootstrap-plugin", {
+      "package.json": workspacePackageJsonWithGraphql("snapshot-bootstrap-plugin"),
+      "glubean.setup.ts": `
+import { installPlugin } from "@glubean/sdk";
+import graphqlPlugin from "@glubean/graphql";
+await installPlugin(graphqlPlugin);
+`,
+      "tests/users.contract.ts": `
+import { contract } from "@glubean/sdk";
+
+// Mock GraphQL client — we're testing the plugin-registration path,
+// not the network. Returning a stable canned response so the case
+// assertion passes deterministically.
+const mockGqlClient: any = {
+  query: async () => ({
+    data: { user: { id: "u1" } },
+    errors: undefined,
+    httpStatus: 200,
+    headers: {},
+    rawBody: null,
+  }),
+  mutate: async () => ({
+    data: null,
+    errors: undefined,
+    httpStatus: 200,
+    headers: {},
+    rawBody: null,
+  }),
+};
+
+const gql = contract.graphql.with("users-api", { client: mockGqlClient });
+
+export const getUser = gql("get-user", {
+  cases: {
+    ok: {
+      description: "fetches a user",
+      query: "query GetUser($id: ID!) { user(id: $id) { id } }",
+      variables: { id: "u1" },
+      expect: { data: { user: { id: "u1" } } },
+    },
+  },
+});
+`,
+    });
+
+    const { code, stdout, stderr } = await runCli(["run", "tests/"], {
+      cwd: dir,
+    });
+    const normalized = normalizeOutput(stdout + stderr);
+
+    // Direct evidence the plugin was registered and the contract imported:
+    // the case's ID ("get-user.ok" or the display form) appears in output
+    // with PASSED status. Pre-RF-1b this would've produced an import error
+    // or "No tests found" because `contract.graphql` wasn't registered in
+    // the CLI parent process during discovery.
+    expect(code).toBe(0);
+    expect(normalized).toContain("get-user");
+    expect(normalized).toContain("PASSED");
+
+    expect(normalized).toMatchSnapshot();
+  }, 30_000);
 
   test("contract-case-requires-browser: inline ⊘ skip line between file header and runnable tests", async () => {
     const dir = await prepareFixture("cap-skip", {

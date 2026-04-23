@@ -1,4 +1,5 @@
 import {
+  bootstrap,
   evaluateThresholds,
   type ExecutionEvent,
   MetricCollector,
@@ -575,6 +576,18 @@ export async function runCommand(
       process.exit(1);
     }
   }
+
+  // ── Bootstrap plugins BEFORE discovery ─────────────────────────────────
+  // CLI's `discoverTests` dynamically imports each .contract.ts / .test.ts
+  // in this process. If the file uses plugin-registered names like
+  // `contract.graphql.with(...)` before the plugin's manifest is installed,
+  // the import throws ("Cannot read properties of undefined (reading
+  // 'with')"). ProjectRunner calls bootstrap() too, but that happens AFTER
+  // our discovery — too late. Matching MCP's `glubean_openapi` pattern here:
+  // explicit bootstrap before any parent-process contract file import. The
+  // call is idempotent (bootstrap tracks loadState internally), so
+  // ProjectRunner's internal call is a no-op second visit.
+  await bootstrap(rootDir);
 
   // ── Discover tests across all files ─────────────────────────────────────
   console.log(`${colors.dim}Discovering tests...${colors.reset}`);
