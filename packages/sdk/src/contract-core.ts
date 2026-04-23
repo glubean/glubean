@@ -54,6 +54,18 @@ export function getAdapter(
 }
 
 /**
+ * List all currently registered protocol names. Used by the artifact
+ * registry's capability introspection (`listArtifactCapability`) to iterate
+ * all adapters and classify them against a given artifact kind.
+ *
+ * Order is insertion order (Map semantics). Consumers that need stable
+ * output should sort.
+ */
+export function listRegisteredProtocols(): string[] {
+  return [..._adapters.keys()];
+}
+
+/**
  * Test-only: unregister a protocol adapter + remove its dispatcher from the
  * `contract` namespace. Used by `__resetInstalledPluginsForTesting` in
  * `install-plugin.ts` to restore a clean state between test scenarios.
@@ -68,6 +80,20 @@ export function __unregisterProtocolForTesting(protocol: string): void {
   if (RESERVED_PROTOCOL_NAMES.has(protocol)) return;
   _adapters.delete(protocol);
   delete (contract as Record<string, unknown>)[protocol];
+}
+
+/**
+ * Test-only: unregister all protocol adapters at once (iterates the current
+ * registry and calls `__unregisterProtocolForTesting` for each, including
+ * built-in "http"). Used by contract-artifacts tests that need a clean
+ * adapter registry between assertions. Reserved names are naturally skipped.
+ *
+ * @internal
+ */
+export function __resetAdapterRegistryForTesting(): void {
+  for (const protocol of [..._adapters.keys()]) {
+    __unregisterProtocolForTesting(protocol);
+  }
 }
 
 // =============================================================================

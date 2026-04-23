@@ -379,8 +379,76 @@ export {
   extractMappingsOut,
   traceComputeFn,
   getAdapter,
+  listRegisteredProtocols,
   LensPurityError,
 } from "./contract-core.js";
+
+// =============================================================================
+// Artifact registry — kind-based rendering extension point
+//
+// `KnownArtifacts` / `KnownArtifactParts` / `KnownArtifactOptions` are
+// declared here at the package root so third-party plugins can augment via
+// `declare module "@glubean/sdk"` and hit the same declaration node that
+// `ContractProtocolAdapter.artifacts` references internally. Phase 2/3 will
+// populate the built-in members (`openapi`, `markdown`) directly in these
+// interfaces as they land.
+//
+// See `internal/40-discovery/proposals/contract-artifact-registry.md` (v6).
+// =============================================================================
+
+/**
+ * Map of known artifact kind names to their Final (merged) types.
+ *
+ * Augmentation pattern for plugins introducing new kinds:
+ *
+ * ```ts
+ * declare module "@glubean/sdk" {
+ *   interface KnownArtifacts { proto: string; }
+ *   interface KnownArtifactParts { proto: ProtoPart; }
+ *   interface KnownArtifactOptions { proto: ProtoOptions; }
+ * }
+ * ```
+ */
+export interface KnownArtifacts {
+  // Built-in kinds populate here as Phase 2/3 lands.
+}
+
+/**
+ * Map of known artifact kind names to their per-contract Part types
+ * (what producers / defaultRender emit; merge consumes).
+ * Keys must mirror `KnownArtifacts`.
+ */
+export interface KnownArtifactParts {
+  // Built-in kinds populate here as Phase 2/3 lands.
+}
+
+/**
+ * Map of known artifact kind names to their per-render Options types.
+ * Keys must mirror `KnownArtifacts`.
+ */
+export interface KnownArtifactOptions {
+  // Built-in kinds populate here as Phase 2/3 lands.
+}
+
+export {
+  defineArtifactKind,
+  registerArtifactKind,
+  getArtifactKind,
+  listArtifactKinds,
+  renderArtifact,
+  renderArtifactByName,
+  renderArtifactWithSummary,
+  listArtifactProducers,
+  listArtifactCapability,
+} from "./contract-artifacts.js";
+
+export type {
+  ArtifactKind,
+  RenderArtifactControl,
+  ArtifactContribution,
+  ArtifactSkip,
+  ArtifactRenderSummary,
+} from "./contract-artifacts.js";
 export type {
   CaseLifecycle,
   CaseSeverity,

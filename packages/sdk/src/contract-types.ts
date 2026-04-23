@@ -19,6 +19,11 @@
  */
 
 import type { Test, TestContext } from "./types.js";
+import type {
+  KnownArtifacts,
+  KnownArtifactParts,
+  KnownArtifactOptions,
+} from "./index.js";
 
 // =============================================================================
 // Protocol-agnostic enums
@@ -264,17 +269,42 @@ export interface ContractProtocolAdapter<
   }) => FailureClassification | undefined;
 
   /**
-   * Optional: render contract as an OpenAPI fragment. Input is the Extracted
-   * projection (after normalize). Used by MCP `glubean_openapi` tool.
+   * Artifact producers declared by this adapter. Each entry is a
+   * per-contract renderer for a registered artifact kind (see
+   * `@glubean/sdk`'s `ArtifactKind` + `renderArtifact` / `KnownArtifacts`).
+   * Producers return the kind's Part type; cross-contract merging is the
+   * kind's responsibility.
+   *
+   * Keyed by `ArtifactKind.name`. Third-party plugins add new keys by
+   * augmenting `KnownArtifacts` / `KnownArtifactParts` / `KnownArtifactOptions`
+   * at the package root via `declare module "@glubean/sdk"`.
+   *
+   * Replaces the deprecated per-adapter `toMarkdown?` / `toOpenApi?` hooks
+   * (removed after v0.2.x) which polluted the generic interface with
+   * protocol-specific artifacts (OpenAPI is HTTP-only).
+   */
+  artifacts?: {
+    [K in keyof KnownArtifacts]?: (
+      projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
+      options?: KnownArtifactOptions[K],
+    ) => KnownArtifactParts[K];
+  };
+
+  /**
+   * @deprecated Use `artifacts.openapi` via the artifact registry instead.
+   * Kept on the interface during the transition so existing adapters compile;
+   * call sites that used `adapter.toOpenApi` directly have migrated to
+   * `renderArtifact(openapiArtifact, ...)`.
    */
   toOpenApi?: (
     projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
   ) => Record<string, unknown> | undefined;
 
   /**
-   * Optional: render contract as Markdown documentation. Used by
-   * CLI `glubean contracts --format md-outline` and
-   * MCP `glubean_project_contracts`.
+   * @deprecated Use `artifacts.markdown` via the artifact registry instead.
+   * Kept on the interface during the transition so existing adapters compile;
+   * call sites that used `adapter.toMarkdown` directly have migrated to
+   * `renderArtifact(markdownArtifact, ...)`.
    */
   toMarkdown?: (
     projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
