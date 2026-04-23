@@ -1,5 +1,52 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > bootstrap-ran: glubean.setup.ts side-effect shows up in CLI output 1`] = `
+"
+🧪 Glubean Test Runner
+
+File: <FIXTURE_DIR>/tests/noop.test.ts
+
+Discovering tests...
+
+Running 1 test(s)...
+
+  ● bootstrap-sentinel
+    ✓ PASSED (<Nms>, 1 checks)
+
+─────────────────────────────────────
+Tests:  1 passed
+Total:  1
+Memory: <MEM> peak
+
+[bootstrap-fixture] setup.ts evaluated
+"
+`;
+
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > contract-case-requires-browser: inline ⊘ skip line between file header and runnable tests 1`] = `
+"
+🧪 Glubean Test Runner
+
+File: <FIXTURE_DIR>/tests/gated.contract.ts
+
+Discovering tests...
+
+Running 2 test(s)...
+
+  ⊘ oauth-login.browserFlow — skipped (requires: browser (use --include-browser to run))
+  ● oauth-login — headlessCheck
+    runs by default
+    ✗ FAILED (<Nms>, 1 checks)
+      ✗ expected {} to have status 200
+        Expected: 200
+
+─────────────────────────────────────
+Tests:  1 failed, 1 skipped
+Total:  2
+Memory: <MEM> peak
+
+"
+`;
+
 exports[`glubean run — snapshot fixtures (RF-1b Phase A) > fail-fast: file-group-granularity failure short-circuit 1`] = `
 "
 🧪 Glubean Test Runner

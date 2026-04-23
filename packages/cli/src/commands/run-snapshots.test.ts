@@ -316,4 +316,105 @@ export const runsAnyway = test("runs-anyway", async (ctx) => {
 
     expect(normalized).toMatchSnapshot();
   }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // Fixture: bootstrap-ran — proves runCommand now invokes bootstrap() via
+  // ProjectRunner (RF-1b Phase B). Pre-migration CLI didn't call bootstrap,
+  // so glubean.setup.ts was never evaluated. This fixture uses a setup.ts
+  // that emits a stderr marker; its presence in captured output is direct
+  // evidence bootstrap ran. If a future regression drops bootstrap again,
+  // this snapshot diffs.
+  // -------------------------------------------------------------------------
+
+  test("bootstrap-ran: glubean.setup.ts side-effect shows up in CLI output", async () => {
+    const dir = await prepareFixture("bootstrap-ran", {
+      "package.json": workspacePackageJson("snapshot-bootstrap"),
+      "glubean.setup.ts": `
+// Intentional stderr marker. bootstrap(rootDir) imports this file;
+// if bootstrap runs, the marker appears in captured stderr and locks
+// the RF-1b bootstrap-fix behavior verbatim.
+console.error("[bootstrap-fixture] setup.ts evaluated");
+`,
+      "tests/noop.test.ts": `
+import { test } from "@glubean/sdk";
+
+export const noop = test("bootstrap-sentinel", async (ctx) => {
+  ctx.assert(true, "test runs after bootstrap");
+});
+`,
+    });
+
+    const { code, stdout, stderr } = await runCli(["run", "tests/"], {
+      cwd: dir,
+    });
+    const normalized = normalizeOutput(stdout + stderr);
+
+    expect(code).toBe(0);
+    // The marker proves bootstrap() was called — pre-RF-1b the CLI
+    // never did this, so this assertion alone would have failed then.
+    expect(normalized).toContain("[bootstrap-fixture] setup.ts evaluated");
+    expect(normalized).toContain("bootstrap-sentinel");
+
+    expect(normalized).toMatchSnapshot();
+  }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // Fixture: contract-case-requires-browser — HTTP contract case with
+  // `requires: "browser"`, run without `--include-browser`. Current CLI's
+  // shouldSkipTest filter catches contract-case-level requires (via meta
+  // injected by dispatchContract) and emits the inline ⊘ skip line.
+  //
+  // The earlier `test-level-requires` fixture showed that `test()`
+  // quick-mode does NOT hit this filter (a separate quirk); this one
+  // covers the path that does, locking the "⊘ — skipped (requires:
+  // browser)" layout Phase B preserves.
+  // -------------------------------------------------------------------------
+
+  test("contract-case-requires-browser: inline ⊘ skip line between file header and runnable tests", async () => {
+    const dir = await prepareFixture("cap-skip", {
+      "package.json": workspacePackageJson("snapshot-capskip"),
+      "tests/gated.contract.ts": `
+import { contract } from "@glubean/sdk";
+
+const mockClient: any = {
+  get: () => ({ json: async () => ({}) }),
+  post: () => ({ json: async () => ({}) }),
+  put: () => ({ json: async () => ({}) }),
+  delete: () => ({ json: async () => ({}) }),
+  head: () => ({ json: async () => ({}) }),
+  patch: () => ({ json: async () => ({}) }),
+};
+const api = contract.http.with("oauth-api", { client: mockClient });
+
+export const oauthLogin = api("oauth-login", {
+  endpoint: "POST /auth/oauth",
+  cases: {
+    headlessCheck: {
+      description: "runs by default",
+      expect: { status: 200 },
+    },
+    browserFlow: {
+      description: "needs real browser",
+      requires: "browser",
+      expect: { status: 200 },
+    },
+  },
+});
+`,
+    });
+
+    const { code, stdout, stderr } = await runCli(
+      ["run", "tests/", "--no-session"],
+      { cwd: dir },
+    );
+    const normalized = normalizeOutput(stdout + stderr);
+
+    // The browser-required case must emit the ⊘ inline skip line.
+    expect(normalized).toContain("⊘");
+    expect(normalized).toMatch(/skipped \(.*browser/);
+    // The headless case should still run normally.
+    expect(normalized).toContain("headlessCheck");
+
+    expect(normalized).toMatchSnapshot();
+  }, 30_000);
 });
