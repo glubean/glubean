@@ -413,10 +413,13 @@ import type {
   OpenApiDocument as _OpenApiDocument,
   OpenApiOptions as _OpenApiOptions,
 } from "./contract-http/openapi.js";
+import type { MarkdownPart as _MarkdownPart } from "./contract-artifacts.js";
 
 export interface KnownArtifacts {
   /** OpenAPI 3.1 document (cross-contract merged). HTTP adapter only. */
   openapi: _OpenApiDocument;
+  /** Protocol-agnostic feature-grouped markdown document. */
+  markdown: string;
 }
 
 /**
@@ -427,6 +430,8 @@ export interface KnownArtifacts {
 export interface KnownArtifactParts {
   /** Per-contract partial OpenAPI document (single path + scoped components). */
   openapi: _OpenApiDocument;
+  /** Per-contract structured markdown part (body + feature + caseCount). */
+  markdown: _MarkdownPart;
 }
 
 /**
@@ -435,9 +440,11 @@ export interface KnownArtifactParts {
  */
 export interface KnownArtifactOptions {
   openapi: _OpenApiOptions;
+  markdown: void;
 }
 
 export type { OpenApiDocument, OpenApiOptions } from "./contract-http/openapi.js";
+export type { MarkdownPart } from "./contract-artifacts.js";
 
 export {
   defineArtifactKind,
@@ -450,6 +457,9 @@ export {
   listArtifactProducers,
   listArtifactCapability,
   openapiArtifact,
+  markdownArtifact,
+  genericMarkdownPart,
+  assembleMarkdownDocument,
 } from "./contract-artifacts.js";
 
 export type {

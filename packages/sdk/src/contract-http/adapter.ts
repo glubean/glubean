@@ -796,6 +796,13 @@ export const httpAdapter: ContractProtocolAdapter<
       // null for.
       return part ?? {};
     },
+    markdown: (projection) => ({
+      body: renderMarkdownForHttp(projection),
+      contractId: projection.id,
+      protocol: projection.protocol,
+      feature: projection.feature,
+      caseCount: projection.cases.length,
+    }),
   },
 
   toMarkdown(projection) {

@@ -443,3 +443,115 @@ export const openapiArtifact = defineArtifactKind<
   merge: (parts, options) => mergeOpenApiParts(parts, options),
   empty: emptyOpenApiDocument,
 });
+
+// ---------------------------------------------------------------------------
+// Markdown artifact kind (CAR-1 Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-contract markdown rendering. Structured Part vs string Final lets
+ * `markdownArtifact.merge` group by feature, compute doc-level summary,
+ * and emit ordered sections — things a flat `parts.join("---")` cannot do.
+ *
+ * Adapters populate `body` (and can enrich with protocol-specific detail);
+ * the other fields are read directly off the projection and passed through
+ * for merge-time grouping.
+ */
+export interface MarkdownPart {
+  /** Rendered per-contract markdown section body (without doc-level header). */
+  body: string;
+  contractId: string;
+  protocol: string;
+  /** Feature grouping key (falls back to "Uncategorized" at merge time). */
+  feature?: string;
+  /** Case count for doc-level summary. */
+  caseCount: number;
+}
+
+/**
+ * Kind-level fallback: protocol-agnostic per-contract markdown rendering.
+ * Used when an adapter does not declare `artifacts.markdown`. Reads only
+ * non-protocol-specific fields off the projection so it works for any
+ * registered protocol.
+ */
+export function genericMarkdownPart(
+  projection: ExtractedContractProjection<unknown, unknown>,
+): MarkdownPart {
+  const lines: string[] = [];
+  const target = projection.target ?? projection.id;
+  lines.push(`### ${projection.id} — ${target}`);
+  if (projection.description) lines.push(`\n${projection.description}`);
+  if (projection.deprecated) {
+    lines.push(`\n**Deprecated:** ${projection.deprecated}`);
+  }
+  if (projection.cases.length === 0) {
+    lines.push("\n_(no cases)_");
+  } else {
+    lines.push("\n**Cases:**\n");
+    for (const c of projection.cases) {
+      const marker =
+        c.lifecycle === "deprecated"
+          ? " ⚠ deprecated"
+          : c.lifecycle === "deferred"
+            ? " ⏸ deferred"
+            : "";
+      lines.push(`- \`${c.key}\`${marker} — ${c.description ?? ""}`);
+      if (c.deprecatedReason) lines.push(`  - deprecated: ${c.deprecatedReason}`);
+      if (c.deferredReason) lines.push(`  - deferred: ${c.deferredReason}`);
+    }
+  }
+  return {
+    body: lines.join("\n"),
+    contractId: projection.id,
+    protocol: projection.protocol,
+    feature: projection.feature,
+    caseCount: projection.cases.length,
+  };
+}
+
+/**
+ * Feature-grouped doc-level assembly. Groups parts by `feature` (falling
+ * back to "Uncategorized"), emits a doc summary header + per-group
+ * sections. This is what replaces CLI `formatMdOutline` — Phase 4 will
+ * wire CLI through this path (zero-regression target).
+ */
+export function assembleMarkdownDocument(parts: MarkdownPart[]): string {
+  if (parts.length === 0) return "";
+
+  const groups = new Map<string, MarkdownPart[]>();
+  for (const part of parts) {
+    const key = part.feature ?? "Uncategorized";
+    const list = groups.get(key) ?? [];
+    list.push(part);
+    groups.set(key, list);
+  }
+
+  const totalCases = parts.reduce((n, p) => n + p.caseCount, 0);
+  const featureCount = groups.size;
+
+  const lines: string[] = [];
+  lines.push(
+    `# Contracts (${parts.length} contract${parts.length === 1 ? "" : "s"}, ` +
+      `${featureCount} feature${featureCount === 1 ? "" : "s"}, ` +
+      `${totalCases} case${totalCases === 1 ? "" : "s"})`,
+  );
+  lines.push("");
+
+  for (const [feature, featureParts] of groups.entries()) {
+    lines.push(`## ${feature}`);
+    lines.push("");
+    for (const part of featureParts) {
+      lines.push(part.body);
+      lines.push("");
+    }
+  }
+
+  return lines.join("\n").trimEnd() + "\n";
+}
+
+export const markdownArtifact = defineArtifactKind<string, MarkdownPart>({
+  name: "markdown",
+  defaultRender: (projection) => genericMarkdownPart(projection),
+  merge: (parts) => assembleMarkdownDocument(parts),
+  empty: "",
+});

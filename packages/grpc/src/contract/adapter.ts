@@ -674,5 +674,19 @@ export const grpcAdapter: ContractProtocolAdapter<
   classifyFailure: classifyGrpcFailure,
   renderTarget: renderGrpcTarget,
   toMarkdown: toMarkdownGrpc,
+  artifacts: {
+    markdown: (projection) => ({
+      body: toMarkdownGrpc(
+        projection as ExtractedContractProjection<
+          GrpcSafeSchemas,
+          GrpcContractSafeMeta
+        >,
+      ),
+      contractId: projection.id,
+      protocol: projection.protocol,
+      feature: projection.feature,
+      caseCount: projection.cases.length,
+    }),
+  },
   describePayload: describeGrpcPayload,
 };

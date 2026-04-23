@@ -749,5 +749,19 @@ export const graphqlAdapter: ContractProtocolAdapter<
   classifyFailure: classifyGraphqlFailure,
   renderTarget: renderGraphqlTarget,
   toMarkdown: toMarkdownGraphql,
+  artifacts: {
+    markdown: (projection) => ({
+      body: toMarkdownGraphql(
+        projection as ExtractedContractProjection<
+          GraphqlSafeSchemas,
+          GraphqlContractSafeMeta
+        >,
+      ),
+      contractId: projection.id,
+      protocol: projection.protocol,
+      feature: projection.feature,
+      caseCount: projection.cases.length,
+    }),
+  },
   describePayload: describeGraphqlPayload,
 };
