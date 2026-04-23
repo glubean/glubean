@@ -664,50 +664,6 @@ function renderGraphqlTarget(target: string): string {
 }
 
 // =============================================================================
-// toMarkdown — case list with operation + short query snippet
-// =============================================================================
-
-function summarizeQuery(query: string, limit = 80): string {
-  const flat = query.replace(/\s+/g, " ").trim();
-  return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
-}
-
-function toMarkdownGraphql(
-  projection: ExtractedContractProjection<GraphqlSafeSchemas, GraphqlContractSafeMeta>,
-): string {
-  const lines: string[] = [];
-  const endpoint = projection.target || "(no endpoint)";
-  lines.push(`### ${projection.id} — GraphQL \`${endpoint}\``);
-  if (projection.description) lines.push(`\n${projection.description}`);
-  if (projection.deprecated) lines.push(`\n**Deprecated:** ${projection.deprecated}`);
-
-  if (projection.cases.length === 0) {
-    lines.push("\n_(no cases)_");
-    return lines.join("\n");
-  }
-
-  lines.push("\n**Cases:**\n");
-  for (const c of projection.cases) {
-    const marker =
-      c.lifecycle === "deprecated"
-        ? " ⚠ deprecated"
-        : c.lifecycle === "deferred"
-          ? " ⏸ deferred"
-          : "";
-    const op = c.schemas?.operation ?? "query";
-    const opName = c.schemas?.operationName ?? "anonymous";
-    lines.push(`- \`${c.key}\`${marker} — ${op} \`${opName}\` — ${c.description ?? ""}`);
-    if (c.schemas?.query) {
-      lines.push(`  - \`${summarizeQuery(c.schemas.query)}\``);
-    }
-    if (c.deprecatedReason) lines.push(`  - deprecated: ${c.deprecatedReason}`);
-    if (c.deferredReason) lines.push(`  - deferred: ${c.deferredReason}`);
-  }
-
-  return lines.join("\n");
-}
-
-// =============================================================================
 // describePayload — high-level summary for index views
 // =============================================================================
 
@@ -749,7 +705,6 @@ export const graphqlAdapter: ContractProtocolAdapter<
   validateCaseForFlow: validateGraphqlCaseForFlow,
   classifyFailure: classifyGraphqlFailure,
   renderTarget: renderGraphqlTarget,
-  toMarkdown: toMarkdownGraphql,
   // Markdown uses the SDK's generic structured renderer — GraphQL has no
   // protocol-specific augmentations to contribute.
   artifacts: {

@@ -250,10 +250,10 @@ describe("project + normalize", () => {
 });
 
 // ---------------------------------------------------------------------------
-// renderTarget + toMarkdown
+// renderTarget + markdown artifact
 // ---------------------------------------------------------------------------
 
-describe("renderTarget + toMarkdown", () => {
+describe("renderTarget + markdown artifact", () => {
   test("renderTarget: 'Service/Method' → 'Service.Method'", () => {
     expect(grpcAdapter.renderTarget!("PaymentService/Complete")).toBe(
       "PaymentService.Complete",
@@ -264,7 +264,8 @@ describe("renderTarget + toMarkdown", () => {
     expect(grpcAdapter.renderTarget!("no-slash")).toBe("no-slash");
   });
 
-  test("toMarkdown lists cases with lifecycle markers", () => {
+  test("artifacts.markdown produces a structured MarkdownPart per contract", async () => {
+    const { renderArtifact, markdownArtifact } = await import("@glubean/sdk");
     const spec: GrpcContractSpec = {
       target: "A/B",
       description: "Desc",
@@ -275,13 +276,14 @@ describe("renderTarget + toMarkdown", () => {
     };
     const runtime = grpcAdapter.project(spec);
     const extracted = grpcAdapter.normalize!({ ...runtime, id: "c1" });
-    const md = grpcAdapter.toMarkdown!(extracted);
+    const md = renderArtifact(markdownArtifact, [extracted as any]);
 
-    expect(md).toContain("A.B"); // renderTarget-style display
-    expect(md).toContain("happy path");
-    expect(md).toContain("legacy");
-    expect(md).toContain("⚠ deprecated"); // deprecated marker
-    expect(md).toContain("use new");
+    // CLI-format output (see sdk assembleMarkdownDocument): active cases
+    // use `- **key** — description`; deprecated cases replace the
+    // description with `⊘ **key** — deprecated: <reason>` (original
+    // description is shadowed).
+    expect(md).toContain("- **ok** — happy path");
+    expect(md).toContain("⊘ **old** — deprecated: use new");
   });
 });
 

@@ -326,10 +326,10 @@ describe("endpoint is projection-only (not runtime override)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// renderTarget + toMarkdown
+// renderTarget + markdown artifact
 // ---------------------------------------------------------------------------
 
-describe("renderTarget + toMarkdown", () => {
+describe("renderTarget + markdown artifact", () => {
   test("renderTarget returns endpoint as-is", () => {
     expect(graphqlAdapter.renderTarget!("/graphql")).toBe("/graphql");
   });
@@ -338,7 +338,8 @@ describe("renderTarget + toMarkdown", () => {
     expect(graphqlAdapter.renderTarget!("")).toBe("(graphql)");
   });
 
-  test("toMarkdown lists cases with operation + query snippet", () => {
+  test("artifacts.markdown produces structured output via renderArtifact", async () => {
+    const { renderArtifact, markdownArtifact } = await import("@glubean/sdk");
     const spec: GraphqlContractSpec = {
       endpoint: "/graphql",
       description: "User API",
@@ -361,15 +362,16 @@ describe("renderTarget + toMarkdown", () => {
     };
     const runtime = graphqlAdapter.project(spec);
     const extracted = graphqlAdapter.normalize!({ ...runtime, id: "users-gql" });
-    const md = graphqlAdapter.toMarkdown!(extracted);
+    const md = renderArtifact(markdownArtifact, [extracted as any]);
 
-    expect(md).toContain("users-gql");
-    expect(md).toContain("/graphql");
-    expect(md).toContain("query");
-    expect(md).toContain("mutation");
-    expect(md).toContain("GetUser");
-    expect(md).toContain("NewUser");
-    expect(md).toContain("⚠ deprecated");
+    // CLI-format output (see sdk assembleMarkdownDocument):
+    //   "## <feature or endpoint>" heading, "- **key** — desc" for active
+    //   cases, "⊘ **key** — deprecated: <reason>" shadows description for
+    //   deprecated cases.
+    expect(md).toContain("## /graphql"); // feature unset → heading uses endpoint
+    expect(md).toContain("- **ok** — happy");
+    expect(md).toContain("- **create** — create");
+    expect(md).toContain("⊘ **old** — deprecated: use new");
   });
 });
 

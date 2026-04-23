@@ -601,40 +601,6 @@ function renderGrpcTarget(target: string): string {
 }
 
 // =============================================================================
-// toMarkdown — case list, no OpenAPI
-// =============================================================================
-
-function toMarkdownGrpc(
-  projection: ExtractedContractProjection<GrpcSafeSchemas, GrpcContractSafeMeta>,
-): string {
-  const lines: string[] = [];
-  const displayTarget = renderGrpcTarget(projection.target ?? "");
-  lines.push(`### ${projection.id} — ${displayTarget}`);
-  if (projection.description) lines.push(`\n${projection.description}`);
-  if (projection.deprecated) lines.push(`\n**Deprecated:** ${projection.deprecated}`);
-
-  if (projection.cases.length === 0) {
-    lines.push("\n_(no cases)_");
-    return lines.join("\n");
-  }
-
-  lines.push("\n**Cases:**\n");
-  for (const c of projection.cases) {
-    const marker =
-      c.lifecycle === "deprecated"
-        ? " ⚠ deprecated"
-        : c.lifecycle === "deferred"
-          ? " ⏸ deferred"
-          : "";
-    lines.push(`- \`${c.key}\`${marker} — ${c.description ?? ""}`);
-    if (c.deprecatedReason) lines.push(`  - deprecated: ${c.deprecatedReason}`);
-    if (c.deferredReason) lines.push(`  - deferred: ${c.deferredReason}`);
-  }
-
-  return lines.join("\n");
-}
-
-// =============================================================================
 // describePayload — high-level summary for index views
 // =============================================================================
 
@@ -674,7 +640,6 @@ export const grpcAdapter: ContractProtocolAdapter<
   validateCaseForFlow: validateGrpcCaseForFlow,
   classifyFailure: classifyGrpcFailure,
   renderTarget: renderGrpcTarget,
-  toMarkdown: toMarkdownGrpc,
   // Markdown uses the SDK's generic structured renderer — gRPC has no
   // protocol-specific augmentations to contribute.
   artifacts: {

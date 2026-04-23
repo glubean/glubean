@@ -290,25 +290,6 @@ export interface ContractProtocolAdapter<
     ) => KnownArtifactParts[K];
   };
 
-  /**
-   * @deprecated Use `artifacts.openapi` via the artifact registry instead.
-   * Kept on the interface during the transition so existing adapters compile;
-   * call sites that used `adapter.toOpenApi` directly have migrated to
-   * `renderArtifact(openapiArtifact, ...)`.
-   */
-  toOpenApi?: (
-    projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
-  ) => Record<string, unknown> | undefined;
-
-  /**
-   * @deprecated Use `artifacts.markdown` via the artifact registry instead.
-   * Kept on the interface during the transition so existing adapters compile;
-   * call sites that used `adapter.toMarkdown` directly have migrated to
-   * `renderArtifact(markdownArtifact, ...)`.
-   */
-  toMarkdown?: (
-    projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
-  ) => string;
 
   /**
    * Optional: render the `target` string for display. HTTP: "POST /users"
