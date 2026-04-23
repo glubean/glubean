@@ -3,7 +3,6 @@ import {
   type ExecutionEvent,
   MetricCollector,
   ProjectRunner,
-  TestExecutor,
   buildRunContext,
 } from "@glubean/runner";
 import type { ProjectRunnerTest } from "@glubean/runner";
@@ -692,10 +691,9 @@ export async function runCommand(
   }
 
   const shared = toSharedRunConfig(effectiveRun);
-  const executor = TestExecutor.fromSharedConfig(shared, {
-    cwd: rootDir,
-    ...(options.inspectBrk && { inspectBrk: options.inspectBrk }),
-  });
+  // Note: TestExecutor construction is delegated to ProjectRunner below
+  // (it builds one via TestExecutor.fromSharedConfig with identical cwd +
+  // inspectBrk params when no executor option is passed).
   let passed = 0;
   let failed = 0;
   let skipped = 0;
@@ -934,7 +932,6 @@ export async function runCommand(
     interactive,
     ...(options.inspectBrk !== undefined && { inspectBrk: options.inspectBrk }),
     metricCollector,
-    executor,
   });
 
   for await (const ev of runner.run()) {
