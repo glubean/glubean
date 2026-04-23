@@ -1,0 +1,52 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > multi-file: two test files with per-file group headers 1`] = `
+"
+🧪 Glubean Test Runner
+
+Target: <FIXTURE_DIR>/tests
+Files:  2 test file(s)
+
+Discovering tests...
+  tests/orders/checkout.test.ts (1 test)
+  tests/users/login.test.ts (1 test)
+
+Running 2 test(s)...
+
+📁 tests/orders/checkout.test.ts
+  ● orders.checkout.ok
+    ✓ PASSED (<Nms>, 1 checks)
+📁 tests/users/login.test.ts
+  ● users.login.ok
+    ✓ PASSED (<Nms>, 1 checks)
+
+─────────────────────────────────────
+Tests:  2 passed
+Total:  2
+Memory: <MEM> peak
+
+"
+`;
+
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > simple: one test file with two passing tests 1`] = `
+"
+🧪 Glubean Test Runner
+
+File: <FIXTURE_DIR>/tests/hello.test.ts
+
+Discovering tests...
+
+Running 2 test(s)...
+
+  ● greet
+    ✓ PASSED (<Nms>, 1 checks)
+  ● farewell
+    ✓ PASSED (<Nms>, 1 checks)
+
+─────────────────────────────────────
+Tests:  2 passed
+Total:  2
+Memory: <MEM> peak
+
+"
+`;
