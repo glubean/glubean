@@ -29,6 +29,7 @@ import type {
   PayloadDescriptor,
   TestContext,
 } from "@glubean/sdk";
+import { genericMarkdownPart } from "@glubean/sdk";
 
 import type { GraphQLClient, GraphQLError, GraphQLResult } from "../index.js";
 import { parseOperationName } from "../index.js";
@@ -749,19 +750,10 @@ export const graphqlAdapter: ContractProtocolAdapter<
   classifyFailure: classifyGraphqlFailure,
   renderTarget: renderGraphqlTarget,
   toMarkdown: toMarkdownGraphql,
+  // Markdown uses the SDK's generic structured renderer — GraphQL has no
+  // protocol-specific augmentations to contribute.
   artifacts: {
-    markdown: (projection) => ({
-      body: toMarkdownGraphql(
-        projection as ExtractedContractProjection<
-          GraphqlSafeSchemas,
-          GraphqlContractSafeMeta
-        >,
-      ),
-      contractId: projection.id,
-      protocol: projection.protocol,
-      feature: projection.feature,
-      caseCount: projection.cases.length,
-    }),
+    markdown: (projection) => genericMarkdownPart(projection),
   },
   describePayload: describeGraphqlPayload,
 };

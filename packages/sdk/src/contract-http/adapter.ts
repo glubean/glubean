@@ -51,6 +51,7 @@ import type {
 import { mergeSlot } from "./flow-helpers.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
 import { renderMarkdownForHttp } from "./markdown.js";
+import { genericMarkdownPart } from "../contract-artifacts.js";
 
 // =============================================================================
 // Helpers — endpoint, params, request body, response headers
@@ -796,13 +797,11 @@ export const httpAdapter: ContractProtocolAdapter<
       // null for.
       return part ?? {};
     },
-    markdown: (projection) => ({
-      body: renderMarkdownForHttp(projection),
-      contractId: projection.id,
-      protocol: projection.protocol,
-      feature: projection.feature,
-      caseCount: projection.cases.length,
-    }),
+    // Markdown uses the kind's generic structured renderer — HTTP has no
+    // protocol-specific augmentations to contribute. (The legacy
+    // `renderMarkdownForHttp` string formatter is kept only for the
+    // deprecated `toMarkdown` field below until CAR-3.)
+    markdown: (projection) => genericMarkdownPart(projection),
   },
 
   toMarkdown(projection) {

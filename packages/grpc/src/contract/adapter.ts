@@ -29,6 +29,7 @@ import type {
   PayloadDescriptor,
 } from "@glubean/sdk";
 import type { TestContext } from "@glubean/sdk";
+import { genericMarkdownPart } from "@glubean/sdk";
 
 import type {
   GrpcClient,
@@ -674,19 +675,10 @@ export const grpcAdapter: ContractProtocolAdapter<
   classifyFailure: classifyGrpcFailure,
   renderTarget: renderGrpcTarget,
   toMarkdown: toMarkdownGrpc,
+  // Markdown uses the SDK's generic structured renderer — gRPC has no
+  // protocol-specific augmentations to contribute.
   artifacts: {
-    markdown: (projection) => ({
-      body: toMarkdownGrpc(
-        projection as ExtractedContractProjection<
-          GrpcSafeSchemas,
-          GrpcContractSafeMeta
-        >,
-      ),
-      contractId: projection.id,
-      protocol: projection.protocol,
-      feature: projection.feature,
-      caseCount: projection.cases.length,
-    }),
+    markdown: (projection) => genericMarkdownPart(projection),
   },
   describePayload: describeGrpcPayload,
 };

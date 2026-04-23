@@ -18,10 +18,15 @@ import {
   renderArtifact,
   renderArtifactByName,
   openapiArtifact,
+  markdownArtifact,
+  assembleMarkdownDocument,
   listArtifactKinds,
   listArtifactCapability,
 } from "@glubean/sdk";
-import type { ExtractedContractProjection } from "@glubean/sdk";
+import type {
+  ExtractedContractProjection,
+  MarkdownPart,
+} from "@glubean/sdk";
 
 // ── Description lint ────────────────────────────────────────────────────────
 
@@ -135,49 +140,47 @@ function formatCase(c: ContractCaseStaticMeta): string {
   return `- **${c.key}**${desc}${suffix}${severityTag}`;
 }
 
+/**
+ * @deprecated CAR-2 back-compat shim. Delegates to the SDK artifact
+ * registry's `assembleMarkdownDocument` (byte-for-byte port of the former
+ * inline logic). Kept so existing `formatMdOutline(ContractStaticMeta[])`
+ * unit tests keep running while callers migrate to
+ * `renderArtifact(markdownArtifact, contracts)` directly.
+ *
+ * CAR-3 will delete this shim once no consumers call it.
+ */
 export function formatMdOutline(contracts: ContractStaticMeta[]): string {
-  const features = groupByFeature(contracts);
-  const summary = computeSummary(contracts);
-  const lines: string[] = [];
-
-  lines.push("# Contract Specification");
-  lines.push("");
-  const date = new Date().toISOString().slice(0, 10);
-  const parts = [`Generated: ${date}`, `${summary.total} cases`];
-  if (summary.active > 0) parts.push(`${summary.active} active`);
-  if (summary.deferred > 0) parts.push(`${summary.deferred} deferred`);
-  if (summary.deprecated > 0) parts.push(`${summary.deprecated} deprecated`);
-  if (summary.gated > 0) parts.push(`${summary.gated} gated`);
-  lines.push(parts.join(" | "));
-  lines.push("");
-
-  for (const feature of features) {
-    lines.push(`## ${feature.name}`);
-    lines.push("");
-
-    for (const contract of feature.contracts) {
-      // Contract description as intro line under the feature heading.
-      // Priority: explicit description > endpoint (if feature differs from endpoint)
-      const intro = contract.description
-        ?? (feature.name !== contract.endpoint ? contract.endpoint : undefined);
-      // Contract-level deprecated marker
-      if (contract.deprecated) {
-        lines.push(`🚫 **Deprecated:** ${contract.deprecated}`);
-        lines.push("");
-      }
-      if (intro) {
-        lines.push(intro);
-        lines.push("");
-      }
-
-      for (const c of contract.cases) {
-        lines.push(formatCase(c));
-      }
-      lines.push("");
-    }
-  }
-
-  return lines.join("\n").trimEnd() + "\n";
+  const parts: MarkdownPart[] = contracts.map((c) => ({
+    contractId: c.contractId,
+    endpoint: c.endpoint,
+    protocol: c.protocol,
+    description: c.description,
+    feature: c.feature,
+    instanceName: c.instanceName,
+    deprecated: c.deprecated,
+    cases: c.cases.map((cs) => {
+      const lifecycle =
+        (cs.lifecycle as MarkdownPart["cases"][number]["lifecycle"]) ??
+        (cs.deprecated
+          ? "deprecated"
+          : cs.deferred
+            ? "deferred"
+            : "active");
+      return {
+        key: cs.key,
+        description: cs.description,
+        lifecycle,
+        severity:
+          (cs.severity as MarkdownPart["cases"][number]["severity"]) ??
+          "warning",
+        defaultRun: cs.defaultRun as MarkdownPart["cases"][number]["defaultRun"],
+        requires: cs.requires as MarkdownPart["cases"][number]["requires"],
+        deferredReason: cs.deferred,
+        deprecatedReason: cs.deprecated,
+      };
+    }),
+  }));
+  return assembleMarkdownDocument(parts);
 }
 
 // ── JSON formatter ──────────────────────────────────────────────────────────
@@ -453,7 +456,20 @@ export async function contractsCommand(
     );
     process.stdout.write(JSON.stringify(spec, null, 2) + "\n");
   } else if (format === "md-outline") {
-    const contractsMd = contracts.length > 0 ? formatMdOutline(contracts) : "";
+    // CAR-2: `md-outline` contracts section now flows through the artifact
+    // registry (`assembleMarkdownDocument` is a byte-for-byte port of the
+    // former CLI `formatMdOutline`). Flows section stays on the CLI side
+    // per D15 — flow artifact is a future ticket.
+    const contractsMd =
+      result.contracts.length > 0
+        ? renderArtifact(
+            markdownArtifact,
+            result.contracts as unknown as ExtractedContractProjection<
+              unknown,
+              unknown
+            >[],
+          )
+        : "";
     const flowsMd = flows.length > 0 ? formatFlowsMdSection(flows) : "";
     if (contractsMd && flowsMd) {
       process.stdout.write(contractsMd.trimEnd() + "\n\n" + flowsMd);

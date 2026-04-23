@@ -445,103 +445,207 @@ export const openapiArtifact = defineArtifactKind<
 });
 
 // ---------------------------------------------------------------------------
-// Markdown artifact kind (CAR-1 Phase 3)
+// Markdown artifact kind
 // ---------------------------------------------------------------------------
+//
+// Part (structured per-contract data) vs Final (rendered string) split
+// lets `markdownArtifact.merge` do hasInstances-aware feature grouping +
+// doc-level summary header — matching byte-for-byte the output of the
+// legacy CLI `formatMdOutline(ContractStaticMeta)` path.
+//
+// CAR-2 port (2026-04-23): replaces the wrapper-style MarkdownPart
+// shipped in CAR-1 Phase 3. Adapters can still override via
+// `artifacts.markdown` for protocol-specific augmentations; the kind's
+// `defaultRender` reads directly off the projection so every protocol
+// gets a consistent baseline.
 
 /**
- * Per-contract markdown rendering. Structured Part vs string Final lets
- * `markdownArtifact.merge` group by feature, compute doc-level summary,
- * and emit ordered sections — things a flat `parts.join("---")` cannot do.
- *
- * Adapters populate `body` (and can enrich with protocol-specific detail);
- * the other fields are read directly off the projection and passed through
- * for merge-time grouping.
+ * Per-contract structured data consumed by `assembleMarkdownDocument`.
+ * Carries raw fields; the merge step handles feature grouping,
+ * instanceName-aware labeling, doc header, and summary counts.
  */
 export interface MarkdownPart {
-  /** Rendered per-contract markdown section body (without doc-level header). */
-  body: string;
   contractId: string;
+  /** Display target — equivalent to `projection.target`. */
+  endpoint: string;
   protocol: string;
-  /** Feature grouping key (falls back to "Uncategorized" at merge time). */
+  description?: string;
   feature?: string;
-  /** Case count for doc-level summary. */
-  caseCount: number;
+  instanceName?: string;
+  deprecated?: string;
+  cases: Array<{
+    key: string;
+    description?: string;
+    /** "active" | "deferred" | "deprecated". */
+    lifecycle: "active" | "deferred" | "deprecated";
+    severity: "critical" | "warning" | "info";
+    defaultRun?: "always" | "opt-in";
+    requires?: "headless" | "browser" | "out-of-band";
+    deferredReason?: string;
+    deprecatedReason?: string;
+  }>;
 }
 
 /**
- * Kind-level fallback: protocol-agnostic per-contract markdown rendering.
- * Used when an adapter does not declare `artifacts.markdown`. Reads only
- * non-protocol-specific fields off the projection so it works for any
- * registered protocol.
+ * Protocol-agnostic default renderer. Reads raw fields off the
+ * projection; every protocol gets a valid Part even if its adapter
+ * doesn't declare `artifacts.markdown`.
  */
 export function genericMarkdownPart(
   projection: ExtractedContractProjection<unknown, unknown>,
 ): MarkdownPart {
-  const lines: string[] = [];
-  const target = projection.target ?? projection.id;
-  lines.push(`### ${projection.id} — ${target}`);
-  if (projection.description) lines.push(`\n${projection.description}`);
-  if (projection.deprecated) {
-    lines.push(`\n**Deprecated:** ${projection.deprecated}`);
-  }
-  if (projection.cases.length === 0) {
-    lines.push("\n_(no cases)_");
-  } else {
-    lines.push("\n**Cases:**\n");
-    for (const c of projection.cases) {
-      const marker =
-        c.lifecycle === "deprecated"
-          ? " ⚠ deprecated"
-          : c.lifecycle === "deferred"
-            ? " ⏸ deferred"
-            : "";
-      lines.push(`- \`${c.key}\`${marker} — ${c.description ?? ""}`);
-      if (c.deprecatedReason) lines.push(`  - deprecated: ${c.deprecatedReason}`);
-      if (c.deferredReason) lines.push(`  - deferred: ${c.deferredReason}`);
-    }
-  }
   return {
-    body: lines.join("\n"),
     contractId: projection.id,
+    endpoint: projection.target,
     protocol: projection.protocol,
+    description: projection.description,
     feature: projection.feature,
-    caseCount: projection.cases.length,
+    instanceName: projection.instanceName,
+    deprecated: projection.deprecated,
+    cases: projection.cases.map((c) => ({
+      key: c.key,
+      description: c.description,
+      lifecycle:
+        (c.lifecycle as MarkdownPart["cases"][number]["lifecycle"]) ??
+        (c.deprecatedReason
+          ? "deprecated"
+          : c.deferredReason
+            ? "deferred"
+            : "active"),
+      severity:
+        (c.severity as MarkdownPart["cases"][number]["severity"]) ?? "warning",
+      defaultRun: c.defaultRun as MarkdownPart["cases"][number]["defaultRun"],
+      requires: c.requires as MarkdownPart["cases"][number]["requires"],
+      deferredReason: c.deferredReason,
+      deprecatedReason: c.deprecatedReason,
+    })),
   };
 }
 
+// --- merge helpers (ported from CLI formatMdOutline) ------------------------
+
+interface _ProjectionSummary {
+  total: number;
+  active: number;
+  deferred: number;
+  deprecated: number;
+  gated: number;
+}
+
+function computeMarkdownSummary(parts: MarkdownPart[]): _ProjectionSummary {
+  let total = 0;
+  let deferred = 0;
+  let deprecated = 0;
+  let gated = 0;
+  for (const p of parts) {
+    for (const c of p.cases) {
+      total++;
+      if (c.lifecycle === "deprecated") deprecated++;
+      else if (c.lifecycle === "deferred") deferred++;
+      else if (c.requires === "browser" || c.requires === "out-of-band") gated++;
+    }
+  }
+  return {
+    total,
+    active: total - deferred - deprecated - gated,
+    deferred,
+    deprecated,
+    gated,
+  };
+}
+
+function formatMarkdownCase(c: MarkdownPart["cases"][number]): string {
+  const desc = c.description ? ` — ${c.description}` : "";
+  if (c.lifecycle === "deprecated") {
+    const reason = c.deprecatedReason ?? "deprecated";
+    return `- ⊘ **${c.key}** — deprecated: ${reason}`;
+  }
+  if (c.lifecycle === "deferred") {
+    const reason = c.deferredReason ?? "deferred";
+    return `- ⊘ **${c.key}** — deferred: ${reason}`;
+  }
+  if (c.requires === "browser" || c.requires === "out-of-band") {
+    return `- ⊘ **${c.key}** — requires: ${c.requires}`;
+  }
+  const severityTag =
+    c.severity === "critical" ? " 🔴" : c.severity === "info" ? " ℹ️" : "";
+  const suffix = c.defaultRun === "opt-in" ? " *(opt-in)*" : "";
+  return `- **${c.key}**${desc}${suffix}${severityTag}`;
+}
+
 /**
- * Feature-grouped doc-level assembly. Groups parts by `feature` (falling
- * back to "Uncategorized"), emits a doc summary header + per-group
- * sections. This is what replaces CLI `formatMdOutline` — Phase 4 will
- * wire CLI through this path (zero-regression target).
+ * Compute the effective feature key for a part — applies the
+ * instanceName-aware transform when the project has any instanced
+ * contract (matches CLI `hasInstances` pre-pass behavior).
+ */
+function displayFeature(part: MarkdownPart, hasInstances: boolean): string {
+  if (hasInstances && part.instanceName) {
+    return `${part.instanceName}: ${part.feature ?? part.endpoint}`;
+  }
+  return part.feature ?? part.endpoint;
+}
+
+/**
+ * Feature-grouped, doc-level markdown assembly. Byte-for-byte output
+ * compatible with `formatMdOutline` from `packages/cli/src/commands/
+ * contracts.ts` (the legacy CLI markdown path).
+ *
+ * Structure:
+ *   # Contract Specification
+ *   Generated: YYYY-MM-DD | N cases | N active | ...
+ *
+ *   ## <feature>
+ *   🚫 **Deprecated:** ...   (if contract-level deprecated)
+ *   <description or endpoint intro>
+ *   - **case** — ...
  */
 export function assembleMarkdownDocument(parts: MarkdownPart[]): string {
   if (parts.length === 0) return "";
 
+  const hasInstances = parts.some((p) => !!p.instanceName);
+
+  // Group preserving insertion order
   const groups = new Map<string, MarkdownPart[]>();
   for (const part of parts) {
-    const key = part.feature ?? "Uncategorized";
+    const key = displayFeature(part, hasInstances);
     const list = groups.get(key) ?? [];
     list.push(part);
     groups.set(key, list);
   }
 
-  const totalCases = parts.reduce((n, p) => n + p.caseCount, 0);
-  const featureCount = groups.size;
+  const summary = computeMarkdownSummary(parts);
 
   const lines: string[] = [];
-  lines.push(
-    `# Contracts (${parts.length} contract${parts.length === 1 ? "" : "s"}, ` +
-      `${featureCount} feature${featureCount === 1 ? "" : "s"}, ` +
-      `${totalCases} case${totalCases === 1 ? "" : "s"})`,
-  );
+  lines.push("# Contract Specification");
+  lines.push("");
+  const date = new Date().toISOString().slice(0, 10);
+  const summaryParts = [`Generated: ${date}`, `${summary.total} cases`];
+  if (summary.active > 0) summaryParts.push(`${summary.active} active`);
+  if (summary.deferred > 0) summaryParts.push(`${summary.deferred} deferred`);
+  if (summary.deprecated > 0)
+    summaryParts.push(`${summary.deprecated} deprecated`);
+  if (summary.gated > 0) summaryParts.push(`${summary.gated} gated`);
+  lines.push(summaryParts.join(" | "));
   lines.push("");
 
-  for (const [feature, featureParts] of groups.entries()) {
-    lines.push(`## ${feature}`);
+  for (const [featureName, featureParts] of groups.entries()) {
+    lines.push(`## ${featureName}`);
     lines.push("");
-    for (const part of featureParts) {
-      lines.push(part.body);
+    for (const contract of featureParts) {
+      const intro =
+        contract.description ??
+        (featureName !== contract.endpoint ? contract.endpoint : undefined);
+      if (contract.deprecated) {
+        lines.push(`🚫 **Deprecated:** ${contract.deprecated}`);
+        lines.push("");
+      }
+      if (intro) {
+        lines.push(intro);
+        lines.push("");
+      }
+      for (const c of contract.cases) {
+        lines.push(formatMarkdownCase(c));
+      }
       lines.push("");
     }
   }
