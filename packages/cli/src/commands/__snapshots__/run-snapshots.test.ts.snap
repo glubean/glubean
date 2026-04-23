@@ -1,5 +1,58 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > fail-fast: file-group-granularity failure short-circuit 1`] = `
+"
+🧪 Glubean Test Runner
+
+File: <FIXTURE_DIR>/tests/failing.test.ts
+
+Discovering tests...
+
+Running 3 test(s)...
+
+  ● first-bad
+    ✗ FAILED (<Nms>, 1 checks)
+      ✗ intentionally failing #1
+  ● second-bad
+    ✗ FAILED (<Nms>, 1 checks)
+      ✗ intentionally failing #2
+  ● third-bad
+    ✗ FAILED (<Nms>, 1 checks)
+      ✗ intentionally failing #3
+
+─────────────────────────────────────
+Tests:  3 failed
+Total:  3
+Memory: <MEM> peak
+
+"
+`;
+
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > mixed: session setup injects session value consumed by test 1`] = `
+"
+🧪 Glubean Test Runner
+
+File: <FIXTURE_DIR>/tests/uses-session.test.ts
+
+Discovering tests...
+
+Running 1 test(s)...
+
+Session: session.ts
+  [session] Loading test module: file:<FIXTURE_DIR>/session.ts
+  1 session value set
+  ● reads-session
+    ✓ PASSED (<Nms>, 1 checks)
+  [session] Loading test module: file:<FIXTURE_DIR>/session.ts
+
+─────────────────────────────────────
+Tests:  1 passed
+Total:  1
+Memory: <MEM> peak
+
+"
+`;
+
 exports[`glubean run — snapshot fixtures (RF-1b Phase A) > multi-file: two test files with per-file group headers 1`] = `
 "
 🧪 Glubean Test Runner
@@ -41,6 +94,29 @@ Running 2 test(s)...
   ● greet
     ✓ PASSED (<Nms>, 1 checks)
   ● farewell
+    ✓ PASSED (<Nms>, 1 checks)
+
+─────────────────────────────────────
+Tests:  2 passed
+Total:  2
+Memory: <MEM> peak
+
+"
+`;
+
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > test-level-requires: current CLI does not filter test() on requires 1`] = `
+"
+🧪 Glubean Test Runner
+
+File: <FIXTURE_DIR>/tests/browser-only.test.ts
+
+Discovering tests...
+
+Running 2 test(s)...
+
+  ● needs-browser
+    ✓ PASSED (<Nms>, 1 checks)
+  ● runs-anyway
     ✓ PASSED (<Nms>, 1 checks)
 
 ─────────────────────────────────────

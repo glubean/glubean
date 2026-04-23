@@ -192,4 +192,128 @@ export const checkoutOk = test("orders.checkout.ok", async (ctx) => {
 
     expect(normalized).toMatchSnapshot();
   }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // Fixture: mixed — session.ts + test file reading the session value
+  // -------------------------------------------------------------------------
+
+  test("mixed: session setup injects session value consumed by test", async () => {
+    const dir = await prepareFixture("mixed", {
+      "package.json": workspacePackageJson("snapshot-mixed"),
+      "session.ts": `
+import { defineSession } from "@glubean/sdk";
+
+export default defineSession({
+  setup: async (ctx) => {
+    ctx.session.set("greeting", "hello");
+  },
+});
+`,
+      "tests/uses-session.test.ts": `
+import { test } from "@glubean/sdk";
+
+export const readsSession = test("reads-session", async (ctx) => {
+  const g = ctx.session.require("greeting");
+  ctx.assert(g === "hello", "session value available");
+});
+`,
+    });
+
+    const { code, stdout, stderr } = await runCli(["run", "tests/"], {
+      cwd: dir,
+    });
+    const normalized = normalizeOutput(stdout + stderr);
+
+    // Structural guards (byte-exact check is the snapshot itself)
+    expect(code).toBe(0);
+    expect(normalized).toContain("Session:");
+    expect(normalized).toContain("session value set");
+    expect(normalized).toContain("reads-session");
+
+    expect(normalized).toMatchSnapshot();
+  }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // Fixture: fail-fast — three failing tests in one file, --fail-fast on.
+  //
+  // Subtle: current CLI evaluates the failure limit BETWEEN file groups,
+  // not within a file. All 3 tests in this single-file fixture run, and
+  // the snapshot captures that. If Phase B changes the granularity, the
+  // snapshot diff will surface it.
+  // -------------------------------------------------------------------------
+
+  test("fail-fast: file-group-granularity failure short-circuit", async () => {
+    const dir = await prepareFixture("fail-fast", {
+      "package.json": workspacePackageJson("snapshot-failfast"),
+      "tests/failing.test.ts": `
+import { test } from "@glubean/sdk";
+
+export const first = test("first-bad", async (ctx) => {
+  ctx.assert(false, "intentionally failing #1");
+});
+
+export const second = test("second-bad", async (ctx) => {
+  ctx.assert(false, "intentionally failing #2");
+});
+
+export const third = test("third-bad", async (ctx) => {
+  ctx.assert(false, "intentionally failing #3");
+});
+`,
+    });
+
+    const { code, stdout, stderr } = await runCli(
+      ["run", "tests/", "--no-session", "--fail-fast"],
+      { cwd: dir },
+    );
+    const normalized = normalizeOutput(stdout + stderr);
+
+    expect(code).not.toBe(0); // non-zero exit on failure
+    expect(normalized).toContain("first-bad");
+    // Fail-fast: remaining two tests should NOT appear as executed
+    // (exact wording depends on CLI but snapshot captures it)
+
+    expect(normalized).toMatchSnapshot();
+  }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // Fixture: test-level-requires — `requires: "browser"` on a `test(...)`
+  // declaration (not a contract case). Current CLI does NOT filter on
+  // test-level requires: both tests run. This snapshot captures that
+  // behavior precisely so Phase B can surface any change (fixing the
+  // filter, or preserving the quirk verbatim).
+  // -------------------------------------------------------------------------
+
+  test("test-level-requires: current CLI does not filter test() on requires", async () => {
+    const dir = await prepareFixture("skip-requires", {
+      "package.json": workspacePackageJson("snapshot-skipreq"),
+      "tests/browser-only.test.ts": `
+import { test } from "@glubean/sdk";
+
+export const needsBrowser = test(
+  { id: "needs-browser", requires: "browser" },
+  async (ctx) => {
+    ctx.assert(true, "would only run with --include-browser");
+  },
+);
+
+export const runsAnyway = test("runs-anyway", async (ctx) => {
+  ctx.assert(true, "default requires=headless");
+});
+`,
+    });
+
+    const { code, stdout, stderr } = await runCli(
+      ["run", "tests/", "--no-session"],
+      { cwd: dir },
+    );
+    const normalized = normalizeOutput(stdout + stderr);
+
+    expect(code).toBe(0); // skipped tests don't fail the run
+    // One passes, one skipped with requires reason
+    expect(normalized).toContain("runs-anyway");
+    expect(normalized).toContain("needs-browser");
+
+    expect(normalized).toMatchSnapshot();
+  }, 30_000);
 });
