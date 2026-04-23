@@ -49,7 +49,7 @@ import type {
   RequestSpec,
 } from "./types.js";
 import { mergeSlot } from "./flow-helpers.js";
-import { buildOpenApiForHttp } from "./openapi.js";
+import { buildOpenApiPartForHttp } from "./openapi.js";
 import { renderMarkdownForHttp } from "./markdown.js";
 
 // =============================================================================
@@ -787,8 +787,15 @@ export const httpAdapter: ContractProtocolAdapter<
     return describeHttpPayload(schemas);
   },
 
-  toOpenApi(projection) {
-    return buildOpenApiForHttp(projection);
+  artifacts: {
+    openapi: (projection) => {
+      const part = buildOpenApiPartForHttp(projection);
+      // `null` parts are filtered by the render pipeline; we never emit
+      // one for HTTP contracts since protocol="http" always matches here,
+      // but defend against malformed targets which buildOpenApiPart returns
+      // null for.
+      return part ?? {};
+    },
   },
 
   toMarkdown(projection) {

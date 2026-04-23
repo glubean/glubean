@@ -45,6 +45,14 @@ import {
 import type {
   ExtractedContractProjection,
 } from "./contract-types.js";
+import {
+  emptyOpenApiDocument,
+  mergeOpenApiParts,
+} from "./contract-http/openapi.js";
+import type {
+  OpenApiDocument,
+  OpenApiOptions,
+} from "./contract-http/openapi.js";
 
 // =============================================================================
 // ArtifactKind
@@ -413,3 +421,25 @@ export function listArtifactCapability(kindName: string): {
   }
   return { explicit, fallback: [], unsupported: rest };
 }
+
+// =============================================================================
+// Built-in kinds
+// =============================================================================
+
+/**
+ * OpenAPI 3.1 artifact kind. Per-contract partials are produced by HTTP
+ * adapter's `artifacts.openapi` (see `contract-http/openapi.ts`); merge
+ * combines them into a full spec. No `defaultRender` — non-HTTP protocols
+ * don't map to OpenAPI and are skipped.
+ *
+ * Ported from MCP's former `contractsToOpenApi` — CAR-1 Phase 2.
+ */
+export const openapiArtifact = defineArtifactKind<
+  OpenApiDocument,
+  OpenApiDocument,
+  OpenApiOptions
+>({
+  name: "openapi",
+  merge: (parts, options) => mergeOpenApiParts(parts, options),
+  empty: emptyOpenApiDocument,
+});

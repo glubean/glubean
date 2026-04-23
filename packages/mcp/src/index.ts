@@ -21,6 +21,8 @@ import { pathToFileURL } from "node:url";
 import { bootstrap, loadProjectEnv, LOCAL_RUN_DEFAULTS, ProjectRunner, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import type { ProjectRunnerTest } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
+import { renderArtifact, openapiArtifact } from "@glubean/sdk";
+import type { ExtractedContractProjection } from "@glubean/sdk";
 import { createScanner, extractFromSource, scan } from "@glubean/scanner";
 import { extractContractCases } from "@glubean/scanner/static";
 import {
@@ -1671,260 +1673,26 @@ export function injectFlowSequenceExtensions(
   }
 }
 
+/**
+ * Back-compat shim — `contractsToOpenApi` is now a thin wrapper over
+ * `renderArtifact(openapiArtifact, ...)` from `@glubean/sdk`. The
+ * per-contract path/operation build logic and the merge logic both moved
+ * into the SDK (contract-http/openapi.ts) in CAR-1 Phase 2. MCP only keeps
+ * this export for existing test fixtures that call it directly.
+ *
+ * The scanner-shape contract is structurally compatible with
+ * `ExtractedContractProjection<unknown, unknown>` — renderArtifact
+ * forwards it to HTTP adapter's `artifacts.openapi` producer.
+ */
 export function contractsToOpenApi(
   rawContracts: SharedExtractedContract[],
   title = "API Specification",
 ): Record<string, unknown> {
-  // Convert new-shape contracts to legacy HTTP view so the generation logic
-  // below (written against the pre-v0.2 shape) keeps working. Non-HTTP
-  // protocols are naturally skipped by the `protocol !== "http"` check.
-  const contracts = toLegacyHttpContracts(rawContracts);
-
-  const paths: Record<string, Record<string, unknown>> = {};
-  const tags = new Set<string>();
-  const securitySchemes: Record<string, Record<string, unknown>> = {};
-
-  for (const c of contracts) {
-    // Only process HTTP protocol contracts for OpenAPI
-    if (c.protocol !== "http") continue;
-
-    // Parse "METHOD /path" → { method, path }
-    const match = c.target.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+)$/i);
-    if (!match) continue;
-    const method = match[1].toLowerCase();
-    let apiPath = match[2];
-
-    // Convert :param to {param} for OpenAPI
-    apiPath = apiPath.replace(/:(\w+)/g, "{$1}");
-
-    if (!paths[apiPath]) paths[apiPath] = {};
-    if (c.feature) tags.add(c.feature);
-
-    // Collect security scheme (instanceName disambiguates collisions)
-    const secMapping = securityToOpenApi(c.security, c.instanceName);
-    if (secMapping) {
-      securitySchemes[secMapping.name] = secMapping.scheme;
-    }
-
-    // Build responses — merge cases per status code. Within each status, support
-    // multiple content types (OpenAPI's responses[status].content is a map keyed
-    // by content-type). Schema and examples merge per content-type; headers merge
-    // at the status level (headers aren't content-type scoped in OpenAPI).
-    type ContentBucket = {
-      schema?: unknown;
-      examples: Record<string, { value: unknown; summary?: string; description?: string }>;
-    };
-    type StatusBucket = {
-      description: string;
-      contents: Record<string, ContentBucket>;
-      headers: Record<string, { schema: unknown }>;
-    };
-    const responses: Record<string, StatusBucket> = {};
-
-    for (const cas of c.cases) {
-      const statusCode = String((cas.protocolExpect as any)?.status ?? 200);
-      const contentType = cas.responseContentType ?? "application/json";
-
-      if (!responses[statusCode]) {
-        responses[statusCode] = {
-          description: cas.description ?? "",
-          contents: {},
-          headers: {},
-        };
-      }
-      const resp = responses[statusCode];
-
-      // Ensure content bucket for this case's content type exists
-      if (!resp.contents[contentType]) {
-        resp.contents[contentType] = { examples: {} };
-      }
-      const bucket = resp.contents[contentType];
-
-      // First non-undefined schema per (status, contentType) wins (cannot meaningfully
-      // merge JSON Schemas). Later cases with the same pair contribute only examples.
-      if (!bucket.schema && cas.responseSchema) {
-        bucket.schema = cas.responseSchema;
-      }
-
-      // Examples merge. Prefix with case key to guarantee uniqueness across cases.
-      if (cas.examples) {
-        for (const [exName, ex] of Object.entries(cas.examples)) {
-          const fullName = exName === "default" ? cas.key : `${cas.key}_${exName}`;
-          bucket.examples[fullName] = ex as any;
-        }
-      }
-
-      // Response headers merge at status level (first wins for conflicts,
-      // new header names from later cases added).
-      if (cas.responseHeaders) {
-        const headersSchema = cas.responseHeaders as any;
-        if (headersSchema?.properties) {
-          for (const [headerName, headerSchema] of Object.entries(headersSchema.properties)) {
-            if (!resp.headers[headerName]) {
-              resp.headers[headerName] = { schema: headerSchema };
-            }
-          }
-        }
-      }
-    }
-
-    // Finalize response shape for OpenAPI
-    const openApiResponses: Record<string, unknown> = {};
-    for (const [status, resp] of Object.entries(responses)) {
-      const out: Record<string, unknown> = { description: resp.description };
-
-      // Emit content only for buckets that have anything
-      const contentOut: Record<string, unknown> = {};
-      for (const [ctype, bucket] of Object.entries(resp.contents)) {
-        if (bucket.schema || Object.keys(bucket.examples).length > 0) {
-          const entry: Record<string, unknown> = {};
-          if (bucket.schema) entry.schema = bucket.schema;
-          if (Object.keys(bucket.examples).length > 0) entry.examples = bucket.examples;
-          contentOut[ctype] = entry;
-        }
-      }
-      if (Object.keys(contentOut).length > 0) {
-        out.content = contentOut;
-      }
-
-      if (Object.keys(resp.headers).length > 0) {
-        out.headers = resp.headers;
-      }
-      openApiResponses[status] = out;
-    }
-
-    // Build operation
-    const operation: Record<string, unknown> = {
-      operationId: c.id,
-      summary: c.description,
-      responses: openApiResponses,
-    };
-    if (c.feature) operation.tags = [c.feature];
-    // Contract-level deprecated flag
-    if (c.deprecated) {
-      operation.deprecated = true;
-      operation["x-deprecated-reason"] = c.deprecated;
-    }
-    // Contract-level OpenAPI extensions (x-* keys)
-    if ((c as any).extensions) {
-      for (const [extKey, extVal] of Object.entries((c as any).extensions)) {
-        operation[extKey] = extVal;
-      }
-    }
-
-    // Operation-level security from contract instance
-    if (secMapping) {
-      operation.security = [{ [secMapping.name]: [] }];
-    } else if (c.security === null) {
-      operation.security = []; // explicitly public
-    }
-
-    // Merge per-param/per-query metadata across ALL cases at FIELD level.
-    // For each named param, fields (schema, description, required, deprecated)
-    // are filled in independently: first non-undefined value per field wins.
-    // This way a case that only sets `description` and a later case that only
-    // sets `schema` both contribute their fields to the same param entry.
-    type ParamMetaMap = Record<string, {
-      schema?: unknown;
-      description?: string;
-      required?: boolean;
-      deprecated?: boolean;
-    }>;
-    const mergeFieldLevel = (target: ParamMetaMap, source: ParamMetaMap | undefined) => {
-      if (!source) return;
-      for (const [name, meta] of Object.entries(source)) {
-        if (!target[name]) target[name] = {};
-        const slot = target[name];
-        if (slot.schema === undefined && meta.schema !== undefined) slot.schema = meta.schema;
-        if (slot.description === undefined && meta.description !== undefined) slot.description = meta.description;
-        if (slot.required === undefined && meta.required !== undefined) slot.required = meta.required;
-        if (slot.deprecated === undefined && meta.deprecated !== undefined) slot.deprecated = meta.deprecated;
-      }
-    };
-    const mergedParamMetas: ParamMetaMap = {};
-    const mergedQueryMetas: ParamMetaMap = {};
-    for (const cas of c.cases) {
-      mergeFieldLevel(mergedParamMetas, (cas as any).paramSchemas);
-      mergeFieldLevel(mergedQueryMetas, (cas as any).querySchemas);
-    }
-
-    // Extract path parameters from URL and attach merged metadata
-    const paramMatches = apiPath.matchAll(/\{(\w+)\}/g);
-    const pathParams = [...paramMatches].map((m) => {
-      const name = m[1];
-      const meta = mergedParamMetas[name];
-      return {
-        name,
-        in: "path",
-        required: meta?.required ?? true,
-        schema: meta?.schema ?? { type: "string" },
-        ...(meta?.description ? { description: meta.description } : {}),
-        ...(meta?.deprecated ? { deprecated: true } : {}),
-      };
-    });
-    // Query parameters (only ones with metadata — string-only queries are not enumerated here)
-    const queryParams = Object.entries(mergedQueryMetas).map(([name, meta]) => ({
-      name,
-      in: "query",
-      required: meta.required ?? false,
-      schema: meta.schema ?? { type: "string" },
-      ...(meta.description ? { description: meta.description } : {}),
-      ...(meta.deprecated ? { deprecated: true } : {}),
-    }));
-
-    // Request header parameters from contract-level request.headers schema.
-    // OpenAPI models request headers as parameters[in=header], not as a separate field.
-    // We read the JSON Schema's `properties` (object shape) and `required` array (if any).
-    const headerParams: Array<Record<string, unknown>> = [];
-    const reqHeadersSchema = (c as any).requestHeaders as any;
-    if (reqHeadersSchema && typeof reqHeadersSchema === "object" && reqHeadersSchema.properties) {
-      const requiredList: string[] = Array.isArray(reqHeadersSchema.required) ? reqHeadersSchema.required : [];
-      for (const [headerName, headerSchema] of Object.entries(reqHeadersSchema.properties)) {
-        headerParams.push({
-          name: headerName,
-          in: "header",
-          required: requiredList.includes(headerName),
-          schema: headerSchema,
-        });
-      }
-    }
-
-    const allParams = [...pathParams, ...queryParams, ...headerParams];
-    if (allParams.length > 0) operation.parameters = allParams;
-
-    // Request body (schema + examples).
-    if (c.requestSchema || (c as any).requestExample !== undefined || (c as any).requestExamples) {
-      const reqContentType = (c as any).requestContentType ?? "application/json";
-      const contentEntry: Record<string, unknown> = {};
-      if (c.requestSchema) contentEntry.schema = c.requestSchema;
-
-      // Merge single example (as "default") with named examples
-      const exMap: Record<string, { value: unknown; summary?: string; description?: string }> = {};
-      if ((c as any).requestExample !== undefined) {
-        exMap.default = { value: (c as any).requestExample };
-      }
-      if ((c as any).requestExamples) {
-        for (const [k, v] of Object.entries((c as any).requestExamples)) {
-          exMap[k] = v as any;
-        }
-      }
-      if (Object.keys(exMap).length > 0) contentEntry.examples = exMap;
-
-      operation.requestBody = {
-        content: { [reqContentType]: contentEntry },
-      };
-    }
-
-    paths[apiPath][method] = operation;
-  }
-
-  return {
-    openapi: "3.1.0",
-    info: { title, version: "1.0.0" },
-    ...(tags.size > 0 ? { tags: [...tags].map((t) => ({ name: t })) } : {}),
-    ...(Object.keys(securitySchemes).length > 0 ? { components: { securitySchemes } } : {}),
-    paths,
-  };
+  return renderArtifact(
+    openapiArtifact,
+    rawContracts as unknown as ExtractedContractProjection<unknown, unknown>[],
+    { title },
+  ) as Record<string, unknown>;
 }
 
 server.registerTool(

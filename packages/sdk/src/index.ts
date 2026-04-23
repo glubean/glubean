@@ -409,8 +409,14 @@ export {
  * }
  * ```
  */
+import type {
+  OpenApiDocument as _OpenApiDocument,
+  OpenApiOptions as _OpenApiOptions,
+} from "./contract-http/openapi.js";
+
 export interface KnownArtifacts {
-  // Built-in kinds populate here as Phase 2/3 lands.
+  /** OpenAPI 3.1 document (cross-contract merged). HTTP adapter only. */
+  openapi: _OpenApiDocument;
 }
 
 /**
@@ -419,7 +425,8 @@ export interface KnownArtifacts {
  * Keys must mirror `KnownArtifacts`.
  */
 export interface KnownArtifactParts {
-  // Built-in kinds populate here as Phase 2/3 lands.
+  /** Per-contract partial OpenAPI document (single path + scoped components). */
+  openapi: _OpenApiDocument;
 }
 
 /**
@@ -427,8 +434,10 @@ export interface KnownArtifactParts {
  * Keys must mirror `KnownArtifacts`.
  */
 export interface KnownArtifactOptions {
-  // Built-in kinds populate here as Phase 2/3 lands.
+  openapi: _OpenApiOptions;
 }
+
+export type { OpenApiDocument, OpenApiOptions } from "./contract-http/openapi.js";
 
 export {
   defineArtifactKind,
@@ -440,6 +449,7 @@ export {
   renderArtifactWithSummary,
   listArtifactProducers,
   listArtifactCapability,
+  openapiArtifact,
 } from "./contract-artifacts.js";
 
 export type {
