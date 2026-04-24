@@ -198,20 +198,17 @@ test("standalone case without setup/teardown runs cleanly (v10 baseline)", async
 });
 
 test("v10 overlay: bootstrap resolvedInput drives real HTTP request construction", async () => {
-  // End-to-end HTTP overlay test. Proves bootstrap output flows through
-  // httpAdapter.executeCase → executeStandaloneCase → function-valued
-  // params/headers/body → outgoing request construction. Mock-adapter
-  // tests cover routing; this test covers HTTP-specific construction.
+  // End-to-end HTTP overlay test on the PUBLIC authoring path:
+  //   contract.http.with(...) → api(id, spec) → c.case(key) → contract.bootstrap(ref, run)
+  // Proves bootstrap output flows through httpAdapter.executeCase →
+  // executeStandaloneCase → function-valued params/headers/body → outgoing
+  // request construction.
   //
-  // Implementation note: HTTP's `validateCaseForFlow` (which fires from
-  // ProtocolContract.case()) rejects function-valued body/params/headers
-  // as a v9 flow-safety rule. v10 overlay dispatch legitimately uses
-  // these with resolvedInput, but the validator doesn't yet distinguish
-  // "used in flow" from "used via overlay". Relaxing the validator is
-  // Phase 2d scope (flow migration). Until then, this test bypasses
-  // `.case()` and registers the overlay directly via registerBootstrap.
-  const { registerBootstrap } = await import("../bootstrap-registry.js");
-
+  // v10 made this work by separating pure case-ref creation from flow-safety
+  // validation: .case() no longer rejects function-valued action fields
+  // (that check moved to flow.step()), so bootstrap overlays can legitimately
+  // attach to cases with function-valued fields. See contract-core.ts §case()
+  // and §step() comments.
   const client = makeMockClient({ status: 200, body: { ok: true } });
   const api = contract.http.with("api", { client });
 
@@ -228,21 +225,14 @@ test("v10 overlay: bootstrap resolvedInput drives real HTTP request construction
     },
   });
 
-  // Register overlay directly (bypasses .case()'s function-field validator).
-  registerBootstrap(
-    {
-      __glubean_type: "contract-case-ref",
-      contractId: "orders.create",
-      caseKey: "success",
-      protocol: "http",
-      target: "POST /projects/:projectId/orders",
-      contract: c as any,
-    } as any,
-    (async () => ({
+  // Public API: contract.bootstrap(ref, spec).
+  (contract.bootstrap as any)(
+    c.case("success"),
+    async () => ({
       projectId: "p_42",
       token: "tok-abc",
       items: [{ sku: "X", qty: 1 }],
-    })) as any,
+    }),
   );
 
   await c[0].fn!(makeCtx());
@@ -259,7 +249,12 @@ test("v10 overlay: bootstrap resolvedInput drives real HTTP request construction
 // .case() fail-fast for function-valued inputs
 // ---------------------------------------------------------------------------
 
-test(".case() rejects function-valued body (fail-fast for flow)", () => {
+test("flow.step() rejects function-valued body (v10: was .case() rule)", () => {
+  // v10: flow-safety validation (function-valued body/params/headers cannot
+  // resolve without per-case state) moved from .case() to flow.step(). The
+  // ref itself is pure — function-valued fields are legitimate when consumed
+  // via contract.bootstrap(ref) overlay with resolvedInput. Only flow usage
+  // of such a ref is rejected.
   const client = makeMockClient();
   const api = contract.http.with("api", { client });
   const c = api("c", {
@@ -273,7 +268,12 @@ test(".case() rejects function-valued body (fail-fast for flow)", () => {
     },
   });
 
-  expect(() => c.case("ok")).toThrow(/function-valued field/);
+  // Pure case-ref creation is NOW OK
+  const ref = c.case("ok");
+  expect(ref.__glubean_type).toBe("contract-case-ref");
+
+  // Using the ref in a flow is rejected
+  expect(() => contract.flow("f").step(ref)).toThrow(/function-valued field/);
 });
 
 test(".case() succeeds for static-input cases", () => {

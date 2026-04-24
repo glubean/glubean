@@ -475,9 +475,13 @@ function dispatchContract<
     _extracted: extracted,
     _spec: spec as Spec,
     case(key: string): ContractCaseRef<any, any> {
-      // Delegate fail-fast validation to adapter (e.g. HTTP rejects
-      // function-valued body/params/query/headers).
-      adapter.validateCaseForFlow?.(spec as Spec, key, id);
+      // v10: .case(key) is pure case-ref creation — no flow-only validation
+      // here. Flow-safety checks (e.g. HTTP's "function-valued body/params/
+      // headers can't be resolved in flow mode") moved to FlowBuilder.step()
+      // where the ref's flow usage is actually being declared. The same
+      // ref used via contract.bootstrap(overlay) legitimately uses
+      // function-valued fields with `resolvedInput` — v9's
+      // validateCaseForFlow incorrectly rejected that at .case() time.
       return makeContractCaseRef(
         protocol,
         id,
@@ -637,6 +641,18 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
             `does not implement executeCaseInFlow — this protocol cannot appear in a flow.`,
         );
       }
+      // v10: flow-safety validation fires here (at step-declaration time),
+      // not at .case() time. The ref itself is pure; only when it enters a
+      // flow do we enforce adapter-specific rules like HTTP's "function-
+      // valued body/params/headers can't resolve in flow mode". This lets
+      // contract.bootstrap(ref) attach to the same ref (where function-
+      // valued fields legitimately receive resolvedInput).
+      const contractRef = ref.contract as ProtocolContract<unknown, unknown, unknown>;
+      adapter.validateCaseForFlow?.(
+        (contractRef as { _spec?: unknown })._spec,
+        ref.caseKey,
+        ref.contractId,
+      );
       const step: RuntimeContractCallStep = {
         kind: "contract-call",
         name: bindings?.name,
