@@ -54,6 +54,34 @@ import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
  * When neither is present, passes value through — the schema was purely
  * type-level and carries no runtime check.
  */
+/**
+ * Run all registered cleanup callbacks in LIFO order. Each cleanup error is
+ * reported via console.error and does NOT mask the primary failure (the
+ * caller has already thrown or will throw whatever brought them here).
+ *
+ * Used by the v10 dispatcher's overlay path — same helper in all three
+ * failure sites (bootstrap run threw, needs validation failed, executeCase
+ * threw / succeeded). Before v3 feedback, the first two paths swallowed
+ * cleanup errors silently; this helper unifies reporting.
+ *
+ * Cleanup error reporting is `console.error` today. Spike 3 routes it
+ * through structured events so CI/agent consumers see it in test output.
+ */
+async function runCleanupsLifo(
+  cleanups: Array<() => Promise<void> | void>,
+  testId: string,
+): Promise<void> {
+  while (cleanups.length > 0) {
+    const cleanup = cleanups.pop()!;
+    try {
+      await cleanup();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`bootstrap cleanup error for ${testId}:`, err);
+    }
+  }
+}
+
 function validateNeedsOutput(
   needsSchema: { safeParse?: unknown; parse?: unknown },
   value: unknown,
@@ -289,21 +317,51 @@ function dispatchContract<
         if (skipDeferred) ctx.skip(skipDeferred);
 
         // v10 attachment model: check for bootstrap overlay registered via
-        // contract.bootstrap(). If one exists AND the adapter supports the
-        // new executeCase entry point, run overlay → call executeCase with
-        // resolved input. Otherwise fall back to legacy adapter.execute.
-        //
-        // Phase 2b Step 1 scope: plain-function bootstrap form only. Structured
-        // form with `bootstrap.params` + runner-provided `bootstrapInput` is
-        // Spike 3 (CLI / MCP channels). Structured form with required params
-        // will throw at runtime until Spike 3 wires the input channel.
-        //
-        // No `needs` schema validation yet — Phase 2b Step 2 adds that once
-        // the input channel exists. For now the adapter's body/headers fns
-        // receive whatever the bootstrap run returned; type safety comes from
-        // the authoring type (InferCaseInput<Cases[K]> on ref).
+        // contract.bootstrap(). When one exists, we MUST route through
+        // executeCase — silently falling back to legacy execute would
+        // ignore the overlay and reintroduce the "hidden precondition"
+        // failure mode the attachment model is supposed to eliminate.
         const overlay = getBootstrap(testId);
-        if (overlay && adapter.executeCase && contractObj) {
+        if (overlay) {
+          // Hard error if adapter hasn't implemented the attachment-model
+          // entry point. Better to fail loudly at dispatch than to run the
+          // raw case as if no overlay existed.
+          if (!adapter.executeCase) {
+            throw new Error(
+              `Bootstrap overlay registered for "${testId}" but the adapter ` +
+                `for protocol "${protocol}" has not been migrated to the ` +
+                `attachment model (missing executeCase method). The overlay ` +
+                `would be silently ignored. Either remove the overlay or ` +
+                `migrate the adapter runtime.`,
+            );
+          }
+          if (!contractObj) {
+            // Unreachable at fn-call time (contractObj is assigned before
+            // any test.fn runs). Defensive check keeps TS narrowing clean.
+            throw new Error(
+              `Internal: contract carrier not assembled when running "${testId}".`,
+            );
+          }
+
+          // Phase 2b Step 1 scope: plain-function bootstrap form, or
+          // structured form without `params`. Structured form WITH params
+          // requires a runner input channel (Spike 3) — until then, reject
+          // clearly rather than passing `undefined` and letting the author
+          // callback blow up with a cryptic TypeError.
+          if (
+            typeof overlay.spec === "object"
+            && overlay.spec !== null
+            && (overlay.spec as { params?: unknown }).params !== undefined
+          ) {
+            throw new Error(
+              `Bootstrap overlay for "${testId}" declares \`params\` but the ` +
+                `runner input channel is not implemented yet (Spike 3 — ` +
+                `single-case-execution-api.md §4). Until then, bootstrap ` +
+                `overlays must use the plain-function form or the structured ` +
+                `form without \`params\`.`,
+            );
+          }
+
           const cleanups: Array<() => Promise<void> | void> = [];
           const bootstrapCtx = Object.assign(Object.create(ctx as object), ctx, {
             cleanup(fn: () => Promise<void> | void) {
@@ -319,10 +377,7 @@ function dispatchContract<
           try {
             resolvedInput = await runFn(bootstrapCtx, undefined as unknown);
           } catch (err) {
-            // Bootstrap failed; still run cleanups registered so far.
-            while (cleanups.length > 0) {
-              try { await cleanups.pop()!(); } catch { /* swallow */ }
-            }
+            await runCleanupsLifo(cleanups, testId);
             throw err;
           }
 
@@ -339,12 +394,7 @@ function dispatchContract<
                 { testId, source: "bootstrap" },
               );
             } catch (err) {
-              // Validation failed — run cleanups, re-throw. Same policy as
-              // bootstrap run failure (cleanups registered during bootstrap
-              // should still tear down what was set up).
-              while (cleanups.length > 0) {
-                try { await cleanups.pop()!(); } catch { /* swallow */ }
-              }
+              await runCleanupsLifo(cleanups, testId);
               throw err;
             }
           }
@@ -357,25 +407,14 @@ function dispatchContract<
               resolvedInput,
             });
           } finally {
-            // LIFO cleanup, errors reported but don't mask primary failure.
-            while (cleanups.length > 0) {
-              const cleanup = cleanups.pop()!;
-              try {
-                await cleanup();
-              } catch (err) {
-                // eslint-disable-next-line no-console
-                console.error(
-                  `bootstrap cleanup error for ${testId}:`,
-                  err,
-                );
-              }
-            }
+            await runCleanupsLifo(cleanups, testId);
           }
           return;
         }
 
-        // Legacy path: no overlay, adapter lacks executeCase, or carrier
-        // not yet assembled (impossible at fn-call time, but TS-safe).
+        // Legacy path: no overlay registered. Runs raw `adapter.execute`
+        // which for HTTP/gRPC/GraphQL still reads `caseSpec.setup/teardown`
+        // until Phase 2c Step B+C removes those fields.
         await adapter.execute(ctx, caseSpec, spec);
       },
     };

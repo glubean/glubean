@@ -443,6 +443,151 @@ test("needs schema validation failure runs cleanups registered during bootstrap"
   expect(log).not.toContain("executeCase"); // case never dispatched
 });
 
+test("overlay with adapter missing executeCase hard-errors (no silent fallback)", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  // Deliberately do NOT set adapter.executeCase — simulates an unmigrated
+  // adapter (pre-Phase-2b) with an overlay registered.
+  contract.register("mock_no_execcase", adapter);
+
+  const c = (contract as any).mock_no_execcase("svc", {
+    target: "/x",
+    cases: { ok: { description: "unmigrated adapter" } },
+  }) as ProtocolContract<MockSpec>;
+
+  (contract.bootstrap as any)(
+    c.case("ok"),
+    async () => ({ token: "seeded" }),
+  );
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /has not been migrated to the attachment model/,
+  );
+  expect(log).not.toContain("execute:unmigrated adapter"); // legacy NOT silently invoked
+});
+
+test("overlay with structured-form params is rejected until Spike 3", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => { log.push("executeCase"); };
+  contract.register("mock_params", adapter);
+
+  const c = (contract as any).mock_params("svc", {
+    target: "/x",
+    cases: { ok: { description: "params form" } },
+  }) as ProtocolContract<MockSpec>;
+
+  // Structured form WITH params declared. Until Spike 3 wires the runner
+  // input channel, this must be rejected with a clear error rather than
+  // passing undefined and letting the callback blow up cryptically.
+  (contract.bootstrap as any)(c.case("ok"), {
+    params: { safeParse: (d: unknown) => ({ success: true, data: d }) },
+    run: async (_ctx: any, _params: any) => undefined,
+  });
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /runner input channel is not implemented yet/,
+  );
+  expect(log).not.toContain("executeCase"); // adapter never reached
+});
+
+test("overlay with structured-form WITHOUT params is accepted (pre-Spike-3)", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => { log.push("executeCase"); };
+  contract.register("mock_noparams", adapter);
+
+  const c = (contract as any).mock_noparams("svc", {
+    target: "/x",
+    cases: { ok: { description: "no-params struct" } },
+  }) as ProtocolContract<MockSpec>;
+
+  (contract.bootstrap as any)(c.case("ok"), {
+    // No `params` field — valid before Spike 3.
+    run: async (_ctx: any) => undefined,
+  });
+
+  await c[0]!.fn!(makeMockCtx());
+  expect(log).toContain("executeCase");
+});
+
+test("cleanup error is reported on ALL three failure paths (not swallowed)", async () => {
+  // All three paths that had cleanup-running code: bootstrap-run throws,
+  // needs-validation fails, executeCase throws. Previously two of them
+  // swallowed cleanup errors silently; v3 unifies via runCleanupsLifo.
+  const originalConsoleError = console.error;
+  const consoleLog: unknown[][] = [];
+  console.error = ((...args: unknown[]) => { consoleLog.push(args); }) as typeof console.error;
+
+  try {
+    // Path 1: bootstrap-run throws
+    {
+      const adapter = makeMockAdapter();
+      adapter.executeCase = async () => {};
+      contract.register("mock_path1", adapter);
+      const c = (contract as any).mock_path1("svc", {
+        target: "/x",
+        cases: { ok: { description: "p1" } },
+      }) as ProtocolContract<MockSpec>;
+      (contract.bootstrap as any)(c.case("ok"), async (ctx: any) => {
+        ctx.cleanup(() => { throw new Error("cleanup-p1"); });
+        throw new Error("bootstrap-p1");
+      });
+      await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow("bootstrap-p1");
+    }
+
+    // Path 2: needs validation fails
+    clearRegistry();
+    clearBootstrapRegistry();
+    {
+      const adapter = makeMockAdapter();
+      adapter.executeCase = async () => {};
+      contract.register("mock_path2", adapter);
+      const schema = {
+        safeParse: () => ({
+          success: false as const,
+          error: { issues: [{ message: "p2 validation" }] },
+        }),
+      };
+      const c = (contract as any).mock_path2("svc", {
+        target: "/x",
+        cases: { ok: { description: "p2", needs: schema } },
+      }) as ProtocolContract<MockSpec>;
+      (contract.bootstrap as any)(c.case("ok"), async (ctx: any) => {
+        ctx.cleanup(() => { throw new Error("cleanup-p2"); });
+        return { anything: true };
+      });
+      await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(/p2 validation/);
+    }
+
+    // Path 3: executeCase throws
+    clearRegistry();
+    clearBootstrapRegistry();
+    {
+      const adapter = makeMockAdapter();
+      adapter.executeCase = async () => { throw new Error("case-p3"); };
+      contract.register("mock_path3", adapter);
+      const c = (contract as any).mock_path3("svc", {
+        target: "/x",
+        cases: { ok: { description: "p3" } },
+      }) as ProtocolContract<MockSpec>;
+      (contract.bootstrap as any)(c.case("ok"), async (ctx: any) => {
+        ctx.cleanup(() => { throw new Error("cleanup-p3"); });
+        return undefined;
+      });
+      await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow("case-p3");
+    }
+
+    // All three cleanup errors should have been reported via console.error
+    const flat = consoleLog.map((args) => args.join(" ")).join("\n");
+    expect(flat).toMatch(/cleanup-p1/);
+    expect(flat).toMatch(/cleanup-p2/);
+    expect(flat).toMatch(/cleanup-p3/);
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
 test("bootstrap cleanup runs even when executeCase throws", async () => {
   const log: string[] = [];
   const adapter = makeMockAdapter({ executionLog: log });

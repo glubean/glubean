@@ -26,6 +26,7 @@ import type {
   TestContext,
 } from "../types.js";
 import { clearRegistry } from "../internal.js";
+import { clearBootstrapRegistry } from "../bootstrap-registry.js";
 import { Expectation } from "../expect.js";
 
 // ---------------------------------------------------------------------------
@@ -99,6 +100,7 @@ function makeCtx(partial: Partial<TestContext> = {}): TestContext {
 
 beforeEach(() => {
   clearRegistry();
+  clearBootstrapRegistry();
 });
 
 // ---------------------------------------------------------------------------
@@ -193,6 +195,64 @@ test("standalone case without setup/teardown runs cleanly (v10 baseline)", async
   });
   await c[0].fn!(makeCtx());
   expect(client._calls.length).toBe(1);
+});
+
+test("v10 overlay: bootstrap resolvedInput drives real HTTP request construction", async () => {
+  // End-to-end HTTP overlay test. Proves bootstrap output flows through
+  // httpAdapter.executeCase → executeStandaloneCase → function-valued
+  // params/headers/body → outgoing request construction. Mock-adapter
+  // tests cover routing; this test covers HTTP-specific construction.
+  //
+  // Implementation note: HTTP's `validateCaseForFlow` (which fires from
+  // ProtocolContract.case()) rejects function-valued body/params/headers
+  // as a v9 flow-safety rule. v10 overlay dispatch legitimately uses
+  // these with resolvedInput, but the validator doesn't yet distinguish
+  // "used in flow" from "used via overlay". Relaxing the validator is
+  // Phase 2d scope (flow migration). Until then, this test bypasses
+  // `.case()` and registers the overlay directly via registerBootstrap.
+  const { registerBootstrap } = await import("../bootstrap-registry.js");
+
+  const client = makeMockClient({ status: 200, body: { ok: true } });
+  const api = contract.http.with("api", { client });
+
+  const c = api("orders.create", {
+    endpoint: "POST /projects/:projectId/orders",
+    cases: {
+      success: {
+        description: "create order under project",
+        params: ({ projectId }: any) => ({ projectId }),
+        body: ({ items }: any) => ({ items }),
+        headers: ({ token }: any) => ({ Authorization: `Bearer ${token}` }),
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  // Register overlay directly (bypasses .case()'s function-field validator).
+  registerBootstrap(
+    {
+      __glubean_type: "contract-case-ref",
+      contractId: "orders.create",
+      caseKey: "success",
+      protocol: "http",
+      target: "POST /projects/:projectId/orders",
+      contract: c as any,
+    } as any,
+    (async () => ({
+      projectId: "p_42",
+      token: "tok-abc",
+      items: [{ sku: "X", qty: 1 }],
+    })) as any,
+  );
+
+  await c[0].fn!(makeCtx());
+
+  expect(client._calls.length).toBe(1);
+  const call = client._calls[0];
+  expect(call.method).toBe("post");
+  expect(call.url).toBe("/projects/p_42/orders");                      // :projectId resolved
+  expect(call.options.json).toEqual({ items: [{ sku: "X", qty: 1 }] }); // body from bootstrap
+  expect(call.options.headers).toEqual({ Authorization: "Bearer tok-abc" }); // headers from bootstrap
 });
 
 // ---------------------------------------------------------------------------
