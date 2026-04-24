@@ -318,12 +318,45 @@ export interface ContractProtocolAdapter<
    * Execute a single case. Called by the core dispatcher for each spec case.
    * Adapter does the full case lifecycle: setup → request/invoke → expect →
    * verify → teardown.
+   *
+   * **Legacy path** — uses case-local `setup` / `teardown` fields.
+   * Replaced by `executeCase` in v10 attachment model (setup/teardown are
+   * removed from contract case surface; state is provided via bootstrap
+   * overlay or explicit input). Kept for backward compat during migration;
+   * removed in Spike 2 Phase 2c.
    */
   execute: (
     ctx: TestContext,
     caseSpec: unknown,
     contractSpec: Spec,
   ) => Promise<void>;
+
+  /**
+   * Execute a single case with an already-resolved logical input.
+   *
+   * v10 attachment model entry point. Core dispatcher calls this after:
+   *   - resolving bootstrap overlay (if registered) to produce `resolvedInput`
+   *   - OR receiving explicit `--input-json` / `input` from runner
+   *   - validating against the case's `needs` schema
+   *
+   * Adapter responsibilities:
+   *   1. Receive already-validated `resolvedInput` (no re-validation needed)
+   *   2. Call function-valued action fields (body / headers / etc.) with the input
+   *   3. Execute request / expect / verify
+   *   4. No setup / teardown — those are gone in v10
+   *
+   * @see contract-attachment-model.md v1.3 §10.1
+   * @see single-case-execution-api.md v1 §5
+   */
+  executeCase?: (options: {
+    ctx: TestContext;
+    contract: ProtocolContract<Spec, SafeSchemas, SafeMeta>;
+    caseKey: string;
+    /** Logical input already validated against `needs`. `void` when case has no needs. */
+    resolvedInput: unknown;
+    /** Where the call originated. Affects cleanup scoping + event tagging. */
+    mode: "standalone" | "flow";
+  }) => Promise<void>;
 
   /**
    * Project the spec to a Runtime projection (may contain live schemas).
