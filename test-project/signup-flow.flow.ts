@@ -13,6 +13,7 @@
  */
 
 import { configure, contract } from "@glubean/sdk";
+import type { SchemaLike } from "@glubean/sdk";
 
 // Any HTTP client will do — configure() returns one bound to the prefixUrl.
 // For running the flow you'd point this at a real API.
@@ -22,14 +23,31 @@ const { http } = configure({
 
 const api = contract.http.with("demo", { client: http });
 
+// v10 logical-input pattern: cases declare `needs` schema; function-valued
+// body/params receive the logical input (not setup state). Flow's `.step()`
+// `in` lens returns the logical input shape, not an adapter patch.
+//
+// Minimal SchemaLike helper for docs-only flows: pure type-level,
+// no runtime parse. A real project would use zod or valibot.
+function s<T>(): SchemaLike<T> {
+  return {} as SchemaLike<T>;
+}
+
 export const createUser = api("create-user", {
   endpoint: "POST /users",
   description: "Register a new user",
   cases: {
     ok: {
       description: "Happy path — returns 201 with user id",
-      // Static body — lens in the flow below patches `email` onto it.
-      body: { role: "member", source: "test-project" },
+      needs: s<{ email: string }>(),
+      // Explicit parameter type until Phase 2c Step B threads Needs generic
+      // through HttpContractCase — right now the body fn's param inherits
+      // v9's S (setup state, defaults to void), not the logical input Needs.
+      body: ({ email }: { email: string }) => ({
+        role: "member",
+        source: "test-project",
+        email,
+      }),
       expect: { status: 201 },
     },
   },
@@ -41,6 +59,8 @@ export const fetchUser = api("fetch-user", {
   cases: {
     ok: {
       description: "Returns the user record",
+      needs: s<{ compoundKey: string }>(),
+      params: ({ compoundKey }: { compoundKey: string }) => ({ compoundKey }),
       expect: { status: 200 },
     },
   },
@@ -49,10 +69,11 @@ export const fetchUser = api("fetch-user", {
 /**
  * Flow:
  *   setup    → seed { email, category }
- *   step #1  → create-user.ok, lens injects email into body, captures userId from response
+ *   step #1  → create-user.ok — `in` returns { email } (the case's logical input);
+ *              body() builds the full request from it. `out` captures userId.
  *   compute  → combine category + userId into a compound key
  *              (lens can't do string concatenation — that's what compute is for)
- *   step #2  → fetch-user.ok, lens uses the compound key as a URL param
+ *   step #2  → fetch-user.ok — `in` returns { compoundKey }; params() resolves URL.
  *
  * Run `npx glubean contracts --format json` to see the extracted projection
  * including FieldMappings for the lenses and reads/writes for the compute step.
@@ -74,14 +95,14 @@ export const signupFlow = contract
     category: "members",
   }))
   .step(createUser.case("ok"), {
-    in: (s) => ({ body: { email: s.email } }),
-    out: (s, res: any) => ({ ...s, userId: res.body.id }),
+    in: (state) => ({ email: state.email }),
+    out: (state, res: any) => ({ ...state, userId: res.body.id }),
   })
-  .compute((s) => ({
-    ...s,
+  .compute((state) => ({
+    ...state,
     // Pure synchronous TS — not allowed in lenses, perfect for compute
-    compoundKey: `${s.category}:${s.userId}`,
+    compoundKey: `${state.category}:${state.userId}`,
   }))
   .step(fetchUser.case("ok"), {
-    in: (s) => ({ params: { compoundKey: s.compoundKey } }),
+    in: (state) => ({ compoundKey: state.compoundKey }),
   });

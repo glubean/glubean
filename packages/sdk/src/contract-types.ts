@@ -785,11 +785,29 @@ export interface FlowBuilder<State = unknown> {
    * lens functions (select / repack only; no I/O, no method calls, no
    * branching). Lens purity is enforced at Proxy dry-run time during
    * projection extraction.
+   *
+   * Two overloads discriminate on `CaseInputs extends void` (Spike 0 Finding 3):
+   *   - void-input case → `bindings` optional; `in` not accepted
+   *   - typed-input case → `bindings.in` REQUIRED
+   *
+   * In v10, `in` returns LOGICAL case input (matches the case's `needs`),
+   * NOT an adapter patch. HTTP adapter's `executeCaseInFlow` calls
+   * function-valued body/headers/params/query with this logical input
+   * (same mechanism as standalone `executeStandaloneCase`).
    */
+  // Overload 1: void-input case — bindings optional, `in` not accepted.
+  step<CaseOutput, NewState = State>(
+    ref: ContractCaseRef<void, CaseOutput>,
+    bindings?: {
+      out?: (state: State, response: CaseOutput) => NewState;
+      name?: string;
+    },
+  ): FlowBuilder<NewState>;
+  // Overload 2: typed-input case — `in` required.
   step<CaseInputs, CaseOutput, NewState = State>(
     ref: ContractCaseRef<CaseInputs, CaseOutput>,
-    bindings?: {
-      in?: (state: State) => CaseInputs;
+    bindings: {
+      in: (state: State) => CaseInputs;
       out?: (state: State, response: CaseOutput) => NewState;
       name?: string;
     },

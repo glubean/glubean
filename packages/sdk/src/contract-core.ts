@@ -627,7 +627,14 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
       return builder;
     },
 
-    step(ref, bindings): FlowBuilder<any> {
+    step(
+      ref: ContractCaseRef<any, any>,
+      bindings?: {
+        in?: (state: any) => any;
+        out?: (state: any, response: any) => any;
+        name?: string;
+      },
+    ): FlowBuilder<any> {
       const adapter = _adapters.get(ref.protocol);
       if (!adapter) {
         throw new Error(
