@@ -304,6 +304,47 @@ test(".case() succeeds for static-input cases", () => {
 // executeCaseInFlow: logical-input construction (v10, Phase 2d Step 2)
 // ---------------------------------------------------------------------------
 
+test("flow step: needs case without `in` throws at runtime (TS bypass guard)", async () => {
+  // v10 invariant: a case with `needs` MUST have `bindings.in` in flow mode.
+  // The conditional-tuple FlowBuilder.step() signature catches this at
+  // compile time, but `as any` / JS callers can bypass. Runtime guard in
+  // runFlow throws a clear error before adapter is invoked.
+  const client = makeMockClient({ status: 200 });
+  const api = contract.http.with("api", { client });
+
+  const stringSchema = {
+    safeParse: (d: unknown) =>
+      typeof d === "string"
+        ? { success: true as const, data: d }
+        : { success: false as const, error: { issues: [{ message: "not a string" }] } },
+  };
+
+  const c = api("create", {
+    endpoint: "POST /users",
+    cases: {
+      ok: {
+        description: "create",
+        needs: stringSchema as SchemaLike<string>,
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  // Simulate the TS bypass: `.step(ref)` WITHOUT bindings on a needs case.
+  // Cast step to any to skip the conditional-tuple type check (simulates
+  // JS callers / `as any` usage).
+  const flowObj = (contract
+    .flow("f")
+    .step as any)(c.case("ok"))
+    .build() as FlowContract<unknown>;
+
+  await expect(runFlow(flowObj, makeCtx())).rejects.toThrow(
+    /declares `needs` but the step has no `bindings\.in`/,
+  );
+  // Critical: HTTP client NEVER called — guard fires before adapter dispatch.
+  expect(client._calls.length).toBe(0);
+});
+
 test("flow step: needs schema rejects invalid `in` output BEFORE HTTP call", async () => {
   // v10: flow `in` output must pass the case's `needs` schema at runtime,
   // mirroring the standalone overlay path. Without this guard, TS-only

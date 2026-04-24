@@ -849,26 +849,45 @@ export async function runFlow<State>(
         );
       }
 
-      let resolvedInputs = step.bindings?.in?.(state);
-
-      // v10 Phase 2d Step 2+3 follow-up (RFR v2 P1): enforce `needs` schema
-      // at flow boundary too, not just standalone. The conditional-tuple
-      // `step()` signature catches TS authoring shape mismatches, but
-      // runtime validation is the only line of defense against:
+      // v10 Phase 2d Step 2+3 follow-up (RFR v2 / v2.1 P1): enforce `needs`
+      // schema at flow boundary, not just standalone. The conditional-tuple
+      // `step()` signature catches TS authoring shape mismatches, but runtime
+      // validation is the only line of defense against:
       //   - `as any` / JS callers that bypass the TS check
       //   - Zod parse / coerce / default semantics (schema can transform
       //     the value, not just validate it)
       //   - State drift producing invalid values at runtime despite valid
       //     authoring types
       // Standalone overlay path already validates via the same helper in
-      // `dispatchContract`'s test.fn closure; flow must mirror that to keep
+      // `dispatchContract`'s test.fn closure; flow mirrors that to keep
       // `needs` a true contract semantic rather than a TS-only boundary.
+      //
+      // Two-branch guard:
+      //   needs present + bindings.in missing  → throw (contract requires input)
+      //   needs present + bindings.in present  → validate unconditionally
+      //   needs absent                          → no guard
       const contractSpec = (step.contract as { _spec?: unknown })._spec as
         | { cases?: Record<string, { needs?: unknown }> }
         | undefined;
       const caseSpec = contractSpec?.cases?.[step.caseKey];
       const needsSchema = caseSpec?.needs;
-      if (needsSchema && step.bindings?.in) {
+      const hasIn = typeof step.bindings?.in === "function";
+
+      if (needsSchema && !hasIn) {
+        throw new Error(
+          `flow "${runtime.id}" step "${step.name ?? step.caseKey}": ` +
+            `case "${step.ref.contractId}.${step.caseKey}" declares \`needs\` ` +
+            `but the step has no \`bindings.in\`. The TypeScript conditional ` +
+            `tuple on FlowBuilder.step() usually prevents this at compile time; ` +
+            `this runtime check catches \`as any\` / JS bypass. Provide an ` +
+            `\`in: (state) => <logical input>\` binding or remove the \`needs\` ` +
+            `schema from the case.`,
+        );
+      }
+
+      let resolvedInputs = step.bindings?.in?.(state);
+
+      if (needsSchema) {
         resolvedInputs = validateNeedsOutput(
           needsSchema as { safeParse?: unknown; parse?: unknown },
           resolvedInputs,
