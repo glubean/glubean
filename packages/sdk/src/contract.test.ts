@@ -26,6 +26,7 @@ import type {
 } from "./contract-types.js";
 import type { TestContext } from "./types.js";
 import { clearRegistry, getRegistry } from "./internal.js";
+import { clearBootstrapRegistry } from "./bootstrap-registry.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapter factory
@@ -117,6 +118,7 @@ function makeMockCtx(partial: Partial<TestContext> = {}): TestContext {
 
 beforeEach(() => {
   clearRegistry();
+  clearBootstrapRegistry();
 });
 
 // ---------------------------------------------------------------------------
@@ -236,6 +238,126 @@ test("dispatcher calls adapter.execute at runtime", async () => {
   const test0 = c[0];
   await test0.fn!(makeMockCtx());
   expect(log).toContain("execute:a case");
+});
+
+// ---------------------------------------------------------------------------
+// v10 attachment model: bootstrap overlay dispatch
+//
+// When contract.bootstrap(ref, spec) is registered for a testId, the
+// dispatcher routes test.fn through adapter.executeCase (not the legacy
+// adapter.execute). Bootstrap's return value becomes resolvedInput.
+// No overlay → legacy path preserved.
+// ---------------------------------------------------------------------------
+
+test("dispatcher routes through adapter.executeCase when bootstrap overlay registered", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  let executeCaseCalled: { caseKey: string; resolvedInput: unknown } | null = null;
+  adapter.executeCase = async ({ caseKey, resolvedInput }) => {
+    executeCaseCalled = { caseKey, resolvedInput };
+    log.push(`executeCase:${caseKey}`);
+  };
+  contract.register("mock_overlay", adapter);
+
+  const c = (contract as any).mock_overlay("svc", {
+    target: "/x",
+    cases: { ok: { description: "with overlay" } },
+  }) as ProtocolContract<MockSpec>;
+
+  // Register bootstrap overlay BEFORE running the test
+  contract.bootstrap(c.case("ok"), async () => ({ token: "seeded" }));
+
+  const test0 = c[0];
+  await test0.fn!(makeMockCtx());
+
+  expect(log).toContain("executeCase:ok");
+  expect(log).not.toContain("execute:with overlay"); // legacy path skipped
+  expect(executeCaseCalled).not.toBeNull();
+  expect(executeCaseCalled!.caseKey).toBe("ok");
+  expect(executeCaseCalled!.resolvedInput).toEqual({ token: "seeded" });
+});
+
+test("dispatcher falls back to adapter.execute when no overlay registered", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async ({ caseKey }) => {
+    log.push(`executeCase:${caseKey}`);
+  };
+  contract.register("mock_no_overlay", adapter);
+
+  const c = (contract as any).mock_no_overlay("svc", {
+    target: "/x",
+    cases: { ok: { description: "no overlay" } },
+  }) as ProtocolContract<MockSpec>;
+
+  // Intentionally NO contract.bootstrap(...) call
+
+  const test0 = c[0];
+  await test0.fn!(makeMockCtx());
+
+  expect(log).toContain("execute:no overlay"); // legacy path
+  expect(log).not.toContain("executeCase:ok");
+});
+
+test("bootstrap ctx.cleanup callbacks run LIFO after case execution", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => {
+    log.push("executeCase");
+  };
+  contract.register("mock_cleanup", adapter);
+
+  const c = (contract as any).mock_cleanup("svc", {
+    target: "/x",
+    cases: { ok: { description: "cleanup" } },
+  }) as ProtocolContract<MockSpec>;
+
+  contract.bootstrap(c.case("ok"), async (ctx) => {
+    (ctx as any).cleanup(() => { log.push("cleanup-A"); });
+    (ctx as any).cleanup(() => { log.push("cleanup-B"); });
+    (ctx as any).cleanup(() => { log.push("cleanup-C"); });
+    return undefined;
+  });
+
+  const test0 = c[0];
+  await test0.fn!(makeMockCtx());
+
+  // LIFO: C registered last runs first
+  const cleanupIdx = [
+    log.indexOf("executeCase"),
+    log.indexOf("cleanup-C"),
+    log.indexOf("cleanup-B"),
+    log.indexOf("cleanup-A"),
+  ];
+  expect(cleanupIdx.every((i) => i >= 0)).toBe(true);
+  // Each index strictly greater than the previous (order matches expectation)
+  expect(cleanupIdx[0]).toBeLessThan(cleanupIdx[1]);
+  expect(cleanupIdx[1]).toBeLessThan(cleanupIdx[2]);
+  expect(cleanupIdx[2]).toBeLessThan(cleanupIdx[3]);
+});
+
+test("bootstrap cleanup runs even when executeCase throws", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => {
+    log.push("executeCase:will-throw");
+    throw new Error("case failed");
+  };
+  contract.register("mock_cleanup_fail", adapter);
+
+  const c = (contract as any).mock_cleanup_fail("svc", {
+    target: "/x",
+    cases: { ok: { description: "cleanup on fail" } },
+  }) as ProtocolContract<MockSpec>;
+
+  contract.bootstrap(c.case("ok"), async (ctx) => {
+    (ctx as any).cleanup(() => { log.push("cleanup"); });
+    return undefined;
+  });
+
+  const test0 = c[0];
+  await expect(test0.fn!(makeMockCtx())).rejects.toThrow("case failed");
+  expect(log).toContain("cleanup"); // still ran despite executeCase failure
 });
 
 test("deferred/deprecated lifecycle propagates to skip() at runtime", async () => {

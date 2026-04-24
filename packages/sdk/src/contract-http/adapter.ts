@@ -378,6 +378,122 @@ async function executeCase<T, S>(
   }
 }
 
+/**
+ * v10 attachment model — standalone-mode case execution.
+ *
+ * Called by the HTTP adapter's `executeCase` method. Receives an
+ * already-resolved logical input (from a bootstrap overlay's `run` output
+ * or from an explicit `--input-json`), already validated against the
+ * case's `needs` schema by the core dispatcher.
+ *
+ * Differs from the legacy `executeCase<T, S>` helper above:
+ *   - No setup / teardown. State is the `resolvedInput` argument.
+ *   - Function-valued body / headers / params / query receive `resolvedInput`
+ *     (typed per-case at the ref boundary; `unknown` here is runtime-only).
+ *   - No `finally` cleanup block — standalone cleanup is owned by bootstrap
+ *     overlay context via `ctx.cleanup`, registered outside this helper.
+ *
+ * Keeps request / expect / verify logic identical to the legacy path so
+ * behavior stays consistent across attachment modes.
+ */
+async function executeStandaloneCase(
+  ctx: TestContext,
+  caseSpec: ContractCase<unknown, unknown>,
+  spec: HttpContractSpec,
+  resolvedInput: unknown,
+): Promise<void> {
+  const { method, path } = parseEndpoint(spec.endpoint);
+
+  const client: HttpClient = (caseSpec.client ?? spec.client) as HttpClient;
+  if (!client) {
+    throw new Error(
+      `No HTTP client provided for case. Set "client" on the case or contract spec.`,
+    );
+  }
+
+  // Resolve params/query/body/headers using resolvedInput (not setup state).
+  // Function-valued fields receive the logical input directly.
+  const rawParams = typeof caseSpec.params === "function"
+    ? (caseSpec.params as (input: unknown) => Record<string, string>)(resolvedInput)
+    : caseSpec.params;
+  const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
+  const resolvedPath = resolveParams(path, params);
+
+  const requestOptions: Record<string, unknown> = {};
+  const body = typeof caseSpec.body === "function"
+    ? (caseSpec.body as (input: unknown) => unknown)(resolvedInput)
+    : caseSpec.body;
+
+  const normalizedReq = normalizeRequest(spec.request);
+  const effectiveContentType =
+    caseSpec.contentType ?? normalizedReq?.contentType ?? "application/json";
+
+  if (body !== undefined) {
+    Object.assign(requestOptions, buildRequestBodyOptions(body, effectiveContentType));
+  }
+
+  const headers = typeof caseSpec.headers === "function"
+    ? (caseSpec.headers as (input: unknown) => Record<string, string>)(resolvedInput)
+    : caseSpec.headers;
+  if (headers) requestOptions.headers = headers;
+
+  if (caseSpec.query) {
+    const rawQuery = typeof caseSpec.query === "function"
+      ? (caseSpec.query as (input: unknown) => Record<string, string>)(resolvedInput)
+      : caseSpec.query;
+    requestOptions.searchParams = flattenParamValues(
+      rawQuery as Record<string, unknown> | undefined,
+    );
+  }
+
+  requestOptions.throwHttpErrors = false;
+
+  const methodLower = method.toLowerCase() as keyof HttpClient;
+  let res;
+  try {
+    res = await (client[methodLower] as (p: string, o: unknown) => HttpResponsePromise)(
+      resolvedPath,
+      requestOptions,
+    );
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      const timeoutMs = (client as { _configuredTimeout?: number })._configuredTimeout ?? 10000;
+      throw new Error(`${err.message} (timeout: ${timeoutMs}ms)`);
+    }
+    throw err;
+  }
+
+  // Assertions (same as legacy path)
+  ctx.expect(res).toHaveStatus(caseSpec.expect.status);
+
+  if (caseSpec.expect.headers) {
+    const normalizedHeaders = normalizeResponseHeaders(res.headers);
+    ctx.validate(normalizedHeaders, caseSpec.expect.headers, `response headers`);
+  }
+
+  let parsed: unknown;
+  if (caseSpec.expect.schema) {
+    const jsonBody = await res.json();
+    const validated = ctx.validate(
+      jsonBody,
+      caseSpec.expect.schema,
+      `response body`,
+    );
+    parsed = validated !== undefined ? validated : jsonBody;
+  } else if (caseSpec.verify) {
+    parsed = await res.json();
+  } else {
+    parsed = undefined;
+  }
+
+  if (caseSpec.verify) {
+    await (caseSpec.verify as (ctx: TestContext, res: unknown) => Promise<void>)(
+      ctx,
+      parsed,
+    );
+  }
+}
+
 // =============================================================================
 // project(): HttpContractSpec → ContractProjection<HttpPayloadSchemas>
 // =============================================================================
@@ -765,6 +881,18 @@ export const httpAdapter: ContractProtocolAdapter<
 > = {
   async execute(ctx, caseSpec, spec) {
     await executeCase(ctx, caseSpec as ContractCase<unknown, unknown>, spec);
+  },
+
+  async executeCase({ ctx, contract, caseKey, resolvedInput }) {
+    const spec = contract._spec;
+    const caseSpec = spec.cases[caseKey] as ContractCase<unknown, unknown>;
+    if (!caseSpec) {
+      throw new Error(
+        `HTTP adapter.executeCase: case "${caseKey}" not found in contract ` +
+          `"${contract._projection.id}".`,
+      );
+    }
+    await executeStandaloneCase(ctx, caseSpec, spec, resolvedInput);
   },
 
   project(spec) {

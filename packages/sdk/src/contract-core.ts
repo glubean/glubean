@@ -42,7 +42,7 @@ import type {
   RuntimeFlowStep,
 } from "./contract-types.js";
 import { registerTest } from "./internal.js";
-import { registerBootstrap } from "./bootstrap-registry.js";
+import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
 
 // =============================================================================
 // Adapter registry
@@ -187,6 +187,14 @@ function dispatchContract<
   // 1:1 key invariant between spec.cases and projection.cases
   validateCaseKeys(protocol, spec.cases ?? {}, projection.cases);
 
+  // Forward-declared carrier reference. Populated below via Object.assign and
+  // captured by each test.fn closure so that v10 bootstrap overlay dispatch
+  // can pass `contract` to `adapter.executeCase({ ..., contract, ... })` at
+  // runtime. Safe because fn closures only execute after contractObj is set.
+  let contractObj:
+    | ProtocolContract<Spec, SafeSchemas, SafeMeta>
+    | undefined;
+
   const cases = spec.cases ?? {};
   const contractTagsRaw = spec.tags;
   const contractTags = Array.isArray(contractTagsRaw)
@@ -242,6 +250,72 @@ function dispatchContract<
       fn: async (ctx) => {
         if (skipDeprecated) ctx.skip(skipDeprecated);
         if (skipDeferred) ctx.skip(skipDeferred);
+
+        // v10 attachment model: check for bootstrap overlay registered via
+        // contract.bootstrap(). If one exists AND the adapter supports the
+        // new executeCase entry point, run overlay → call executeCase with
+        // resolved input. Otherwise fall back to legacy adapter.execute.
+        //
+        // Phase 2b Step 1 scope: plain-function bootstrap form only. Structured
+        // form with `bootstrap.params` + runner-provided `bootstrapInput` is
+        // Spike 3 (CLI / MCP channels). Structured form with required params
+        // will throw at runtime until Spike 3 wires the input channel.
+        //
+        // No `needs` schema validation yet — Phase 2b Step 2 adds that once
+        // the input channel exists. For now the adapter's body/headers fns
+        // receive whatever the bootstrap run returned; type safety comes from
+        // the authoring type (InferCaseInput<Cases[K]> on ref).
+        const overlay = getBootstrap(testId);
+        if (overlay && adapter.executeCase && contractObj) {
+          const cleanups: Array<() => Promise<void> | void> = [];
+          const bootstrapCtx = Object.assign(Object.create(ctx as object), ctx, {
+            cleanup(fn: () => Promise<void> | void) {
+              cleanups.push(fn);
+            },
+          });
+
+          const runFn = typeof overlay.spec === "function"
+            ? overlay.spec
+            : overlay.spec.run;
+
+          let resolvedInput: unknown;
+          try {
+            resolvedInput = await runFn(bootstrapCtx, undefined as unknown);
+          } catch (err) {
+            // Bootstrap failed; still run cleanups registered so far.
+            while (cleanups.length > 0) {
+              try { await cleanups.pop()!(); } catch { /* swallow */ }
+            }
+            throw err;
+          }
+
+          try {
+            await adapter.executeCase({
+              ctx,
+              contract: contractObj,
+              caseKey,
+              resolvedInput,
+            });
+          } finally {
+            // LIFO cleanup, errors reported but don't mask primary failure.
+            while (cleanups.length > 0) {
+              const cleanup = cleanups.pop()!;
+              try {
+                await cleanup();
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.error(
+                  `bootstrap cleanup error for ${testId}:`,
+                  err,
+                );
+              }
+            }
+          }
+          return;
+        }
+
+        // Legacy path: no overlay, adapter lacks executeCase, or carrier
+        // not yet assembled (impossible at fn-call time, but TS-safe).
         await adapter.execute(ctx, caseSpec, spec);
       },
     };
@@ -297,7 +371,7 @@ function dispatchContract<
 
   const arr: Test[] = [...tests];
 
-  const contractObj = Object.assign(arr, {
+  contractObj = Object.assign(arr, {
     _projection: enrichedProjection,
     _extracted: extracted,
     _spec: spec as Spec,
