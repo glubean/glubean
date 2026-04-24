@@ -32,6 +32,7 @@ import type {
 import type {
   HttpClient,
   HttpResponsePromise,
+  SchemaLike,
   TestContext,
 } from "./types.js";
 import { clearRegistry } from "./internal.js";
@@ -269,6 +270,8 @@ test("CG-0 spike: HTTP + spike_rpc + HTTP mixed flow end-to-end", async () => {
     cases: {
       byId: {
         description: "fetch order by id",
+        needs: {} as SchemaLike<{ id: string }>,
+        params: ({ id }: { id: string }) => ({ id }),
         expect: { status: 200 },
       },
     },
@@ -301,19 +304,18 @@ test("CG-0 spike: HTTP + spike_rpc + HTTP mixed flow end-to-end", async () => {
         paymentId: res.message?.serverId as string,
       }),
     })
-    // Step 3: HTTP — verify order status (uses RPC output)
-    // Phase 2d Step 3 will migrate cross-protocol flow tests when Option Y
-    // (gRPC/GraphQL flow migration) lands; Option X scope keeps them as-is.
-    // Cast bindings to `any` so conditional-tuple step() doesn't reject v9
-    // adapter-patch shape; runtime `executeCaseInFlow` still deep-merges.
+    // Step 3: HTTP — verify order status (uses RPC output). v10 logical
+    // input shape: case declares `needs: { id }`, `in` returns `{ id }`,
+    // and `params` function resolves URL. gRPC step above keeps v9 adapter-
+    // patch shape (Option X: gRPC flow migration deferred to Spike 4).
     .step(fetchContract.case("byId"), {
-      in: (s: any) => ({ params: { id: s.orderId } }),
+      in: (s: any) => ({ id: s.orderId }),
       out: (s: any, res: any) => {
         const out = { ...s, finalStatus: res.body?.status };
         finalState = out;
         return out;
       },
-    } as any)
+    })
     .build() as FlowContract<unknown>;
 
   await runFlow(flowObj, makeCtx());

@@ -412,7 +412,9 @@ describe("executeCaseInFlow + flow integration", () => {
           capturedOut = res;
           return { statusCode: res.status.code, serverId: res.message.serverId };
         },
-      })
+      } as any)  // Spike 4 — gRPC factory returns `any` via (contract as any).grpc,
+                  // so conditional tuple on step() matches typed-input branch. gRPC
+                  // flow migration is deferred per Option X.
       .build() as FlowContract<unknown>;
 
     await runFlow(flowObj, makeCtx());
@@ -756,10 +758,10 @@ describe("schema validation failure path", () => {
       },
     });
 
-    const flowObj = contract
+    const flowObj = (contract
       .flow("schema-fail-flow")
       .setup(async () => ({}))
-      .step(svcContract.case("ok"))
+      .step as any)(svcContract.case("ok"))
       .build() as FlowContract<unknown>;
 
     await expect(runFlow(flowObj, makeCtx())).rejects.toThrow(/validate failed/);
@@ -786,7 +788,7 @@ describe("validateCaseForFlow", () => {
     });
 
     expect(() =>
-      contract.flow("f").step(c.case("ok") as any),
+      (contract.flow("f").step as any)(c.case("ok")),
     ).toThrow(/function-valued request.*flow/);
   });
 
@@ -805,7 +807,7 @@ describe("validateCaseForFlow", () => {
     });
 
     expect(() =>
-      contract.flow("f").step(c.case("ok") as any),
+      (contract.flow("f").step as any)(c.case("ok")),
     ).toThrow(/function-valued.*metadata/);
   });
 });

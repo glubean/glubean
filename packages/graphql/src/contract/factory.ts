@@ -36,7 +36,12 @@ type GraphqlDispatch = <
 >(
   id: string,
   spec: GraphqlContractSpec<Vars, Res, Cases>,
-) => ProtocolContract<GraphqlContractSpec, GraphqlPayloadSchemas, GraphqlContractMeta>;
+) => ProtocolContract<
+  GraphqlContractSpec<Vars, Res, Cases>,
+  GraphqlPayloadSchemas,
+  GraphqlContractMeta,
+  Cases
+>;
 
 function mergeExtensions(
   base: Extensions | undefined,
@@ -98,7 +103,12 @@ export function createGraphqlFactory(
   >(
     id: string,
     spec: GraphqlContractSpec<Vars, Res, Cases>,
-  ): ProtocolContract<GraphqlContractSpec, GraphqlPayloadSchemas, GraphqlContractMeta> => {
+  ): ProtocolContract<
+    GraphqlContractSpec<Vars, Res, Cases>,
+    GraphqlPayloadSchemas,
+    GraphqlContractMeta,
+    Cases
+  > => {
     if (!defaults?._name) {
       throw new Error(
         `contract.graphql("${id}", spec) is not supported. ` +

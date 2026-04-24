@@ -545,7 +545,8 @@ describe("executeCaseInFlow + flow integration", () => {
           captured = res;
           return { id: res.data.createUser.id };
         },
-      })
+      } as any)  // Spike 4 — GraphQL factory returns `any` via (contract as any).graphql;
+                  // GraphQL flow migration deferred per Option X.
       .build() as FlowContract<unknown>;
 
     await runFlow(flowObj, makeCtx());
@@ -614,7 +615,7 @@ describe("validateCaseForFlow", () => {
     });
 
     expect(() =>
-      contract.flow("f").step(c.case("ok") as any),
+      (contract.flow("f").step as any)(c.case("ok")),
     ).toThrow(/function-valued variables.*flow/);
   });
 
@@ -633,7 +634,7 @@ describe("validateCaseForFlow", () => {
     });
 
     expect(() =>
-      contract.flow("f").step(c.case("ok") as any),
+      (contract.flow("f").step as any)(c.case("ok")),
     ).toThrow(/function-valued.*headers/);
   });
 });
@@ -961,10 +962,10 @@ describe("schema validation failure path", () => {
       },
     });
 
-    const flowObj = contract
+    const flowObj = (contract
       .flow("schema-fail-flow")
       .setup(async () => ({}))
-      .step(c.case("ok"))
+      .step as any)(c.case("ok"))
       .build() as FlowContract<unknown>;
 
     await expect(runFlow(flowObj, makeCtx())).rejects.toThrow(/validate failed/);

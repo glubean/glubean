@@ -34,7 +34,12 @@ type GrpcDispatch = <
 >(
   id: string,
   spec: GrpcContractSpec<Req, Res, Cases>,
-) => ProtocolContract<GrpcContractSpec, GrpcPayloadSchemas, GrpcContractMeta>;
+) => ProtocolContract<
+  GrpcContractSpec<Req, Res, Cases>,
+  GrpcPayloadSchemas,
+  GrpcContractMeta,
+  Cases
+>;
 
 function mergeExtensions(
   base: Extensions | undefined,
@@ -96,7 +101,12 @@ export function createGrpcFactory(
   >(
     id: string,
     spec: GrpcContractSpec<Req, Res, Cases>,
-  ): ProtocolContract<GrpcContractSpec, GrpcPayloadSchemas, GrpcContractMeta> => {
+  ): ProtocolContract<
+    GrpcContractSpec<Req, Res, Cases>,
+    GrpcPayloadSchemas,
+    GrpcContractMeta,
+    Cases
+  > => {
     if (!defaults?._name) {
       throw new Error(
         `contract.grpc("${id}", spec) is not supported. ` +

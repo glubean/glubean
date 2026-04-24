@@ -48,7 +48,6 @@ import type {
   ParamValue,
   RequestSpec,
 } from "./types.js";
-import { mergeSlot } from "./flow-helpers.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
 import { genericMarkdownPart } from "../contract-artifacts.js";
 
@@ -689,126 +688,113 @@ async function executeCaseInFlowHttp(input: {
     throw new Error(`case "${caseKey}" not in contract "${contract._projection.id}"`);
   }
 
-  // Note: function-valued fields are rejected at .case() time (§5.1.1).
-  // In flow mode we assume all input slots are static (possibly undefined).
+  // v10: `resolvedInputs` is the LOGICAL case input (matches the case's
+  // `needs` shape), NOT an adapter patch. Same pattern as standalone
+  // executeStandaloneCase — function-valued body/params/query/headers
+  // receive resolvedInputs; static values pass through unchanged.
+  //
+  // Flow step's `in` lens returns this logical input; FlowBuilder.step()
+  // type (conditional tuple) enforces this at compile time. No setup /
+  // teardown — those are gone in v10 (contract case has no lifecycle per
+  // attachment model §4.1).
 
-  // Compute effective body/params/query/headers via deep-merge
-  const patch = (resolvedInputs ?? {}) as {
-    body?: unknown;
-    params?: Record<string, unknown>;
-    query?: Record<string, unknown>;
-    headers?: Record<string, string>;
-  };
-
-  const effectiveBody = mergeSlot(caseSpec.body, patch.body);
-  const effectiveParams = mergeSlot(caseSpec.params, patch.params);
-  const effectiveQuery = mergeSlot(caseSpec.query, patch.query);
-  const effectiveHeaders = mergeSlot(caseSpec.headers, patch.headers);
-
-  // Rule 1: case setup throw → teardown does NOT run. Track whether setup
-  // SUCCEEDED via a separate flag, not via state-is-undefined — a setup may
-  // legitimately return `undefined` and we still owe it a teardown call.
-  let setupRan = false;
-  let caseState: unknown = undefined;
-  if (caseSpec.setup) {
-    caseState = await caseSpec.setup(ctx);
-    setupRan = true;
-  }
-
-  try {
-    const { method, path } = parseEndpoint(spec.endpoint);
-    const client: HttpClient = (caseSpec.client ?? spec.client) as HttpClient;
-    if (!client) {
-      throw new Error(
-        `No HTTP client provided for case "${caseKey}" in contract "${contract._projection.id}". ` +
-          `Set "client" on the case or contract spec.`,
-      );
-    }
-
-    const resolvedPath = resolveParams(
-      path,
-      flattenParamValues(effectiveParams as Record<string, unknown> | undefined),
+  const { method, path } = parseEndpoint(spec.endpoint);
+  const client: HttpClient = (caseSpec.client ?? spec.client) as HttpClient;
+  if (!client) {
+    throw new Error(
+      `No HTTP client provided for case "${caseKey}" in contract "${contract._projection.id}". ` +
+        `Set "client" on the case or contract spec.`,
     );
+  }
 
-    const normalizedReq = normalizeRequest(spec.request);
-    const effectiveContentType =
-      caseSpec.contentType ?? normalizedReq?.contentType ?? "application/json";
+  // Resolve action fields using resolvedInputs for function-valued slots.
+  const rawParams = typeof caseSpec.params === "function"
+    ? (caseSpec.params as (input: unknown) => Record<string, string>)(resolvedInputs)
+    : caseSpec.params;
+  const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
+  const resolvedPath = resolveParams(path, params);
 
-    const requestOptions: Record<string, unknown> = { throwHttpErrors: false };
-    if (effectiveBody !== undefined) {
-      Object.assign(
-        requestOptions,
-        buildRequestBodyOptions(effectiveBody, effectiveContentType),
-      );
+  const body = typeof caseSpec.body === "function"
+    ? (caseSpec.body as (input: unknown) => unknown)(resolvedInputs)
+    : caseSpec.body;
+
+  const headers = typeof caseSpec.headers === "function"
+    ? (caseSpec.headers as (input: unknown) => Record<string, string>)(resolvedInputs)
+    : caseSpec.headers;
+
+  const normalizedReq = normalizeRequest(spec.request);
+  const effectiveContentType =
+    caseSpec.contentType ?? normalizedReq?.contentType ?? "application/json";
+
+  const requestOptions: Record<string, unknown> = { throwHttpErrors: false };
+  if (body !== undefined) {
+    Object.assign(
+      requestOptions,
+      buildRequestBodyOptions(body, effectiveContentType),
+    );
+  }
+  if (headers) requestOptions.headers = headers;
+
+  if (caseSpec.query) {
+    const rawQuery = typeof caseSpec.query === "function"
+      ? (caseSpec.query as (input: unknown) => Record<string, string>)(resolvedInputs)
+      : caseSpec.query;
+    requestOptions.searchParams = flattenParamValues(
+      rawQuery as Record<string, unknown>,
+    );
+  }
+
+  const methodLower = method.toLowerCase() as keyof HttpClient;
+  let res;
+  try {
+    res = await (client[methodLower] as (p: string, o: unknown) => HttpResponsePromise)(
+      resolvedPath,
+      requestOptions,
+    );
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      const timeoutMs =
+        (client as { _configuredTimeout?: number })._configuredTimeout ?? 10000;
+      throw new Error(`${err.message} (timeout: ${timeoutMs}ms)`);
     }
-    if (effectiveHeaders) requestOptions.headers = effectiveHeaders;
-    if (effectiveQuery) {
-      requestOptions.searchParams = flattenParamValues(
-        effectiveQuery as Record<string, unknown>,
-      );
-    }
+    throw err;
+  }
 
-    const methodLower = method.toLowerCase() as keyof HttpClient;
-    let res;
+  ctx.expect(res).toHaveStatus(caseSpec.expect.status);
+
+  const responseHeaders = normalizeResponseHeaders(res.headers);
+  if (caseSpec.expect.headers) {
+    ctx.validate(responseHeaders, caseSpec.expect.headers, `response headers`);
+  }
+
+  let body2: unknown;
+  if (caseSpec.expect.schema) {
+    const jsonBody = await res.json();
+    const validated = ctx.validate(
+      jsonBody,
+      caseSpec.expect.schema,
+      `response body`,
+    );
+    body2 = validated !== undefined ? validated : jsonBody;
+  } else if (caseSpec.verify) {
+    body2 = await res.json();
+  } else {
+    // Try to pull body anyway for downstream lens.
     try {
-      res = await (client[methodLower] as (p: string, o: unknown) => HttpResponsePromise)(
-        resolvedPath,
-        requestOptions,
-      );
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === "TimeoutError") {
-        const timeoutMs =
-          (client as { _configuredTimeout?: number })._configuredTimeout ?? 10000;
-        throw new Error(`${err.message} (timeout: ${timeoutMs}ms)`);
-      }
-      throw err;
-    }
-
-    ctx.expect(res).toHaveStatus(caseSpec.expect.status);
-
-    const responseHeaders = normalizeResponseHeaders(res.headers);
-    if (caseSpec.expect.headers) {
-      ctx.validate(responseHeaders, caseSpec.expect.headers, `response headers`);
-    }
-
-    let body: unknown;
-    if (caseSpec.expect.schema) {
-      const jsonBody = await res.json();
-      const validated = ctx.validate(
-        jsonBody,
-        caseSpec.expect.schema,
-        `response body`,
-      );
-      body = validated !== undefined ? validated : jsonBody;
-    } else if (caseSpec.verify) {
-      body = await res.json();
-    } else {
-      // Try to pull body anyway for downstream lens
-      try {
-        body = await res.json();
-      } catch {
-        body = undefined;
-      }
-    }
-
-    if (caseSpec.verify) {
-      await caseSpec.verify(ctx, body);
-    }
-
-    return { status: res.status, headers: responseHeaders, body };
-  } finally {
-    // Rule 1: case.teardown runs in finally whenever setup succeeded,
-    // regardless of downstream outcome AND regardless of the state value
-    // returned by setup (undefined is a valid return). Teardown errors are
-    // logged but MUST NOT mask the primary exception.
-    if (caseSpec.teardown && setupRan) {
-      try {
-        await caseSpec.teardown(ctx, caseState as any);
-      } catch (tdErr) {
-        ctx.log?.(`case.teardown("${caseKey}") failed: ${String(tdErr)}`);
-      }
+      body2 = await res.json();
+    } catch {
+      body2 = undefined;
     }
   }
+
+  if (caseSpec.verify) {
+    await (caseSpec.verify as (ctx: TestContext, res: unknown) => Promise<void>)(
+      ctx,
+      body2,
+    );
+  }
+
+  return { status: res.status, headers: responseHeaders, body: body2 };
 }
 
 // =============================================================================
@@ -933,40 +919,11 @@ export const httpAdapter: ContractProtocolAdapter<
     return target; // HTTP "POST /users" is already human-readable
   },
 
-  validateCaseForFlow(spec, caseKey, contractId) {
-    const caseSpec = spec.cases[caseKey];
-    if (!caseSpec) {
-      throw new Error(`Case "${caseKey}" not in contract "${contractId}"`);
-    }
-    validateHttpCaseForFlow(contractId, caseKey, caseSpec as ContractCase<unknown, unknown>);
-  },
+  // v10: HTTP no longer needs a validateCaseForFlow. In v9, function-valued
+  // body/params/query/headers were rejected at flow boundary because they
+  // referenced case-local setup state that wasn't available in flow mode.
+  // In v10 (attachment model §5.2), these functions receive `resolvedInputs`
+  // (the logical case input from flow's `in` lens or overlay bootstrap) —
+  // they're the CANONICAL v10 pattern, not a disallowed one. Runtime
+  // `executeCaseInFlowHttp` calls them with resolvedInputs.
 };
-
-// =============================================================================
-// .case(key) fail-fast for function-valued input fields
-// =============================================================================
-
-/**
- * Validate that an HTTP case can be referenced from a flow. Called from
- * ProtocolContract.case() — throws if the case has function-valued inputs.
- * See contract-flow v9 §5.1.1.
- */
-export function validateHttpCaseForFlow(
-  contractId: string,
-  caseKey: string,
-  caseSpec: ContractCase<unknown, unknown>,
-): void {
-  const functionFields: string[] = [];
-  if (typeof caseSpec.body === "function") functionFields.push("body");
-  if (typeof caseSpec.params === "function") functionFields.push("params");
-  if (typeof caseSpec.query === "function") functionFields.push("query");
-  if (typeof caseSpec.headers === "function") functionFields.push("headers");
-  if (functionFields.length > 0) {
-    throw new Error(
-      `Contract "${contractId}" case "${caseKey}" has function-valued field(s): ` +
-        `${functionFields.join(", ")}. Function fields reference case-local setup state, ` +
-        `which is not available in flow mode. ` +
-        `Fix: split into a new case with static values, or convert the field to a static value.`,
-    );
-  }
-}

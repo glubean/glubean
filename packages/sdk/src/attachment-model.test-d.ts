@@ -26,6 +26,20 @@ function s<T>(): SchemaLike<T> {
   return {} as SchemaLike<T>;
 }
 
+// InferCaseInput correctness probes (Phase 2d Step 2 diagnostics kept as
+// regression guards):
+//
+//   - Case without `needs` field → void (InferCaseInput returns void)
+//   - Unknown case type → void (gRPC/GraphQL defaulting to unknown)
+//
+// Both must hold for the conditional-tuple step() signature to correctly
+// allow `.step(ref)` without bindings on cases that don't declare `needs`.
+import type { InferCaseInput } from "./contract-types.js";
+const _probeUnknownIsVoid: InferCaseInput<unknown> extends void ? true : false = true;
+const _probeNoNeedsIsVoid: InferCaseInput<{ description: string }> extends void ? true : false = true;
+void _probeUnknownIsVoid;
+void _probeNoNeedsIsVoid;
+
 // Minimal mock http client — typed enough for the factory `.with(...)` call.
 const mockClient = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

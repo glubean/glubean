@@ -23,6 +23,7 @@ import type {
 import type {
   HttpClient,
   HttpResponsePromise,
+  SchemaLike,
   TestContext,
 } from "../types.js";
 import { clearRegistry } from "../internal.js";
@@ -249,12 +250,12 @@ test("v10 overlay: bootstrap resolvedInput drives real HTTP request construction
 // .case() fail-fast for function-valued inputs
 // ---------------------------------------------------------------------------
 
-test("flow.step() rejects function-valued body (v10: was .case() rule)", () => {
-  // v10: flow-safety validation (function-valued body/params/headers cannot
-  // resolve without per-case state) moved from .case() to flow.step(). The
-  // ref itself is pure — function-valued fields are legitimate when consumed
-  // via contract.bootstrap(ref) overlay with resolvedInput. Only flow usage
-  // of such a ref is rejected.
+test("function-valued body accepted in flow (v10 logical-input)", () => {
+  // v10: function-valued body/params/headers are the CANONICAL pattern for
+  // logical-input cases. They receive `resolvedInput` (from flow `in` lens
+  // or bootstrap overlay) and build the request. v9's validateCaseForFlow
+  // rule "function fields can't resolve in flow" is removed — the runtime
+  // (`executeCaseInFlowHttp`) now handles them directly.
   const client = makeMockClient();
   const api = contract.http.with("api", { client });
   const c = api("c", {
@@ -262,18 +263,21 @@ test("flow.step() rejects function-valued body (v10: was .case() rule)", () => {
     cases: {
       ok: {
         description: "x",
+        needs: {} as SchemaLike<{ x: unknown }>,
         expect: { status: 200 },
-        body: (s: any) => ({ v: s.x }),
+        body: (s: { x: unknown }) => ({ v: s.x }),
       },
     },
   });
 
-  // Pure case-ref creation is NOW OK
+  // Pure case-ref creation — OK
   const ref = c.case("ok");
   expect(ref.__glubean_type).toBe("contract-case-ref");
 
-  // Using the ref in a flow is rejected
-  expect(() => contract.flow("f").step(ref)).toThrow(/function-valued field/);
+  // Flow step accepts — no longer rejected (v10 logical-input is canonical).
+  expect(() =>
+    contract.flow("f").step(ref, { in: () => ({ x: 1 }) }),
+  ).not.toThrow();
 });
 
 test(".case() succeeds for static-input cases", () => {
@@ -297,10 +301,15 @@ test(".case() succeeds for static-input cases", () => {
 });
 
 // ---------------------------------------------------------------------------
-// executeCaseInFlow: deep-merge + Rule 1 teardown
+// executeCaseInFlow: logical-input construction (v10, Phase 2d Step 2)
 // ---------------------------------------------------------------------------
 
-test("flow step deep-merges lens inputs over case static body", async () => {
+test("flow step: function-valued body receives logical input", async () => {
+  // v10 equivalent of the v9 "deep-merges lens inputs over case static body"
+  // test. Previously: static `body: { role, source }` + adapter-patch in-lens
+  // `{ body: { email } }` produced `{ role, source, email }`. Now: case
+  // declares `needs: { email }`, body is a function that builds the full
+  // request from logical input, flow `in` returns that logical input.
   const client = makeMockClient({ status: 200, body: { id: "u1" } });
   const api = contract.http.with("api", { client });
   const c = api("create", {
@@ -308,24 +317,23 @@ test("flow step deep-merges lens inputs over case static body", async () => {
     cases: {
       ok: {
         description: "create",
+        needs: {} as SchemaLike<{ email: string }>, // type-only; no runtime parse
         expect: { status: 200 },
-        // Static body with role & source; flow will patch email onto this
-        body: { role: "admin", source: "web" },
+        body: ({ email }: { email: string }) => ({
+          role: "admin",
+          source: "web",
+          email,
+        }),
       },
     },
   });
 
-  // Phase 2d Step 3 will migrate this adapter-patch test to logical-input
-  // shape (or delete if covered elsewhere). For now: cast the bindings to
-  // `any` so conditional-tuple step() signature doesn't reject the v9
-  // adapter-patch shape — runtime still uses `executeCaseInFlowHttp` with
-  // deep-merge semantics (unchanged until Step 2).
   const flowObj = contract
     .flow("f")
     .setup(async () => ({ email: "alice@test" }))
     .step(c.case("ok"), {
-      in: (s: any) => ({ body: { email: s.email } }),
-    } as any)
+      in: (s: { email: string }) => ({ email: s.email }),
+    })
     .build() as FlowContract<unknown>;
 
   await runFlow(flowObj, makeCtx());
@@ -371,84 +379,27 @@ test("flow step returns adapter CaseOutput shape for out lens", async () => {
   expect(outState).toEqual({ status: 201, id: "u1" });
 });
 
-test("Rule 1: case teardown runs when setup returns undefined (not gated on state value)", async () => {
-  const client = makeMockClient({ status: 200 });
-  const api = contract.http.with("api", { client });
-  const order: string[] = [];
-  const c = api("c", {
-    endpoint: "POST /x",
-    cases: {
-      ok: {
-        description: "x",
-        expect: { status: 200 },
-        body: {},
-        // setup returns undefined legitimately — still owes a teardown
-        setup: async () => { order.push("setup"); return undefined as any; },
-        teardown: async () => { order.push("teardown"); },
-      },
-    },
-  });
-
-  const flowObj = contract
-    .flow("f")
-    .step(c.case("ok"))
-    .build() as FlowContract<unknown>;
-
-  await runFlow(flowObj, makeCtx());
-  expect(order).toEqual(["setup", "teardown"]);
-});
-
-test("Rule 1: case teardown does NOT run when setup itself throws", async () => {
-  const client = makeMockClient({ status: 200 });
-  const api = contract.http.with("api", { client });
-  const order: string[] = [];
-  const c = api("c", {
-    endpoint: "POST /x",
-    cases: {
-      ok: {
-        description: "x",
-        expect: { status: 200 },
-        body: {},
-        setup: async () => { order.push("setup"); throw new Error("setup fail"); },
-        teardown: async () => { order.push("teardown"); },
-      },
-    },
-  });
-
-  const flowObj = contract
-    .flow("f")
-    .step(c.case("ok"))
-    .build() as FlowContract<unknown>;
-
-  await expect(runFlow(flowObj, makeCtx())).rejects.toThrow("setup fail");
-  expect(order).toEqual(["setup"]);
-});
-
-test("Rule 1: case teardown runs even if flow step request throws", async () => {
-  const client = makeMockClient({ status: 500 }); // will fail status assertion
-  const api = contract.http.with("api", { client });
-  const order: string[] = [];
-  const c = api("create", {
-    endpoint: "POST /x",
-    cases: {
-      ok: {
-        description: "x",
-        expect: { status: 200 },
-        body: {},
-        setup: async () => { order.push("setup"); return {}; },
-        teardown: async () => { order.push("teardown"); },
-      },
-    },
-  });
-
-  const flowObj = contract
-    .flow("f")
-    .step(c.case("ok"))
-    .build() as FlowContract<unknown>;
-
-  await expect(runFlow(flowObj, makeCtx())).rejects.toThrow();
-  expect(order).toEqual(["setup", "teardown"]);
-});
+// ---------------------------------------------------------------------------
+// v10 attachment model migration note — Category B (flow-mode setup/teardown)
+// ---------------------------------------------------------------------------
+// Three v9 tests deleted in Phase 2d Step 2:
+//   - "Rule 1: case teardown runs when setup returns undefined"
+//   - "Rule 1: case teardown does NOT run when setup itself throws"
+//   - "Rule 1: case teardown runs even if flow step request throws"
+//
+// All three documented v9 flow-mode case-level setup/teardown semantics.
+// In v10 (attachment model §4.1) contract cases have no lifecycle; their
+// equivalents live as bootstrap overlay cleanups (contract.bootstrap +
+// ctx.cleanup). Overlay coverage in contract.test.ts:
+//   - "bootstrap ctx.cleanup callbacks run LIFO after case execution"
+//   - "bootstrap cleanup runs even when executeCase throws"
+//   - "cleanup error is reported on ALL three failure paths" (3 sub-paths)
+//
+// These overlay tests subsume the Rule-1 semantics with adapter-agnostic
+// coverage. The adapter-specific flavor added no new signal. If future
+// needs arise for HTTP-specific overlay coverage (e.g., that a bootstrap's
+// HTTP-client cleanup doesn't leak keep-alive sockets), add it here with
+// a new test name that reflects v10 vocabulary.
 
 // ---------------------------------------------------------------------------
 // projection + normalize
