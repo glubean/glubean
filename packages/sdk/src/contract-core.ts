@@ -44,6 +44,43 @@ import type {
 import { registerTest } from "./internal.js";
 import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
 
+/**
+ * Validate a value against a `needs` schema. Used by the v10 attachment model
+ * dispatcher after bootstrap overlay produces `resolvedInput` — before passing
+ * to `adapter.executeCase`. Keeps the invariant that adapter receives
+ * already-validated input.
+ *
+ * Handles both SchemaLike flavors (safeParse preferred, parse fallback).
+ * When neither is present, passes value through — the schema was purely
+ * type-level and carries no runtime check.
+ */
+function validateNeedsOutput(
+  needsSchema: { safeParse?: unknown; parse?: unknown },
+  value: unknown,
+  ctx: { testId: string; source: "bootstrap" | "explicit" },
+): unknown {
+  const sp = (needsSchema as { safeParse?: (d: unknown) => unknown }).safeParse;
+  if (typeof sp === "function") {
+    const result = sp(value) as
+      | { success: true; data: unknown }
+      | { success: false; error: { issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }> } };
+    if (result.success) return result.data;
+    const lines = result.error.issues.map(
+      (i) => `  - ${i.path?.join(".") ?? "<root>"}: ${i.message}`,
+    );
+    throw new Error(
+      `${ctx.source === "bootstrap" ? "Bootstrap output" : "Explicit input"} ` +
+        `for case "${ctx.testId}" does not satisfy needs schema:\n${lines.join("\n")}`,
+    );
+  }
+  const p = (needsSchema as { parse?: (d: unknown) => unknown }).parse;
+  if (typeof p === "function") {
+    return p(value);
+  }
+  // Schema declares neither safeParse nor parse — type-level only, pass through.
+  return value;
+}
+
 // =============================================================================
 // Adapter registry
 // =============================================================================
@@ -287,6 +324,29 @@ function dispatchContract<
               try { await cleanups.pop()!(); } catch { /* swallow */ }
             }
             throw err;
+          }
+
+          // v10 Phase 2b Step 2: validate bootstrap output against `needs`
+          // schema before handing off to adapter. Adapter's contract is
+          // "receives already-validated input"; validation at the runner
+          // boundary matches single-case-execution-api.md §7.
+          const needsSchema = (caseSpec as { needs?: unknown }).needs;
+          if (needsSchema) {
+            try {
+              resolvedInput = validateNeedsOutput(
+                needsSchema as { safeParse?: unknown; parse?: unknown },
+                resolvedInput,
+                { testId, source: "bootstrap" },
+              );
+            } catch (err) {
+              // Validation failed — run cleanups, re-throw. Same policy as
+              // bootstrap run failure (cleanups registered during bootstrap
+              // should still tear down what was set up).
+              while (cleanups.length > 0) {
+                try { await cleanups.pop()!(); } catch { /* swallow */ }
+              }
+              throw err;
+            }
           }
 
           try {

@@ -264,8 +264,15 @@ test("dispatcher routes through adapter.executeCase when bootstrap overlay regis
     cases: { ok: { description: "with overlay" } },
   }) as ProtocolContract<MockSpec>;
 
-  // Register bootstrap overlay BEFORE running the test
-  contract.bootstrap(c.case("ok"), async () => ({ token: "seeded" }));
+  // Register bootstrap overlay BEFORE running the test.
+  // Mock case has no `needs` schema (MockSpec doesn't carry one), so the
+  // ref's inferred Needs is `void`. The `as any` bypasses the void-only
+  // constraint — dispatcher doesn't run needs validation when `needs` is
+  // absent, so any shape reaches adapter.executeCase as resolvedInput.
+  (contract.bootstrap as any)(
+    c.case("ok"),
+    async () => ({ token: "seeded" }),
+  );
 
   const test0 = c[0];
   await test0.fn!(makeMockCtx());
@@ -334,6 +341,106 @@ test("bootstrap ctx.cleanup callbacks run LIFO after case execution", async () =
   expect(cleanupIdx[0]).toBeLessThan(cleanupIdx[1]);
   expect(cleanupIdx[1]).toBeLessThan(cleanupIdx[2]);
   expect(cleanupIdx[2]).toBeLessThan(cleanupIdx[3]);
+});
+
+test("needs schema validates bootstrap output before executeCase", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async ({ resolvedInput }) => {
+    log.push(`executeCase:${JSON.stringify(resolvedInput)}`);
+  };
+  contract.register("mock_needs_ok", adapter);
+
+  // Case carries a `needs` schema using safeParse (Zod-shape)
+  const schema = {
+    safeParse: (d: unknown) => {
+      if (d && typeof d === "object" && "token" in d && typeof (d as any).token === "string") {
+        return { success: true as const, data: d };
+      }
+      return {
+        success: false as const,
+        error: { issues: [{ message: "token must be string", path: ["token"] }] },
+      };
+    },
+  };
+
+  const c = (contract as any).mock_needs_ok("svc", {
+    target: "/x",
+    cases: { ok: { description: "needs-validated", needs: schema } },
+  }) as ProtocolContract<MockSpec>;
+
+  (contract.bootstrap as any)(
+    c.case("ok"),
+    async () => ({ token: "valid-string" }),
+  );
+
+  await c[0]!.fn!(makeMockCtx());
+  expect(log).toContain('executeCase:{"token":"valid-string"}');
+});
+
+test("needs schema rejects bootstrap output; executeCase not called", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => {
+    log.push("executeCase");
+  };
+  contract.register("mock_needs_bad", adapter);
+
+  const schema = {
+    safeParse: (d: unknown) => {
+      if (d && typeof d === "object" && "token" in d && typeof (d as any).token === "string") {
+        return { success: true as const, data: d };
+      }
+      return {
+        success: false as const,
+        error: { issues: [{ message: "token must be string", path: ["token"] }] },
+      };
+    },
+  };
+
+  const c = (contract as any).mock_needs_bad("svc", {
+    target: "/x",
+    cases: { ok: { description: "needs-bad", needs: schema } },
+  }) as ProtocolContract<MockSpec>;
+
+  // Bootstrap returns wrong shape (missing token) — should be rejected
+  (contract.bootstrap as any)(
+    c.case("ok"),
+    async () => ({ wrongField: "x" }),
+  );
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(/does not satisfy needs schema/);
+  expect(log).not.toContain("executeCase"); // adapter never reached
+});
+
+test("needs schema validation failure runs cleanups registered during bootstrap", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => {
+    log.push("executeCase");
+  };
+  contract.register("mock_needs_cleanup", adapter);
+
+  const schema = {
+    safeParse: () => ({
+      success: false as const,
+      error: { issues: [{ message: "always fails", path: [] }] },
+    }),
+  };
+
+  const c = (contract as any).mock_needs_cleanup("svc", {
+    target: "/x",
+    cases: { ok: { description: "cleanup on validation fail", needs: schema } },
+  }) as ProtocolContract<MockSpec>;
+
+  (contract.bootstrap as any)(c.case("ok"), async (ctx: any) => {
+    ctx.cleanup(() => { log.push("cleanup"); });
+    return { irrelevant: true };
+  });
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(/always fails/);
+  expect(log).toContain("cleanup");       // cleanup ran despite validation failure
+  expect(log).not.toContain("executeCase"); // case never dispatched
 });
 
 test("bootstrap cleanup runs even when executeCase throws", async () => {
