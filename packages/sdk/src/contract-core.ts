@@ -133,14 +133,25 @@ function register<
   _adapters.set(protocol, adapter as ContractProtocolAdapter<any, any, any, any, any>);
 
   // Attach contract[protocol] dispatcher dynamically.
-  (contract as any)[protocol] = (
+  // Generic `Cases` preserves per-case Needs/Output through ProtocolContract
+  // so `.case("key")` returns a properly-typed ContractCaseRef. Without this,
+  // `contract.bootstrap(ref, { run })` cannot type-check the run return
+  // against the specific case's needs.
+  (contract as any)[protocol] = <
+    Cases extends Record<string, BaseCaseSpec>,
+  >(
     id: string,
     spec: Spec & {
-      cases?: Record<string, BaseCaseSpec>;
+      cases?: Cases;
       tags?: string[];
     },
-  ): ProtocolContract<Spec, SafeSchemas, SafeMeta> => {
-    return dispatchContract(protocol, adapter, id, spec);
+  ): ProtocolContract<Spec, SafeSchemas, SafeMeta, Cases> => {
+    return dispatchContract(protocol, adapter, id, spec) as ProtocolContract<
+      Spec,
+      SafeSchemas,
+      SafeMeta,
+      Cases
+    >;
   };
 }
 

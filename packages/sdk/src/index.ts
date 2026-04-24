@@ -536,6 +536,13 @@ export const contract: {
     protocol: string,
     adapter: ContractProtocolAdapter<Spec, Rt, RtM, Sf, SfM>,
   ) => void;
+  bootstrap: <Needs, Params = void>(
+    ref: import("./contract-types.js").ContractCaseRef<Needs, unknown>,
+    spec: import("./contract-types.js").Bootstrap<
+      Params,
+      NoInfer<Needs>
+    >,
+  ) => import("./contract-types.js").BootstrapAttachment<Needs, Params>;
   [protocol: string]: unknown;
 } = _contract as any;
 

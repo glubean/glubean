@@ -113,15 +113,24 @@ export interface FailureClassification {
  *
  * @see contract-attachment-model.md v1.3 for `needs` / `given` / `runnability` semantics.
  */
-export interface BaseCaseSpec<Needs = void> {
+export interface BaseCaseSpec {
   description?: string;
 
   /**
    * Logical input schema for the case. The only public input contract.
    * Protocol action fields (HTTP body/headers/params/query etc.) receive
    * this typed input as their argument.
+   *
+   * Typed as `SchemaLike<unknown>` at the base to accept any concrete
+   * schema. The specific type is extracted per-case via `InferCaseInput<C>`
+   * when `ProtocolContract.case<K>()` types its return — TS infers the
+   * concrete T from the literal `SchemaLike<T>` the author wrote.
+   *
+   * This avoids a generic on `BaseCaseSpec<Needs>` which would force every
+   * adapter's case type (ContractCase / GrpcContractCase / GraphqlContractCase)
+   * to thread a Needs parameter through — too invasive for the authoring API.
    */
-  needs?: SchemaLike<Needs>;
+  needs?: SchemaLike<unknown>;
 
   /**
    * World-state precondition this case assumes. Projected as part of the
@@ -466,6 +475,7 @@ export interface ProtocolContract<
   Spec = unknown,
   PayloadSchemas = unknown,
   Meta = unknown,
+  Cases extends Record<string, unknown> = Record<string, unknown>,
 > extends Array<Test> {
   /**
    * Runtime projection with `id` injected by core. Consumers duck-type this.
@@ -502,9 +512,12 @@ export interface ProtocolContract<
    * headers as functions). Function fields reference case-local setup state
    * which is not available in flow mode. See contract-flow §5.1.1.
    */
-  case(
-    key: string,
-  ): ContractCaseRef<InferInputs<PayloadSchemas>, InferOutput<PayloadSchemas>>;
+  case<K extends keyof Cases & string>(
+    key: K,
+  ): ContractCaseRef<
+    InferCaseInput<Cases[K]>,
+    InferOutput<PayloadSchemas>
+  >;
 }
 
 /**
@@ -519,6 +532,28 @@ export interface ProtocolContract<
  * direct typing of their own ContractCaseRef.
  */
 export type InferInputs<_PayloadSchemas> = unknown;
+
+/**
+ * Extract per-case logical input type from a case spec's `needs` field.
+ *
+ * Works for any case spec that extends `BaseCaseSpec<Needs>` and declares
+ * `needs: SchemaLike<T>`. Returns `void` for cases without `needs`.
+ *
+ * Used by `ProtocolContract.case<K>()` to infer `ContractCaseRef<Needs, ...>`
+ * per-case, so `contract.bootstrap(ref, { run: ... })` can type-check the
+ * run return against the specific case's Needs.
+ *
+ * @see contract-attachment-model.md v1.3 §4.1 / §5.3
+ * @see Spike 0 Finding 2 — requires `any` (not `unknown`) in don't-care slot
+ *      for contravariant positions.
+ */
+export type InferCaseInput<C> = C extends {
+  needs?: SchemaLike<infer N>;
+}
+  ? unknown extends N
+    ? void
+    : N
+  : void;
 
 /** Adapter-defined helper: extract the "case output" shape from PayloadSchemas. */
 export type InferOutput<_PayloadSchemas> = unknown;

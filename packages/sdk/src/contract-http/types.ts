@@ -316,9 +316,10 @@ export interface HttpContractFactory {
     id: string,
     spec: HttpContractSpec<Cases>,
   ): import("../contract-types.js").ProtocolContract<
-    HttpContractSpec,
+    HttpContractSpec<Cases>,
     HttpPayloadSchemas,
-    HttpContractMeta
+    HttpContractMeta,
+    Cases
   >;
   with(name: string, defaults: HttpContractDefaults): HttpContractFactory;
 }
