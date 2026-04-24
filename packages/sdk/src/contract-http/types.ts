@@ -100,7 +100,7 @@ export interface ContractExpect<T = unknown> {
 // Case spec
 // =============================================================================
 
-export interface ContractCase<T = unknown, S = void> extends BaseCaseSpec {
+export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
   /** Per-case HTTP client override. */
   client?: HttpClient;
   /** Why this case exists — required. */
@@ -110,26 +110,24 @@ export interface ContractCase<T = unknown, S = void> extends BaseCaseSpec {
 
   /**
    * Request body (for POST/PUT/PATCH). Static value, FormData/URLSearchParams
-   * /Blob/string for non-JSON content types, or a function of setup state.
+   * /Blob/string for non-JSON content types, or a function of the case's
+   * logical input (matching `needs`). v10 attachment model: no more setup
+   * state — input comes from overlay bootstrap, explicit `--input-json`, or
+   * flow `.step() in` lens.
    */
-  body?: unknown | FormData | URLSearchParams | Blob | ((state: S) => unknown);
+  body?: unknown | FormData | URLSearchParams | Blob | ((input: Needs) => unknown);
 
   /** Request content type override for this case. */
   contentType?: string;
 
   /** URL params. Values can be `ParamValue` objects for OpenAPI metadata. */
-  params?: Record<string, ParamValue> | ((state: S) => Record<string, string>);
+  params?: Record<string, ParamValue> | ((input: Needs) => Record<string, string>);
 
   /** Query parameters. */
-  query?: Record<string, ParamValue> | ((state: S) => Record<string, string>);
+  query?: Record<string, ParamValue> | ((input: Needs) => Record<string, string>);
 
   /** Request headers merged with client headers. */
-  headers?: Record<string, string> | ((state: S) => Record<string, string>);
-
-  /** Setup runs before the request. Return value goes to param/query/body/headers functions + teardown. */
-  setup?: (ctx: TestContext) => Promise<S>;
-  /** Teardown runs after verify, even on failure. */
-  teardown?: (ctx: TestContext, state: S) => Promise<void>;
+  headers?: Record<string, string> | ((input: Needs) => Record<string, string>);
 
   /** Business-logic verify — runs after status and schema validation. */
   verify?: (ctx: TestContext, res: T) => Promise<void>;

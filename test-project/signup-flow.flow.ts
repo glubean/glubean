@@ -40,9 +40,13 @@ export const createUser = api("create-user", {
     ok: {
       description: "Happy path — returns 201 with user id",
       needs: s<{ email: string }>(),
-      // Explicit parameter type until Phase 2c Step B threads Needs generic
-      // through HttpContractCase — right now the body fn's param inherits
-      // v9's S (setup state, defaults to void), not the logical input Needs.
+      // Explicit parameter annotation. Phase 2c Step B+C removed v9's `S`
+      // (setup state) from ContractCase and threaded `Needs`, but TS can't
+      // auto-infer Needs from the sibling `needs: SchemaLike<T>` field
+      // (self-referential inference across sibling fields in an object
+      // literal is beyond TS's capability without a factory wrapper).
+      // Annotation is a small but persistent authoring cost; a future
+      // `defineCase<T>({ needs, body })` factory could eliminate it.
       body: ({ email }: { email: string }) => ({
         role: "member",
         source: "test-project",

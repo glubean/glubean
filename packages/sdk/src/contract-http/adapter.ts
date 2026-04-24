@@ -269,115 +269,6 @@ function extractParamMetaSchemas(
 // =============================================================================
 
 /**
- * Run a single case. Called by the dispatcher in contract-core.ts (via
- * adapter.execute). Full lifecycle: setup → request → assert → verify →
- * teardown (finally).
- */
-async function executeCase<T, S>(
-  ctx: TestContext,
-  caseSpec: ContractCase<T, S>,
-  spec: HttpContractSpec,
-): Promise<void> {
-  const { method, path } = parseEndpoint(spec.endpoint);
-
-  // Setup
-  const state = caseSpec.setup
-    ? await caseSpec.setup(ctx)
-    : (undefined as S);
-
-  try {
-    const client: HttpClient = (caseSpec.client ?? spec.client) as HttpClient;
-    if (!client) {
-      throw new Error(
-        `No HTTP client provided for case. Set "client" on the case or contract spec.`,
-      );
-    }
-
-    // Resolve params/query/body/headers
-    const rawParams = typeof caseSpec.params === "function"
-      ? caseSpec.params(state)
-      : caseSpec.params;
-    const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
-    const resolvedPath = resolveParams(path, params);
-
-    const requestOptions: Record<string, unknown> = {};
-    const body = typeof caseSpec.body === "function"
-      ? (caseSpec.body as (s: S) => unknown)(state)
-      : caseSpec.body;
-
-    const normalizedReq = normalizeRequest(spec.request);
-    const effectiveContentType =
-      caseSpec.contentType ?? normalizedReq?.contentType ?? "application/json";
-
-    if (body !== undefined) {
-      Object.assign(requestOptions, buildRequestBodyOptions(body, effectiveContentType));
-    }
-
-    const headers = typeof caseSpec.headers === "function"
-      ? (caseSpec.headers as (s: S) => Record<string, string>)(state)
-      : caseSpec.headers;
-    if (headers) requestOptions.headers = headers;
-
-    if (caseSpec.query) {
-      const rawQuery = typeof caseSpec.query === "function"
-        ? caseSpec.query(state)
-        : caseSpec.query;
-      requestOptions.searchParams = flattenParamValues(
-        rawQuery as Record<string, unknown> | undefined,
-      );
-    }
-
-    requestOptions.throwHttpErrors = false;
-
-    const methodLower = method.toLowerCase() as keyof HttpClient;
-    let res;
-    try {
-      res = await (client[methodLower] as (p: string, o: unknown) => HttpResponsePromise)(
-        resolvedPath,
-        requestOptions,
-      );
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === "TimeoutError") {
-        const timeoutMs = (client as { _configuredTimeout?: number })._configuredTimeout ?? 10000;
-        throw new Error(`${err.message} (timeout: ${timeoutMs}ms)`);
-      }
-      throw err;
-    }
-
-    // Assertions
-    ctx.expect(res).toHaveStatus(caseSpec.expect.status);
-
-    if (caseSpec.expect.headers) {
-      const normalizedHeaders = normalizeResponseHeaders(res.headers);
-      ctx.validate(normalizedHeaders, caseSpec.expect.headers, `response headers`);
-    }
-
-    let parsed: T;
-    if (caseSpec.expect.schema) {
-      const jsonBody = await res.json();
-      const validated = ctx.validate(
-        jsonBody,
-        caseSpec.expect.schema,
-        `response body`,
-      );
-      parsed = (validated !== undefined ? validated : jsonBody) as T;
-    } else if (caseSpec.verify) {
-      parsed = (await res.json()) as T;
-    } else {
-      parsed = undefined as T;
-    }
-
-    if (caseSpec.verify) {
-      await caseSpec.verify(ctx, parsed);
-    }
-  } finally {
-    if (caseSpec.teardown) {
-      await caseSpec.teardown(ctx, state);
-    }
-  }
-}
-
-/**
  * v10 attachment model — standalone-mode case execution.
  *
  * Called by the HTTP adapter's `executeCase` method. Receives an
@@ -866,7 +757,20 @@ export const httpAdapter: ContractProtocolAdapter<
   HttpContractMeta
 > = {
   async execute(ctx, caseSpec, spec) {
-    await executeCase(ctx, caseSpec as ContractCase<unknown, unknown>, spec);
+    // v10 legacy execute path: used by dispatcher when no bootstrap overlay
+    // is registered for the case. With setup/teardown removed from
+    // HttpContractCase in Phase 2c Step B+C, this degenerates to "run the
+    // case with no input" — exactly what executeStandaloneCase does when
+    // resolvedInput is undefined. Function-valued body/params/query/headers
+    // receive `undefined` and are author-responsible (cases with
+    // function-valued fields should declare `needs` and be dispatched
+    // via overlay or explicit input).
+    await executeStandaloneCase(
+      ctx,
+      caseSpec as ContractCase<unknown, unknown>,
+      spec,
+      undefined,
+    );
   },
 
   async executeCase({ ctx, contract, caseKey, resolvedInput }) {
