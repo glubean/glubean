@@ -85,7 +85,7 @@ async function runCleanupsLifo(
 function validateNeedsOutput(
   needsSchema: { safeParse?: unknown; parse?: unknown },
   value: unknown,
-  ctx: { testId: string; source: "bootstrap" | "explicit" },
+  ctx: { testId: string; source: "bootstrap" | "explicit" | "flow" },
 ): unknown {
   const sp = (needsSchema as { safeParse?: (d: unknown) => unknown }).safeParse;
   if (typeof sp === "function") {
@@ -96,9 +96,12 @@ function validateNeedsOutput(
     const lines = result.error.issues.map(
       (i) => `  - ${i.path?.join(".") ?? "<root>"}: ${i.message}`,
     );
+    const sourceLabel =
+      ctx.source === "bootstrap" ? "Bootstrap output"
+      : ctx.source === "explicit" ? "Explicit input"
+      : "Flow `in` output";
     throw new Error(
-      `${ctx.source === "bootstrap" ? "Bootstrap output" : "Explicit input"} ` +
-        `for case "${ctx.testId}" does not satisfy needs schema:\n${lines.join("\n")}`,
+      `${sourceLabel} for case "${ctx.testId}" does not satisfy needs schema:\n${lines.join("\n")}`,
     );
   }
   const p = (needsSchema as { parse?: (d: unknown) => unknown }).parse;
@@ -846,7 +849,35 @@ export async function runFlow<State>(
         );
       }
 
-      const resolvedInputs = step.bindings?.in?.(state);
+      let resolvedInputs = step.bindings?.in?.(state);
+
+      // v10 Phase 2d Step 2+3 follow-up (RFR v2 P1): enforce `needs` schema
+      // at flow boundary too, not just standalone. The conditional-tuple
+      // `step()` signature catches TS authoring shape mismatches, but
+      // runtime validation is the only line of defense against:
+      //   - `as any` / JS callers that bypass the TS check
+      //   - Zod parse / coerce / default semantics (schema can transform
+      //     the value, not just validate it)
+      //   - State drift producing invalid values at runtime despite valid
+      //     authoring types
+      // Standalone overlay path already validates via the same helper in
+      // `dispatchContract`'s test.fn closure; flow must mirror that to keep
+      // `needs` a true contract semantic rather than a TS-only boundary.
+      const contractSpec = (step.contract as { _spec?: unknown })._spec as
+        | { cases?: Record<string, { needs?: unknown }> }
+        | undefined;
+      const caseSpec = contractSpec?.cases?.[step.caseKey];
+      const needsSchema = caseSpec?.needs;
+      if (needsSchema && step.bindings?.in) {
+        resolvedInputs = validateNeedsOutput(
+          needsSchema as { safeParse?: unknown; parse?: unknown },
+          resolvedInputs,
+          {
+            testId: `${step.ref.contractId}.${step.caseKey}`,
+            source: "flow",
+          },
+        );
+      }
 
       const response = await adapter.executeCaseInFlow({
         ctx,

@@ -304,6 +304,63 @@ test(".case() succeeds for static-input cases", () => {
 // executeCaseInFlow: logical-input construction (v10, Phase 2d Step 2)
 // ---------------------------------------------------------------------------
 
+test("flow step: needs schema rejects invalid `in` output BEFORE HTTP call", async () => {
+  // v10: flow `in` output must pass the case's `needs` schema at runtime,
+  // mirroring the standalone overlay path. Without this guard, TS-only
+  // logical-input enforcement could be bypassed via `as any`, JS callers,
+  // or state drift producing invalid values. Runtime validation is the
+  // only line of defense that also applies Zod parse / coerce / default.
+  const client = makeMockClient({ status: 200 });
+  const api = contract.http.with("api", { client });
+
+  // Schema rejects anything without a non-empty `email` string.
+  const emailSchema = {
+    safeParse: (d: unknown) => {
+      if (
+        d && typeof d === "object" &&
+        "email" in d &&
+        typeof (d as { email: unknown }).email === "string" &&
+        (d as { email: string }).email.length > 0
+      ) {
+        return { success: true as const, data: d };
+      }
+      return {
+        success: false as const,
+        error: {
+          issues: [{ message: "email must be a non-empty string", path: ["email"] }],
+        },
+      };
+    },
+  };
+
+  const c = api("create", {
+    endpoint: "POST /users",
+    cases: {
+      ok: {
+        description: "create",
+        needs: emailSchema as SchemaLike<{ email: string }>,
+        expect: { status: 200 },
+        body: ({ email }: { email: string }) => ({ email }),
+      },
+    },
+  });
+
+  // Flow `in` returns an invalid shape (email missing).
+  const flowObj = contract
+    .flow("f")
+    .setup(async () => ({ somethingElse: true }))
+    .step(c.case("ok"), {
+      in: () => ({ email: "" }), // fails schema (length === 0)
+    })
+    .build() as FlowContract<unknown>;
+
+  await expect(runFlow(flowObj, makeCtx())).rejects.toThrow(
+    /Flow `in` output.*does not satisfy needs/,
+  );
+  // Critical: HTTP client NEVER called — validation fires before adapter.
+  expect(client._calls.length).toBe(0);
+});
+
 test("flow step: function-valued body receives logical input", async () => {
   // v10 equivalent of the v9 "deep-merges lens inputs over case static body"
   // test. Previously: static `body: { role, source }` + adapter-patch in-lens
