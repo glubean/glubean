@@ -332,7 +332,14 @@ export interface ContractProtocolAdapter<
   ) => Promise<void>;
 
   /**
-   * Execute a single case with an already-resolved logical input.
+   * Execute a single case in **standalone mode** with an already-resolved
+   * logical input.
+   *
+   * Scope note: this method is **standalone-only**. Flow dispatch continues
+   * to use `executeCaseInFlow` (below). The two paths coexist because flow
+   * never invokes bootstrap (attachment model §14.0 non-negotiable invariant)
+   * — if executeCase took `mode: "flow"`, it would imply flow could route
+   * through here, which contradicts the invariant.
    *
    * v10 attachment model entry point. Core dispatcher calls this after:
    *   - resolving bootstrap overlay (if registered) to produce `resolvedInput`
@@ -354,8 +361,6 @@ export interface ContractProtocolAdapter<
     caseKey: string;
     /** Logical input already validated against `needs`. `void` when case has no needs. */
     resolvedInput: unknown;
-    /** Where the call originated. Affects cleanup scoping + event tagging. */
-    mode: "standalone" | "flow";
   }) => Promise<void>;
 
   /**
