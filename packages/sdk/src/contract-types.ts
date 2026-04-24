@@ -18,7 +18,7 @@
  * and `internal/40-discovery/proposals/contract-flow.md` v9 for design.
  */
 
-import type { Test, TestContext } from "./types.js";
+import type { SchemaLike, Test, TestContext } from "./types.js";
 import type {
   KnownArtifacts,
   KnownArtifactParts,
@@ -110,9 +110,37 @@ export interface FailureClassification {
  *
  * Core (`dispatchContract`) reads these fields directly from `spec.cases[key]`.
  * Adapter-specific fields are opaque to core and passed through to the adapter.
+ *
+ * @see contract-attachment-model.md v1.3 for `needs` / `given` / `runnability` semantics.
  */
-export interface BaseCaseSpec {
+export interface BaseCaseSpec<Needs = void> {
   description?: string;
+
+  /**
+   * Logical input schema for the case. The only public input contract.
+   * Protocol action fields (HTTP body/headers/params/query etc.) receive
+   * this typed input as their argument.
+   */
+  needs?: SchemaLike<Needs>;
+
+  /**
+   * World-state precondition this case assumes. Projected as part of the
+   * contract because it changes what `expect` means (see §0.9 of the
+   * attachment model proposal). Bootstrap may *satisfy* `given` at
+   * runtime, but it must not be the only place where a semantically
+   * relevant precondition is declared.
+   */
+  given?: string;
+
+  /**
+   * Runnability metadata — grouped under `runnability` to make the
+   * "not contract semantic" stance structurally visible. Fields here
+   * do NOT enter contract projection; they enter runnable inventory.
+   */
+  runnability?: {
+    requireAttachment?: boolean;
+  };
+
   deferred?: string;
   deprecated?: string;
   severity?: CaseSeverity;
@@ -120,6 +148,50 @@ export interface BaseCaseSpec {
   defaultRun?: CaseDefaultRun;
   tags?: string[];
   extensions?: Extensions;
+}
+
+// =============================================================================
+// Standalone bootstrap context + attachment types
+// =============================================================================
+
+/**
+ * Context passed to `bootstrap.run(ctx, params)`. Extends TestContext with
+ * cleanup registration — cleanups run LIFO after standalone case execution,
+ * even if case expect/verify fails.
+ *
+ * Flow NEVER invokes bootstrap, so StandaloneBootstrapContext only exists
+ * for the standalone execution path.
+ */
+export interface StandaloneBootstrapContext extends TestContext {
+  cleanup(fn: () => Promise<void> | void): void;
+}
+
+/**
+ * Bootstrap spec. Plain function form is shorthand for structured form
+ * with no `params`.
+ *
+ * Body is opaque (§4.2 attachment model); only `params` schema is projectable.
+ */
+export type Bootstrap<Params, Output> =
+  | ((ctx: StandaloneBootstrapContext) => Promise<Output>)
+  | {
+      params?: SchemaLike<Params>;
+      run: (
+        ctx: StandaloneBootstrapContext,
+        params: Params,
+      ) => Promise<Output>;
+    };
+
+/**
+ * Runtime marker carried by a registered bootstrap overlay. Scanner reads
+ * the __glubean_type discriminator; runner consults the registry at
+ * runnable resolution time.
+ */
+export interface BootstrapAttachment<Needs = void, Params = void> {
+  readonly __glubean_type: "bootstrap-attachment";
+  readonly testId: string;
+  readonly __phantom_needs?: Needs;
+  readonly __phantom_params?: Params;
 }
 
 // =============================================================================

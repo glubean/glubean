@@ -22,6 +22,8 @@
 import type { Test, TestContext } from "./types.js";
 import type {
   BaseCaseSpec,
+  Bootstrap,
+  BootstrapAttachment,
   ContractCaseRef,
   ContractProtocolAdapter,
   ContractProjection,
@@ -40,6 +42,7 @@ import type {
   RuntimeFlowStep,
 } from "./contract-types.js";
 import { registerTest } from "./internal.js";
+import { registerBootstrap } from "./bootstrap-registry.js";
 
 // =============================================================================
 // Adapter registry
@@ -374,12 +377,31 @@ function makeContractCaseRef(
 type ContractNamespace = {
   register: typeof register;
   flow: typeof flow;
+  bootstrap: typeof bootstrap;
   [protocol: string]: unknown;
 };
+
+/**
+ * Register a bootstrap overlay for a contract case. Standalone-only
+ * execution path; flow NEVER invokes bootstrap (non-negotiable invariant
+ * from attachment model §0.4 / §14.0).
+ *
+ * `NoInfer<Needs>` on the spec parameter prevents TypeScript's multi-site
+ * inference from silently accepting a mismatched `run` return type —
+ * without it, TS merges inferences from ref + spec and produces a
+ * compatible Needs, masking real type errors (Spike 0 Finding 1).
+ */
+export function bootstrap<Needs, Params = void>(
+  ref: ContractCaseRef<Needs, unknown>,
+  spec: Bootstrap<Params, NoInfer<Needs>>,
+): BootstrapAttachment<Needs, Params> {
+  return registerBootstrap(ref, spec as Bootstrap<Params, Needs>);
+}
 
 export const contract: ContractNamespace = {
   register,
   flow,
+  bootstrap,
 };
 
 // =============================================================================
