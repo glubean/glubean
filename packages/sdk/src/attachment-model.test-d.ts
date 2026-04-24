@@ -113,6 +113,64 @@ const api = contract.http.with("type-d-tests", { client: mockClient as any });
 }
 
 // =============================================================================
+// Test 3-bis: FlowBuilder.step enforces `in` presence matches case needs
+//
+// v10 invariant: a flow step's `in` binding MUST be present iff the case
+// declares `needs`. Spike 0 Finding 3 (N8). Historically caught by conditional
+// tuple type on step(); the two-overload form doesn't catch it because
+// TS falls to overload 2 and `() => X` is bivariant-assignable to `() => void`.
+// =============================================================================
+
+{
+  const needsCase = api("user.step.needs", {
+    endpoint: "GET /x",
+    cases: {
+      ok: {
+        description: "needs",
+        needs: s<{ token: string }>(),
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const noNeedsCase = api("user.step.void", {
+    endpoint: "GET /y",
+    cases: {
+      ok: {
+        description: "no needs",
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const needsRef = needsCase.case("ok");
+  const voidRef = noNeedsCase.case("ok");
+
+  // ✅ needsRef with `in` (typed) — should compile
+  contract.flow("ok-1").step(needsRef, {
+    in: () => ({ token: "t" }),
+  });
+
+  // ✅ voidRef without bindings — should compile
+  contract.flow("ok-2").step(voidRef);
+
+  // ✅ voidRef with only `out` — should compile
+  contract.flow("ok-3").step(voidRef, {
+    out: (_s, res: any) => ({ status: res?.status }),
+  });
+
+  // ❌ needsRef without bindings — should NOT compile
+  // @ts-expect-error — case declares `needs`; bindings.in is required
+  contract.flow("bad-1").step(needsRef);
+
+  // ❌ voidRef with `in` — should NOT compile
+  contract.flow("bad-2").step(voidRef, {
+    // @ts-expect-error — case has no `needs`; `in` is not accepted on void-input case
+    in: () => ({ anything: 1 }),
+  });
+}
+
+// =============================================================================
 // Test 3: no-needs case accepts void-returning bootstrap
 // =============================================================================
 

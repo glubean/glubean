@@ -724,16 +724,18 @@ test("contract.flow meta / setup / teardown are captured in runtime projection",
 });
 
 test("flow.step rejects unknown protocol", () => {
-  expect(() =>
-    contract.flow("f").step({
-      __glubean_type: "contract-case-ref",
-      contractId: "c",
-      caseKey: "ok",
-      protocol: "nonexistent_protocol_xyz",
-      target: "/x",
-      contract: [] as any,
-    } as any),
-  ).toThrow(/unknown protocol/);
+  const fakeRef = {
+    __glubean_type: "contract-case-ref",
+    contractId: "c",
+    caseKey: "ok",
+    protocol: "nonexistent_protocol_xyz",
+    target: "/x",
+    contract: [] as any,
+  } as any;
+  // Cast call to `any` so the conditional-tuple `step` signature doesn't
+  // force `bindings` based on an `any`-shaped CaseInputs (which distributes
+  // conditionals unexpectedly). The test is about runtime protocol rejection.
+  expect(() => (contract.flow("f").step as any)(fakeRef)).toThrow(/unknown protocol/);
 });
 
 test("flow.step rejects adapter without executeCaseInFlow", () => {
@@ -744,7 +746,7 @@ test("flow.step rejects adapter without executeCaseInFlow", () => {
   }) as ProtocolContract<MockSpec>;
 
   expect(() =>
-    contract.flow("f").step(c.case("ok") as any),
+    contract.flow("f").step(c.case("ok")),
   ).toThrow(/does not implement executeCaseInFlow/);
 });
 
@@ -762,9 +764,9 @@ test("flow.step with compliant adapter accepts ContractCaseRef", async () => {
   const flowObj = contract
     .flow("f")
     .setup(async () => ({ seed: 42 }))
-    .step(c.case("ok") as any, {
+    .step(c.case("ok"), {
       in: (s: any) => ({ body: { v: s.seed } }),
-    })
+    } as any)
     .build() as FlowContract<unknown>;
 
   await runFlow(flowObj, makeMockCtx());
@@ -786,7 +788,7 @@ test("runFlow runs flow.teardown after successful steps", async () => {
   const flowObj = contract
     .flow("f")
     .setup(async () => { order.push("setup"); return {}; })
-    .step(c.case("ok") as any)
+    .step(c.case("ok"))
     .teardown(async () => { order.push("teardown"); })
     .build() as FlowContract<unknown>;
 
@@ -815,7 +817,7 @@ test("runFlow runs flow.teardown in outer finally on step failure (Rule 2)", asy
   const flowObj = contract
     .flow("f")
     .setup(async () => { order.push("setup"); return {}; })
-    .step(c.case("ok") as any)
+    .step(c.case("ok"))
     .teardown(async () => { order.push("teardown"); })
     .build() as FlowContract<unknown>;
 

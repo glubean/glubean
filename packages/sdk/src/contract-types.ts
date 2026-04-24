@@ -786,8 +786,14 @@ export interface FlowBuilder<State = unknown> {
    * branching). Lens purity is enforced at Proxy dry-run time during
    * projection extraction.
    *
-   * Two overloads discriminate on `CaseInputs extends void` (Spike 0 Finding 3):
-   *   - void-input case → `bindings` optional; `in` not accepted
+   * Single signature with rest-parameter conditional tuple (Spike 0 Finding 3).
+   * Two-overload form (historically tried) has a subtle hole: overload 1
+   * (void-input, no `in`) excess-property-fails when `in` is passed → TS
+   * falls through to overload 2, which accepts because `() => X` is
+   * bivariant-assignable to `() => void`. Conditional tuple is a single
+   * signature so TS doesn't get a second chance:
+   *   - void-input case → `bindings` optional; `in` not present in the
+   *     allowed shape
    *   - typed-input case → `bindings.in` REQUIRED
    *
    * In v10, `in` returns LOGICAL case input (matches the case's `needs`),
@@ -795,22 +801,18 @@ export interface FlowBuilder<State = unknown> {
    * function-valued body/headers/params/query with this logical input
    * (same mechanism as standalone `executeStandaloneCase`).
    */
-  // Overload 1: void-input case — bindings optional, `in` not accepted.
-  step<CaseOutput, NewState = State>(
-    ref: ContractCaseRef<void, CaseOutput>,
-    bindings?: {
-      out?: (state: State, response: CaseOutput) => NewState;
-      name?: string;
-    },
-  ): FlowBuilder<NewState>;
-  // Overload 2: typed-input case — `in` required.
   step<CaseInputs, CaseOutput, NewState = State>(
     ref: ContractCaseRef<CaseInputs, CaseOutput>,
-    bindings: {
-      in: (state: State) => CaseInputs;
-      out?: (state: State, response: CaseOutput) => NewState;
-      name?: string;
-    },
+    ...args: [CaseInputs] extends [void]
+      ? [bindings?: {
+          out?: (state: State, response: CaseOutput) => NewState;
+          name?: string;
+        }]
+      : [bindings: {
+          in: (state: State) => CaseInputs;
+          out?: (state: State, response: CaseOutput) => NewState;
+          name?: string;
+        }]
   ): FlowBuilder<NewState>;
 
   /**

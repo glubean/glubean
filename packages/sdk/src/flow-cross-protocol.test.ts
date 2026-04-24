@@ -302,6 +302,10 @@ test("CG-0 spike: HTTP + spike_rpc + HTTP mixed flow end-to-end", async () => {
       }),
     })
     // Step 3: HTTP — verify order status (uses RPC output)
+    // Phase 2d Step 3 will migrate cross-protocol flow tests when Option Y
+    // (gRPC/GraphQL flow migration) lands; Option X scope keeps them as-is.
+    // Cast bindings to `any` so conditional-tuple step() doesn't reject v9
+    // adapter-patch shape; runtime `executeCaseInFlow` still deep-merges.
     .step(fetchContract.case("byId"), {
       in: (s: any) => ({ params: { id: s.orderId } }),
       out: (s: any, res: any) => {
@@ -309,7 +313,7 @@ test("CG-0 spike: HTTP + spike_rpc + HTTP mixed flow end-to-end", async () => {
         finalState = out;
         return out;
       },
-    })
+    } as any)
     .build() as FlowContract<unknown>;
 
   await runFlow(flowObj, makeCtx());

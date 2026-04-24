@@ -315,12 +315,17 @@ test("flow step deep-merges lens inputs over case static body", async () => {
     },
   });
 
+  // Phase 2d Step 3 will migrate this adapter-patch test to logical-input
+  // shape (or delete if covered elsewhere). For now: cast the bindings to
+  // `any` so conditional-tuple step() signature doesn't reject the v9
+  // adapter-patch shape — runtime still uses `executeCaseInFlowHttp` with
+  // deep-merge semantics (unchanged until Step 2).
   const flowObj = contract
     .flow("f")
     .setup(async () => ({ email: "alice@test" }))
     .step(c.case("ok"), {
       in: (s: any) => ({ body: { email: s.email } }),
-    })
+    } as any)
     .build() as FlowContract<unknown>;
 
   await runFlow(flowObj, makeCtx());
