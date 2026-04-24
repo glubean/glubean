@@ -169,45 +169,30 @@ test("case execution sends HTTP request and asserts status", async () => {
   expect(client._calls[0].options.json).toEqual({ name: "Alice" });
 });
 
-test("case setup + teardown run in correct order", async () => {
+// ---------------------------------------------------------------------------
+// v10 attachment model migration note
+// ---------------------------------------------------------------------------
+// Tests for standalone case-level `setup`/`teardown` lifecycle lived here
+// before v10. That lifecycle is going away (attachment model §4.1 — contract
+// case has no lifecycle; use contract.bootstrap overlay with ctx.cleanup).
+// Equivalent coverage now lives in contract.test.ts using the mock adapter:
+//   - "dispatcher routes through adapter.executeCase when bootstrap overlay registered"
+//   - "bootstrap ctx.cleanup callbacks run LIFO after case execution"
+//   - "bootstrap cleanup runs even when executeCase throws"
+// The HTTP-specific flavor added no coverage beyond what the mock path proves,
+// so these two tests are removed. Flow-mode setup/teardown (further down in
+// this file) is retained until Phase 2d migrates flow to logical-input
+// semantics and case-level lifecycle is removed from the HTTP type as well.
+
+test("standalone case without setup/teardown runs cleanly (v10 baseline)", async () => {
   const client = makeMockClient({ status: 200 });
   const api = contract.http.with("api", { client });
-  const order: string[] = [];
   const c = api("c", {
     endpoint: "GET /x",
-    cases: {
-      ok: {
-        description: "x",
-        expect: { status: 200 },
-        setup: async () => { order.push("setup"); return { id: "s1" }; },
-        teardown: async () => { order.push("teardown"); },
-      },
-    },
+    cases: { ok: { description: "v10 baseline", expect: { status: 200 } } },
   });
-
   await c[0].fn!(makeCtx());
-  expect(order).toEqual(["setup", "teardown"]);
-});
-
-test("case teardown runs even when verify throws (finally semantics)", async () => {
-  const client = makeMockClient({ status: 200, body: { id: "u" } });
-  const api = contract.http.with("api", { client });
-  const order: string[] = [];
-  const c = api("c", {
-    endpoint: "GET /x",
-    cases: {
-      ok: {
-        description: "x",
-        expect: { status: 200 },
-        setup: async () => { order.push("setup"); return {}; },
-        verify: async () => { order.push("verify"); throw new Error("verify fail"); },
-        teardown: async () => { order.push("teardown"); },
-      },
-    },
-  });
-
-  await expect(c[0].fn!(makeCtx())).rejects.toThrow("verify fail");
-  expect(order).toEqual(["setup", "verify", "teardown"]);
+  expect(client._calls.length).toBe(1);
 });
 
 // ---------------------------------------------------------------------------
