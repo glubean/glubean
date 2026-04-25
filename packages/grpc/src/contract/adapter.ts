@@ -385,19 +385,24 @@ function normalizeGrpc(
 // =============================================================================
 
 /**
- * Flow-mode case execution. Called by core's FlowBuilder.step() dispatch.
+ * Flow-mode case execution (attachment-model v10). Called by core's
+ * `FlowBuilder.step()` dispatch.
  *
  * Core has already:
- *   1. Computed `resolvedInputs` via `step.bindings.in(state)` (may be partial)
+ *   1. Computed `resolvedInputs` via `step.bindings.in(state)` — this is
+ *      the case's LOGICAL input (matches `needs`), NOT a v9 adapter patch
  *   2. Prepared current flow state
  *   3. Passed the live ProtocolContract (access merged scoped-factory state
  *      via `contract._spec`)
  *
  * Adapter responsibilities:
- *   1. Merge resolvedInputs (shape: { request?, metadata?, deadlineMs? })
- *      over case static spec
- *   2. Run case setup / call / expect / verify (Rule 1: case teardown runs in
- *      step-local finally — contract-flow §7.3)
+ *   1. Pass `resolvedInputs` to function-valued `request` / `metadata`
+ *      (static values pass through unchanged; contract-level
+ *      `defaultRequest` / `defaultMetadata` still merge under)
+ *   2. Run call / expect / verify. There is no per-case setup or
+ *      teardown in v10 (Spike 4 migration removed both fields); flow-
+ *      level lifecycle is owned by the flow orchestrator's `setup()` /
+ *      `teardown()` and per-step `contract.bootstrap()` overlays
  *   3. Return GrpcFlowCaseOutput (= GrpcCaseResult<Res>) for `step.out` lens
  */
 async function executeCaseInFlowGrpc(input: {

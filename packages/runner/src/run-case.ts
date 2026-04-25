@@ -27,6 +27,7 @@ import type {
 } from "./project-runner.js";
 import type { SharedRunConfig } from "./config.js";
 import { applyEnvTemplating } from "./runner-input-templating.js";
+import { loadProjectEnv } from "./env.js";
 
 /**
  * Walk up from `filePath` to find the project root — the nearest
@@ -103,11 +104,38 @@ export interface RunCaseOptions {
 
   /**
    * Optional env map for `{{VAR}}` substitution inside `input` /
-   * `bootstrapInput` (§8). Defaults to `process.env`. Embedders that
-   * load project `.env` files can pass a merged map here so secrets
-   * don't have to be re-injected into the process.
+   * `bootstrapInput` (§8). When omitted, the templating env is built
+   * from `{ ...vars, ...secrets, ...process.env }` matching CLI / MCP
+   * precedence (process.env wins, secrets win over vars).
    */
   templatingEnv?: Record<string, string | undefined>;
+
+  /**
+   * Project env-file basename to load (e.g. `".env"` or
+   * `".env.staging"`). Loads `<rootDir>/<envFile>` and
+   * `<rootDir>/<envFile>.secrets`. Both files are silently treated as
+   * empty when absent. Defaults to `".env"` to match CLI / MCP.
+   *
+   * Set to `null` to skip env-file loading entirely (useful for
+   * fixture-driven tests / scripts that don't want any project env).
+   */
+  envFile?: string | null;
+
+  /**
+   * Project vars to inject into `ProjectRunner` (and therefore into
+   * `ctx.vars` for the running case). When provided, MERGED ON TOP OF
+   * the env loaded from `envFile` (caller-supplied vars win over file
+   * vars). Use this to override or extend env values without touching
+   * the on-disk `.env`.
+   */
+  vars?: Record<string, string>;
+
+  /**
+   * Project secrets to inject into `ProjectRunner` (and therefore into
+   * `ctx.secrets`). Same merge semantics as `vars` — caller-supplied
+   * wins over `envFile` values.
+   */
+  secrets?: Record<string, string>;
 }
 
 /**
@@ -159,17 +187,44 @@ export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
   // omitted, walk up from the file looking for `package.json`.
   const rootDir = opts.rootDir ?? findProjectRoot(filePath);
 
+  // Load project env (matches CLI / MCP behavior). `envFile: null`
+  // skips the load; otherwise default basename is `.env`. Caller-supplied
+  // `vars` / `secrets` merge on top (caller wins over file).
+  let loadedVars: Record<string, string> = {};
+  let loadedSecrets: Record<string, string> = {};
+  if (opts.envFile !== null) {
+    const envFileName = opts.envFile ?? ".env";
+    try {
+      const loaded = await loadProjectEnv(rootDir, envFileName);
+      loadedVars = loaded.vars;
+      loadedSecrets = loaded.secrets;
+    } catch {
+      // Match CLI behavior: missing env files are silently ignored.
+      // A real load failure (parse error) bubbles up here unchanged so
+      // the caller sees it instead of running with stale empty env.
+      // loadProjectEnv itself doesn't throw on missing files.
+    }
+  }
+  const effectiveVars = { ...loadedVars, ...(opts.vars ?? {}) };
+  const effectiveSecrets = { ...loadedSecrets, ...(opts.secrets ?? {}) };
+
   // Capture & set env vars BEFORE constructing ProjectRunner — the
   // executor inherits parent env when spawning the harness subprocess.
   const savedExplicit = process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
   const savedBootstrap = process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
   const savedForce = process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
 
-  // §8 templating env — caller-provided or process.env. Substitution
-  // happens before serialization (and therefore before schema validation
-  // in the harness).
+  // §8 templating env — caller override, else built from
+  // `{ ...vars, ...secrets, ...process.env }` matching CLI / MCP
+  // precedence (process.env wins, secrets win over vars). Substitution
+  // happens before env-var serialization, so the harness sees ready-to-
+  // validate JSON.
   const templatingEnv: Record<string, string | undefined> =
-    opts.templatingEnv ?? process.env;
+    opts.templatingEnv ?? {
+      ...effectiveVars,
+      ...effectiveSecrets,
+      ...process.env,
+    };
 
   if (opts.input !== undefined) {
     const templated = applyEnvTemplating(opts.input, templatingEnv);
@@ -219,8 +274,8 @@ export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
   const runner = new ProjectRunner({
     rootDir,
     sharedConfig: opts.sharedConfig,
-    vars: {},
-    secrets: {},
+    vars: effectiveVars,
+    secrets: effectiveSecrets,
     tests: [test],
     noSession: opts.noSession ?? true,
   });

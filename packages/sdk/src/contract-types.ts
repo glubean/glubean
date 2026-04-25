@@ -495,18 +495,15 @@ export interface ContractProtocolAdapter<
    *   4. Passed the live contract instance (access merged scoped-factory state
    *      via `contract._spec`)
    *
-   * Adapter responsibilities vary by migration state:
-   *
-   * - **v10 (attachment model; HTTP as of Phase 2d Step 2):** treat
-   *   `resolvedInputs` as logical case input matching the case's `needs`.
-   *   Call function-valued `body/params/query/headers` with it. No
-   *   setup/teardown on the contract case (v10 case has no lifecycle).
-   *   Return adapter-specific CaseOutput (HTTP: { status, headers, body }).
-   *
-   * - **v9 legacy (gRPC / GraphQL, pending Spike 4 migration):** deep-merge
-   *   `resolvedInputs` (adapter patch shape) into static case fields; run
-   *   case setup / request / expect / verify / case teardown (Rule 1 flow
-   *   teardown semantics). Will be reshaped in Spike 4 to match v10.
+   * Adapter responsibility (post-Spike-4; uniform across HTTP / gRPC /
+   * GraphQL): treat `resolvedInputs` as the case's **logical input**
+   * matching `needs`. Call function-valued action fields (HTTP:
+   * `body`/`params`/`query`/`headers`; gRPC: `request`/`metadata`;
+   * GraphQL: `variables`/`headers`) with it. The contract case has no
+   * lifecycle in v10 — setup-style work belongs to a
+   * `contract.bootstrap()` overlay, NOT to the case itself. Return an
+   * adapter-specific CaseOutput (HTTP: `{ status, headers, body }`;
+   * gRPC: `GrpcCaseResult`; GraphQL: `GraphqlCaseResult`).
    *
    * Not implemented = this protocol cannot be referenced in a flow.
    */
@@ -520,16 +517,19 @@ export interface ContractProtocolAdapter<
   /**
    * Optional: validate that a case can be referenced in a flow.
    *
-   * v10 call-site: `FlowBuilder.step(ref, bindings)` — fires at step-declaration
-   * time, NOT at `ProtocolContract.case(key)` time. Case-ref creation is pure
-   * in v10 (attachment model §4.1); flow-safety is a step-declaration concern.
+   * v10 call-site: `FlowBuilder.step(ref, bindings)` — fires at
+   * step-declaration time, NOT at `ProtocolContract.case(key)` time.
+   * Case-ref creation is pure in v10 (attachment model §4.1);
+   * flow-safety is a step-declaration concern.
    *
-   * HTTP adapter removed its implementation in Phase 2d Step 2: the v9 rule
-   * "function-valued body/params/query/headers can't resolve in flow" is
-   * semantically reversed in v10 — function-valued fields ARE the canonical
-   * flow input channel, receiving resolvedInputs via logical input. gRPC and
-   * GraphQL adapters still implement this check for their legacy v9 runtime;
-   * Spike 4 removes it when their runtimes are migrated.
+   * Post-Spike-4 reality: NO built-in adapter implements this hook
+   * anymore. The v9 rule "function-valued action fields can't resolve
+   * in flow" is semantically reversed in v10 — function fields ARE the
+   * canonical flow input channel, receiving `resolvedInputs` via
+   * logical input. The hook is kept on the interface for protocol-
+   * adapter authors who have legitimate per-protocol flow constraints
+   * (e.g. streaming-only methods rejected from non-streaming flows in
+   * a future plugin).
    *
    * Throws on invalid case; returns undefined on success.
    */
