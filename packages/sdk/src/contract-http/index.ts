@@ -13,6 +13,7 @@
 
 export { httpAdapter } from "./adapter.js";
 export { createHttpFactory, createHttpRoot } from "./factory.js";
+export { defineHttpCase } from "./types.js";
 
 export type {
   // User-facing authoring types

@@ -550,6 +550,7 @@ export {
   createHttpFactory,
   createHttpRoot,
 } from "./contract-http/factory.js";
+export { defineHttpCase } from "./contract-http/types.js";
 export type {
   HttpContractSpec,
   HttpContractDefaults,

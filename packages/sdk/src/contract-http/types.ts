@@ -117,6 +117,54 @@ export type HttpStaticBody =
   | URLSearchParams
   | Blob;
 
+/**
+ * v0 HTTP case factory — closes the v3 P2 known-open ("HTTP body Needs
+ * drift"). Inside a contract spec literal, TypeScript can't correlate
+ * `needs: SchemaLike<X>` and `body: (input: Y) => ...` from sibling
+ * fields — author can write drift between them and TS won't flag it
+ * (`body` runs with `input.email` undefined when `body` destructures
+ * a key that isn't on Needs).
+ *
+ * `defineHttpCase<Needs, T>` captures `Needs` once via the explicit
+ * generic; the case literal is then checked against
+ * `ContractCase<T, Needs>` so all action fields (`body`, `params`,
+ * `query`, `headers`) are constrained to `(input: Needs) => ...`. Drift
+ * between `needs` and any action field becomes a compile error.
+ *
+ * Use it for cases that declare `needs` AND have function-valued action
+ * fields. Cases without `needs` (or with only static action fields)
+ * don't need the factory; the runtime invariants are unaffected either
+ * way (this is a typing improvement only).
+ *
+ * @example
+ * ```ts
+ * import { defineHttpCase } from "@glubean/sdk";
+ * import { z } from "zod";
+ *
+ * const successCase = defineHttpCase<{ email: string }>({
+ *   description: "creates a user",
+ *   needs: z.object({ email: z.string() }),
+ *   // body, params, query, headers params now type-checked against
+ *   // { email: string } — author can NOT write `({wrongKey}) => ...`.
+ *   body: ({ email }) => ({ email }),
+ *   expect: { status: 201 },
+ * });
+ *
+ * const api = contract.http.with("users", { client });
+ * export const createUser = api("user.create", {
+ *   endpoint: "POST /users",
+ *   cases: { success: successCase },
+ * });
+ * ```
+ *
+ * @param c The case spec to validate. Returned verbatim.
+ */
+export function defineHttpCase<Needs = void, T = unknown>(
+  c: ContractCase<T, Needs>,
+): ContractCase<T, Needs> {
+  return c;
+}
+
 export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
   /**
    * Per-case logical input schema. Redeclares the `BaseCaseSpec.needs` field

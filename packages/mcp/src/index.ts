@@ -18,7 +18,7 @@ import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-import { bootstrap, loadProjectEnv, LOCAL_RUN_DEFAULTS, ProjectRunner, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
+import { applyEnvTemplating, bootstrap, loadProjectEnv, LOCAL_RUN_DEFAULTS, ProjectRunner, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
 import type { ProjectRunnerTest } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { renderArtifact, openapiArtifact } from "@glubean/sdk";
@@ -739,6 +739,24 @@ export async function runLocalTestsFromFile(args: {
   includeTraces?: boolean;
   stopOnFailure?: boolean;
   concurrency?: number;
+  /**
+   * Spike 3 runner input channels (attachment-model §8). Mirrors CLI
+   * `--input-json` / `--bootstrap-json` / `--force-standalone`.
+   *
+   * `inputJson` — explicit case input. When provided, `filter` must
+   * resolve to exactly one testId; the input is validated against the
+   * case's `needs` schema and runs raw (overlay skipped).
+   *
+   * `bootstrapInput` — bootstrap params. When provided, `filter` must
+   * resolve to exactly one testId; the value is validated against the
+   * overlay's `params` schema and passed to overlay's `run()`.
+   *
+   * `forceStandalone` — debug bypass for `runnability.requireAttachment`
+   * on no-needs cases (§6.3 escape valve).
+   */
+  inputJson?: unknown;
+  bootstrapInput?: unknown;
+  forceStandalone?: boolean;
 }): Promise<{
   fileUrl: string;
   projectRoot: string;
@@ -819,6 +837,84 @@ export async function runLocalTestsFromFile(args: {
     } as ProjectRunnerTest["meta"],
   }));
 
+  // ── Spike 3 runner input channels (attachment-model §8) ─────────────────
+  // ProjectRunner spawns a tsx subprocess inheriting parent env; the harness
+  // reads `GLUBEAN_RUNNER_*` env vars and populates the SDK's runner-input
+  // channel. Mirrors CLI run.ts. Restored in finally so concurrent MCP
+  // tool calls don't leak state.
+  const hasInputChannel =
+    args.inputJson !== undefined ||
+    args.bootstrapInput !== undefined ||
+    args.forceStandalone === true;
+  let savedExplicitMap: string | undefined;
+  let savedBootstrapMap: string | undefined;
+  let savedForceIds: string | undefined;
+  if (hasInputChannel) {
+    if (selected.length !== 1) {
+      return {
+        fileUrl,
+        projectRoot,
+        vars,
+        secrets,
+        results: [],
+        summary: { total: 0, passed: 0, failed: 0 },
+        error:
+          `inputJson / bootstrapInput / forceStandalone require \`filter\` ` +
+          `to match exactly one testId. Matched ${selected.length} tests` +
+          (selected.length > 1
+            ? `: ${selected.map((t) => t.id).slice(0, 10).join(", ")}`
+            : "") +
+          ".",
+      };
+    }
+    const targetTestId = selected[0]!.id;
+    savedExplicitMap = process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
+    savedBootstrapMap = process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
+    savedForceIds = process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
+    // §8 templating env — project vars+secrets + process.env (secrets win
+    // over vars; process.env wins over both, matching loadProjectEnv).
+    const templatingEnv: Record<string, string | undefined> = {
+      ...vars,
+      ...secrets,
+      ...process.env,
+    };
+    if (args.inputJson !== undefined) {
+      const templated = applyEnvTemplating(args.inputJson, templatingEnv);
+      process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = JSON.stringify({
+        [targetTestId]: templated,
+      });
+    }
+    if (args.bootstrapInput !== undefined) {
+      const templated = applyEnvTemplating(args.bootstrapInput, templatingEnv);
+      process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = JSON.stringify({
+        [targetTestId]: templated,
+      });
+    }
+    if (args.forceStandalone === true) {
+      process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = JSON.stringify([
+        targetTestId,
+      ]);
+    }
+  }
+  const restoreEnv = () => {
+    if (!hasInputChannel) return;
+    if (savedExplicitMap === undefined) {
+      delete process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
+    } else {
+      process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = savedExplicitMap;
+    }
+    if (savedBootstrapMap === undefined) {
+      delete process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
+    } else {
+      process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = savedBootstrapMap;
+    }
+    if (savedForceIds === undefined) {
+      delete process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
+    } else {
+      process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = savedForceIds;
+    }
+  };
+
   // Index results by testId as events stream in. Each test's events flow
   // between its `start` and `status` events; we key the accumulator by the
   // current testId observed from `start`.
@@ -849,6 +945,7 @@ export async function runLocalTestsFromFile(args: {
   // `session:setup:failed` events from the facade.
   let orchestrationError: string | undefined;
 
+  try {
   for await (const evt of runner.run()) {
     // Surface non-file failure events so callers can distinguish them from
     // "clean empty run" outcomes.
@@ -944,6 +1041,9 @@ export async function runLocalTestsFromFile(args: {
         break;
       }
     }
+  }
+  } finally {
+    restoreEnv();
   }
 
   // Preserve the original `selected` order (also matches AI-agent
@@ -1070,6 +1170,24 @@ server.registerTool(
         .max(16)
         .optional()
         .describe("Parallelism (default: 1)"),
+      inputJson: z
+        .unknown()
+        .optional()
+        .describe(
+          "Spike 3 attachment-model §8 — explicit case input. Validated against the case's `needs` schema; runs raw (overlay skipped). Requires `filter` to match exactly one testId.",
+        ),
+      bootstrapInput: z
+        .unknown()
+        .optional()
+        .describe(
+          "Spike 3 attachment-model §8 — bootstrap params. Validated against the overlay's `params` schema; passed to overlay's run(ctx, params). Requires `filter` to match exactly one testId.",
+        ),
+      forceStandalone: z
+        .boolean()
+        .optional()
+        .describe(
+          "DEBUG: bypass `runnability.requireAttachment` for the filtered case. Author-debug only; runtime emits a warning.",
+        ),
     },
   },
   async (input: {
@@ -1080,6 +1198,9 @@ server.registerTool(
     includeTraces?: boolean;
     stopOnFailure?: boolean;
     concurrency?: number;
+    inputJson?: unknown;
+    bootstrapInput?: unknown;
+    forceStandalone?: boolean;
   }) => {
     const result = await runLocalTestsFromFile({
       filePath: input.filePath,
@@ -1089,6 +1210,9 @@ server.registerTool(
       includeTraces: input.includeTraces,
       stopOnFailure: input.stopOnFailure,
       concurrency: input.concurrency,
+      inputJson: input.inputJson,
+      bootstrapInput: input.bootstrapInput,
+      forceStandalone: input.forceStandalone,
     });
 
     const safe: Record<string, unknown> = {

@@ -18,6 +18,7 @@ import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
 import { extractContractFromFile, loadProjectOverlays } from "@glubean/scanner";
+import { applyEnvTemplating } from "@glubean/runner";
 
 // ANSI color codes for pretty output
 const colors = {
@@ -807,10 +808,28 @@ export async function runCommand(
       }
     }
 
+    // Templating env: project-loaded vars+secrets + process.env. Secrets
+    // win over vars; process.env wins over both (matches `loadProjectEnv`'s
+    // own precedence). §8 — substitution happens before schema validation.
+    const templatingEnv: Record<string, string | undefined> = {
+      ...envVars,
+      ...secrets,
+      ...process.env,
+    };
+
     if (options.inputJson !== undefined) {
       const parsed = await resolveJsonFlag(options.inputJson, "--input-json");
+      let templated: unknown;
+      try {
+        templated = applyEnvTemplating(parsed, templatingEnv);
+      } catch (err) {
+        console.error(
+          `\n${colors.red}❌ --input-json: ${err instanceof Error ? err.message : String(err)}${colors.reset}\n`,
+        );
+        process.exit(1);
+      }
       process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = JSON.stringify({
-        [targetTestId]: parsed,
+        [targetTestId]: templated,
       });
       console.log(`${colors.dim}  --input-json: ${targetTestId}${colors.reset}`);
     }
@@ -819,8 +838,17 @@ export async function runCommand(
         options.bootstrapJson,
         "--bootstrap-json",
       );
+      let templated: unknown;
+      try {
+        templated = applyEnvTemplating(parsed, templatingEnv);
+      } catch (err) {
+        console.error(
+          `\n${colors.red}❌ --bootstrap-json: ${err instanceof Error ? err.message : String(err)}${colors.reset}\n`,
+        );
+        process.exit(1);
+      }
       process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = JSON.stringify({
-        [targetTestId]: parsed,
+        [targetTestId]: templated,
       });
       console.log(`${colors.dim}  --bootstrap-json: ${targetTestId}${colors.reset}`);
     }

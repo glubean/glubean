@@ -278,3 +278,55 @@ const api = contract.http.with("type-d-tests", { client: mockClient as any });
 
   void noNeedsOverlay;
 }
+
+// =============================================================================
+// Test 4: defineHttpCase<Needs> closes the v3 P2 known-open (HTTP body
+// Needs drift). Inside a contract spec literal, `needs` and `body`
+// param types can drift silently. The factory binds Needs once per
+// case so all action fields are checked against it.
+// =============================================================================
+
+import { defineHttpCase } from "./index.js";
+
+{
+  // ✅ Correct: needs + body param types align — compiles.
+  const _good = defineHttpCase<{ email: string }>({
+    description: "creates user",
+    needs: s<{ email: string }>(),
+    body: ({ email }) => ({ email }),
+    expect: { status: 201 },
+  });
+  void _good;
+
+  // ✅ All action fields type-check against Needs.
+  const _good2 = defineHttpCase<{ token: string; userId: string }>({
+    description: "fetch user",
+    needs: s<{ token: string; userId: string }>(),
+    headers: ({ token }) => ({ authorization: `Bearer ${token}` }),
+    params: ({ userId }) => ({ userId }),
+    expect: { status: 200 },
+  });
+  void _good2;
+
+  // ❌ Drift: body destructures key not on Needs — must NOT compile.
+  // This is the v3 P2 case that escaped TS without the factory.
+  const _drift = defineHttpCase<{ email: string }>({
+    description: "drift between needs and body annotation",
+    needs: s<{ email: string }>(),
+    // @ts-expect-error — body param type must be `{email: string}`,
+    // not `{nope: string}`. Drift caught at compile time.
+    body: ({ nope }: { nope: string }) => ({ nope }),
+    expect: { status: 200 },
+  });
+  void _drift;
+
+  // ❌ Drift: headers destructures key not on Needs — must NOT compile.
+  const _drift2 = defineHttpCase<{ token: string }>({
+    description: "headers drift",
+    needs: s<{ token: string }>(),
+    // @ts-expect-error — headers param type must be `{token: string}`.
+    headers: ({ wrongKey }: { wrongKey: string }) => ({ x: wrongKey }),
+    expect: { status: 200 },
+  });
+  void _drift2;
+}

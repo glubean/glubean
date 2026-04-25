@@ -51,6 +51,21 @@ export type {
   ProjectRunnerTest,
 } from "./project-runner.js";
 
+/**
+ * Programmatic single-case runner mirroring CLI `--input-json` /
+ * `--bootstrap-json` / `--force-standalone` and MCP `glubean_run_local_file`'s
+ * runner-input parameters. See attachment-model §8.
+ */
+export { runCase } from "./run-case.js";
+export type { RunCaseOptions, RunCaseResult } from "./run-case.js";
+
+/**
+ * `{{VAR}}` env templating for runner-supplied inputs (§8). Used
+ * internally by CLI / MCP / `runCase` to interpolate before schema
+ * validation. Exposed for embedders that pre-process inputs themselves.
+ */
+export { applyEnvTemplating } from "./runner-input-templating.js";
+
 // =============================================================================
 // 2. Entry-point infrastructure
 // =============================================================================
