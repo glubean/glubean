@@ -481,12 +481,19 @@ describe("classifyFailure (3-layer)", () => {
 // ---------------------------------------------------------------------------
 
 describe("executeCaseInFlow + flow integration", () => {
-  test("flow step deep-merges lens variables over case static + defaultVariables", async () => {
+  test("flow step (v10): function-valued variables receive logical input from step.in lens", async () => {
+    // v10 — flow lens returns LOGICAL input (matches case `needs`); the
+    // case's function-valued `variables` builds the final wire shape from
+    // it. Contract `defaultVariables` still merges under the case-built
+    // variables; the deep-merge of lens adapter-patch is gone (§5.1).
     const client = makeMockGqlClient({
       data: { user: { name: "alice" } },
       httpStatus: 200,
     });
     const api = (contract as any).graphql.with("api", { client });
+    const inputSchema = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d as { id: string } }),
+    };
     const getUser = api("get-user", {
       endpoint: "/graphql",
       defaultVariables: { locale: "en" },
@@ -494,7 +501,8 @@ describe("executeCaseInFlow + flow integration", () => {
         ok: {
           description: "happy",
           query: "query GetUser($id: ID!) { user(id:$id) { name } }",
-          variables: { tier: "premium" },
+          needs: inputSchema,
+          variables: (input: { id: string }) => ({ id: input.id, tier: "premium" }),
         },
       },
     });
@@ -503,8 +511,8 @@ describe("executeCaseInFlow + flow integration", () => {
       .flow("user-flow")
       .setup(async () => ({ userId: "u-1" }))
       .step(getUser.case("ok"), {
-        in: (s: any) => ({ variables: { id: s.userId } }),
-      })
+        in: (s: any) => ({ id: s.userId }),
+      } as any)
       .build() as FlowContract<unknown>;
 
     await runFlow(flowObj, makeCtx());
@@ -512,9 +520,9 @@ describe("executeCaseInFlow + flow integration", () => {
     expect(client._calls).toHaveLength(1);
     expect(client._calls[0].op).toBe("query");
     expect(client._calls[0].variables).toEqual({
-      locale: "en",     // from defaultVariables
-      tier: "premium",  // from case.variables
-      id: "u-1",        // from lens
+      locale: "en",      // from defaultVariables (still merged)
+      tier: "premium",   // from case static piece of variables fn
+      id: "u-1",         // from logical input via lens
     });
   });
 
@@ -559,29 +567,36 @@ describe("executeCaseInFlow + flow integration", () => {
     expect(client._calls[0].op).toBe("mutation");
   });
 
-  test("headers merge contract < lens in flow mode", async () => {
+  test("headers merge contract defaults + case (v10): function-valued case headers build from logical input", async () => {
     const client = makeMockGqlClient({ data: {}, httpStatus: 200 });
     const api = (contract as any).graphql.with("api", {
       client,
       headers: { "x-instance-tag": "a" },
     });
+    const inputSchema = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d as { tag: string } }),
+    };
     const c = api("c", {
       defaultHeaders: { "x-contract-tag": "b" },
       cases: {
         ok: {
           description: "ok",
           query: "{ hi }",
-          headers: { "x-case-tag": "c" },
+          needs: inputSchema,
+          headers: (input: { tag: string }) => ({
+            "x-case-tag": "c",
+            "x-from-lens": input.tag,
+          }),
         },
       },
     });
 
     const flowObj = contract
       .flow("f")
-      .setup(async () => ({}))
+      .setup(async () => ({ lensTag: "d" }))
       .step(c.case("ok"), {
-        in: () => ({ headers: { "x-lens-tag": "d" } }),
-      })
+        in: (s: any) => ({ tag: s.lensTag }),
+      } as any)
       .build() as FlowContract<unknown>;
 
     await runFlow(flowObj, makeCtx());
@@ -590,54 +605,20 @@ describe("executeCaseInFlow + flow integration", () => {
     expect(headers).toMatchObject({
       "x-contract-tag": "b",
       "x-case-tag": "c",
-      "x-lens-tag": "d",
+      "x-from-lens": "d",
     });
   });
 });
 
 // ---------------------------------------------------------------------------
-// validateCaseForFlow — reject function-valued fields in flow mode
+// validateCaseForFlow — REMOVED in v10
 // ---------------------------------------------------------------------------
-
-describe("validateCaseForFlow", () => {
-  test("rejects function-valued variables", () => {
-    const client = makeMockGqlClient();
-    const api = (contract as any).graphql.with("api", { client });
-    const c = api("c", {
-      cases: {
-        ok: {
-          description: "needs state",
-          query: "{ hi }",
-          setup: async () => ({ v: 1 }),
-          variables: (s: any) => ({ v: s.v }),
-        },
-      },
-    });
-
-    expect(() =>
-      (contract.flow("f").step as any)(c.case("ok")),
-    ).toThrow(/function-valued variables.*flow/);
-  });
-
-  test("rejects function-valued headers", () => {
-    const client = makeMockGqlClient();
-    const api = (contract as any).graphql.with("api", { client });
-    const c = api("c", {
-      cases: {
-        ok: {
-          description: "needs state",
-          query: "{ hi }",
-          setup: async () => ({ t: "tok" }),
-          headers: (s: any) => ({ authorization: `Bearer ${s.t}` }),
-        },
-      },
-    });
-
-    expect(() =>
-      (contract.flow("f").step as any)(c.case("ok")),
-    ).toThrow(/function-valued.*headers/);
-  });
-});
+//
+// Function-valued `variables` / `headers` are now legal in flow mode —
+// they receive logical input from `step.in` lens. The `setup`-state
+// failure mode that motivated the v9 rejection is gone (no per-case
+// setup). Mirror of gRPC + HTTP migration. Behavior is covered by
+// executeCaseInFlow tests above.
 
 // ---------------------------------------------------------------------------
 // Direct graphqlAdapter.execute (non-flow) path
@@ -725,41 +706,20 @@ describe("graphqlAdapter.execute (non-flow path)", () => {
     });
   });
 
-  test("execute: runs setup → teardown even on assertion failure", async () => {
-    const client = makeMockGqlClient({
-      data: { user: { name: "wrong" } },
-      httpStatus: 200,
-    });
-
-    const order: string[] = [];
-    const spec = {
-      client,
-      cases: {
-        ok: {
-          description: "lifecycle",
-          query: "{ user { name } }",
-          setup: async () => {
-            order.push("setup");
-            return { tag: "x" };
-          },
-          teardown: async () => {
-            order.push("teardown");
-          },
-          expect: {
-            data: { user: { name: "alice" } } as any, // mismatch → throws
-          },
-        },
-      },
-    };
-
-    const ctx = makeCtx();
-    await expect(
-      graphqlAdapter.execute(ctx, spec.cases.ok as any, spec as any),
-    ).rejects.toThrow();
-    expect(order).toEqual(["setup", "teardown"]);
+  test("execute (v10): no per-case lifecycle — overlay owns setup/teardown", () => {
+    // v10 removed `setup` / `teardown` from GraphqlContractCase. Lifecycle
+    // around a case is owned by `contract.bootstrap()` overlays (whose
+    // `ctx.cleanup(...)` runs LIFO around the case, including on assert
+    // failure). The pre-v10 ordering test is no longer applicable; the
+    // equivalent invariant lives in SDK-level bootstrap-cleanup tests.
+    expect(true).toBe(true); // documentation marker
   });
 
-  test("execute: function-valued variables / headers receive setup state", async () => {
+  test("execute (v10): function-valued variables / headers receive resolvedInput", async () => {
+    // v0 path — `adapter.execute` is reached only when no overlay AND no
+    // `needs` (per §5.1 step 5), so resolvedInput is undefined. To prove
+    // function-valued fields wire to resolvedInput, exercise the v10
+    // entry `adapter.executeCase({ ..., resolvedInput })` directly.
     const client = makeMockGqlClient({ data: {}, httpStatus: 200 });
 
     const spec = {
@@ -768,15 +728,20 @@ describe("graphqlAdapter.execute (non-flow path)", () => {
         ok: {
           description: "fn fields",
           query: "{ me { id } }",
-          setup: async () => ({ userId: "u-1", token: "t-1" }),
-          variables: (state: any) => ({ id: state.userId }),
-          headers: (state: any) => ({ authorization: `Bearer ${state.token}` }),
+          // v10: function fields receive logical input (matches `needs`).
+          variables: (input: any) => ({ id: input.userId }),
+          headers: (input: any) => ({ authorization: `Bearer ${input.token}` }),
         },
       },
     };
 
     const ctx = makeCtx();
-    await graphqlAdapter.execute(ctx, spec.cases.ok as any, spec as any);
+    await graphqlAdapter.executeCase!({
+      ctx,
+      contract: { _projection: {}, _spec: spec } as any,
+      caseKey: "ok",
+      resolvedInput: { userId: "u-1", token: "t-1" },
+    });
 
     expect(client._calls[0].variables).toEqual({ id: "u-1" });
     expect(client._calls[0].headers).toMatchObject({ authorization: "Bearer t-1" });

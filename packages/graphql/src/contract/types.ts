@@ -177,18 +177,26 @@ export interface GraphqlContractExpect<T = unknown> {
 // =============================================================================
 
 /**
- * One case on a GraphQL contract.
+ * One case on a GraphQL contract (attachment-model v10).
  *
  * Each case owns its own `query` string — the selection-set is
- * per-case (proposal §3.2 b). Function-valued fields (`variables`,
- * `headers`) reference case-local setup state; in flow mode these are
- * rejected by `validateCaseForFlow`, same discipline as HTTP.
+ * per-case (proposal §3.2 b). Function-valued `variables` / `headers`
+ * receive the case's **logical input** (matching `needs: SchemaLike<Needs>`),
+ * NOT setup state. v10 removes per-case lifecycle entirely; setup-style
+ * work belongs to a `contract.bootstrap()` overlay (whose `ctx.cleanup(...)`
+ * runs LIFO). Mirrors HTTP and gRPC migrations (Phase 2c B+C / Spike 4).
  */
 export interface GraphqlContractCase<
   Vars = Record<string, unknown>,
   Res = unknown,
-  S = void,
+  Needs = void,
 > extends BaseCaseSpec {
+  /**
+   * Per-case logical input schema. Redeclares `BaseCaseSpec.needs` with
+   * the case's own `Needs` so action fields can type-narrow correctly.
+   */
+  needs?: SchemaLike<Needs>;
+
   /** Per-case client override. */
   client?: GraphQLClient;
 
@@ -216,19 +224,17 @@ export interface GraphqlContractCase<
   expect?: GraphqlContractExpect<Res>;
 
   /**
-   * Variables. Object shorthand or a function of setup state.
-   * Merged deep-style over `defaults.variables` → `spec.defaultVariables`.
+   * Variables. Object shorthand or a function of the case's logical
+   * input (matching `needs`). Merged deep-style over
+   * `defaults.variables` → `spec.defaultVariables`.
    */
-  variables?: Vars | ((state: S) => Vars);
+  variables?: Vars | ((input: Needs) => Vars);
 
-  /** Per-call headers (merged with instance + contract defaults). */
-  headers?: Record<string, string> | ((state: S) => Record<string, string>);
-
-  /** Setup runs before the call. Return value flows to variables/headers fn + teardown. */
-  setup?: (ctx: TestContext) => Promise<S>;
-
-  /** Teardown runs after verify, even on failure. */
-  teardown?: (ctx: TestContext, state: S) => Promise<void>;
+  /**
+   * Per-call headers (merged with instance + contract defaults). Function
+   * form receives the case's logical input.
+   */
+  headers?: Record<string, string> | ((input: Needs) => Record<string, string>);
 
   /** Business-logic verify — runs after transport + schema + data match. */
   verify?: (ctx: TestContext, res: GraphqlCaseResult<Res>) => void | Promise<void>;

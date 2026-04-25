@@ -354,11 +354,19 @@ describe("classifyFailure", () => {
 // ---------------------------------------------------------------------------
 
 describe("executeCaseInFlow + flow integration", () => {
-  test("flow step deep-merges lens request over case static + contract defaultRequest", async () => {
+  test("flow step (v10): function-valued request receives logical input from step.in lens", async () => {
+    // v10 — flow lens returns LOGICAL input (matches case `needs`); the
+    // case's function-valued `request` builds the final wire shape from
+    // it. Contract defaults still merge under the case-built request, so
+    // case + contract defaults still compose; the deep-merge of lens
+    // adapter-patch is gone (v9 → v10 §5.1).
     const client = makeMockGrpcClient({
       message: { paymentId: "pay-1" },
     });
     const paymentContracts = (contract as any).grpc.with("payment", { client });
+    const inputSchema = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d as { orderId: string; amount: number } }),
+    };
     const paymentContract = paymentContracts("complete-payment", {
       target: "PaymentService/Complete",
       defaultRequest: { currency: "USD" },
@@ -366,7 +374,14 @@ describe("executeCaseInFlow + flow integration", () => {
         ok: {
           description: "happy",
           expect: { statusCode: 0 },
-          request: { processorHint: "fast-lane" },
+          needs: inputSchema,
+          // v10: function-valued `request` builds wire shape from logical
+          // input; static fields the case always wants live here too.
+          request: (input: { orderId: string; amount: number }) => ({
+            orderId: input.orderId,
+            amount: input.amount,
+            processorHint: "fast-lane",
+          }),
         },
       },
     });
@@ -375,10 +390,8 @@ describe("executeCaseInFlow + flow integration", () => {
       .flow("pay-flow")
       .setup(async () => ({ orderId: "o-1", amount: 99.99 }))
       .step(paymentContract.case("ok"), {
-        in: (s: any) => ({
-          request: { orderId: s.orderId, amount: s.amount },
-        }),
-      })
+        in: (s: any) => ({ orderId: s.orderId, amount: s.amount }),
+      } as any)
       .build() as FlowContract<unknown>;
 
     await runFlow(flowObj, makeCtx());
@@ -386,10 +399,10 @@ describe("executeCaseInFlow + flow integration", () => {
     expect(client._calls).toHaveLength(1);
     expect(client._calls[0].method).toBe("Complete");
     expect(client._calls[0].request).toEqual({
-      currency: "USD",           // from defaultRequest
-      processorHint: "fast-lane", // from case.request
-      orderId: "o-1",            // from lens
-      amount: 99.99,              // from lens
+      currency: "USD",            // from defaultRequest (still merged)
+      processorHint: "fast-lane", // from case static piece of request fn
+      orderId: "o-1",             // from logical input via lens
+      amount: 99.99,              // from logical input via lens
     });
   });
 
@@ -423,39 +436,49 @@ describe("executeCaseInFlow + flow integration", () => {
     expect(capturedOut.message.serverId).toBe("server-1");
   });
 
-  test("metadata merges instance < contract < lens in flow", async () => {
+  test("metadata merges contract defaults + case (v10): function-valued case metadata builds from logical input", async () => {
+    // v10 — lens returns logical input; case's function-valued metadata
+    // builds final headers from it. Contract `defaultMetadata` still
+    // merges under case metadata, but the lens no longer contributes a
+    // metadata adapter-patch directly.
     const client = makeMockGrpcClient();
     const svcContracts = (contract as any).grpc.with("svc", {
       client,
       metadata: { "x-instance-tag": "a" },
     });
+    const inputSchema = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d as { tag: string } }),
+    };
     const svcContract = svcContracts("my-svc", {
       target: "MyService/Echo",
       defaultMetadata: { "x-contract-tag": "b" },
       cases: {
         ok: {
           description: "ok",
-          metadata: { "x-case-tag": "c" },
+          needs: inputSchema,
+          metadata: (input: { tag: string }) => ({
+            "x-case-tag": "c",
+            "x-from-lens": input.tag,
+          }),
         },
       },
     });
 
     const flowObj = contract
       .flow("f")
-      .setup(async () => ({}))
+      .setup(async () => ({ lensTag: "d" }))
       .step(svcContract.case("ok"), {
-        in: () => ({ metadata: { "x-lens-tag": "d" } }),
-      })
+        in: (s: any) => ({ tag: s.lensTag }),
+      } as any)
       .build() as FlowContract<unknown>;
 
     await runFlow(flowObj, makeCtx());
 
-    // In flow mode, the adapter merges: instance defaults + contract defaults + lens
-    // (case static metadata is used but function-valued metadata would be rejected).
     const opts = client._calls[0].options as { metadata: Record<string, string> };
     expect(opts.metadata).toMatchObject({
       "x-contract-tag": "b",
-      "x-lens-tag": "d",
+      "x-case-tag": "c",
+      "x-from-lens": "d",
     });
   });
 });
@@ -524,45 +547,21 @@ describe("grpcAdapter.execute (non-flow path)", () => {
     });
   });
 
-  test("execute: runs setup → teardown lifecycle (teardown even on assert failure)", async () => {
-    const client = makeMockGrpcClient({
-      message: { unexpected: "field" },
-      statusCode: 0,
-    });
-
-    const order: string[] = [];
-
-    const spec = {
-      target: "Svc/Call",
-      client,
-      cases: {
-        ok: {
-          description: "setup-teardown",
-          setup: async () => {
-            order.push("setup");
-            return { tag: "abc" };
-          },
-          teardown: async () => {
-            order.push("teardown");
-          },
-          expect: {
-            statusCode: 0,
-            message: { expected: "different" }, // will fail toMatchObject
-          },
-        },
-      },
-    };
-
-    const ctx = makeCtx();
-    await expect(
-      grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any),
-    ).rejects.toThrow();
-
-    // Rule 1: teardown runs even on assert failure
-    expect(order).toEqual(["setup", "teardown"]);
+  test("execute (v10): no per-case lifecycle — overlay owns setup/teardown", () => {
+    // v10 removed `setup` / `teardown` from GrpcContractCase. Lifecycle
+    // around a case is owned by `contract.bootstrap()` overlays (whose
+    // `ctx.cleanup(...)` runs LIFO, including on assert failure). The
+    // pre-v10 test that asserted `setup → teardown` ordering on the case
+    // is no longer applicable; the equivalent invariant lives in SDK-level
+    // bootstrap-cleanup tests (`packages/sdk/src/contract.test.ts`).
+    expect(true).toBe(true); // documentation marker
   });
 
-  test("execute: function-valued request receives setup state", async () => {
+  test("execute: function-valued request receives resolvedInput (v10 logical input)", async () => {
+    // v0 path — `adapter.execute` is reached only when no overlay AND no
+    // `needs` (per §5.1 step 5), so resolvedInput is undefined. To prove
+    // function-valued fields wire to resolvedInput, exercise the v10
+    // entry `adapter.executeCase({ ..., resolvedInput })` directly.
     const client = makeMockGrpcClient({ message: {} });
 
     const spec = {
@@ -571,15 +570,22 @@ describe("grpcAdapter.execute (non-flow path)", () => {
       cases: {
         ok: {
           description: "function request",
-          setup: async () => ({ userId: "u-1", authToken: "t-1" }),
-          request: (state: any) => ({ userId: state.userId }),
-          metadata: (state: any) => ({ authorization: `Bearer ${state.authToken}` }),
+          // Function fields receive logical input (matches `needs`). In a
+          // real run, dispatcher provides resolvedInput from overlay or
+          // --input-json after needs validation.
+          request: (input: any) => ({ userId: input.userId }),
+          metadata: (input: any) => ({ authorization: `Bearer ${input.authToken}` }),
         },
       },
     };
 
     const ctx = makeCtx();
-    await grpcAdapter.execute(ctx, spec.cases.ok as any, spec as any);
+    await grpcAdapter.executeCase!({
+      ctx,
+      contract: { _projection: {}, _spec: spec } as any,
+      caseKey: "ok",
+      resolvedInput: { userId: "u-1", authToken: "t-1" },
+    });
 
     expect(client._calls[0].request).toEqual({ userId: "u-1" });
     const opts = client._calls[0].options as { metadata: Record<string, string> };
@@ -769,45 +775,15 @@ describe("schema validation failure path", () => {
 });
 
 // ---------------------------------------------------------------------------
-// validateCaseForFlow — reject function-valued fields
+// validateCaseForFlow — REMOVED in v10
 // ---------------------------------------------------------------------------
-
-describe("validateCaseForFlow", () => {
-  test("rejects function-valued request", () => {
-    const client = makeMockGrpcClient();
-    const svcContracts = (contract as any).grpc.with("svc", { client });
-    const c = svcContracts("c", {
-      target: "A/B",
-      cases: {
-        ok: {
-          description: "uses setup",
-          setup: async () => ({ x: 1 }),
-          request: (s: any) => ({ x: s.x }),
-        },
-      },
-    });
-
-    expect(() =>
-      (contract.flow("f").step as any)(c.case("ok")),
-    ).toThrow(/function-valued request.*flow/);
-  });
-
-  test("rejects function-valued metadata", () => {
-    const client = makeMockGrpcClient();
-    const svcContracts = (contract as any).grpc.with("svc", { client });
-    const c = svcContracts("c", {
-      target: "A/B",
-      cases: {
-        ok: {
-          description: "uses setup",
-          setup: async () => ({ tag: "v" }),
-          metadata: (s: any) => ({ "x-tag": s.tag }),
-        },
-      },
-    });
-
-    expect(() =>
-      (contract.flow("f").step as any)(c.case("ok")),
-    ).toThrow(/function-valued.*metadata/);
-  });
-});
+//
+// In v9, function-valued `request` / `metadata` referenced case-local
+// `setup` state and so couldn't run inside flows (state belonged to the
+// flow orchestrator, not to the case). v10 removes per-case setup
+// entirely; function fields receive the case's logical input (from
+// `step.in` lens or `--input-json`), so flows accept them natively.
+// `needs`-vs-function-fields consistency is enforced by the type system
+// + §5.3 load-time guard, not at flow-step registration. The describe
+// block that lived here is gone; flow-mode function-field behavior is
+// covered by the executeCaseInFlow tests above.

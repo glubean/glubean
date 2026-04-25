@@ -237,12 +237,19 @@ describe("live gRPC smoke — execute + flow paths against real server", () => {
     });
 
     const greeterContracts = (contract as any).grpc.with("greeter", { client });
+    // v10 — case has needs schema; function-valued request builds wire
+    // shape from the logical input that the flow lens supplies.
+    const nameSchema = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d as { name: string } }),
+    };
     const greeterContract = greeterContracts("say-hello", {
       target: "GreeterService/SayHello",
       cases: {
         ok: {
           description: "flow against real server",
           expect: { statusCode: 0 },
+          needs: nameSchema,
+          request: (input: { name: string }) => ({ name: input.name }),
         },
       },
     });
@@ -253,12 +260,12 @@ describe("live gRPC smoke — execute + flow paths against real server", () => {
       .flow("live-greet-flow")
       .setup(async () => ({ name: "bob" }))
       .step(greeterContract.case("ok"), {
-        in: (s: any) => ({ request: { name: s.name } }),
+        in: (s: any) => ({ name: s.name }),
         out: (s: any, res: any) => {
           capturedMessage = res.message.message;
           return { ...s, greeting: res.message.message };
         },
-      })
+      } as any)
       .build() as FlowContract<unknown>;
 
     await runFlow(flowObj, makeCtx());

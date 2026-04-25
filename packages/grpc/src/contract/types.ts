@@ -91,14 +91,24 @@ export interface GrpcContractExpect<T = unknown> {
 // =============================================================================
 
 /**
- * One case on a gRPC contract.
+ * One case on a gRPC contract (attachment-model v10).
  *
- * Function-valued fields (`request`, `metadata`) reference case-local setup
- * state. In flow mode these are rejected by `validateCaseForFlow` (same
- * discipline as HTTP's function-valued body/params/query/headers).
+ * Function-valued `request` / `metadata` receive the case's **logical
+ * input** — the value matching `needs: SchemaLike<Needs>`. In standalone
+ * mode the input comes from a bootstrap overlay's `run()` output or
+ * CLI `--input-json`; in flow mode from `step.bindings.in(state)`. There
+ * is no per-case setup state in v10 (per attachment-model §4.1 — case is
+ * pure semantics, not lifecycle).
  */
-export interface GrpcContractCase<Req = unknown, Res = unknown, S = void>
+export interface GrpcContractCase<Req = unknown, Res = unknown, Needs = void>
   extends BaseCaseSpec {
+  /**
+   * Per-case logical input schema (redeclares `BaseCaseSpec.needs` with
+   * the case's own `Needs` so action fields can type-narrow correctly).
+   * Mirrors HTTP `ContractCase.needs` redeclaration (Phase 2c B+C).
+   */
+  needs?: SchemaLike<Needs>;
+
   /** Per-case gRPC client override. */
   client?: GrpcClient;
 
@@ -109,22 +119,20 @@ export interface GrpcContractCase<Req = unknown, Res = unknown, S = void>
   expect?: GrpcContractExpect<Res>;
 
   /**
-   * Request message. Object shorthand or a function of setup state.
-   * Merged deep-style over contract `defaults.request`.
+   * Request message. Object shorthand or a function of the case's
+   * logical input (matching `needs`). Merged deep-style over contract
+   * `defaultRequest`.
    */
-  request?: Req | ((state: S) => Req);
+  request?: Req | ((input: Needs) => Req);
 
-  /** Per-call metadata (merged with instance + contract defaults). */
-  metadata?: Record<string, string> | ((state: S) => Record<string, string>);
+  /**
+   * Per-call metadata (merged with instance + contract defaults).
+   * Function form receives the case's logical input.
+   */
+  metadata?: Record<string, string> | ((input: Needs) => Record<string, string>);
 
   /** Per-call deadline in ms (overrides instance / contract defaults). */
   deadlineMs?: number;
-
-  /** Setup runs before the call. Return value flows to request/metadata fn + teardown. */
-  setup?: (ctx: TestContext) => Promise<S>;
-
-  /** Teardown runs after verify, even on failure. */
-  teardown?: (ctx: TestContext, state: S) => Promise<void>;
 
   /** Business-logic verify — runs after status + schema + message match. */
   verify?: (ctx: TestContext, res: GrpcCaseResult<Res>) => void | Promise<void>;
@@ -311,6 +319,10 @@ export type GrpcContractFactory = <
 /**
  * Infer request type from a GrpcContractCase. Placeholder for future
  * ergonomic inference helpers parallel to HTTP's InferHttpInputs.
+ *
+ * Third generic slot is now `Needs` (was v9's `S` setup-state). Using
+ * `any` in the don't-care slot per Spike 0 Finding 2 (contravariant
+ * positions need `any`, not `unknown`, to keep inference stable).
  */
 export type InferGrpcRequest<C> = C extends GrpcContractCase<infer Req, any, any> ? Req : never;
 

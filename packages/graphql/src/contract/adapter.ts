@@ -104,30 +104,36 @@ function resolveClient(
   return client;
 }
 
-/** Merge headers: contract defaults < case. */
+/**
+ * Merge headers: contract defaults < case.
+ * v10 — function form receives the case's logical input (matches `needs`).
+ */
 function resolveHeaders(
   spec: GraphqlContractSpec,
   caseSpec: GraphqlContractCase,
-  state: unknown,
+  resolvedInput: unknown,
 ): Record<string, string> | undefined {
   const caseHeaders =
     typeof caseSpec.headers === "function"
-      ? (caseSpec.headers as (s: unknown) => Record<string, string>)(state)
+      ? (caseSpec.headers as (i: unknown) => Record<string, string>)(resolvedInput)
       : caseSpec.headers;
   const specHeaders = spec.defaultHeaders;
   if (!caseHeaders && !specHeaders) return undefined;
   return { ...(specHeaders ?? {}), ...(caseHeaders ?? {}) };
 }
 
-/** Resolve variables with deep-merge: spec.defaultVariables < case.variables. */
+/**
+ * Resolve variables with deep-merge: spec.defaultVariables < case.variables.
+ * v10 — function form receives the case's logical input (matches `needs`).
+ */
 function resolveVariables(
   spec: GraphqlContractSpec,
   caseSpec: GraphqlContractCase,
-  state: unknown,
+  resolvedInput: unknown,
 ): Record<string, unknown> {
   const caseVars =
     typeof caseSpec.variables === "function"
-      ? (caseSpec.variables as (s: unknown) => Record<string, unknown>)(state)
+      ? (caseSpec.variables as (i: unknown) => Record<string, unknown>)(resolvedInput)
       : caseSpec.variables;
   return deepMerge(
     spec.defaultVariables as Record<string, unknown> | undefined,
@@ -290,10 +296,20 @@ function assertErrors(
 // executeCase — standard (non-flow) case execution
 // =============================================================================
 
-async function executeCase(
+/**
+ * Execute one GraphQL contract case (attachment-model v10).
+ *
+ * `resolvedInput` is the case's already-validated logical input (matches
+ * `needs` schema). Function-valued `variables` / `headers` receive it as
+ * their argument. No per-case setup/teardown in v10 — the contract case
+ * is pure semantics; setup-style work belongs to a `contract.bootstrap()`
+ * overlay (whose `ctx.cleanup(...)` runs LIFO around this fn).
+ */
+async function executeStandaloneCaseGraphql(
   ctx: TestContext,
   caseSpec: GraphqlContractCase,
   spec: GraphqlContractSpec,
+  resolvedInput: unknown,
 ): Promise<void> {
   if (!caseSpec.query || typeof caseSpec.query !== "string") {
     throw new Error(
@@ -301,26 +317,16 @@ async function executeCase(
     );
   }
 
-  const state: unknown = caseSpec.setup
-    ? await caseSpec.setup(ctx)
-    : undefined;
+  const client = resolveClient(caseSpec, spec);
+  const variables = resolveVariables(spec, caseSpec, resolvedInput);
+  const headers = resolveHeaders(spec, caseSpec, resolvedInput);
 
-  try {
-    const client = resolveClient(caseSpec, spec);
-    const variables = resolveVariables(spec, caseSpec, state);
-    const headers = resolveHeaders(spec, caseSpec, state);
+  const result = await callGraphql(client, caseSpec, spec, variables, headers);
 
-    const result = await callGraphql(client, caseSpec, spec, variables, headers);
+  assertResult(ctx, result, caseSpec);
 
-    assertResult(ctx, result, caseSpec);
-
-    if (caseSpec.verify) {
-      await caseSpec.verify(ctx, result);
-    }
-  } finally {
-    if (caseSpec.teardown) {
-      await caseSpec.teardown(ctx, state as never);
-    }
+  if (caseSpec.verify) {
+    await caseSpec.verify(ctx, result);
   }
 }
 
@@ -369,6 +375,11 @@ function projectGraphql(
       extensions: casted.extensions,
       requires: casted.requires,
       defaultRun: casted.defaultRun,
+      // v10 attachment-model — semantic + inventory + needs surface.
+      given: casted.given,
+      runnability: casted.runnability,
+      hasNeeds: casted.needs !== undefined,
+      needsSchema: casted.needs as unknown,
     };
   });
 
@@ -415,7 +426,17 @@ function normalizeGraphql(
         variablesExample: s.variablesExample,
         variablesExamples: s.variablesExamples,
       };
-      return { ...c, schemas: safe };
+      // v10 — convert needsSchema to JSON-safe (may be undefined for
+      // opaque safeParse-only validators); hasNeeds remains authoritative.
+      const safeNeeds = schemaToJsonSchema(c.needsSchema) ?? undefined;
+      return {
+        ...c,
+        schemas: safe,
+        given: c.given,
+        runnability: c.runnability,
+        hasNeeds: c.hasNeeds,
+        needsSchema: safeNeeds,
+      };
     });
 
   return {
@@ -457,93 +478,41 @@ async function executeCaseInFlowGraphql(input: {
     );
   }
 
-  const state: void = caseSpec.setup
-    ? (await caseSpec.setup(ctx)) as void
-    : undefined;
+  // v10 — `resolvedInputs` is the LOGICAL case input (matches `needs`),
+  // NOT an adapter patch. Function-valued `variables` / `headers` receive
+  // it; static values pass through. No setup / teardown — gone in v10
+  // (case has no lifecycle per attachment-model §4.1).
 
-  try {
-    const client = resolveClient(caseSpec as GraphqlContractCase, spec);
+  const client = resolveClient(caseSpec as GraphqlContractCase, spec);
+  const variables = resolveVariables(spec, caseSpec as GraphqlContractCase, resolvedInputs);
+  const headers = resolveHeaders(spec, caseSpec as GraphqlContractCase, resolvedInputs);
 
-    const staticVars =
-      typeof caseSpec.variables === "function"
-        ? undefined
-        : (caseSpec.variables as Record<string, unknown> | undefined);
-    const staticHeaders =
-      typeof caseSpec.headers === "function"
-        ? undefined
-        : (caseSpec.headers as Record<string, string> | undefined);
+  const result = await callGraphql(
+    client,
+    caseSpec as GraphqlContractCase,
+    spec,
+    variables,
+    headers,
+  );
 
-    const lensInput = (resolvedInputs ?? {}) as {
-      variables?: Record<string, unknown>;
-      headers?: Record<string, string>;
-    };
+  assertResult(ctx, result, caseSpec as GraphqlContractCase);
 
-    // Deep-merge lens variables over case static + spec default
-    const mergedVariables = deepMerge(
-      deepMerge(
-        spec.defaultVariables as Record<string, unknown> | undefined,
-        staticVars,
-      ),
-      lensInput.variables,
-    );
-
-    const mergedHeaders = {
-      ...(spec.defaultHeaders ?? {}),
-      ...(staticHeaders ?? {}),
-      ...(lensInput.headers ?? {}),
-    };
-
-    const result = await callGraphql(
-      client,
-      caseSpec,
-      spec,
-      mergedVariables,
-      Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined,
-    );
-
-    assertResult(ctx, result, caseSpec);
-
-    if (caseSpec.verify) {
-      await caseSpec.verify(ctx, result);
-    }
-
-    return result;
-  } finally {
-    if (caseSpec.teardown) {
-      await caseSpec.teardown(ctx, state as never);
-    }
+  if (caseSpec.verify) {
+    await caseSpec.verify(ctx, result);
   }
+
+  return result;
 }
 
 // =============================================================================
-// validateCaseForFlow — reject function-valued fields in flow mode
+// validateCaseForFlow — REMOVED in v10
 // =============================================================================
-
-export function validateGraphqlCaseForFlow(
-  spec: GraphqlContractSpec,
-  caseKey: string,
-  contractId: string,
-): void {
-  const caseSpec = spec.cases[caseKey];
-  if (!caseSpec) {
-    throw new Error(
-      `contract.graphql(${JSON.stringify(contractId)}).case(${JSON.stringify(caseKey)}): case not found.`,
-    );
-  }
-
-  const functionFields: string[] = [];
-  if (typeof caseSpec.variables === "function") functionFields.push("variables");
-  if (typeof caseSpec.headers === "function") functionFields.push("headers");
-
-  if (functionFields.length > 0) {
-    throw new Error(
-      `contract.graphql(${JSON.stringify(contractId)}).case(${JSON.stringify(caseKey)}): ` +
-        `cannot use function-valued ${functionFields.join(" / ")} in a flow step — ` +
-        `these fields depend on case-local setup state which isn't available in flow mode. ` +
-        `Move the value into flow state and use step.in lens instead.`,
-    );
-  }
-}
+//
+// Previously rejected function-valued `variables` / `headers` because they
+// referenced case-local `setup` state. v10 removes per-case setup; function
+// fields receive logical input (matches `needs`) from `step.in` lens or
+// `--input-json`. Flow accepts them natively. Mirror of gRPC + HTTP
+// migration (Spike 4 / Phase 2c B+C).
 
 // =============================================================================
 // classifyFailure — 3-layer (transport / payload / data shape)
@@ -690,11 +659,31 @@ export const graphqlAdapter: ContractProtocolAdapter<
   GraphqlSafeSchemas,
   GraphqlContractSafeMeta
 > = {
+  // v0 path: no overlay + no needs (no resolvedInput) → run case raw.
+  // Per attachment-model §5.1 step 5; the dispatcher only reaches this
+  // path when no overlay is registered AND `needs` is absent.
   async execute(ctx, caseSpec, contractSpec) {
-    await executeCase(
+    await executeStandaloneCaseGraphql(
       ctx,
       caseSpec as GraphqlContractCase,
       contractSpec as GraphqlContractSpec,
+      undefined,
+    );
+  },
+  // v10 attachment-model entry point. Dispatcher routes here when:
+  //   - explicit input was supplied (§5.1 step 1), OR
+  //   - bootstrap overlay produced `resolvedInput` (§5.1 step 3).
+  async executeCase({ ctx, contract, caseKey, resolvedInput }) {
+    const spec = (contract as { _spec: unknown })._spec as GraphqlContractSpec;
+    const caseSpec = spec.cases[caseKey];
+    if (!caseSpec) {
+      throw new Error(`GraphQL contract: unknown case key "${caseKey}".`);
+    }
+    await executeStandaloneCaseGraphql(
+      ctx,
+      caseSpec as GraphqlContractCase,
+      spec,
+      resolvedInput,
     );
   },
   project: projectGraphql,
@@ -702,7 +691,8 @@ export const graphqlAdapter: ContractProtocolAdapter<
   executeCaseInFlow: executeCaseInFlowGraphql as ContractProtocolAdapter<
     GraphqlContractSpec
   >["executeCaseInFlow"],
-  validateCaseForFlow: validateGraphqlCaseForFlow,
+  // v10: no validateCaseForFlow — function fields are legal in flow mode
+  // and receive the logical input from `step.in` lens.
   classifyFailure: classifyGraphqlFailure,
   renderTarget: renderGraphqlTarget,
   // Markdown uses the SDK's generic structured renderer — GraphQL has no
