@@ -46,12 +46,14 @@ export type { FileSystem, Hasher, MetadataExtractor } from "./scanner.js";
 export { createStaticExtractor, extractAliasesFromSource, extractContractCases, extractFromSource, isGlubeanFile } from "./extractor-static.js";
 export type { ContractStaticMeta, ContractCaseStaticMeta } from "./extractor-static.js";
 
-// Re-export runtime contract + flow extraction
+// Re-export runtime contract + flow + attachment extraction
 export {
   extractContractFromFile,
   extractContractsFromProject,
   isProtocolContract,
   isFlowContract,
+  isBootstrapAttachment,
+  bootstrapAttachmentToNormalized,
   isHttpContract, // deprecated-throw, kept for diagnostic
 } from "./contract-extraction.js";
 export type {
@@ -62,6 +64,7 @@ export type {
   NormalizedFlowMeta,
   NormalizedFlowStep,
   NormalizedFieldMapping,
+  NormalizedAttachmentMeta,
   ExtractedContract,
   ExtractionResult,
   CaseLifecycle,

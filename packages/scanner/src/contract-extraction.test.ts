@@ -12,7 +12,11 @@
  */
 
 import { test, expect } from "vitest";
-import { protocolContractToNormalized } from "./contract-extraction.js";
+import {
+  bootstrapAttachmentToNormalized,
+  isBootstrapAttachment,
+  protocolContractToNormalized,
+} from "./contract-extraction.js";
 
 test("protocolContractToNormalized reads _extracted when available", () => {
   // Construct a fake carrier whose _extracted schemas differ from what
@@ -53,4 +57,81 @@ test("protocolContractToNormalized reads _extracted when available", () => {
   const normalized = protocolContractToNormalized(fakeCarrier, "exportName");
   expect(normalized.schemas).toEqual({ fromExtracted: true });
   expect(normalized.cases[0].schemas).toEqual({ fromExtracted: true });
+});
+
+// ---------------------------------------------------------------------------
+// v10 attachment model: bootstrap attachment extraction (Phase 2e)
+// ---------------------------------------------------------------------------
+
+test("isBootstrapAttachment recognizes the runtime marker", () => {
+  expect(
+    isBootstrapAttachment({
+      __glubean_type: "bootstrap-attachment",
+      testId: "orders.create.success",
+    }),
+  ).toBe(true);
+
+  // Wrong marker
+  expect(
+    isBootstrapAttachment({
+      __glubean_type: "contract-case-ref",
+      testId: "orders.create.success",
+    }),
+  ).toBe(false);
+
+  // Missing testId
+  expect(
+    isBootstrapAttachment({ __glubean_type: "bootstrap-attachment" }),
+  ).toBe(false);
+
+  // null / non-object
+  expect(isBootstrapAttachment(null)).toBe(false);
+  expect(isBootstrapAttachment("string")).toBe(false);
+  expect(isBootstrapAttachment(undefined)).toBe(false);
+});
+
+test("bootstrapAttachmentToNormalized splits testId into contractId + caseKey", () => {
+  const normalized = bootstrapAttachmentToNormalized(
+    { testId: "orders.create.success" },
+    "ordersStandalone",
+  );
+  expect(normalized).toEqual({
+    exportName: "ordersStandalone",
+    kind: "bootstrap-overlay",
+    testId: "orders.create.success",
+    contractId: "orders.create",
+    caseKey: "success",
+  });
+});
+
+test("bootstrapAttachmentToNormalized splits at LAST dot (multi-segment contractId)", () => {
+  // contractId can have dots (e.g. "v2.orders.create"); caseKey is the last segment.
+  const normalized = bootstrapAttachmentToNormalized(
+    { testId: "v2.orders.create.success" },
+    "exp",
+  );
+  expect(normalized).toEqual({
+    exportName: "exp",
+    kind: "bootstrap-overlay",
+    testId: "v2.orders.create.success",
+    contractId: "v2.orders.create",
+    caseKey: "success",
+  });
+});
+
+test("bootstrapAttachmentToNormalized rejects malformed testIds", () => {
+  // No dot
+  expect(
+    bootstrapAttachmentToNormalized({ testId: "noseparator" }, "exp"),
+  ).toBeNull();
+
+  // Trailing dot
+  expect(
+    bootstrapAttachmentToNormalized({ testId: "orders.create." }, "exp"),
+  ).toBeNull();
+
+  // Leading dot (empty contractId)
+  expect(
+    bootstrapAttachmentToNormalized({ testId: ".success" }, "exp"),
+  ).toBeNull();
 });

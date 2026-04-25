@@ -143,16 +143,62 @@ export interface NormalizedFlowMeta {
   steps: NormalizedFlowStep[];
 }
 
-/** Result of extracting contracts/flows from one or more files. */
+/**
+ * v10 attachment projection. Surfaces bootstrap overlays declared via
+ * `contract.bootstrap(ref, spec)` so scanner / CLI / MCP can show them
+ * in runnable inventory alongside contracts.
+ *
+ * Body of the bootstrap is opaque (per attachment-model §4.2 — backdoor).
+ * `paramsSchema` is undefined in v0; structured-form schema extraction
+ * is deferred to Spike 3 when the runner input channel ships and we have
+ * a concrete consumer for the schema shape.
+ */
+export interface NormalizedAttachmentMeta {
+  exportName: string;
+  kind: "bootstrap-overlay";
+  /** Test id this overlay attaches to (`${contractId}.${caseKey}`). */
+  testId: string;
+  contractId: string;
+  caseKey: string;
+}
+
+/** Result of extracting contracts/flows/attachments from one or more files. */
 export interface ExtractionResult {
   contracts: NormalizedContractMeta[];
   flows?: NormalizedFlowMeta[];
+  attachments?: NormalizedAttachmentMeta[];
   errors: Array<{ file: string; error: string }>;
 }
 
 // =============================================================================
 // Duck typing
 // =============================================================================
+
+/**
+ * Check if a value looks like a BootstrapAttachment (v10 attachment model).
+ *
+ * BootstrapAttachment is the runtime marker returned by `contract.bootstrap()`.
+ * Carries `__glubean_type: "bootstrap-attachment"` and `testId`
+ * (= `${contractId}.${caseKey}`). Scanner identifies attachments via this
+ * marker without importing @glubean/sdk types.
+ *
+ * v0 attachment projection only surfaces metadata (kind, testId,
+ * contractId, caseKey). Bootstrap params schema (structured-form `params`)
+ * is not yet exposed on the export object — extracting it requires reading
+ * the bootstrap registry, deferred to Spike 3 when the runner input
+ * channel ships.
+ */
+export function isBootstrapAttachment(val: unknown): val is {
+  __glubean_type: "bootstrap-attachment";
+  testId: string;
+} {
+  return (
+    typeof val === "object" &&
+    val !== null &&
+    (val as Record<string, unknown>).__glubean_type === "bootstrap-attachment" &&
+    typeof (val as Record<string, unknown>).testId === "string"
+  );
+}
 
 /**
  * Check if a value looks like a ProtocolContract.
@@ -387,6 +433,34 @@ function autoBuildFlowBuilder(val: unknown): unknown {
 // File-level extraction
 // =============================================================================
 
+/**
+ * Convert a BootstrapAttachment runtime export to a NormalizedAttachmentMeta.
+ * Splits `testId` into contractId + caseKey using the dot separator
+ * convention used by the SDK dispatcher (`${contractId}.${caseKey}`).
+ *
+ * If the testId can't be split (no dot), returns null and caller skips it
+ * — that shape would indicate a malformed attachment and we'd rather not
+ * surface garbage in scanner output.
+ */
+export function bootstrapAttachmentToNormalized(
+  attachment: { testId: string },
+  exportName: string,
+): NormalizedAttachmentMeta | null {
+  const dotIndex = attachment.testId.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === attachment.testId.length - 1) {
+    return null;
+  }
+  const contractId = attachment.testId.slice(0, dotIndex);
+  const caseKey = attachment.testId.slice(dotIndex + 1);
+  return {
+    exportName,
+    kind: "bootstrap-overlay",
+    testId: attachment.testId,
+    contractId,
+    caseKey,
+  };
+}
+
 // Per-path mtime cache used by extractContractFromFile() to decide when
 // to bust Node's ESM module cache on re-import. See the comment inside
 // that function for the full reasoning.
@@ -401,6 +475,7 @@ export async function extractContractFromFile(
 ): Promise<ExtractionResult> {
   const contracts: NormalizedContractMeta[] = [];
   const flows: NormalizedFlowMeta[] = [];
+  const attachments: NormalizedAttachmentMeta[] = [];
   const errors: ExtractionResult["errors"] = [];
   const absolutePath = resolve(filePath);
 
@@ -446,6 +521,9 @@ export async function extractContractFromFile(
         flows.push(flowContractToNormalized(value, exportName));
       } else if (isProtocolContract(value)) {
         contracts.push(protocolContractToNormalized(value, exportName));
+      } else if (isBootstrapAttachment(value)) {
+        const normalized = bootstrapAttachmentToNormalized(value, exportName);
+        if (normalized) attachments.push(normalized);
       }
     }
   } catch (err) {
@@ -453,7 +531,12 @@ export async function extractContractFromFile(
     errors.push({ file: absolutePath, error: message });
   }
 
-  return { contracts, flows: flows.length > 0 ? flows : undefined, errors };
+  return {
+    contracts,
+    flows: flows.length > 0 ? flows : undefined,
+    attachments: attachments.length > 0 ? attachments : undefined,
+    errors,
+  };
 }
 
 // =============================================================================
@@ -461,7 +544,13 @@ export async function extractContractFromFile(
 // =============================================================================
 
 /**
- * Find all .contract.{ts,js,mjs} and .flow.{ts,js,mjs} files in a directory tree.
+ * Find all .contract.{ts,js,mjs}, .flow.{ts,js,mjs}, and
+ * .bootstrap.{ts,js,mjs} files in a directory tree.
+ *
+ * v10 attachment model §7.4 mandates eager loading of `.bootstrap.` files
+ * so overlay registrations fire during module evaluation. Without this,
+ * filtered runs (CLI / MCP) could miss overlay registrations and silently
+ * fall through to the no-overlay path.
  */
 function findContractAndFlowFiles(dir: string): string[] {
   const files: string[] = [];
@@ -472,7 +561,11 @@ function findContractAndFlowFiles(dir: string): string[] {
       if (statSync(full).isDirectory()) walk(full);
       else {
         const base = basename(entry);
-        if (base.includes(".contract.") || base.includes(".flow.")) {
+        if (
+          base.includes(".contract.") ||
+          base.includes(".flow.") ||
+          base.includes(".bootstrap.")
+        ) {
           files.push(full);
         }
       }
@@ -483,7 +576,7 @@ function findContractAndFlowFiles(dir: string): string[] {
 }
 
 /**
- * Extract contracts + flows from all recognized files in a project.
+ * Extract contracts + flows + attachments from all recognized files in a project.
  */
 export async function extractContractsFromProject(
   dir: string,
@@ -493,18 +586,22 @@ export async function extractContractsFromProject(
 
   const allContracts: NormalizedContractMeta[] = [];
   const allFlows: NormalizedFlowMeta[] = [];
+  const allAttachments: NormalizedAttachmentMeta[] = [];
   const allErrors: ExtractionResult["errors"] = [];
 
   for (const filePath of files) {
-    const { contracts, flows, errors } = await extractContractFromFile(filePath);
+    const { contracts, flows, attachments, errors } =
+      await extractContractFromFile(filePath);
     allContracts.push(...contracts);
     if (flows) allFlows.push(...flows);
+    if (attachments) allAttachments.push(...attachments);
     allErrors.push(...errors);
   }
 
   return {
     contracts: allContracts,
     flows: allFlows.length > 0 ? allFlows : undefined,
+    attachments: allAttachments.length > 0 ? allAttachments : undefined,
     errors: allErrors,
   };
 }
