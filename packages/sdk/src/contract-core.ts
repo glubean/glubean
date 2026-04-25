@@ -433,10 +433,32 @@ function dispatchContract<
           );
         }
 
-        // No-needs case + no overlay → run case with no input. Static body /
-        // headers / params / query work as-is; function-valued action fields
-        // receive undefined (author responsibility — typically a no-needs
-        // case has no function-valued fields).
+        // `runnability.requireAttachment` is the proposal's explicit opt-in
+        // for "this case cannot run raw — an attachment (bootstrap overlay
+        // or flow step) is mandatory". It applies independently of `needs`:
+        // a no-needs case can still require attachment (e.g. because the
+        // overlay performs a mandatory side-effect setup even though the
+        // case itself takes no logical input). Without this guard, such a
+        // case silently falls through to `adapter.execute` and the whole
+        // "attachment is required" invariant leaks.
+        const requireAttachment = (caseSpec as {
+          runnability?: { requireAttachment?: boolean };
+        }).runnability?.requireAttachment;
+        if (requireAttachment) {
+          throw new Error(
+            `case "${testId}" sets \`runnability.requireAttachment: true\` ` +
+              `but no bootstrap overlay is registered. Per attachment model ` +
+              `§7.2: register a bootstrap overlay via \`contract.bootstrap(...)\`, ` +
+              `or attach the case to a flow step. Raw execution is disabled ` +
+              `for this case by its own declaration.`,
+          );
+        }
+
+        // No-needs case + no overlay + no requireAttachment → run case with
+        // no input. Static body / headers / params / query work as-is;
+        // function-valued action fields receive undefined (author
+        // responsibility — typically a no-needs case has no function-valued
+        // fields).
         await adapter.execute(ctx, caseSpec, spec);
       },
     };

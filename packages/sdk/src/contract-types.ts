@@ -235,13 +235,41 @@ export interface CaseMeta<PayloadSchemas = unknown, Meta = unknown> {
   meta?: Meta;
 
   /**
+   * World-state precondition (contract-attachment-model.md §0.9). Projected
+   * as part of the contract because it changes what `expect` means.
+   * Adapter-independent — threaded verbatim from `BaseCaseSpec.given`.
+   */
+  given?: string;
+
+  /**
+   * Runnability metadata (contract-attachment-model.md §7.2). Not contract
+   * semantic; drives runnable inventory (e.g. `requireAttachment` blocks
+   * raw execution). Threaded verbatim from `BaseCaseSpec.runnability`.
+   */
+  runnability?: {
+    requireAttachment?: boolean;
+  };
+
+  /**
    * v10 attachment-model — the case's logical-input (`needs`) schema in
-   * JSON-safe form. Populated by adapter.normalize() when the case declares
-   * a `needs` schema; absent when it doesn't. Consumers (scanner, CLI, MCP)
-   * use this to surface the `rawBypass` execution path on bootstrap-overlay
-   * attachments (see contract-attachment-model.md §7.2).
+   * JSON-safe form. Populated by adapter.normalize() when the case's
+   * `needs` schema can be projected (`schemaToJsonSchema` returns
+   * something). Absent when the case has no `needs` OR when the schema
+   * shape isn't projectable (custom `safeParse`-only validator).
+   *
+   * To decide whether `rawBypass` is available, consumers should check
+   * `hasNeeds` below — it is true whenever the case declared `needs`
+   * regardless of whether the schema survives projection.
    */
   needsSchema?: unknown;
+
+  /**
+   * True iff the case declares `needs`. Independent from `needsSchema`
+   * (which may be undefined even when `hasNeeds` is true, e.g. opaque
+   * `safeParse`-only schemas). Inventory uses this to decide whether
+   * the `rawBypass` execution path should appear on an overlay.
+   */
+  hasNeeds?: boolean;
 }
 
 /**

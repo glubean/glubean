@@ -26,7 +26,11 @@ function makeContract(
   id: string,
   caseKey: string,
   exportName: string,
-  opts: { needsSchema?: unknown; requireAttachment?: boolean } = {},
+  opts: {
+    needsSchema?: unknown;
+    hasNeeds?: boolean;
+    requireAttachment?: boolean;
+  } = {},
 ): NormalizedContractMeta {
   return {
     id,
@@ -38,9 +42,17 @@ function makeContract(
         key: caseKey,
         lifecycle: "active",
         severity: "warning",
+        // `hasNeeds` defaults to true when a `needsSchema` is provided, but
+        // callers can pass `hasNeeds: true` without a projected schema to
+        // simulate an unprojectable SchemaLike.
+        ...(opts.hasNeeds !== undefined
+          ? { hasNeeds: opts.hasNeeds }
+          : opts.needsSchema !== undefined
+            ? { hasNeeds: true }
+            : {}),
         ...(opts.needsSchema !== undefined ? { needsSchema: opts.needsSchema } : {}),
         ...(opts.requireAttachment !== undefined
-          ? { extensions: { runnability: { requireAttachment: opts.requireAttachment } } }
+          ? { runnability: { requireAttachment: opts.requireAttachment } }
           : {}),
       },
     ],
@@ -206,7 +218,7 @@ test("synthesize: bootstrap overlay REPLACES the raw entry for the same testId",
   });
 });
 
-test("synthesize: rawBypass present iff target case declares needsSchema", () => {
+test("synthesize: rawBypass present iff target case has `needs` (hasNeeds trigger)", () => {
   const cWithNeeds = makeContract("orders.create", "ok", "createWithNeeds", {
     needsSchema: { type: "object", properties: { token: { type: "string" } } },
   });
@@ -243,6 +255,32 @@ test("synthesize: rawBypass present iff target case declares needsSchema", () =>
   });
   expect(withoutBypass).toMatchObject({ kind: "bootstrap-overlay" });
   expect((withoutBypass as { rawBypass?: unknown }).rawBypass).toBeUndefined();
+});
+
+test("synthesize: rawBypass surfaces even when needs schema is unprojectable (hasNeeds decouples schema)", () => {
+  // Simulates the `SchemaLike<T>` case where the validator is a custom
+  // safeParse/parse object that can't be converted to JSON Schema. SDK
+  // normalizes hasNeeds=true, needsSchema=undefined. Inventory should
+  // STILL expose rawBypass (explicit-input runtime path is valid) but
+  // with `needsSchema: undefined` as the decoration.
+  const cOpaqueNeeds = makeContract("orders.create", "ok", "createOpaque", {
+    hasNeeds: true,
+    // needsSchema deliberately omitted — simulates normalize() returning
+    // undefined for a non-projectable SchemaLike.
+  });
+  const overlay = {
+    exportName: "createOverlay",
+    testId: "orders.create.ok",
+    contractId: "orders.create",
+    caseKey: "ok",
+  };
+
+  const { attachments } = synthesizeAttachments([cOpaqueNeeds], [], [overlay]);
+  const a = attachments.find((x) => x.testId === "orders.create.ok");
+  expect(a).toMatchObject({
+    kind: "bootstrap-overlay",
+    rawBypass: { available: true, needsSchema: undefined },
+  });
 });
 
 test("synthesize: duplicate overlay surfaces a load-time error; first wins", () => {

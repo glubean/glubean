@@ -10,6 +10,7 @@ import { parseArgs } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
 import { bootstrap } from "./bootstrap.js";
+import { loadProjectOverlays } from "@glubean/scanner";
 import { setRuntime, type InternalRuntime } from "@glubean/sdk/internal";
 import ky, { type KyInstance, type Options as KyOptions, type NormalizedOptions } from "ky";
 import type {
@@ -1206,6 +1207,24 @@ try {
   // on first access or silently fall through to the default behavior — see
   // plugin-manifest-proposal.md D2.
   await bootstrap(process.cwd());
+
+  // Eagerly load `.bootstrap.{ts,js,mjs}` files (attachment-model §7.4).
+  // Parent process also calls this for its own scanning purposes, but the
+  // SDK bootstrap registry is process-local — every harness subprocess
+  // has its own empty Map until it imports the overlay modules itself.
+  // Without this, a filtered run like `glubean run project.contract.ts`
+  // would reach the child's dispatcher with no overlays registered and
+  // silently fall through to the raw execution path, defeating both the
+  // overlay intent and `runnability.requireAttachment` guards.
+  const overlayLoad = await loadProjectOverlays(process.cwd());
+  for (const err of overlayLoad.errors) {
+    console.log(
+      JSON.stringify({
+        type: "log",
+        message: `Bootstrap overlay failed to load: ${err.file} — ${err.error}`,
+      }),
+    );
+  }
 
   // Dynamic import - LOAD phase
   console.log(

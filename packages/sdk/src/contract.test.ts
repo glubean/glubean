@@ -472,6 +472,33 @@ test("needs case without overlay hard-errors before adapter.execute (RFR v3 P1)"
   expect(log).not.toContain("execute:needs case"); // adapter never reached
 });
 
+test("no-needs case with requireAttachment hard-errors when overlay missing (RFR v6 P1.2)", async () => {
+  // A case with no `needs` but `runnability.requireAttachment: true`
+  // explicitly opts out of raw execution. Without this guard, the v3
+  // P1 check (which only looks at `needs`) would let the case silently
+  // fall through to `adapter.execute`, violating the attachment invariant.
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  contract.register("mock_require_attachment", adapter);
+
+  const c = (contract as any).mock_require_attachment("svc", {
+    target: "/x",
+    cases: {
+      ok: {
+        description: "no needs but requires attachment",
+        runnability: { requireAttachment: true },
+      },
+    },
+  }) as ProtocolContract<MockSpec>;
+
+  // Intentionally NO contract.bootstrap(...) registered
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /runnability\.requireAttachment.*no bootstrap overlay is registered/,
+  );
+  expect(log).not.toContain("execute:no needs but requires attachment");
+});
+
 test("overlay with adapter missing executeCase hard-errors (no silent fallback)", async () => {
   const log: string[] = [];
   const adapter = makeMockAdapter({ executionLog: log });

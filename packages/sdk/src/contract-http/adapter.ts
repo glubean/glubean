@@ -450,9 +450,18 @@ function projectHttp(
         defaultRun: c.defaultRun,
         tags: c.tags,
         extensions: c.extensions,
-        // v10 attachment-model — carry the live `needs` SchemaLike through
-        // to the runtime projection so normalize() can convert it to a
-        // JSON-safe schema for downstream `rawBypass` surfacing.
+        // v10 attachment-model — thread `given`/`runnability` from the
+        // public case spec (BaseCaseSpec) to the projection. Both are
+        // proposal-defined semantic/inventory fields; they must survive
+        // adapter.normalize() so scanner/CLI/MCP see them. `extensions`
+        // is NOT the place for these (per §0.9 + §7.2).
+        given: c.given,
+        runnability: c.runnability,
+        // Live `needs` SchemaLike for normalize() to convert to JSON-safe.
+        // `hasNeeds` is set whenever the case declared `needs`, even when
+        // the schema isn't projectable — consumers use it to decide
+        // rawBypass visibility independently of schema shape.
+        hasNeeds: c.needs !== undefined,
         needsSchema: c.needs as unknown,
         schemas: {
           request: undefined,
@@ -523,8 +532,13 @@ function normalizeHttp(
       tags: c.tags,
       extensions: c.extensions,
       meta: c.meta,
-      // v10 attachment-model: convert live `needs` SchemaLike to JSON-safe
-      // form. Absent when case has no needs (no rawBypass available).
+      // v10 attachment-model: thread `given` / `runnability` / `hasNeeds`
+      // through normalize. `needsSchema` may end up undefined when the
+      // live schema can't be converted to JSON Schema (custom safeParse-
+      // only validator); `hasNeeds` is the authoritative rawBypass trigger.
+      given: c.given,
+      runnability: c.runnability,
+      hasNeeds: c.hasNeeds,
       needsSchema: c.needsSchema
         ? schemaToJsonSchema(c.needsSchema as Parameters<typeof schemaToJsonSchema>[0]) ?? undefined
         : undefined,

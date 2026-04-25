@@ -72,9 +72,30 @@ export interface NormalizedCaseMeta {
   /** Adapter-defined free-form meta (opaque). */
   meta?: unknown;
   /**
-   * v10 attachment-model — JSON-safe `needs` schema. Populated when the
-   * case declares `needs: SchemaLike<T>`. Used by attachment synthesis to
-   * derive `rawBypass` on bootstrap overlays.
+   * World-state precondition — attachment-model §0.9. Adapter threads
+   * through from `BaseCaseSpec.given`. Not a contract semantic input,
+   * but projected because it changes what `expect` means.
+   */
+  given?: string;
+  /**
+   * Runnability metadata — attachment-model §7.2. `requireAttachment`
+   * blocks raw execution (case MUST run via a bootstrap overlay). Lives
+   * as a first-class field, not in `extensions`, per proposal.
+   */
+  runnability?: {
+    requireAttachment?: boolean;
+  };
+  /**
+   * True iff the case declared `needs`. Authoritative trigger for
+   * `rawBypass` in the attachment inventory. Decoupled from `needsSchema`:
+   * a case can have needs whose schema isn't projectable.
+   */
+  hasNeeds?: boolean;
+  /**
+   * v10 attachment-model — JSON-safe `needs` schema. May be undefined
+   * even when `hasNeeds` is true (e.g. opaque custom validator). Use
+   * `hasNeeds` for inventory/rawBypass decisions; this field is a
+   * decoration for consumers that want the schema shape when available.
    */
   needsSchema?: unknown;
 }
@@ -404,6 +425,9 @@ export function protocolContractToNormalized(
       extensions: c.extensions,
       schemas: c.schemas,
       meta: c.meta,
+      given: c.given,
+      runnability: c.runnability,
+      hasNeeds: c.hasNeeds,
       needsSchema: c.needsSchema,
     })),
   };
@@ -580,11 +604,13 @@ export function synthesizeAttachments(
     }
   }
 
-  // Step 1: seed raw entries.
+  // Step 1: seed raw entries. Reads `runnability.requireAttachment`
+  // directly from the case projection (post-Phase-2f-fix: the adapter
+  // now threads it as a first-class field, no longer hidden under
+  // `extensions`).
   const byTestId = new Map<string, NormalizedAttachmentMeta>();
   for (const [testId, { contract, case: c }] of caseByTestId) {
-    const requireAttachment = (c.extensions as { runnability?: { requireAttachment?: boolean } } | undefined)
-      ?.runnability?.requireAttachment;
+    const requireAttachment = c.runnability?.requireAttachment;
     byTestId.set(testId, {
       kind: "raw",
       testId,
@@ -609,6 +635,12 @@ export function synthesizeAttachments(
     }
     seenOverlayIds.add(marker.testId);
 
+    // rawBypass is available iff the target case declared `needs`
+    // (hasNeeds === true). This is decoupled from needsSchema projection:
+    // a case with a custom safeParse-only validator still satisfies
+    // "explicit input can run the raw case" even when the JSON Schema
+    // projection is null. If the schema projected, we decorate the
+    // bypass slot with it; otherwise bypass is still advertised.
     const target = caseByTestId.get(marker.testId);
     const overlay: NormalizedBootstrapOverlayAttachment = {
       kind: "bootstrap-overlay",
@@ -616,8 +648,13 @@ export function synthesizeAttachments(
       exportName: marker.exportName,
       targetRef: { contractId: marker.contractId, caseKey: marker.caseKey },
       bootstrap: {},
-      ...(target?.case.needsSchema !== undefined
-        ? { rawBypass: { available: true, needsSchema: target.case.needsSchema } }
+      ...(target?.case.hasNeeds
+        ? {
+            rawBypass: {
+              available: true as const,
+              needsSchema: target.case.needsSchema,
+            },
+          }
         : {}),
     };
     byTestId.set(marker.testId, overlay);
