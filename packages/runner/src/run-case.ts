@@ -19,7 +19,7 @@
  */
 
 import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { ProjectRunner } from "./project-runner.js";
 import type {
   ProjectRunEvent,
@@ -30,21 +30,43 @@ import { applyEnvTemplating } from "./runner-input-templating.js";
 import { loadProjectEnv } from "./env.js";
 
 /**
- * Walk up from `filePath` to find the project root — the nearest
- * ancestor containing `package.json`. Falls back to `filePath`'s
- * directory when no `package.json` is found (matches CLI/MCP behavior
- * for ad-hoc test files outside any project).
+ * Walk up from `filePath` to find the **Glubean project root** — the
+ * nearest ancestor containing a `package.json` that declares
+ * `@glubean/sdk` (in deps or devDeps) OR carries a `glubean` config
+ * field. Mirrors `findProjectConfig` in CLI run.ts.
  *
- * Mirrors the contract used by `bootstrap()` / `loadProjectOverlays()`
- * / `loadProjectEnv()` — they all key off the project root, so
- * `runCase` must locate the same place when the caller doesn't pass
- * `rootDir` explicitly.
+ * The "Glubean project" filter matters in monorepos / nested-package
+ * setups: a contract under `apps/foo/tests/x.contract.ts` should resolve
+ * to the workspace root (where `glubean.setup.ts` / root `.env` /
+ * top-level overlay registrations live), NOT to `apps/foo/` if that
+ * subpackage's `package.json` doesn't depend on `@glubean/sdk`. Stopping
+ * at the first `package.json` would silently misroute everything.
+ *
+ * Fallback when no Glubean project is found anywhere up the tree:
+ * `dirname(filePath)`. This keeps ad-hoc / scratch test runs working
+ * (matches CLI's "scratch mode" — no glubean project found).
  */
 function findProjectRoot(filePath: string): string {
   let dir = dirname(filePath);
-  // Bound the walk at filesystem root.
   while (dir !== dirname(dir)) {
-    if (existsSync(resolve(dir, "package.json"))) return dir;
+    const pkgPath = resolve(dir, "package.json");
+    if (existsSync(pkgPath)) {
+      try {
+        const content = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+          dependencies?: Record<string, unknown>;
+          devDependencies?: Record<string, unknown>;
+          glubean?: unknown;
+        };
+        const deps = { ...content.dependencies, ...content.devDependencies };
+        if ("@glubean/sdk" in deps || content.glubean !== undefined) {
+          return dir;
+        }
+        // Non-Glubean package.json — keep walking; might be a nested
+        // tooling package whose Glubean root is higher up.
+      } catch {
+        // Parse error — skip this package.json and keep walking.
+      }
+    }
     dir = dirname(dir);
   }
   return dirname(filePath);
