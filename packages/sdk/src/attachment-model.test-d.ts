@@ -171,9 +171,13 @@ const api = contract.http.with("type-d-tests", { client: mockClient as any });
   void _good;
 
   // Drift case: annotation says `{ nope }` but `needs` says `{ email }`.
-  // CURRENTLY COMPILES — this is the gap. Runtime `validateNeedsOutput`
-  // catches the mismatch when the case actually executes (overlay/flow/
-  // explicit input all gate on the `needs` schema before reaching `body`).
+  // CURRENTLY COMPILES — this is the gap, and runtime does NOT catch it.
+  // validateNeedsOutput parses input against `needs` and returns the
+  // validated `{ email }`; body then runs with `({ nope })` destructured
+  // from `{ email }` → `nope === undefined` → silently produces
+  // `{ nope: undefined }` request body. No exception, no validation
+  // failure. KNOWN OPEN P2 until `defineHttpCase` or equivalent typing
+  // mechanism lands; see block comment above for full rationale.
   const _drift = api("body-typed.drift", {
     endpoint: "POST /x",
     cases: {
