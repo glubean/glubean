@@ -28,7 +28,9 @@
  * ```ts
  * import { extractContractsFromProject } from "@glubean/scanner";
  *
- * const { contracts, flows, errors } = await extractContractsFromProject(".");
+ * const { contracts, attachments, errors } = await extractContractsFromProject(".");
+ * // Filter by kind to recover the legacy "flows only" view:
+ * const flows = attachments.filter((a) => a.kind === "flow").map((a) => a.flow);
  * ```
  */
 
