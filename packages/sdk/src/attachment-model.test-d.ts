@@ -127,25 +127,32 @@ const api = contract.http.with("type-d-tests", { client: mockClient as any });
 }
 
 // =============================================================================
-// Test 3-pre: HTTP body field — known type-inference gap (RFR v3 P2)
+// Test 3-pre: HTTP body field — KNOWN OPEN GAP (RFR v3.2 P2 acknowledged)
 //
-// v3 P2 reviewer pointed out: `Needs` doesn't actually thread to body's fn
-// parameter when authoring case literals. Even with the v3 narrowed
-// `body?: HttpStaticBody | ((input: Needs) => unknown)` and the redeclared
-// `needs?: SchemaLike<Needs>` on HttpContractCase, the case literal's
-// `Needs` is not inferred from the sibling `needs: SchemaLike<X>` field —
-// requires a factory wrapper (`defineHttpCase<T>(...)`) for cross-field
-// generic inference.
+// `Needs` does NOT thread to body's fn parameter when authoring case
+// literals. v3.1 partial fixes:
+//   - body's static branch narrowed to `HttpStaticBody` (no `unknown`)
+//   - HttpContractCase redeclares `needs?: SchemaLike<Needs>`
+// Both real but insufficient: TS still doesn't infer `Needs` from the
+// sibling `needs: SchemaLike<X>` field in a case literal (cross-field
+// generic inference requires a factory wrapper).
 //
-// Concrete consequence: `body: ({ nope }: { nope: string }) => ...`
-// COMPILES even when `needs: s<{ email: string }>()`. Annotation can drift
-// from schema. v3.1 doesn't fix this; the runtime guards (`validateNeedsOutput`
-// at all input boundaries) are the actual line of defense — not the
-// authoring type system.
+// **Runtime is NOT a substitute defense for this case.** Earlier RFR
+// drafts said "validateNeedsOutput catches it" — that was wrong. The
+// failure mode in detail:
+//   1. Author writes drift: `needs: s<{email}>()` + `body: ({nope}: {nope}) => ({nope})`
+//   2. Caller passes valid input matching `needs`: `{ email: "x" }`
+//   3. `validateNeedsOutput` parses, returns `{ email: "x" }` (validated)
+//   4. `body({ email: "x" })` runs; `{ nope }` destructure → `nope = undefined`
+//   5. Outgoing HTTP body: `{ nope: undefined }` — silently wrong request,
+//      no exception, no validation failure, possibly accepted by server.
 //
-// This block documents the limitation rather than asserting it's caught.
-// A future `defineHttpCase<T>` factory or recursive-generic-on-self-field
-// trick would close this; out of scope for Phase 2c B+C.
+// This is a real gap. To close, either:
+//   - Ship a `defineHttpCase<T>(case)` factory that captures `Needs` via
+//     `<const T>` generic from the case literal, OR
+//   - Wait for / construct a recursive-self-referential mapped type that
+//     extracts each case's Needs from its `needs` field.
+// Marked open P2 in v3.2 RFR; deferred to a follow-up commit/RFR cycle.
 // =============================================================================
 
 {
