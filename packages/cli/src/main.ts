@@ -99,6 +99,18 @@ program
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
   .option("--api-url <url>", "Glubean API server URL")
+  .option(
+    "--input-json <value>",
+    "Explicit case input as JSON literal or @path/to.json. Validated against the case's `needs` schema; runs raw (overlay skipped). Requires --filter to match exactly one testId.",
+  )
+  .option(
+    "--bootstrap-json <value>",
+    "Bootstrap params as JSON literal or @path/to.json. Validated against the overlay's `params` schema and passed to overlay's run(ctx, params). Requires --filter to match exactly one testId.",
+  )
+  .option(
+    "--force-standalone",
+    "DEBUG: bypass `runnability.requireAttachment` for the filtered case. Emits a runtime warning. Author-debug only.",
+  )
   .action(async (target, options) => {
     // Flatten --config values
     const configFiles = options.config && options.config.length > 0
@@ -164,6 +176,9 @@ program
       project: options.project,
       token: options.token,
       apiUrl: options.apiUrl,
+      inputJson: options.inputJson,
+      bootstrapJson: options.bootstrapJson,
+      forceStandalone: options.forceStandalone,
     });
   });
 

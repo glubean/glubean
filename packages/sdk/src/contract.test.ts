@@ -25,7 +25,14 @@ import type {
   FlowContract,
 } from "./contract-types.js";
 import type { TestContext } from "./types.js";
-import { clearRegistry, getRegistry } from "./internal.js";
+import {
+  clearRegistry,
+  getRegistry,
+  setExplicitInput,
+  setBootstrapInput,
+  setForceStandalone,
+  clearRunnerInputs,
+} from "./internal.js";
 import { clearBootstrapRegistry } from "./bootstrap-registry.js";
 
 // ---------------------------------------------------------------------------
@@ -119,6 +126,7 @@ function makeMockCtx(partial: Partial<TestContext> = {}): TestContext {
 beforeEach(() => {
   clearRegistry();
   clearBootstrapRegistry();
+  clearRunnerInputs();
 });
 
 // ---------------------------------------------------------------------------
@@ -522,29 +530,223 @@ test("overlay with adapter missing executeCase hard-errors (no silent fallback)"
   expect(log).not.toContain("execute:unmigrated adapter"); // legacy NOT silently invoked
 });
 
-test("overlay with structured-form params is rejected until Spike 3", async () => {
+// =============================================================================
+// §5.1 Runnable resolution algorithm — Spike 3 runner input channels
+// =============================================================================
+
+test("§5.1 step 1: explicit input wins, overlay NOT invoked", async () => {
+  // Both an overlay AND explicit input are present. Per §5.1 invariants,
+  // the overlay must NOT be invoked — explicit input is trusted directly.
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  let executedInput: unknown = "<not-called>";
+  adapter.executeCase = async ({ resolvedInput }) => {
+    executedInput = resolvedInput;
+    log.push("executeCase");
+  };
+  contract.register("mock_step1", adapter);
+
+  const tokenSchema = {
+    safeParse: (d: unknown) =>
+      typeof d === "object" && d !== null && typeof (d as any).token === "string"
+        ? { success: true as const, data: d as { token: string } }
+        : { success: false as const, error: { issues: [{ message: "token required" }] } },
+  };
+
+  const c = (contract as any).mock_step1("svc", {
+    target: "/x",
+    cases: { ok: { description: "explicit-wins", needs: tokenSchema } },
+  }) as ProtocolContract<MockSpec>;
+
+  // Register an overlay that, if invoked, would log "OVERLAY_RAN".
+  (contract.bootstrap as any)(c.case("ok"), async () => {
+    log.push("OVERLAY_RAN");
+    return { token: "from-overlay" };
+  });
+
+  // Provide explicit input. Per §5.1 step 1: dispatch must validate AND
+  // run raw with this input, ignoring the overlay.
+  setExplicitInput("svc.ok", { token: "from-cli" });
+
+  await c[0]!.fn!(makeMockCtx());
+
+  expect(log).toContain("executeCase");
+  expect(log).not.toContain("OVERLAY_RAN");
+  expect(executedInput).toEqual({ token: "from-cli" });
+});
+
+test("§5.1 step 1: explicit input validated against needs schema; rejects bad shape", async () => {
   const log: string[] = [];
   const adapter = makeMockAdapter({ executionLog: log });
   adapter.executeCase = async () => { log.push("executeCase"); };
-  contract.register("mock_params", adapter);
+  contract.register("mock_step1_validate", adapter);
 
-  const c = (contract as any).mock_params("svc", {
+  const tokenSchema = {
+    safeParse: (d: unknown) =>
+      typeof d === "object" && d !== null && typeof (d as any).token === "string"
+        ? { success: true as const, data: d as { token: string } }
+        : {
+            success: false as const,
+            error: { issues: [{ path: ["token"], message: "token required" }] },
+          },
+  };
+
+  const c = (contract as any).mock_step1_validate("svc", {
+    target: "/x",
+    cases: { ok: { description: "validate", needs: tokenSchema } },
+  }) as ProtocolContract<MockSpec>;
+
+  setExplicitInput("svc.ok", { wrongField: 123 });
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /Explicit input.*does not satisfy needs schema/,
+  );
+  expect(log).not.toContain("executeCase");
+});
+
+test("§5.1 step 1b: no-needs case + explicit input → reject (input meaningless)", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => { log.push("executeCase"); };
+  contract.register("mock_step1b", adapter);
+
+  const c = (contract as any).mock_step1b("svc", {
+    target: "/x",
+    cases: { ok: { description: "no-needs case" } },
+  }) as ProtocolContract<MockSpec>;
+
+  setExplicitInput("svc.ok", { whatever: 1 });
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /has no `needs` schema; explicit input is meaningless/,
+  );
+  expect(log).not.toContain("executeCase");
+});
+
+test("§5.1 step 1b: no-needs + requireAttachment + explicit input → reject with --force-standalone hint", async () => {
+  const adapter = makeMockAdapter();
+  adapter.executeCase = async () => {};
+  contract.register("mock_step1b_req", adapter);
+
+  const c = (contract as any).mock_step1b_req("svc", {
+    target: "/x",
+    cases: {
+      ok: {
+        description: "no-needs require-attach",
+        runnability: { requireAttachment: true },
+      },
+    },
+  }) as ProtocolContract<MockSpec>;
+
+  setExplicitInput("svc.ok", { whatever: 1 });
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /Use --force-standalone for debug, or attach a bootstrap/,
+  );
+});
+
+test("§5.1 step 3: bootstrap input feeds overlay's structured-form `params` schema", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => { log.push("executeCase"); };
+  contract.register("mock_step3", adapter);
+
+  const c = (contract as any).mock_step3("svc", {
     target: "/x",
     cases: { ok: { description: "params form" } },
   }) as ProtocolContract<MockSpec>;
 
-  // Structured form WITH params declared. Until Spike 3 wires the runner
-  // input channel, this must be rejected with a clear error rather than
-  // passing undefined and letting the callback blow up cryptically.
+  let receivedParams: unknown = "<not-called>";
+  // Structured form WITH params. Spike 3: this is now valid. Bootstrap
+  // input is validated against the params schema and passed to run().
   (contract.bootstrap as any)(c.case("ok"), {
-    params: { safeParse: (d: unknown) => ({ success: true, data: d }) },
-    run: async (_ctx: any, _params: any) => undefined,
+    params: {
+      safeParse: (d: unknown) =>
+        typeof d === "object" && d !== null && typeof (d as any).projectId === "string"
+          ? { success: true as const, data: d as { projectId: string } }
+          : {
+              success: false as const,
+              error: { issues: [{ path: ["projectId"], message: "projectId required" }] },
+            },
+    },
+    run: async (_ctx: any, params: any) => {
+      receivedParams = params;
+    },
   });
 
+  setBootstrapInput("svc.ok", { projectId: "p_42" });
+
+  await c[0]!.fn!(makeMockCtx());
+
+  expect(log).toContain("executeCase");
+  expect(receivedParams).toEqual({ projectId: "p_42" });
+});
+
+test("§5.1 step 3: bootstrap input rejected when fails params schema", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => { log.push("executeCase"); };
+  contract.register("mock_step3_bad", adapter);
+
+  const c = (contract as any).mock_step3_bad("svc", {
+    target: "/x",
+    cases: { ok: { description: "bad params" } },
+  }) as ProtocolContract<MockSpec>;
+
+  (contract.bootstrap as any)(c.case("ok"), {
+    params: {
+      safeParse: (d: unknown) =>
+        typeof d === "object" && d !== null && typeof (d as any).projectId === "string"
+          ? { success: true as const, data: d as { projectId: string } }
+          : {
+              success: false as const,
+              error: { issues: [{ path: ["projectId"], message: "projectId required" }] },
+            },
+    },
+    run: async () => undefined,
+  });
+
+  setBootstrapInput("svc.ok", { wrongShape: true });
+
   await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
-    /runner input channel is not implemented yet/,
+    /Bootstrap params.*does not satisfy params schema/,
   );
-  expect(log).not.toContain("executeCase"); // adapter never reached
+  expect(log).not.toContain("executeCase");
+});
+
+test("§5.1 step 2: requireAttachment + no overlay + --force-standalone bypasses guard with warning", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  contract.register("mock_force_std", adapter);
+
+  const c = (contract as any).mock_force_std("svc", {
+    target: "/x",
+    cases: {
+      ok: {
+        description: "force-std bypass",
+        runnability: { requireAttachment: true },
+      },
+    },
+  }) as ProtocolContract<MockSpec>;
+
+  // Capture console.warn to verify the debug warning fires.
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = ((...args: unknown[]) => {
+    warnings.push(args.map((a) => String(a)).join(" "));
+  }) as typeof console.warn;
+
+  try {
+    setForceStandalone("svc.ok");
+    await c[0]!.fn!(makeMockCtx());
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  // Adapter ran (raw path).
+  expect(log).toContain("execute:force-std bypass");
+  // Warning emitted.
+  expect(warnings.some((w) => /bypassing runnability\.requireAttachment/.test(w))).toBe(true);
 });
 
 test("overlay with structured-form WITHOUT params is accepted (pre-Spike-3)", async () => {

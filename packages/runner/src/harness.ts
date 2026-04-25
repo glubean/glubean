@@ -11,7 +11,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
 import { bootstrap } from "./bootstrap.js";
 import { loadProjectOverlays } from "@glubean/scanner";
-import { setRuntime, type InternalRuntime } from "@glubean/sdk/internal";
+import {
+  setRuntime,
+  setExplicitInput,
+  setBootstrapInput,
+  setForceStandalone,
+  type InternalRuntime,
+} from "@glubean/sdk/internal";
 import ky, { type KyInstance, type Options as KyOptions, type NormalizedOptions } from "ky";
 import type {
   Trace,
@@ -1224,6 +1230,69 @@ try {
         message: `Bootstrap overlay failed to load: ${err.file} — ${err.error}`,
       }),
     );
+  }
+
+  // Spike 3 — runner input channels (attachment-model §8). The CLI / MCP
+  // serializes runner-supplied case input + bootstrap params into env
+  // vars before spawning this subprocess. Each map is JSON `{ testId:
+  // value }`. Force-standalone is a JSON-encoded `string[]` of testIds.
+  // We populate the SDK runner-input channel here so the dispatcher's
+  // §5.1 algorithm sees them when test.fn runs.
+  const explicitMapRaw = process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
+  if (explicitMapRaw) {
+    try {
+      const parsed = JSON.parse(explicitMapRaw) as Record<string, unknown>;
+      for (const [testId, value] of Object.entries(parsed)) {
+        setExplicitInput(testId, value);
+      }
+    } catch (err) {
+      console.log(
+        JSON.stringify({
+          type: "log",
+          message:
+            `Invalid GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP JSON: ` +
+            (err instanceof Error ? err.message : String(err)),
+        }),
+      );
+    }
+  }
+  const bootstrapMapRaw = process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
+  if (bootstrapMapRaw) {
+    try {
+      const parsed = JSON.parse(bootstrapMapRaw) as Record<string, unknown>;
+      for (const [testId, value] of Object.entries(parsed)) {
+        setBootstrapInput(testId, value);
+      }
+    } catch (err) {
+      console.log(
+        JSON.stringify({
+          type: "log",
+          message:
+            `Invalid GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP JSON: ` +
+            (err instanceof Error ? err.message : String(err)),
+        }),
+      );
+    }
+  }
+  const forceStandaloneRaw = process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
+  if (forceStandaloneRaw) {
+    try {
+      const parsed = JSON.parse(forceStandaloneRaw) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const testId of parsed) {
+          if (typeof testId === "string") setForceStandalone(testId);
+        }
+      }
+    } catch (err) {
+      console.log(
+        JSON.stringify({
+          type: "log",
+          message:
+            `Invalid GLUBEAN_RUNNER_FORCE_STANDALONE_IDS JSON: ` +
+            (err instanceof Error ? err.message : String(err)),
+        }),
+      );
+    }
   }
 
   // Dynamic import - LOAD phase

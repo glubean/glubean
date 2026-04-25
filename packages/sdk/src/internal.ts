@@ -31,6 +31,18 @@ export {
   __resetInstalledPluginsForTesting,
 } from "./install-plugin.js";
 
+// Runner input channel — runner harness populates these before importing
+// the user module; dispatcher reads them when applying §5.1 algorithm.
+export {
+  setExplicitInput,
+  getExplicitInput,
+  setBootstrapInput,
+  getBootstrapInput,
+  setForceStandalone,
+  isForceStandalone,
+  clearRunnerInputs,
+} from "./runner-input-channel.js";
+
 /**
  * Global registry for test metadata.
  * Populated at import time when test files are loaded.

@@ -43,6 +43,11 @@ import type {
 } from "./contract-types.js";
 import { registerTest } from "./internal.js";
 import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
+import {
+  getExplicitInput,
+  getBootstrapInput,
+  isForceStandalone,
+} from "./runner-input-channel.js";
 
 /**
  * Validate a value against a `needs` schema. Used by the v10 attachment model
@@ -85,7 +90,10 @@ async function runCleanupsLifo(
 function validateNeedsOutput(
   needsSchema: { safeParse?: unknown; parse?: unknown },
   value: unknown,
-  ctx: { testId: string; source: "bootstrap" | "explicit" | "flow" },
+  ctx: {
+    testId: string;
+    source: "bootstrap" | "explicit" | "flow" | "bootstrap-params";
+  },
 ): unknown {
   const sp = (needsSchema as { safeParse?: (d: unknown) => unknown }).safeParse;
   if (typeof sp === "function") {
@@ -99,9 +107,12 @@ function validateNeedsOutput(
     const sourceLabel =
       ctx.source === "bootstrap" ? "Bootstrap output"
       : ctx.source === "explicit" ? "Explicit input"
+      : ctx.source === "bootstrap-params" ? "Bootstrap params"
       : "Flow `in` output";
+    const schemaLabel =
+      ctx.source === "bootstrap-params" ? "params schema" : "needs schema";
     throw new Error(
-      `${sourceLabel} for case "${ctx.testId}" does not satisfy needs schema:\n${lines.join("\n")}`,
+      `${sourceLabel} for case "${ctx.testId}" does not satisfy ${schemaLabel}:\n${lines.join("\n")}`,
     );
   }
   const p = (needsSchema as { parse?: (d: unknown) => unknown }).parse;
@@ -319,11 +330,69 @@ function dispatchContract<
         if (skipDeprecated) ctx.skip(skipDeprecated);
         if (skipDeferred) ctx.skip(skipDeferred);
 
-        // v10 attachment model: check for bootstrap overlay registered via
-        // contract.bootstrap(). When one exists, we MUST route through
-        // executeCase — silently falling back to legacy execute would
-        // ignore the overlay and reintroduce the "hidden precondition"
-        // failure mode the attachment model is supposed to eliminate.
+        // ── §5.1 runnable resolution algorithm ───────────────────────────
+        //
+        // Step 1: explicit input wins over everything.
+        //   - case has needs → validate, run raw with that input
+        //   - case has no needs → reject (input has no schema target)
+        // Step 2: requireAttachment + no overlay → hard error
+        //   (bypassed by setForceStandalone via internal channel; debug only)
+        // Step 3: overlay registered → run overlay path; bootstrap params
+        //   come from getBootstrapInput; validated against overlay's
+        //   `params` schema if structured form
+        // Step 4: needs declared, no overlay, no input → hard error
+        // Step 5: no needs, no overlay → run raw with no input
+        //
+        // The order below mirrors §5.1 exactly. Tests for each path live
+        // in `contract.test.ts` (search "§5.1").
+
+        const needsSchema = (caseSpec as { needs?: unknown }).needs;
+        const requireAttachment = (caseSpec as {
+          runnability?: { requireAttachment?: boolean };
+        }).runnability?.requireAttachment;
+
+        // §5.1 Step 1 — explicit input always wins. Bootstrap overlay (even
+        // if registered) is NOT invoked. No "run bootstrap for side-effects
+        // then use my input" mode (per §5.1 invariants).
+        const explicit = getExplicitInput(testId);
+        if (explicit.has) {
+          if (!needsSchema) {
+            const requireHint = requireAttachment
+              ? " Use --force-standalone for debug, or attach a bootstrap."
+              : "";
+            throw new Error(
+              `case "${testId}" has no \`needs\` schema; explicit input is ` +
+                `meaningless (no schema to satisfy).${requireHint}`,
+            );
+          }
+          if (!contractObj) {
+            throw new Error(
+              `Internal: contract carrier not assembled when running "${testId}".`,
+            );
+          }
+          if (!adapter.executeCase) {
+            throw new Error(
+              `Explicit input provided for "${testId}" but the adapter for ` +
+                `protocol "${protocol}" has not been migrated to the ` +
+                `attachment model (missing executeCase method).`,
+            );
+          }
+          const validatedInput = validateNeedsOutput(
+            needsSchema as { safeParse?: unknown; parse?: unknown },
+            explicit.value,
+            { testId, source: "explicit" },
+          );
+          await adapter.executeCase({
+            ctx,
+            contract: contractObj,
+            caseKey,
+            resolvedInput: validatedInput,
+          });
+          return;
+        }
+
+        // §5.1 Step 3 — overlay path. Step 2 (requireAttachment + no
+        // overlay) is handled in the no-overlay branch below.
         const overlay = getBootstrap(testId);
         if (overlay) {
           // Hard error if adapter hasn't implemented the attachment-model
@@ -346,25 +415,6 @@ function dispatchContract<
             );
           }
 
-          // Phase 2b Step 1 scope: plain-function bootstrap form, or
-          // structured form without `params`. Structured form WITH params
-          // requires a runner input channel (Spike 3) — until then, reject
-          // clearly rather than passing `undefined` and letting the author
-          // callback blow up with a cryptic TypeError.
-          if (
-            typeof overlay.spec === "object"
-            && overlay.spec !== null
-            && (overlay.spec as { params?: unknown }).params !== undefined
-          ) {
-            throw new Error(
-              `Bootstrap overlay for "${testId}" declares \`params\` but the ` +
-                `runner input channel is not implemented yet (Spike 3 — ` +
-                `single-case-execution-api.md §4). Until then, bootstrap ` +
-                `overlays must use the plain-function form or the structured ` +
-                `form without \`params\`.`,
-            );
-          }
-
           const cleanups: Array<() => Promise<void> | void> = [];
           const bootstrapCtx = Object.assign(Object.create(ctx as object), ctx, {
             cleanup(fn: () => Promise<void> | void) {
@@ -376,9 +426,34 @@ function dispatchContract<
             ? overlay.spec
             : overlay.spec.run;
 
+          // §5.1 step 3a-3b: structured-form `params` schema validation.
+          // Bootstrap input comes from the runner channel (CLI
+          // `--bootstrap-json`, MCP `bootstrapInput`, programmatic
+          // `bootstrapInput`). When the overlay is plain-function form,
+          // any provided bootstrap input is silently ignored — the body
+          // takes (ctx) only.
+          const paramsSchema =
+            typeof overlay.spec === "object" && overlay.spec !== null
+              ? (overlay.spec as { params?: unknown }).params
+              : undefined;
+
+          let validatedParams: unknown = undefined;
+          if (paramsSchema) {
+            const provided = getBootstrapInput(testId);
+            // §5.1 step 3a: "Take bootstrapInput from runner options
+            // (may be empty if no params)". Validation happens whether
+            // or not the runner supplied input — schema may have
+            // defaults, or all fields may be optional.
+            validatedParams = validateNeedsOutput(
+              paramsSchema as { safeParse?: unknown; parse?: unknown },
+              provided.has ? provided.value : undefined,
+              { testId, source: "bootstrap-params" },
+            );
+          }
+
           let resolvedInput: unknown;
           try {
-            resolvedInput = await runFn(bootstrapCtx, undefined as unknown);
+            resolvedInput = await runFn(bootstrapCtx, validatedParams as unknown);
           } catch (err) {
             await runCleanupsLifo(cleanups, testId);
             throw err;
@@ -388,7 +463,6 @@ function dispatchContract<
           // schema before handing off to adapter. Adapter's contract is
           // "receives already-validated input"; validation at the runner
           // boundary matches single-case-execution-api.md §7.
-          const needsSchema = (caseSpec as { needs?: unknown }).needs;
           if (needsSchema) {
             try {
               resolvedInput = validateNeedsOutput(
@@ -415,50 +489,58 @@ function dispatchContract<
           return;
         }
 
-        // No-overlay standalone path. Per attachment model §5.1 algorithm:
-        // a case that declares `needs` cannot run without input. Three valid
-        // input sources: (1) bootstrap overlay [handled above], (2) explicit
-        // `--input-json` from runner [Spike 3], (3) flow `.step({ in })`
-        // [different code path, runFlow]. None of those apply here, so a
-        // `needs`-declared case at this point is undefined-input territory —
-        // hard error rather than feed undefined to author callbacks and let
-        // them blow up cryptically (or worse: silently run with wrong data).
-        const needsSchema = (caseSpec as { needs?: unknown }).needs;
+        // ── No-overlay standalone path ───────────────────────────────────
+        //
+        // §5.1 step 2: requireAttachment + no overlay → hard error
+        //   (UNLESS isForceStandalone(testId) — debug bypass per §6.3).
+        // §5.1 step 4: needs declared, no overlay, no input → hard error.
+        // §5.1 step 5: no needs, no overlay → run raw with no input.
+        //
+        // Order matters: step 2 fires before step 4 because requireAttachment
+        // is the stronger declaration ("don't run bare under any input
+        // condition"). A case with both needs + requireAttachment + no
+        // overlay + no input gets the requireAttachment error message,
+        // which carries the more actionable hint (attach a bootstrap or
+        // pass --input-json depending on needs presence).
+
+        if (requireAttachment) {
+          if (isForceStandalone(testId)) {
+            // §6.3 debug escape valve. Author opted out of the guard via
+            // --force-standalone; emit a runtime warning so it's visible
+            // in test output, then fall through to step 4/5.
+            // eslint-disable-next-line no-console
+            console.warn(
+              `⚠ case "${testId}": bypassing runnability.requireAttachment ` +
+                `via --force-standalone (debug). Do not use this in normal runs.`,
+            );
+          } else {
+            throw new Error(
+              `case "${testId}" sets \`runnability.requireAttachment: true\` ` +
+                `but no bootstrap overlay is registered. Per attachment model ` +
+                `§7.2: register a bootstrap overlay via \`contract.bootstrap(...)\`, ` +
+                `attach the case to a flow step, or pass \`--input-json\` (if ` +
+                `the case declares \`needs\`). Raw execution is disabled for ` +
+                `this case by its own declaration.`,
+            );
+          }
+        }
+
+        // §5.1 step 4: needs case with no overlay + no input → hard error.
+        // (Step 1 already returned for cases with explicit input above.)
         if (needsSchema) {
           throw new Error(
             `case "${testId}" declares \`needs\` but has no bootstrap overlay ` +
               `and no explicit input. Per attachment model §5.1: register a ` +
-              `bootstrap overlay via \`contract.bootstrap(...)\`, or once the ` +
-              `runner input channel lands (Spike 3) pass \`--input-json\`.`,
+              `bootstrap overlay via \`contract.bootstrap(...)\`, or pass ` +
+              `\`--input-json\` to provide explicit input.`,
           );
         }
 
-        // `runnability.requireAttachment` is the proposal's explicit opt-in
-        // for "this case cannot run raw — an attachment (bootstrap overlay
-        // or flow step) is mandatory". It applies independently of `needs`:
-        // a no-needs case can still require attachment (e.g. because the
-        // overlay performs a mandatory side-effect setup even though the
-        // case itself takes no logical input). Without this guard, such a
-        // case silently falls through to `adapter.execute` and the whole
-        // "attachment is required" invariant leaks.
-        const requireAttachment = (caseSpec as {
-          runnability?: { requireAttachment?: boolean };
-        }).runnability?.requireAttachment;
-        if (requireAttachment) {
-          throw new Error(
-            `case "${testId}" sets \`runnability.requireAttachment: true\` ` +
-              `but no bootstrap overlay is registered. Per attachment model ` +
-              `§7.2: register a bootstrap overlay via \`contract.bootstrap(...)\`, ` +
-              `or attach the case to a flow step. Raw execution is disabled ` +
-              `for this case by its own declaration.`,
-          );
-        }
-
-        // No-needs case + no overlay + no requireAttachment → run case with
-        // no input. Static body / headers / params / query work as-is;
-        // function-valued action fields receive undefined (author
-        // responsibility — typically a no-needs case has no function-valued
-        // fields).
+        // §5.1 step 5: no needs, no overlay (or requireAttachment+force-
+        // standalone) → run case with no input. Static body / headers /
+        // params / query work as-is; function-valued action fields receive
+        // undefined (author responsibility — typically a no-needs case has
+        // no function-valued fields).
         await adapter.execute(ctx, caseSpec, spec);
       },
     };

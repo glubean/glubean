@@ -71,6 +71,25 @@ interface RunOptions {
   apiUrl?: string;
   noSession?: boolean;
   meta?: Record<string, string>;
+  /**
+   * Spike 3 — runner input channels (attachment-model §8).
+   *
+   * `inputJson` — explicit case input. Validated against the case's
+   * `needs` schema; runs raw (overlay, if registered, NOT invoked).
+   *
+   * `bootstrapJson` — bootstrap params. Validated against the overlay's
+   * `params` schema; passed to overlay's `run(ctx, params)`.
+   *
+   * `forceStandalone` — debug bypass for `runnability.requireAttachment`
+   * on no-needs cases (§6.3 escape valve). Emits a runtime warning.
+   *
+   * For all three, the CLI requires `filter` to match exactly one
+   * testId; the input applies to that case. `@path/to.json` form loads
+   * the value from a file.
+   */
+  inputJson?: string;
+  bootstrapJson?: string;
+  forceStandalone?: boolean;
 }
 
 // =============================================================================
@@ -731,6 +750,94 @@ export async function runCommand(
   console.log(
     `\n${colors.bold}Running ${testsToRun.length} test(s)...${colors.reset}\n`,
   );
+
+  // ── Spike 3: runner input channels (attachment-model §8) ────────────────
+  // `--input-json` / `--bootstrap-json` / `--force-standalone` apply to a
+  // single targeted case; require --filter to resolve to exactly one test.
+  // Maps are JSON-encoded `{ [testId]: <value> }` and passed to the harness
+  // subprocess via env vars (which the harness reads in `setExplicitInput`
+  // / `setBootstrapInput` / `setForceStandalone` calls before user import).
+  const hasInputFlag =
+    options.inputJson !== undefined ||
+    options.bootstrapJson !== undefined ||
+    options.forceStandalone === true;
+  if (hasInputFlag) {
+    if (testsToRun.length !== 1) {
+      console.error(
+        `\n${colors.red}❌ --input-json / --bootstrap-json / --force-standalone require ` +
+          `--filter to match exactly one testId. Matched ${testsToRun.length} tests.${colors.reset}\n`,
+      );
+      if (testsToRun.length > 1) {
+        const ids = testsToRun.map((t) => t.test.meta.id).slice(0, 10);
+        console.error(
+          `${colors.dim}First matches: ${ids.join(", ")}${ids.length < testsToRun.length ? "…" : ""}${colors.reset}`,
+        );
+      }
+      process.exit(1);
+    }
+    const targetTestId = testsToRun[0]!.test.meta.id;
+
+    async function resolveJsonFlag(
+      raw: string,
+      flagName: string,
+    ): Promise<unknown> {
+      let text: string;
+      if (raw.startsWith("@")) {
+        const filePath = resolve(raw.slice(1));
+        try {
+          text = await readFile(filePath, "utf-8");
+        } catch (err) {
+          console.error(
+            `\n${colors.red}❌ ${flagName}: could not read ${filePath}: ` +
+              `${err instanceof Error ? err.message : String(err)}${colors.reset}\n`,
+          );
+          process.exit(1);
+        }
+      } else {
+        text = raw;
+      }
+      try {
+        return JSON.parse(text);
+      } catch (err) {
+        console.error(
+          `\n${colors.red}❌ ${flagName}: invalid JSON: ` +
+            `${err instanceof Error ? err.message : String(err)}${colors.reset}\n`,
+        );
+        process.exit(1);
+      }
+    }
+
+    if (options.inputJson !== undefined) {
+      const parsed = await resolveJsonFlag(options.inputJson, "--input-json");
+      process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = JSON.stringify({
+        [targetTestId]: parsed,
+      });
+      console.log(`${colors.dim}  --input-json: ${targetTestId}${colors.reset}`);
+    }
+    if (options.bootstrapJson !== undefined) {
+      const parsed = await resolveJsonFlag(
+        options.bootstrapJson,
+        "--bootstrap-json",
+      );
+      process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = JSON.stringify({
+        [targetTestId]: parsed,
+      });
+      console.log(`${colors.dim}  --bootstrap-json: ${targetTestId}${colors.reset}`);
+    }
+    if (options.forceStandalone === true) {
+      process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = JSON.stringify([
+        targetTestId,
+      ]);
+      console.warn(
+        `${colors.yellow}⚠ --force-standalone enabled for ${targetTestId} (debug)${colors.reset}`,
+      );
+    }
+  } else {
+    // Clear stale state from prior runs in the same process.
+    delete process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
+    delete process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
+    delete process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
+  }
 
   if (options.pick) {
     process.env.GLUBEAN_PICK = options.pick;
