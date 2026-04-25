@@ -714,6 +714,51 @@ test("§5.1 step 3: bootstrap input rejected when fails params schema", async ()
   expect(log).not.toContain("executeCase");
 });
 
+test("§5.1 RFR-followup: bootstrap input + plain-function overlay (no params) hard-errors (was P2 silent drop)", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => { log.push("executeCase"); };
+  contract.register("mock_bs_no_params", adapter);
+
+  const c = (contract as any).mock_bs_no_params("svc", {
+    target: "/x",
+    cases: { ok: { description: "no-params overlay" } },
+  }) as ProtocolContract<MockSpec>;
+
+  // Plain-function overlay — no `params` schema declared.
+  (contract.bootstrap as any)(c.case("ok"), async () => undefined);
+
+  // Runner supplies bootstrap input even though overlay can't consume it.
+  // Pre-fix: silently dropped. Post-fix: hard-error before run().
+  setBootstrapInput("svc.ok", { projectId: "p_1" });
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /runner supplied bootstrap input.*does not declare a `params` schema/,
+  );
+  expect(log).not.toContain("executeCase");
+});
+
+test("§5.1 RFR-followup: bootstrap input + no overlay registered hard-errors (was P1.2 silent drop)", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  contract.register("mock_bs_no_overlay", adapter);
+
+  const c = (contract as any).mock_bs_no_overlay("svc", {
+    target: "/x",
+    cases: { ok: { description: "no overlay" } },
+  }) as ProtocolContract<MockSpec>;
+
+  // No bootstrap registered — but runner supplies bootstrap input.
+  // Pre-fix: silently fell through to raw `adapter.execute`.
+  // Post-fix: hard-error.
+  setBootstrapInput("svc.ok", { projectId: "p_1" });
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /runner supplied bootstrap input but no bootstrap overlay is registered/,
+  );
+  expect(log).not.toContain("execute:no overlay");
+});
+
 test("§5.1 step 2: requireAttachment + no overlay + --force-standalone bypasses guard with warning", async () => {
   const log: string[] = [];
   const adapter = makeMockAdapter({ executionLog: log });

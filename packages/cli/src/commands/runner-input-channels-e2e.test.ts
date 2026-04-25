@@ -290,6 +290,38 @@ export const ordersOverlay = contract.bootstrap(getOrders.case("seeded"), {
     expect(out).not.toContain("OVERLAY_RAN_DESPITE_BAD_PARAMS_SENTINEL");
   }, 60_000);
 
+  test("CLI rejects --input-json + --bootstrap-json supplied together (RFR-followup mutex)", async () => {
+    const dir = await prepareFixture("mutex", {
+      "package.json": workspacePackageJson("spike3-mutex"),
+      "tests/users.contract.ts": `
+import { contract } from "@glubean/sdk";
+const api = contract.http.with("api", { endpoint: "https://example.invalid" });
+export const getUsers = api("users.get", {
+  endpoint: "GET /users",
+  cases: { ok: { description: "fetch", expect: { status: 200 } } },
+});
+`,
+    });
+
+    const { code, stderr } = await runCli(
+      [
+        "run",
+        "tests/users.contract.ts",
+        "--filter",
+        "users.get.ok",
+        "--no-session",
+        "--input-json",
+        '{"x":1}',
+        "--bootstrap-json",
+        '{"y":2}',
+      ],
+      { cwd: dir },
+    );
+
+    expect(code).not.toBe(0);
+    expect(stderr).toMatch(/--input-json and --bootstrap-json are mutually exclusive/);
+  }, 60_000);
+
   test("CLI rejects --input-json when filter matches multiple tests", async () => {
     const dir = await prepareFixture("input-json-multi", {
       "package.json": workspacePackageJson("spike3-multi-match"),

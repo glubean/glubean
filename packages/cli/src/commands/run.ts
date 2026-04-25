@@ -763,6 +763,21 @@ export async function runCommand(
     options.bootstrapJson !== undefined ||
     options.forceStandalone === true;
   if (hasInputFlag) {
+    // §5.1 invariant: explicit input always wins; overlay (and therefore
+    // its bootstrap-params channel) is NOT invoked. Per the proposal's
+    // "no run-bootstrap-for-side-effects-then-use-my-input mode" rule,
+    // the two channels are exclusive at the surface boundary too —
+    // dispatcher would silently drop the bootstrap input otherwise.
+    if (
+      options.inputJson !== undefined &&
+      options.bootstrapJson !== undefined
+    ) {
+      console.error(
+        `\n${colors.red}❌ --input-json and --bootstrap-json are mutually exclusive.${colors.reset}\n` +
+          `${colors.dim}Per attachment-model §5.1: explicit input bypasses the overlay, so bootstrap params would be ignored. Pick one channel per run.${colors.reset}\n`,
+      );
+      process.exit(1);
+    }
     if (testsToRun.length !== 1) {
       console.error(
         `\n${colors.red}❌ --input-json / --bootstrap-json / --force-standalone require ` +

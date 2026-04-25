@@ -429,24 +429,38 @@ function dispatchContract<
           // §5.1 step 3a-3b: structured-form `params` schema validation.
           // Bootstrap input comes from the runner channel (CLI
           // `--bootstrap-json`, MCP `bootstrapInput`, programmatic
-          // `bootstrapInput`). When the overlay is plain-function form,
-          // any provided bootstrap input is silently ignored — the body
-          // takes (ctx) only.
+          // `bootstrapInput`).
           const paramsSchema =
             typeof overlay.spec === "object" && overlay.spec !== null
               ? (overlay.spec as { params?: unknown }).params
               : undefined;
+          const providedBootstrap = getBootstrapInput(testId);
+
+          // Plain-function overlay (or structured form without `params`)
+          // does NOT accept bootstrap input. If the runner supplied one,
+          // the user almost certainly forgot to declare a `params` schema
+          // or mistyped the testId — silently dropping the input would
+          // mask the bug. Hard-error before invoking run().
+          if (!paramsSchema && providedBootstrap.has) {
+            throw new Error(
+              `case "${testId}": runner supplied bootstrap input but the ` +
+                `registered overlay does not declare a \`params\` schema. ` +
+                `Plain-function overlays (and structured overlays without ` +
+                `\`params\`) cannot consume bootstrap input — declare ` +
+                `\`params: SchemaLike<...>\` on the overlay spec, or remove ` +
+                `the bootstrap input from the runner invocation.`,
+            );
+          }
 
           let validatedParams: unknown = undefined;
           if (paramsSchema) {
-            const provided = getBootstrapInput(testId);
             // §5.1 step 3a: "Take bootstrapInput from runner options
             // (may be empty if no params)". Validation happens whether
             // or not the runner supplied input — schema may have
             // defaults, or all fields may be optional.
             validatedParams = validateNeedsOutput(
               paramsSchema as { safeParse?: unknown; parse?: unknown },
-              provided.has ? provided.value : undefined,
+              providedBootstrap.has ? providedBootstrap.value : undefined,
               { testId, source: "bootstrap-params" },
             );
           }
@@ -491,6 +505,23 @@ function dispatchContract<
 
         // ── No-overlay standalone path ───────────────────────────────────
         //
+        // First: bootstrap input supplied but no overlay registered. The
+        // user provided `--bootstrap-json` / `bootstrapInput` for a case
+        // that has no `contract.bootstrap()`. Almost always a typo or a
+        // missing overlay file; silently dropping the input would mask
+        // the bug. Hard-error before any other resolution.
+        const providedBootstrapNoOverlay = getBootstrapInput(testId);
+        if (providedBootstrapNoOverlay.has) {
+          throw new Error(
+            `case "${testId}": runner supplied bootstrap input but no ` +
+              `bootstrap overlay is registered for this case. Register an ` +
+              `overlay via \`contract.bootstrap(ref, { params, run })\`, ` +
+              `or remove the bootstrap input from the runner invocation. ` +
+              `(If you meant to bypass the overlay and pass case input ` +
+              `directly, use --input-json / inputJson instead.)`,
+          );
+        }
+
         // §5.1 step 2: requireAttachment + no overlay → hard error
         //   (UNLESS isForceStandalone(testId) — debug bypass per §6.3).
         // §5.1 step 4: needs declared, no overlay, no input → hard error.

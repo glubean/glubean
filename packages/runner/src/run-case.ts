@@ -18,7 +18,8 @@
  * same process don't leak state.
  */
 
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { ProjectRunner } from "./project-runner.js";
 import type {
   ProjectRunEvent,
@@ -26,6 +27,27 @@ import type {
 } from "./project-runner.js";
 import type { SharedRunConfig } from "./config.js";
 import { applyEnvTemplating } from "./runner-input-templating.js";
+
+/**
+ * Walk up from `filePath` to find the project root — the nearest
+ * ancestor containing `package.json`. Falls back to `filePath`'s
+ * directory when no `package.json` is found (matches CLI/MCP behavior
+ * for ad-hoc test files outside any project).
+ *
+ * Mirrors the contract used by `bootstrap()` / `loadProjectOverlays()`
+ * / `loadProjectEnv()` — they all key off the project root, so
+ * `runCase` must locate the same place when the caller doesn't pass
+ * `rootDir` explicitly.
+ */
+function findProjectRoot(filePath: string): string {
+  let dir = dirname(filePath);
+  // Bound the walk at filesystem root.
+  while (dir !== dirname(dir)) {
+    if (existsSync(resolve(dir, "package.json"))) return dir;
+    dir = dirname(dir);
+  }
+  return dirname(filePath);
+}
 
 /** Result of running a single case via {@link runCase}. */
 export interface RunCaseResult {
@@ -117,8 +139,25 @@ export interface RunCaseOptions {
  * ```
  */
 export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
+  // §5.1 invariant: explicit input always wins; overlay never invoked.
+  // The two channels are mutually exclusive — surface boundary enforces
+  // it so the dispatcher never silently drops the bootstrap-params side.
+  if (opts.input !== undefined && opts.bootstrapInput !== undefined) {
+    throw new Error(
+      `runCase: \`input\` and \`bootstrapInput\` are mutually exclusive. ` +
+        `Per attachment-model §5.1: explicit input bypasses the overlay, ` +
+        `so bootstrap params would be ignored. Pick one channel per call.`,
+    );
+  }
+
   const filePath = resolve(opts.filePath);
-  const rootDir = opts.rootDir ?? filePath.replace(/\/[^/]+$/, "");
+  // §7.4 / glubean.setup.ts location: project root must be the directory
+  // containing `package.json` and (typically) `glubean.setup.ts` — NOT
+  // just the directory of the contract file. A file under `tests/` or
+  // `contracts/` would otherwise miss the project's plugin bootstrap and
+  // env loading. Caller can pass an explicit `rootDir` to override; if
+  // omitted, walk up from the file looking for `package.json`.
+  const rootDir = opts.rootDir ?? findProjectRoot(filePath);
 
   // Capture & set env vars BEFORE constructing ProjectRunner — the
   // executor inherits parent env when spawning the harness subprocess.

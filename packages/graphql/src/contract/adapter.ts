@@ -5,15 +5,22 @@
  * model — "contract is a first-class citizen"). Registered via
  * `contract.register("graphql", graphqlAdapter)` on import — see ./index.ts.
  *
- * Responsibilities (same interface as HTTP / gRPC adapters):
- *   - execute: setup → call → expect → verify → teardown
- *   - executeCaseInFlow: deep-merge resolvedInputs, run case in flow mode
- *   - validateCaseForFlow: reject function-valued variables / headers
- *   - project: runtime ContractProjection<GraphqlPayloadSchemas>
+ * Attachment-model v10 adapter (Spike 4 migration). No per-case lifecycle:
+ * the case is pure semantics; setup-style work belongs to a
+ * `contract.bootstrap()` overlay. Function-valued `variables` / `headers`
+ * receive the case's logical input (matching `needs`), not v9 setup state.
+ *
+ * Responsibilities (same interface as HTTP / gRPC adapters post-Spike-4):
+ *   - execute: §5.1 step 5 raw run with no input (no overlay + no needs)
+ *   - executeCase: v10 entry point — receives `resolvedInput` from
+ *     dispatcher (§5.1 steps 1+3 — explicit input or overlay output)
+ *   - executeCaseInFlow: receives logical input from `step.in` lens
+ *   - project: runtime ContractProjection threading
+ *     `given` / `runnability` / `hasNeeds` / `needsSchema`
  *   - normalize: runtime → JSON-safe ExtractedContractProjection
  *   - classifyFailure: 3-layer (transport / payload errors / data shape)
  *   - renderTarget: operationName (parsed from query if needed)
- *   - toMarkdown: case list with operation + query snippet
+ *   - artifacts.markdown: case list with operation + query snippet
  *   - describePayload: high-level summary for index views
  *
  * Phase 1 scope: query + mutation only. Subscription deferred to Phase 2.

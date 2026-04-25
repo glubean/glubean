@@ -850,6 +850,22 @@ export async function runLocalTestsFromFile(args: {
   let savedBootstrapMap: string | undefined;
   let savedForceIds: string | undefined;
   if (hasInputChannel) {
+    // §5.1 invariant: explicit input always wins; overlay never invoked.
+    // Two channels are mutually exclusive — surface boundary enforces it
+    // so the dispatcher never silently drops the bootstrap-params side.
+    if (args.inputJson !== undefined && args.bootstrapInput !== undefined) {
+      return {
+        fileUrl,
+        projectRoot,
+        vars,
+        secrets,
+        results: [],
+        summary: { total: 0, passed: 0, failed: 0 },
+        error:
+          "inputJson and bootstrapInput are mutually exclusive. " +
+          "Per attachment-model §5.1: explicit input bypasses the overlay, so bootstrap params would be ignored. Pick one channel per run.",
+      };
+    }
     if (selected.length !== 1) {
       return {
         fileUrl,

@@ -5,15 +5,22 @@
  * model — "contract is a first-class citizen"). Registered via
  * `contract.register("grpc", grpcAdapter)` on import — see ./index.ts.
  *
- * Responsibilities (same interface as HTTP adapter):
- *   - execute: run a case's setup → request → expect → verify → teardown
- *   - executeCaseInFlow: deep-merge resolvedInputs, run case in flow mode
- *   - validateCaseForFlow: reject function-valued request/metadata fields
- *   - project: runtime ContractProjection<GrpcPayloadSchemas>
+ * Attachment-model v10 adapter (Spike 4 migration). No per-case lifecycle:
+ * the case is pure semantics; setup-style work belongs to a
+ * `contract.bootstrap()` overlay. Function-valued `request` / `metadata`
+ * receive the case's logical input (matching `needs`), not v9 setup state.
+ *
+ * Responsibilities (same interface as HTTP adapter post-Phase-2c B+C):
+ *   - execute: §5.1 step 5 raw run with no input (no overlay + no needs)
+ *   - executeCase: v10 entry point — receives `resolvedInput` from
+ *     dispatcher (§5.1 steps 1+3 — explicit input or overlay output)
+ *   - executeCaseInFlow: receives logical input from `step.in` lens
+ *   - project: runtime ContractProjection threading
+ *     `given` / `runnability` / `hasNeeds` / `needsSchema`
  *   - normalize: runtime → JSON-safe ExtractedContractProjection
  *   - classifyFailure: gRPC status 0-16 → FailureKind
  *   - renderTarget: "Service/Method" → "Service.Method" (display-only)
- *   - toMarkdown: case list
+ *   - artifacts.markdown: case list
  *   - describePayload: high-level summary for index views
  *
  * Phase 1 scope: unary RPCs only. Streaming deferred to Phase 2.
