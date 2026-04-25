@@ -127,6 +127,61 @@ const api = contract.http.with("type-d-tests", { client: mockClient as any });
 }
 
 // =============================================================================
+// Test 3-pre: HTTP body field — known type-inference gap (RFR v3 P2)
+//
+// v3 P2 reviewer pointed out: `Needs` doesn't actually thread to body's fn
+// parameter when authoring case literals. Even with the v3 narrowed
+// `body?: HttpStaticBody | ((input: Needs) => unknown)` and the redeclared
+// `needs?: SchemaLike<Needs>` on HttpContractCase, the case literal's
+// `Needs` is not inferred from the sibling `needs: SchemaLike<X>` field —
+// requires a factory wrapper (`defineHttpCase<T>(...)`) for cross-field
+// generic inference.
+//
+// Concrete consequence: `body: ({ nope }: { nope: string }) => ...`
+// COMPILES even when `needs: s<{ email: string }>()`. Annotation can drift
+// from schema. v3.1 doesn't fix this; the runtime guards (`validateNeedsOutput`
+// at all input boundaries) are the actual line of defense — not the
+// authoring type system.
+//
+// This block documents the limitation rather than asserting it's caught.
+// A future `defineHttpCase<T>` factory or recursive-generic-on-self-field
+// trick would close this; out of scope for Phase 2c B+C.
+// =============================================================================
+
+{
+  // Authoring with matching annotation — compiles (correct usage).
+  const _good = api("body-typed.good", {
+    endpoint: "POST /x",
+    cases: {
+      ok: {
+        description: "good body shape",
+        needs: s<{ email: string }>(),
+        body: ({ email }: { email: string }) => ({ email }),
+        expect: { status: 200 },
+      },
+    },
+  });
+  void _good;
+
+  // Drift case: annotation says `{ nope }` but `needs` says `{ email }`.
+  // CURRENTLY COMPILES — this is the gap. Runtime `validateNeedsOutput`
+  // catches the mismatch when the case actually executes (overlay/flow/
+  // explicit input all gate on the `needs` schema before reaching `body`).
+  const _drift = api("body-typed.drift", {
+    endpoint: "POST /x",
+    cases: {
+      ok: {
+        description: "drift between needs and body annotation",
+        needs: s<{ email: string }>(),
+        body: ({ nope }: { nope: string }) => ({ nope }),
+        expect: { status: 200 },
+      },
+    },
+  });
+  void _drift;
+}
+
+// =============================================================================
 // Test 3-bis: FlowBuilder.step enforces `in` presence matches case needs
 //
 // v10 invariant: a flow step's `in` binding MUST be present iff the case

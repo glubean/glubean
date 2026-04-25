@@ -100,7 +100,32 @@ export interface ContractExpect<T = unknown> {
 // Case spec
 // =============================================================================
 
+/**
+ * Static-body shape for HTTP case `body` field. Excludes `unknown` (which
+ * would swallow the function branch in a union and lose `Needs` typing for
+ * function-valued bodies). Function-form `body: (input: Needs) => ...` only
+ * matches when the static-form types reject the value.
+ */
+export type HttpStaticBody =
+  | Record<string, unknown>
+  | unknown[]
+  | string
+  | number
+  | boolean
+  | null
+  | FormData
+  | URLSearchParams
+  | Blob;
+
 export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
+  /**
+   * Per-case logical input schema. Redeclares the `BaseCaseSpec.needs` field
+   * with the case-specific `Needs` parameter so author-provided schema and
+   * function-valued action field parameter types stay locked together —
+   * preventing drift between `needs: SchemaLike<X>` and `body: ({wrong}) => ...`.
+   */
+  needs?: SchemaLike<Needs>;
+
   /** Per-case HTTP client override. */
   client?: HttpClient;
   /** Why this case exists — required. */
@@ -109,13 +134,16 @@ export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
   expect: ContractExpect<T>;
 
   /**
-   * Request body (for POST/PUT/PATCH). Static value, FormData/URLSearchParams
-   * /Blob/string for non-JSON content types, or a function of the case's
-   * logical input (matching `needs`). v10 attachment model: no more setup
-   * state — input comes from overlay bootstrap, explicit `--input-json`, or
-   * flow `.step() in` lens.
+   * Request body (for POST/PUT/PATCH). Either a static value (HttpStaticBody)
+   * or a function of the case's logical input (matching `needs`). v10
+   * attachment model: no more setup state — input comes from overlay
+   * bootstrap, explicit `--input-json`, or flow `.step() in` lens.
+   *
+   * The static branch deliberately uses concrete types (not `unknown`)
+   * because `unknown` in a union swallows the function branch — `Needs`
+   * typing on the function param would then be silently bypassed.
    */
-  body?: unknown | FormData | URLSearchParams | Blob | ((input: Needs) => unknown);
+  body?: HttpStaticBody | ((input: Needs) => unknown);
 
   /** Request content type override for this case. */
   contentType?: string;

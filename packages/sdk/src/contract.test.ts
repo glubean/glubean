@@ -443,6 +443,35 @@ test("needs schema validation failure runs cleanups registered during bootstrap"
   expect(log).not.toContain("executeCase"); // case never dispatched
 });
 
+test("needs case without overlay hard-errors before adapter.execute (RFR v3 P1)", async () => {
+  // Per attachment model §5.1: a case declaring `needs` cannot run without
+  // an input source. Three valid sources: (1) bootstrap overlay, (2) explicit
+  // --input-json (Spike 3), (3) flow `.step({ in })` (different code path).
+  // The standalone-no-overlay branch must hard-error rather than feed
+  // undefined to the adapter and let author callbacks blow up cryptically.
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  contract.register("mock_needs_no_overlay", adapter);
+
+  // Mock adapter case shape doesn't include `needs`, so cast to bypass.
+  const c = (contract as any).mock_needs_no_overlay("svc", {
+    target: "/x",
+    cases: {
+      ok: {
+        description: "needs case",
+        needs: { safeParse: () => ({ success: true, data: undefined }) },
+      },
+    },
+  }) as ProtocolContract<MockSpec>;
+
+  // Intentionally NO contract.bootstrap(...) registered
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /declares `needs` but has no bootstrap overlay and no explicit input/,
+  );
+  expect(log).not.toContain("execute:needs case"); // adapter never reached
+});
+
 test("overlay with adapter missing executeCase hard-errors (no silent fallback)", async () => {
   const log: string[] = [];
   const adapter = makeMockAdapter({ executionLog: log });

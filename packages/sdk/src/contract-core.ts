@@ -415,9 +415,28 @@ function dispatchContract<
           return;
         }
 
-        // Legacy path: no overlay registered. Runs raw `adapter.execute`
-        // which for HTTP/gRPC/GraphQL still reads `caseSpec.setup/teardown`
-        // until Phase 2c Step B+C removes those fields.
+        // No-overlay standalone path. Per attachment model §5.1 algorithm:
+        // a case that declares `needs` cannot run without input. Three valid
+        // input sources: (1) bootstrap overlay [handled above], (2) explicit
+        // `--input-json` from runner [Spike 3], (3) flow `.step({ in })`
+        // [different code path, runFlow]. None of those apply here, so a
+        // `needs`-declared case at this point is undefined-input territory —
+        // hard error rather than feed undefined to author callbacks and let
+        // them blow up cryptically (or worse: silently run with wrong data).
+        const needsSchema = (caseSpec as { needs?: unknown }).needs;
+        if (needsSchema) {
+          throw new Error(
+            `case "${testId}" declares \`needs\` but has no bootstrap overlay ` +
+              `and no explicit input. Per attachment model §5.1: register a ` +
+              `bootstrap overlay via \`contract.bootstrap(...)\`, or once the ` +
+              `runner input channel lands (Spike 3) pass \`--input-json\`.`,
+          );
+        }
+
+        // No-needs case + no overlay → run case with no input. Static body /
+        // headers / params / query work as-is; function-valued action fields
+        // receive undefined (author responsibility — typically a no-needs
+        // case has no function-valued fields).
         await adapter.execute(ctx, caseSpec, spec);
       },
     };
