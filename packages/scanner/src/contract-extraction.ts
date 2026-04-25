@@ -71,6 +71,12 @@ export interface NormalizedCaseMeta {
   schemas?: unknown;
   /** Adapter-defined free-form meta (opaque). */
   meta?: unknown;
+  /**
+   * v10 attachment-model — JSON-safe `needs` schema. Populated when the
+   * case declares `needs: SchemaLike<T>`. Used by attachment synthesis to
+   * derive `rawBypass` on bootstrap overlays.
+   */
+  needsSchema?: unknown;
 }
 
 /**
@@ -143,30 +149,98 @@ export interface NormalizedFlowMeta {
   steps: NormalizedFlowStep[];
 }
 
+// =============================================================================
+// v10 attachment-model — runnable inventory (§7.2 / §7.3)
+//
+// Each entry in `attachments[]` represents one runnable test id. Discriminated
+// by `kind`:
+//
+// - `raw` — a contract case with no bootstrap overlay (default).
+// - `bootstrap-overlay` — a `contract.bootstrap(ref, spec)` registered for
+//   the case. REPLACES the raw entry with the same testId. Carries
+//   `rawBypass` when the case declares `needs` (explicit-input mode is
+//   still discoverable per §5.1 algorithm).
+// - `flow` — a `contract.flow(...).build()` orchestration. Independent
+//   testId (no underlying case to replace).
+//
+// `testId` uniqueness within `attachments[]` is enforced; duplicate
+// overlays for the same testId surface as load-time errors in
+// `ExtractionResult.errors`.
+// =============================================================================
+
 /**
- * v10 attachment projection. Surfaces bootstrap overlays declared via
- * `contract.bootstrap(ref, spec)` so scanner / CLI / MCP can show them
- * in runnable inventory alongside contracts.
- *
- * Body of the bootstrap is opaque (per attachment-model §4.2 — backdoor).
- * `paramsSchema` is undefined in v0; structured-form schema extraction
- * is deferred to Spike 3 when the runner input channel ships and we have
- * a concrete consumer for the schema shape.
+ * Default execution mode for a contract case — runs the case directly with
+ * an explicit input (or void when no needs declared). Lives in
+ * `attachments[]` until a bootstrap overlay replaces it.
  */
-export interface NormalizedAttachmentMeta {
-  exportName: string;
-  kind: "bootstrap-overlay";
-  /** Test id this overlay attaches to (`${contractId}.${caseKey}`). */
+export interface NormalizedRawAttachment {
+  kind: "raw";
+  /** Contract case test id (`${contractId}.${caseKey}`). */
   testId: string;
   contractId: string;
   caseKey: string;
+  /** Export name of the contract this case belongs to. */
+  exportName: string;
+  /** Whether the case declares `runnability.requireAttachment` (raw blocked). */
+  runnability?: { requireAttachment?: boolean };
 }
 
-/** Result of extracting contracts/flows/attachments from one or more files. */
+/**
+ * Bootstrap overlay attachment — `contract.bootstrap(ref, spec)` registers
+ * a setup-and-cleanup that wraps the case. Replaces the raw entry for the
+ * target testId. Body of `run`/`spec` is opaque per attachment-model §4.2.
+ *
+ * `paramsSchema` is undefined in v0 — structured-form param schema
+ * extraction needs the bootstrap registry, deferred to Spike 3.
+ *
+ * `rawBypass` exposes the explicit-input execution path (§5.1) so the
+ * inventory is the single authoritative source for both modes per testId.
+ */
+export interface NormalizedBootstrapOverlayAttachment {
+  kind: "bootstrap-overlay";
+  testId: string;
+  /** The overlay's own export name (NOT the contract's). */
+  exportName: string;
+  targetRef: { contractId: string; caseKey: string };
+  bootstrap: {
+    /** v0: undefined; populated when structured-form `params` schema lands. */
+    paramsSchema?: unknown;
+  };
+  /** Present iff the target case has `needs` (explicit-input bypass available). */
+  rawBypass?: {
+    available: true;
+    /** JSON-safe form of the case's `needs` schema (may be undefined when SDK can't convert). */
+    needsSchema: unknown;
+  };
+}
+
+/**
+ * Flow attachment — orchestrates a sequence of contract calls under a
+ * single test id. Distinct from raw / overlay (no underlying case).
+ */
+export interface NormalizedFlowAttachment {
+  kind: "flow";
+  /** Flow test id (`flowId`). */
+  testId: string;
+  exportName: string;
+  flow: NormalizedFlowMeta;
+}
+
+/** Discriminated attachment entry. One per testId in the inventory. */
+export type NormalizedAttachmentMeta =
+  | NormalizedRawAttachment
+  | NormalizedBootstrapOverlayAttachment
+  | NormalizedFlowAttachment;
+
+/** Result of extracting contracts/attachments from one or more files. */
 export interface ExtractionResult {
   contracts: NormalizedContractMeta[];
-  flows?: NormalizedFlowMeta[];
-  attachments?: NormalizedAttachmentMeta[];
+  /**
+   * Attachment inventory per attachment-model §7.3. Always present
+   * (may be empty). Replaces the previous `flows?: NormalizedFlowMeta[]`
+   * top-level field — flows now appear here as `kind: "flow"` entries.
+   */
+  attachments: NormalizedAttachmentMeta[];
   errors: Array<{ file: string; error: string }>;
 }
 
@@ -330,6 +404,7 @@ export function protocolContractToNormalized(
       extensions: c.extensions,
       schemas: c.schemas,
       meta: c.meta,
+      needsSchema: c.needsSchema,
     })),
   };
 }
@@ -434,18 +509,27 @@ function autoBuildFlowBuilder(val: unknown): unknown {
 // =============================================================================
 
 /**
- * Convert a BootstrapAttachment runtime export to a NormalizedAttachmentMeta.
- * Splits `testId` into contractId + caseKey using the dot separator
- * convention used by the SDK dispatcher (`${contractId}.${caseKey}`).
- *
- * If the testId can't be split (no dot), returns null and caller skips it
- * — that shape would indicate a malformed attachment and we'd rather not
- * surface garbage in scanner output.
+ * Bootstrap overlay marker collected during file walk — pre-synthesis raw
+ * material. Not yet a final attachment entry; `synthesizeAttachments`
+ * decides whether to keep it (replaces a raw entry) or report duplicate.
+ */
+export interface BootstrapOverlayMarker {
+  exportName: string;
+  testId: string;
+  contractId: string;
+  caseKey: string;
+}
+
+/**
+ * Convert a BootstrapAttachment runtime export to a marker. Splits
+ * `testId` into contractId + caseKey at the LAST dot (contractId can have
+ * dots, e.g. `v2.orders.create.success`). Returns null for malformed shapes
+ * (no dot, leading dot, trailing dot) — caller skips them.
  */
 export function bootstrapAttachmentToNormalized(
   attachment: { testId: string },
   exportName: string,
-): NormalizedAttachmentMeta | null {
+): BootstrapOverlayMarker | null {
   const dotIndex = attachment.testId.lastIndexOf(".");
   if (dotIndex <= 0 || dotIndex === attachment.testId.length - 1) {
     return null;
@@ -454,28 +538,128 @@ export function bootstrapAttachmentToNormalized(
   const caseKey = attachment.testId.slice(dotIndex + 1);
   return {
     exportName,
-    kind: "bootstrap-overlay",
     testId: attachment.testId,
     contractId,
     caseKey,
   };
 }
 
-// Per-path mtime cache used by extractContractFromFile() to decide when
-// to bust Node's ESM module cache on re-import. See the comment inside
-// that function for the full reasoning.
+/**
+ * Synthesize the §7.3 attachment inventory from raw materials.
+ *
+ * Algorithm (per attachment-model §7.3):
+ *  1. Seed: each contract case → `kind: "raw"` entry (testId = `${id}.${key}`).
+ *  2. Apply overlays: each marker → REPLACE the raw entry with the same
+ *     testId by a `kind: "bootstrap-overlay"` entry. Carry `rawBypass`
+ *     when the target case has `needsSchema` (explicit-input bypass
+ *     available per §5.1).
+ *  3. Duplicate detection: two markers with the same testId → push a
+ *     load-time error. Keep the first; subsequent overlays ignored.
+ *  4. Append flows as `kind: "flow"` entries.
+ *
+ * Overlays whose testId doesn't match any contract case stand alone —
+ * we still emit them as `bootstrap-overlay` (no `rawBypass`, no targetRef
+ * verification). This keeps cross-file overlay registration discoverable
+ * even when the contract module hasn't been scanned yet.
+ */
+export function synthesizeAttachments(
+  contracts: NormalizedContractMeta[],
+  flows: NormalizedFlowMeta[],
+  markers: BootstrapOverlayMarker[],
+): { attachments: NormalizedAttachmentMeta[]; errors: ExtractionResult["errors"] } {
+  const errors: ExtractionResult["errors"] = [];
+
+  // Index cases by testId for O(1) lookup during overlay application.
+  const caseByTestId = new Map<
+    string,
+    { contract: NormalizedContractMeta; case: NormalizedCaseMeta }
+  >();
+  for (const contract of contracts) {
+    for (const c of contract.cases) {
+      caseByTestId.set(`${contract.id}.${c.key}`, { contract, case: c });
+    }
+  }
+
+  // Step 1: seed raw entries.
+  const byTestId = new Map<string, NormalizedAttachmentMeta>();
+  for (const [testId, { contract, case: c }] of caseByTestId) {
+    const requireAttachment = (c.extensions as { runnability?: { requireAttachment?: boolean } } | undefined)
+      ?.runnability?.requireAttachment;
+    byTestId.set(testId, {
+      kind: "raw",
+      testId,
+      contractId: contract.id,
+      caseKey: c.key,
+      exportName: contract.exportName,
+      ...(requireAttachment !== undefined
+        ? { runnability: { requireAttachment } }
+        : {}),
+    });
+  }
+
+  // Step 2 + 3: apply overlays, detect duplicates.
+  const seenOverlayIds = new Set<string>();
+  for (const marker of markers) {
+    if (seenOverlayIds.has(marker.testId)) {
+      errors.push({
+        file: marker.exportName,
+        error: `Duplicate bootstrap overlay for testId "${marker.testId}" (export "${marker.exportName}"). Per attachment-model §7.3 testId uniqueness is enforced.`,
+      });
+      continue;
+    }
+    seenOverlayIds.add(marker.testId);
+
+    const target = caseByTestId.get(marker.testId);
+    const overlay: NormalizedBootstrapOverlayAttachment = {
+      kind: "bootstrap-overlay",
+      testId: marker.testId,
+      exportName: marker.exportName,
+      targetRef: { contractId: marker.contractId, caseKey: marker.caseKey },
+      bootstrap: {},
+      ...(target?.case.needsSchema !== undefined
+        ? { rawBypass: { available: true, needsSchema: target.case.needsSchema } }
+        : {}),
+    };
+    byTestId.set(marker.testId, overlay);
+  }
+
+  // Step 4: append flows.
+  const attachments = Array.from(byTestId.values());
+  for (const flow of flows) {
+    attachments.push({
+      kind: "flow",
+      testId: flow.id,
+      exportName: flow.exportName,
+      flow,
+    });
+  }
+
+  return { attachments, errors };
+}
+
+// Per-path mtime cache used by collectRawMaterials() to decide when to
+// bust Node's ESM module cache on re-import. See the comment inside that
+// function for the full reasoning.
 const _importMtimeCache = new Map<string, number>();
 
+interface RawFileMaterials {
+  contracts: NormalizedContractMeta[];
+  flows: NormalizedFlowMeta[];
+  markers: BootstrapOverlayMarker[];
+  errors: ExtractionResult["errors"];
+}
+
 /**
- * Extract contracts + flows from a single file by dynamic import.
- * One file's import failure does not block others.
+ * Internal: dynamically import a file and collect raw materials
+ * (contracts / flows / overlay markers / errors) without synthesis.
+ * Both `extractContractFromFile` and `extractContractsFromProject` use
+ * this — the former synthesizes per-file, the latter synthesizes
+ * project-wide so cross-file overlay replacement and dedup work.
  */
-export async function extractContractFromFile(
-  filePath: string,
-): Promise<ExtractionResult> {
+async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> {
   const contracts: NormalizedContractMeta[] = [];
   const flows: NormalizedFlowMeta[] = [];
-  const attachments: NormalizedAttachmentMeta[] = [];
+  const markers: BootstrapOverlayMarker[] = [];
   const errors: ExtractionResult["errors"] = [];
   const absolutePath = resolve(filePath);
 
@@ -522,8 +706,8 @@ export async function extractContractFromFile(
       } else if (isProtocolContract(value)) {
         contracts.push(protocolContractToNormalized(value, exportName));
       } else if (isBootstrapAttachment(value)) {
-        const normalized = bootstrapAttachmentToNormalized(value, exportName);
-        if (normalized) attachments.push(normalized);
+        const marker = bootstrapAttachmentToNormalized(value, exportName);
+        if (marker) markers.push(marker);
       }
     }
   } catch (err) {
@@ -531,11 +715,26 @@ export async function extractContractFromFile(
     errors.push({ file: absolutePath, error: message });
   }
 
+  return { contracts, flows, markers, errors };
+}
+
+/**
+ * Extract contracts + attachments from a single file by dynamic import.
+ * One file's import failure does not block others.
+ *
+ * Per-file synthesis: only this file's contracts/flows/markers are seen.
+ * Cross-file overlay replacement (overlay in fileA targets case in fileB)
+ * only resolves at project level via `extractContractsFromProject`.
+ */
+export async function extractContractFromFile(
+  filePath: string,
+): Promise<ExtractionResult> {
+  const raw = await collectRawMaterials(filePath);
+  const synth = synthesizeAttachments(raw.contracts, raw.flows, raw.markers);
   return {
-    contracts,
-    flows: flows.length > 0 ? flows : undefined,
-    attachments: attachments.length > 0 ? attachments : undefined,
-    errors,
+    contracts: raw.contracts,
+    attachments: synth.attachments,
+    errors: [...raw.errors, ...synth.errors],
   };
 }
 
@@ -576,34 +775,104 @@ function findContractAndFlowFiles(dir: string): string[] {
 }
 
 /**
- * Extract contracts + flows + attachments from all recognized files in a project.
+ * Extract contracts + attachments from all recognized files in a project.
+ *
+ * Project-level synthesis: collects raw materials (contracts, flows,
+ * overlay markers) across all `.contract.` / `.flow.` / `.bootstrap.`
+ * files, then runs `synthesizeAttachments` once. This is what enables
+ * cross-file overlay replacement (overlay in `signup.bootstrap.ts`
+ * replacing the raw entry for a case in `signup.contract.ts`) and
+ * project-wide duplicate-overlay detection per §7.3.
  */
 export async function extractContractsFromProject(
   dir: string,
 ): Promise<ExtractionResult> {
   const files = findContractAndFlowFiles(dir);
-  if (files.length === 0) return { contracts: [], errors: [] };
+  if (files.length === 0) {
+    return { contracts: [], attachments: [], errors: [] };
+  }
 
   const allContracts: NormalizedContractMeta[] = [];
   const allFlows: NormalizedFlowMeta[] = [];
-  const allAttachments: NormalizedAttachmentMeta[] = [];
+  const allMarkers: BootstrapOverlayMarker[] = [];
   const allErrors: ExtractionResult["errors"] = [];
 
   for (const filePath of files) {
-    const { contracts, flows, attachments, errors } =
-      await extractContractFromFile(filePath);
-    allContracts.push(...contracts);
-    if (flows) allFlows.push(...flows);
-    if (attachments) allAttachments.push(...attachments);
-    allErrors.push(...errors);
+    const raw = await collectRawMaterials(filePath);
+    allContracts.push(...raw.contracts);
+    allFlows.push(...raw.flows);
+    allMarkers.push(...raw.markers);
+    allErrors.push(...raw.errors);
   }
+
+  const synth = synthesizeAttachments(allContracts, allFlows, allMarkers);
 
   return {
     contracts: allContracts,
-    flows: allFlows.length > 0 ? allFlows : undefined,
-    attachments: allAttachments.length > 0 ? allAttachments : undefined,
-    errors: allErrors,
+    attachments: synth.attachments,
+    errors: [...allErrors, ...synth.errors],
   };
+}
+
+// =============================================================================
+// Eager overlay loading — attachment-model §7.4
+//
+// "Runner MUST eagerly load all *.contract.ts and *.bootstrap.ts files in
+// the contracts root before resolving attachments. Overlay registration is
+// a semantic input to runnable inventory; making it depend on import path
+// leads to nondeterministic runs."
+//
+// CLI/MCP/ProjectRunner call this before any test runs so a filtered run
+// (e.g. `glubean run path/to/single.contract.ts`) still picks up sibling
+// `*.bootstrap.ts` overlay registrations.
+// =============================================================================
+
+/**
+ * Eagerly import every `*.bootstrap.{ts,js,mjs}` file under `dir` so
+ * `contract.bootstrap()` calls execute during module evaluation and
+ * register their overlays in the SDK's bootstrap registry.
+ *
+ * Idempotent: subsequent calls re-import the same module URLs; Node's
+ * ESM module cache short-circuits unless the file's mtime changed (the
+ * same cache-busting strategy `collectRawMaterials` uses).
+ *
+ * Errors: per-file failures are returned; the caller decides whether
+ * to abort or continue. We return errors instead of throwing because a
+ * single broken bootstrap file shouldn't kill an otherwise-working run.
+ */
+export async function loadProjectOverlays(
+  dir: string,
+): Promise<{ loaded: string[]; errors: Array<{ file: string; error: string }> }> {
+  const allFiles = findContractAndFlowFiles(dir);
+  const bootstrapFiles = allFiles.filter((f) => basename(f).includes(".bootstrap."));
+  const loaded: string[] = [];
+  const errors: Array<{ file: string; error: string }> = [];
+
+  for (const filePath of bootstrapFiles) {
+    const absolutePath = resolve(filePath);
+    try {
+      let mtimeKey = 0;
+      try {
+        mtimeKey = statSync(absolutePath).mtimeMs;
+      } catch {
+        // fall through with mtimeKey=0
+      }
+      const baseUrl = pathToFileURL(absolutePath).href;
+      const lastSeen = _importMtimeCache.get(absolutePath);
+      const importUrl =
+        lastSeen === undefined || lastSeen === mtimeKey
+          ? baseUrl
+          : `${baseUrl}?t=${mtimeKey}`;
+      _importMtimeCache.set(absolutePath, mtimeKey);
+      await import(importUrl);
+      loaded.push(absolutePath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ file: absolutePath, error: message });
+    }
+  }
+
+  return { loaded, errors };
 }
 
 // =============================================================================

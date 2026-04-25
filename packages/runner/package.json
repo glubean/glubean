@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@glubean/sdk": "workspace:*",
+    "@glubean/scanner": "workspace:*",
     "dotenv": "^16.4.0",
     "ky": "^1.14.0",
     "p-queue": "^9.1.0",

@@ -17,7 +17,7 @@ import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
-import { extractContractFromFile } from "@glubean/scanner";
+import { extractContractFromFile, loadProjectOverlays } from "@glubean/scanner";
 
 // ANSI color codes for pretty output
 const colors = {
@@ -141,10 +141,25 @@ function isGlob(target: string): boolean {
   return /[*?{[]/.test(target);
 }
 
-const TEST_FILE_SUFFIXES = [".test.ts", ".contract.ts", ".flow.ts"];
+// Test files: anything that may CONTRIBUTE runnable tests OR overlay
+// registrations during a run. `.bootstrap.ts` files don't produce
+// runnables themselves, but they MUST be loaded so `contract.bootstrap()`
+// calls execute and register overlays before discovery runs (attachment-
+// model §7.4). `discoverTests()` is responsible for distinguishing
+// bootstrap-only files from runnable-emitting ones.
+const TEST_FILE_SUFFIXES = [
+  ".test.ts",
+  ".contract.ts",
+  ".flow.ts",
+  ".bootstrap.ts",
+];
 
 function isGlubeanTestFile(name: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
+
+function isBootstrapOnlyFile(name: string): boolean {
+  return name.endsWith(".bootstrap.ts");
 }
 
 async function walkTestFiles(dir: string, result: string[]): Promise<void> {
@@ -215,6 +230,15 @@ interface DiscoveredTest {
 }
 
 export async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
+  // `.bootstrap.ts` files register overlays as a side-effect of import; they
+  // produce no runnable tests of their own. We don't even need to import here
+  // because the project-wide `loadProjectOverlays()` ran before discovery.
+  // Returning [] here keeps these files in the walker (so filtered runs
+  // still evaluate them transitively) without surfacing phantom test entries.
+  if (isBootstrapOnlyFile(filePath)) {
+    return [];
+  }
+
   const content = await readFile(filePath, "utf-8");
 
   if (filePath.includes(".contract.") || filePath.includes(".flow.")) {
@@ -243,20 +267,17 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     }
 
     // Each flow has a single orchestrator Test (setup → steps → teardown).
-    // Discover it as one runnable entry with the flow id.
-    if (result.flows) {
-      for (const flow of result.flows) {
-        results.push({
-          exportName: flow.exportName,
-          meta: {
-            id: flow.id,
-            description: flow.description,
-            // Flow-level meta.skip was propagated to TestMeta.deferred
-            // by the flow builder (contract-core.ts), surfaced via the
-            // extracted projection's description where applicable.
-          },
-        });
-      }
+    // Discover it as one runnable entry with the flow id. Post-Phase 2f
+    // flows live as `kind: "flow"` entries inside `result.attachments`.
+    for (const att of result.attachments) {
+      if (att.kind !== "flow") continue;
+      results.push({
+        exportName: att.exportName,
+        meta: {
+          id: att.flow.id,
+          description: att.flow.description,
+        },
+      });
     }
 
     if (results.length > 0) return results;
@@ -588,6 +609,21 @@ export async function runCommand(
   // call is idempotent (bootstrap tracks loadState internally), so
   // ProjectRunner's internal call is a no-op second visit.
   await bootstrap(rootDir);
+
+  // ── Eager-load overlay registrations (attachment-model §7.4) ────────────
+  // A filtered run (e.g. `glubean run path/to/single.contract.ts`) would
+  // otherwise miss sibling `*.bootstrap.ts` overlay registrations that
+  // wrap cases in the filtered-in contract. §7.4 mandates eager loading
+  // before any test runs so overlay registration is deterministic.
+  // Idempotent: ProjectRunner re-invokes the same helper (no-op second
+  // visit thanks to mtime-keyed module cache).
+  const overlayLoad = await loadProjectOverlays(rootDir);
+  for (const err of overlayLoad.errors) {
+    console.error(
+      `${colors.yellow}⚠ Bootstrap overlay failed to load:${colors.reset} ${err.file}`,
+    );
+    console.error(`${colors.dim}${err.error}${colors.reset}`);
+  }
 
   // ── Discover tests across all files ─────────────────────────────────────
   console.log(`${colors.dim}Discovering tests...${colors.reset}`);

@@ -233,6 +233,15 @@ export interface CaseMeta<PayloadSchemas = unknown, Meta = unknown> {
 
   /** Plugin-defined free-form metadata. Opaque to core. */
   meta?: Meta;
+
+  /**
+   * v10 attachment-model — the case's logical-input (`needs`) schema in
+   * JSON-safe form. Populated by adapter.normalize() when the case declares
+   * a `needs` schema; absent when it doesn't. Consumers (scanner, CLI, MCP)
+   * use this to surface the `rawBypass` execution path on bootstrap-overlay
+   * attachments (see contract-attachment-model.md §7.2).
+   */
+  needsSchema?: unknown;
 }
 
 /**

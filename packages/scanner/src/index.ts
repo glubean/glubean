@@ -54,6 +54,8 @@ export {
   isFlowContract,
   isBootstrapAttachment,
   bootstrapAttachmentToNormalized,
+  synthesizeAttachments,
+  loadProjectOverlays,
   isHttpContract, // deprecated-throw, kept for diagnostic
 } from "./contract-extraction.js";
 export type {
@@ -65,6 +67,9 @@ export type {
   NormalizedFlowStep,
   NormalizedFieldMapping,
   NormalizedAttachmentMeta,
+  NormalizedRawAttachment,
+  NormalizedBootstrapOverlayAttachment,
+  NormalizedFlowAttachment,
   ExtractedContract,
   ExtractionResult,
   CaseLifecycle,

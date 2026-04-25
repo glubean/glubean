@@ -381,7 +381,12 @@ export async function contractsCommand(
   }
 
   const result = await extractContractsFromProject(dir);
-  const flows = result.flows ?? [];
+  // Post-Phase 2f: flows live as `kind: "flow"` entries inside the
+  // attachment inventory (§7.3). Filter them back out for legacy
+  // `--format` consumers that still operate on a flat flow list.
+  const flows = result.attachments
+    .filter((a): a is Extract<typeof a, { kind: "flow" }> => a.kind === "flow")
+    .map((a) => a.flow);
 
   // Surface import errors
   if (result.errors.length > 0) {

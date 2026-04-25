@@ -1737,9 +1737,13 @@ server.registerTool(
     // `x-glubean-flow-sequence` so agents / Cloud / viewers can see which
     // endpoint plays which role in which flow. Skip flows that include
     // non-HTTP steps (the extension is path-keyed and only meaningful when
-    // every step maps to an OpenAPI operation).
-    if (result.flows && result.flows.length > 0) {
-      injectFlowSequenceExtensions(spec, result.flows);
+    // every step maps to an OpenAPI operation). Post-Phase 2f flows live
+    // as `kind: "flow"` entries inside `result.attachments`.
+    const flowsForOpenApi = result.attachments
+      .filter((a): a is Extract<typeof a, { kind: "flow" }> => a.kind === "flow")
+      .map((a) => a.flow);
+    if (flowsForOpenApi.length > 0) {
+      injectFlowSequenceExtensions(spec, flowsForOpenApi);
     }
 
     return {

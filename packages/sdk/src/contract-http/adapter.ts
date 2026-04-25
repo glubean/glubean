@@ -450,6 +450,10 @@ function projectHttp(
         defaultRun: c.defaultRun,
         tags: c.tags,
         extensions: c.extensions,
+        // v10 attachment-model — carry the live `needs` SchemaLike through
+        // to the runtime projection so normalize() can convert it to a
+        // JSON-safe schema for downstream `rawBypass` surfacing.
+        needsSchema: c.needs as unknown,
         schemas: {
           request: undefined,
           response: {
@@ -519,6 +523,11 @@ function normalizeHttp(
       tags: c.tags,
       extensions: c.extensions,
       meta: c.meta,
+      // v10 attachment-model: convert live `needs` SchemaLike to JSON-safe
+      // form. Absent when case has no needs (no rawBypass available).
+      needsSchema: c.needsSchema
+        ? schemaToJsonSchema(c.needsSchema as Parameters<typeof schemaToJsonSchema>[0]) ?? undefined
+        : undefined,
       schemas: c.schemas
         ? {
             response: c.schemas.response

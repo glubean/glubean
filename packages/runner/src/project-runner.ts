@@ -23,6 +23,7 @@
 
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { loadProjectOverlays } from "@glubean/scanner";
 import { bootstrap } from "./bootstrap.js";
 import { TestExecutor } from "./executor.js";
 import type { ExecutionEvent } from "./executor.js";
@@ -63,6 +64,14 @@ export type ProjectRunEvent =
   | { type: "bootstrap:start"; projectRoot: string }
   | { type: "bootstrap:done" }
   | { type: "bootstrap:failed"; error: Error }
+  /**
+   * attachment-model §7.4 — a `*.bootstrap.{ts,js,mjs}` file failed to
+   * import during eager overlay loading. Non-fatal: cases that depend on
+   * the missing overlay will hard-error at execute-time per §5.1, but
+   * unrelated tests still run. Surfaced so consumers can render the
+   * diagnostic alongside their normal output.
+   */
+  | { type: "overlay:load:failed"; file: string; error: string }
   | { type: "discovery:done"; totalFiles: number; totalTests: number }
   | { type: "session:discovered"; sessionFile: string | undefined }
   | { type: "session:setup:start"; sessionFile: string }
@@ -188,6 +197,17 @@ export class ProjectRunner {
       yield { type: "bootstrap:failed", error };
       yield { type: "run:failed", reason: "bootstrap-failed", error: error.message };
       return;
+    }
+    // attachment-model §7.4: eagerly load every `*.bootstrap.{ts,js,mjs}`
+    // so `contract.bootstrap()` calls register their overlays before any
+    // test runs. Idempotent — CLI already calls this; second visit
+    // short-circuits via the scanner's mtime-keyed module cache.
+    // Per-file errors are surfaced but don't abort the run; a broken
+    // overlay file shouldn't block unrelated tests. Cases that depend
+    // on the missing overlay will hard-error at execute-time per §5.1.
+    const overlayLoad = await loadProjectOverlays(rootDir);
+    for (const err of overlayLoad.errors) {
+      yield { type: "overlay:load:failed", file: err.file, error: err.error };
     }
     yield { type: "bootstrap:done" };
 

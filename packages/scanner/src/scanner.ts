@@ -348,21 +348,20 @@ export class Scanner {
     }
 
     // Phase 5: Extract flow metadata from flow files.
-    // extractContractFromFile already returns both contracts and flows; we also
-    // call it on .flow.ts files so single-file flow modules are picked up.
+    // Post-Phase 2f: extractContractFromFile returns flows as `kind: "flow"`
+    // entries inside `attachments[]`. We also call it on .flow.ts files so
+    // single-file flow modules are picked up.
     const flows: NormalizedFlowMeta[] = [];
     const allFlowSourceFiles = [...flowFiles, ...contractFiles]; // contract files can also export flows
     const seenFlowIds = new Set<string>();
     for (const filePath of allFlowSourceFiles) {
       const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
       const result = await extractContractFromFile(absolutePath);
-      if (result.flows) {
-        for (const flow of result.flows) {
-          if (!seenFlowIds.has(flow.id)) {
-            flows.push(flow);
-            seenFlowIds.add(flow.id);
-          }
-        }
+      for (const att of result.attachments) {
+        if (att.kind !== "flow") continue;
+        if (seenFlowIds.has(att.flow.id)) continue;
+        flows.push(att.flow);
+        seenFlowIds.add(att.flow.id);
       }
       // Errors already surfaced in contract phase for shared files; only add
       // new errors for flow-only files

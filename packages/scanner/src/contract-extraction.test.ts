@@ -16,7 +16,40 @@ import {
   bootstrapAttachmentToNormalized,
   isBootstrapAttachment,
   protocolContractToNormalized,
+  synthesizeAttachments,
+  type NormalizedContractMeta,
+  type NormalizedFlowMeta,
 } from "./contract-extraction.js";
+
+// Helper: minimal contract carrier with one case.
+function makeContract(
+  id: string,
+  caseKey: string,
+  exportName: string,
+  opts: { needsSchema?: unknown; requireAttachment?: boolean } = {},
+): NormalizedContractMeta {
+  return {
+    id,
+    exportName,
+    protocol: "http",
+    target: "GET /x",
+    cases: [
+      {
+        key: caseKey,
+        lifecycle: "active",
+        severity: "warning",
+        ...(opts.needsSchema !== undefined ? { needsSchema: opts.needsSchema } : {}),
+        ...(opts.requireAttachment !== undefined
+          ? { extensions: { runnability: { requireAttachment: opts.requireAttachment } } }
+          : {}),
+      },
+    ],
+  };
+}
+
+function makeFlow(id: string, exportName: string): NormalizedFlowMeta {
+  return { id, exportName, protocol: "flow", steps: [] };
+}
 
 test("protocolContractToNormalized reads _extracted when available", () => {
   // Construct a fake carrier whose _extracted schemas differ from what
@@ -60,7 +93,7 @@ test("protocolContractToNormalized reads _extracted when available", () => {
 });
 
 // ---------------------------------------------------------------------------
-// v10 attachment model: bootstrap attachment extraction (Phase 2e)
+// v10 attachment model: bootstrap marker recognition (Phase 2e)
 // ---------------------------------------------------------------------------
 
 test("isBootstrapAttachment recognizes the runtime marker", () => {
@@ -90,14 +123,13 @@ test("isBootstrapAttachment recognizes the runtime marker", () => {
   expect(isBootstrapAttachment(undefined)).toBe(false);
 });
 
-test("bootstrapAttachmentToNormalized splits testId into contractId + caseKey", () => {
-  const normalized = bootstrapAttachmentToNormalized(
+test("bootstrapAttachmentToNormalized splits testId into contractId + caseKey marker", () => {
+  const marker = bootstrapAttachmentToNormalized(
     { testId: "orders.create.success" },
     "ordersStandalone",
   );
-  expect(normalized).toEqual({
+  expect(marker).toEqual({
     exportName: "ordersStandalone",
-    kind: "bootstrap-overlay",
     testId: "orders.create.success",
     contractId: "orders.create",
     caseKey: "success",
@@ -106,13 +138,12 @@ test("bootstrapAttachmentToNormalized splits testId into contractId + caseKey", 
 
 test("bootstrapAttachmentToNormalized splits at LAST dot (multi-segment contractId)", () => {
   // contractId can have dots (e.g. "v2.orders.create"); caseKey is the last segment.
-  const normalized = bootstrapAttachmentToNormalized(
+  const marker = bootstrapAttachmentToNormalized(
     { testId: "v2.orders.create.success" },
     "exp",
   );
-  expect(normalized).toEqual({
+  expect(marker).toEqual({
     exportName: "exp",
-    kind: "bootstrap-overlay",
     testId: "v2.orders.create.success",
     contractId: "v2.orders.create",
     caseKey: "success",
@@ -134,4 +165,157 @@ test("bootstrapAttachmentToNormalized rejects malformed testIds", () => {
   expect(
     bootstrapAttachmentToNormalized({ testId: ".success" }, "exp"),
   ).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// v10 attachment-model: synthesizeAttachments §7.3 inventory algorithm
+// ---------------------------------------------------------------------------
+
+test("synthesize: each case seeds a kind:'raw' entry by default", () => {
+  const c = makeContract("orders.create", "success", "ordersCreate");
+  const { attachments, errors } = synthesizeAttachments([c], [], []);
+  expect(errors).toEqual([]);
+  expect(attachments).toEqual([
+    {
+      kind: "raw",
+      testId: "orders.create.success",
+      contractId: "orders.create",
+      caseKey: "success",
+      exportName: "ordersCreate",
+    },
+  ]);
+});
+
+test("synthesize: bootstrap overlay REPLACES the raw entry for the same testId", () => {
+  const c = makeContract("orders.create", "success", "ordersCreate");
+  const marker = {
+    exportName: "ordersStandalone",
+    testId: "orders.create.success",
+    contractId: "orders.create",
+    caseKey: "success",
+  };
+  const { attachments, errors } = synthesizeAttachments([c], [], [marker]);
+  expect(errors).toEqual([]);
+  expect(attachments).toHaveLength(1); // raw replaced, not appended
+  expect(attachments[0]).toEqual({
+    kind: "bootstrap-overlay",
+    testId: "orders.create.success",
+    exportName: "ordersStandalone",
+    targetRef: { contractId: "orders.create", caseKey: "success" },
+    bootstrap: {},
+  });
+});
+
+test("synthesize: rawBypass present iff target case declares needsSchema", () => {
+  const cWithNeeds = makeContract("orders.create", "ok", "createWithNeeds", {
+    needsSchema: { type: "object", properties: { token: { type: "string" } } },
+  });
+  const cNoNeeds = makeContract("health.read", "ok", "health");
+
+  const overlayWithNeeds = {
+    exportName: "createOverlay",
+    testId: "orders.create.ok",
+    contractId: "orders.create",
+    caseKey: "ok",
+  };
+  const overlayNoNeeds = {
+    exportName: "healthOverlay",
+    testId: "health.read.ok",
+    contractId: "health.read",
+    caseKey: "ok",
+  };
+
+  const { attachments } = synthesizeAttachments(
+    [cWithNeeds, cNoNeeds],
+    [],
+    [overlayWithNeeds, overlayNoNeeds],
+  );
+
+  const withBypass = attachments.find((a) => a.testId === "orders.create.ok");
+  const withoutBypass = attachments.find((a) => a.testId === "health.read.ok");
+
+  expect(withBypass).toMatchObject({
+    kind: "bootstrap-overlay",
+    rawBypass: {
+      available: true,
+      needsSchema: { type: "object", properties: { token: { type: "string" } } },
+    },
+  });
+  expect(withoutBypass).toMatchObject({ kind: "bootstrap-overlay" });
+  expect((withoutBypass as { rawBypass?: unknown }).rawBypass).toBeUndefined();
+});
+
+test("synthesize: duplicate overlay surfaces a load-time error; first wins", () => {
+  const c = makeContract("orders.create", "ok", "createContract");
+  const m1 = {
+    exportName: "firstOverlay",
+    testId: "orders.create.ok",
+    contractId: "orders.create",
+    caseKey: "ok",
+  };
+  const m2 = {
+    exportName: "secondOverlay",
+    testId: "orders.create.ok",
+    contractId: "orders.create",
+    caseKey: "ok",
+  };
+  const { attachments, errors } = synthesizeAttachments([c], [], [m1, m2]);
+
+  expect(errors).toHaveLength(1);
+  expect(errors[0]?.error).toMatch(/Duplicate bootstrap overlay/);
+  expect(errors[0]?.error).toMatch(/orders\.create\.ok/);
+
+  // First overlay wins; second ignored.
+  expect(attachments).toHaveLength(1);
+  expect(attachments[0]).toMatchObject({
+    kind: "bootstrap-overlay",
+    exportName: "firstOverlay",
+  });
+});
+
+test("synthesize: orphan overlay (no matching case) still appears as bootstrap-overlay (no rawBypass)", () => {
+  // Cross-file: overlay's contract module not in the scanned set.
+  const orphan = {
+    exportName: "orphanOverlay",
+    testId: "absent.case.ok",
+    contractId: "absent.case",
+    caseKey: "ok",
+  };
+  const { attachments } = synthesizeAttachments([], [], [orphan]);
+  expect(attachments).toHaveLength(1);
+  expect(attachments[0]).toEqual({
+    kind: "bootstrap-overlay",
+    testId: "absent.case.ok",
+    exportName: "orphanOverlay",
+    targetRef: { contractId: "absent.case", caseKey: "ok" },
+    bootstrap: {},
+  });
+});
+
+test("synthesize: flows appear as kind:'flow' alongside raw/overlay entries", () => {
+  const c = makeContract("orders.create", "ok", "createContract");
+  const flow = makeFlow("orders-onboarding", "onboardingFlow");
+  const { attachments } = synthesizeAttachments([c], [flow], []);
+  expect(attachments).toHaveLength(2);
+
+  expect(attachments.find((a) => a.kind === "raw")).toMatchObject({
+    testId: "orders.create.ok",
+  });
+  expect(attachments.find((a) => a.kind === "flow")).toEqual({
+    kind: "flow",
+    testId: "orders-onboarding",
+    exportName: "onboardingFlow",
+    flow,
+  });
+});
+
+test("synthesize: case extensions.runnability.requireAttachment surfaces on raw", () => {
+  const c = makeContract("orders.create", "needs-overlay", "createContract", {
+    requireAttachment: true,
+  });
+  const { attachments } = synthesizeAttachments([c], [], []);
+  expect(attachments[0]).toMatchObject({
+    kind: "raw",
+    runnability: { requireAttachment: true },
+  });
 });
