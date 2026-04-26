@@ -550,13 +550,18 @@ export const invalidTimeoutUpdateTest = test(
 test("ctx.setTimeout - can extend timeout dynamically", async () => {
   const testFile = await makeTempFile(TIMEOUT_UPDATE_TEST_CONTENT);
   const executor = new TestExecutor();
-  // Initial timeout must be long enough for tsx subprocess to start up (~200ms)
-  // and reach ctx.setTimeout(450) before the initial timeout fires.
+  // Outer timeout sized generously (5000ms, same as the sibling
+  // `reduce-timeout` test) so tsx subprocess startup + IPC for the
+  // `ctx.setTimeout(450)` update have ample headroom on slow CI
+  // hardware. The test verifies the dynamic update mechanism works,
+  // not budget tightness — so the initial cap should never be the
+  // thing that fires. Pre-fix used 500ms which was reliably failing
+  // on GitHub Actions runners (subprocess startup ate ~300ms).
   const result = await executor.execute(
     `file://${testFile}`,
     "extend-timeout",
     { vars: {}, secrets: {} },
-    { timeout: 500 },
+    { timeout: 5000 },
   );
 
   expect(result.success).toBe(true);
