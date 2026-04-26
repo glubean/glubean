@@ -150,6 +150,44 @@ export const reads = test("env-reads", async (ctx) => {
     expect(result.success).toBe(true);
   }, 60_000);
 
+  test("runs project session.ts by default (matches CLI / MCP / ProjectRunner)", async () => {
+    // Pre-fix runCase defaulted noSession to true; programmatic callers
+    // would silently skip session setup/teardown. This test asserts the
+    // current default actually runs session.ts and the value it sets is
+    // visible to the case via ctx.session.
+    const projectRoot = await prepareFixture("session-default", {
+      "package.json": workspacePackageJson("session-default-test"),
+      "session.ts": `
+import { defineSession } from "@glubean/sdk";
+export default defineSession({
+  setup: async (ctx) => {
+    ctx.session.set("greeting", "from-session-setup");
+  },
+});
+`,
+      "tests/checks.test.ts": `
+import { test } from "@glubean/sdk";
+
+export const reads = test("session-reads", async (ctx) => {
+  ctx.assert(
+    ctx.session.require("greeting") === "from-session-setup",
+    "session.ts setup must have run by default",
+  );
+});
+`,
+    });
+
+    const result = await runCase({
+      filePath: join(projectRoot, "tests/checks.test.ts"),
+      testId: "session-reads",
+      exportName: "reads",
+      sharedConfig: LOCAL_RUN_DEFAULTS,
+    });
+
+    expect(result.orchestrationError).toBeUndefined();
+    expect(result.success).toBe(true);
+  }, 60_000);
+
   test("caller-supplied vars/secrets win over loaded envFile values", async () => {
     const projectRoot = await prepareFixture("env-override", {
       "package.json": workspacePackageJson("env-override-test"),

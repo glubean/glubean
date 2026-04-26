@@ -103,7 +103,14 @@ export interface RunCaseOptions {
   rootDir?: string;
   /** Shared run config (timeouts, schema inference, etc.). */
   sharedConfig: SharedRunConfig;
-  /** Skip session setup/teardown. */
+  /**
+   * Skip session setup/teardown. Defaults to `false` to match CLI / MCP
+   * / `ProjectRunner` defaults — a programmatic single-case run sees
+   * the same `session.ts` lifecycle a `glubean run --filter` would.
+   * Set to `true` only when the caller has a reason to bypass session
+   * (e.g. invoking from inside a test that already established its own
+   * session, or driving a fixture project with no `session.ts`).
+   */
   noSession?: boolean;
 
   /**
@@ -209,23 +216,22 @@ export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
   // omitted, walk up from the file looking for `package.json`.
   const rootDir = opts.rootDir ?? findProjectRoot(filePath);
 
-  // Load project env (matches CLI / MCP behavior). `envFile: null`
-  // skips the load; otherwise default basename is `.env`. Caller-supplied
+  // Load project env (matches CLI / MCP behavior). `envFile: null` skips
+  // the load; otherwise default basename is `.env`. Caller-supplied
   // `vars` / `secrets` merge on top (caller wins over file).
+  //
+  // No try/catch around `loadProjectEnv`: it treats missing `.env` /
+  // `.env.secrets` files as empty internally and only throws on real
+  // load failures (parse errors, IO errors). Letting those bubble up
+  // matches CLI / MCP behavior — silently empty-env-then-run is a
+  // worse failure mode than a clear parse error to the caller.
   let loadedVars: Record<string, string> = {};
   let loadedSecrets: Record<string, string> = {};
   if (opts.envFile !== null) {
     const envFileName = opts.envFile ?? ".env";
-    try {
-      const loaded = await loadProjectEnv(rootDir, envFileName);
-      loadedVars = loaded.vars;
-      loadedSecrets = loaded.secrets;
-    } catch {
-      // Match CLI behavior: missing env files are silently ignored.
-      // A real load failure (parse error) bubbles up here unchanged so
-      // the caller sees it instead of running with stale empty env.
-      // loadProjectEnv itself doesn't throw on missing files.
-    }
+    const loaded = await loadProjectEnv(rootDir, envFileName);
+    loadedVars = loaded.vars;
+    loadedSecrets = loaded.secrets;
   }
   const effectiveVars = { ...loadedVars, ...(opts.vars ?? {}) };
   const effectiveSecrets = { ...loadedSecrets, ...(opts.secrets ?? {}) };
@@ -299,7 +305,7 @@ export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
     vars: effectiveVars,
     secrets: effectiveSecrets,
     tests: [test],
-    noSession: opts.noSession ?? true,
+    noSession: opts.noSession ?? false,
   });
 
   const events: ProjectRunEvent[] = [];
