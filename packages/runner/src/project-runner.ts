@@ -47,6 +47,13 @@ export interface ProjectRunnerTest {
   meta: TestMeta;
 }
 
+// NOTE: template-id detection (`/\$\w+/`) lives inside the harness now
+// (`packages/runner/src/harness.ts`, batch mode expansion). Keeping the
+// expansion at the harness boundary preserves the per-file single-
+// subprocess invariant — the facade just passes `testIds + exportNames`
+// through and the harness handles both concrete and template entries
+// uniformly. See `internal/30-execution/2026-04-27-data-driven-discovery-rebuild/`.
+
 /**
  * Event stream yielded by `ProjectRunner.run()`. Causally ordered:
  *   bootstrap:start → bootstrap:done | bootstrap:failed
@@ -308,6 +315,19 @@ export class ProjectRunner {
         yield { type: "file:start", filePath, testCount: fileTests.length };
         const fileStart = Date.now();
 
+        // ONE harness subprocess per file, even for mixed static/data-driven
+        // exports. The harness's batch mode (extended in runner 0.2.6)
+        // detects template ids in `testIds` (matches /\$\w+/) and expands
+        // them in source order via `exportNamesMap` + `resolveModuleTests`.
+        // This preserves:
+        //   - per-file module-level state across all tests in the file
+        //   - source-order execution between static and data-driven exports
+        //   - failFast semantics (one stream of completions; consumer
+        //     decides when to stop)
+        //
+        // Pre-0.2.6 behavior was different and broken: harness's old batch
+        // mode passed templates through `findTestByExport` fallback that
+        // returned only the FIRST row. Now expansion is canonical (B1).
         for await (const event of executor.run(
           testFileUrl,
           "",

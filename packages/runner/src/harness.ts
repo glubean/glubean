@@ -1353,15 +1353,89 @@ try {
     process.exit(0);
   }
 
-  // ── Normal test mode: testId or testIds required ──
-  if (!testId && !testIds) {
+  // ── Mode validation ──
+  // At least one of testId, testIds, or exportName must be provided.
+  // exportName alone triggers the export-scoped enumeration mode below
+  // (canonical path for data-driven tests where per-row ids are runtime data).
+  if (!testId && !testIds && !exportName) {
     console.log(
       JSON.stringify({
         type: "error",
-        message: "Missing required arguments: --testId or --testIds",
+        message:
+          "Missing required arguments: --testId, --testIds, or --exportName",
       }),
     );
     process.exit(1);
+  }
+
+  // ── Export-scoped enumeration mode ──
+  // When --exportName is set without --testId/--testIds, enumerate every
+  // test belonging to that export and run all of them. This is the canonical
+  // path for `test.each` / `test.pick` data-driven exports: per-row ids
+  // (e.g. `demo-alpha`, `demo-beta` substituted from a `demo-$key` template)
+  // only exist after the EachBuilder/PickBuilder is built — that runtime
+  // fact lives here in the harness, not in any caller's static parser.
+  //
+  // Why a dedicated mode and not "passing template ids through --testIds":
+  // template ids (`demo-$key`) never match any concrete `Test.meta.id`, so
+  // `findTestById` returns undefined and the existing `exportNamesMap`
+  // fallback short-circuits to `findTestByExport` which only returns the
+  // FIRST test in the export — silent first-row-only bug that affected
+  // every CLI/MCP run of a data-driven cookbook test (B1).
+  if (exportName && !testId && !testIds) {
+    const allTests = resolveModuleTests(userModule);
+    const scoped = allTests.filter((t) => t.exportName === exportName);
+    if (scoped.length === 0) {
+      throw new Error(
+        `No tests found in export "${exportName}". Available exports: ${
+          Object.keys(userModule).join(", ")
+        }`,
+      );
+    }
+    let hasFailure = false;
+    for (const resolved of scoped) {
+      resetTestCounters();
+      const obj = findTestById(userModule, resolved.id);
+      if (!obj) {
+        // Should never happen if `resolveModuleTests` returned this id,
+        // but be defensive — emit a failure event rather than skipping silently.
+        console.log(JSON.stringify({
+          type: "status",
+          status: "failed",
+          id: resolved.id,
+          testId: resolved.id,
+          error: `Test "${resolved.id}" enumerated by resolveModuleTests but not findable by id`,
+        }));
+        hasFailure = true;
+        continue;
+      }
+      try {
+        await executeNewTest(obj);
+      } catch (error) {
+        if (error instanceof SkipError) {
+          console.log(JSON.stringify({
+            type: "status",
+            status: "skipped",
+            id: resolved.id,
+            testId: resolved.id,
+            reason: (error as SkipError).reason,
+          }));
+        } else {
+          hasFailure = true;
+          const reason = classifyErrorReason(error);
+          console.log(JSON.stringify({
+            type: "status",
+            status: "failed",
+            id: resolved.id,
+            testId: resolved.id,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+            ...(reason && { reason }),
+          }));
+        }
+      }
+    }
+    process.exit(hasFailure ? 1 : 0);
   }
 
   if (testIds) {
@@ -1369,7 +1443,28 @@ try {
     // Runs multiple tests in a single process, preserving module-level state.
     // When batchConcurrency > 1, tests run concurrently via p-queue
     // (opt-in via test.each({ parallel: true }) + --concurrency flag).
+    //
+    // Mixed input shape: each id in `testIds` is either
+    //   (a) a CONCRETE id like `"my-test"` — found via `findTestById`.
+    //   (b) a DATA-DRIVEN TEMPLATE like `"dj-csv-$label"` (matches /\$\w+/) —
+    //       expanded into per-row substituted ids via `resolveModuleTests`
+    //       filtered by `exportNamesMap[id]` (the export this template
+    //       belongs to). Each substituted row runs as its own work item
+    //       with its own substituted testId in events.
+    //
+    // Why expansion lives here: per-row ids are runtime data — only the
+    // harness's environment can produce them correctly. CLI/MCP/VSCode
+    // pre-rebuild stuffed templates into `--testIds=` and relied on the
+    // legacy `findTestByExport` fallback that returned only the FIRST row
+    // (silent first-row-only bug B1). The expansion below is the canonical
+    // fix: keep the single-subprocess-per-file invariant (module state +
+    // source order preserved) while running ALL rows.
+    //
+    // Caching `resolveModuleTests` once per harness run avoids repeated
+    // re-resolution if multiple template ids appear in the same file.
     let hasFailure = false;
+    let resolvedModuleTestsCache: ReturnType<typeof resolveModuleTests> | undefined;
+    const isTemplateId = (id: string): boolean => /\$\w+/.test(id);
 
     const runOneTest = async (id: string): Promise<void> => {
       resetTestCounters();
@@ -1401,15 +1496,53 @@ try {
       }
     };
 
+    /**
+     * Expand each `testIds` entry into one or more concrete ids to run,
+     * preserving source order. A template id with a known exportName
+     * expands into N substituted ids (one per row); a concrete id passes
+     * through as itself. Unknown templates pass through too — they'll
+     * fail loudly via the not-found path in `runOneTest`.
+     */
+    const expandedIds: string[] = [];
+    for (const id of testIds) {
+      if (isTemplateId(id) && exportNamesMap[id]) {
+        if (!resolvedModuleTestsCache) {
+          resolvedModuleTestsCache = resolveModuleTests(userModule);
+        }
+        const targetExport = exportNamesMap[id];
+        const scoped = resolvedModuleTestsCache.filter(
+          (t) => t.exportName === targetExport,
+        );
+        if (scoped.length === 0) {
+          // Template id whose export has no resolvable tests — emit a
+          // failure event for the template id itself so the run doesn't
+          // silently complete. (Without this, an empty `test.each([])`
+          // export would look like a passing zero-test run.)
+          console.log(JSON.stringify({
+            type: "status",
+            status: "failed",
+            id,
+            testId: id,
+            error: `No tests found in export "${targetExport}" (template id "${id}" expanded to zero rows)`,
+          }));
+          hasFailure = true;
+          continue;
+        }
+        for (const r of scoped) expandedIds.push(r.id);
+      } else {
+        expandedIds.push(id);
+      }
+    }
+
     if (batchConcurrency > 1) {
       const { default: PQueue } = await import("p-queue");
       const queue = new PQueue({ concurrency: batchConcurrency });
-      for (const id of testIds) {
+      for (const id of expandedIds) {
         void queue.add(() => runOneTest(id));
       }
       await queue.onIdle();
     } else {
-      for (const id of testIds) {
+      for (const id of expandedIds) {
         await runOneTest(id);
       }
     }

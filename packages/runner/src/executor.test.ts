@@ -2550,3 +2550,145 @@ test("parallel .each - events carry testId for attribution", async () => {
   }
   expect(byTest.size).toBe(3);
 });
+
+// ---------------------------------------------------------------------------
+// T1 — Export-scoped enumeration mode (data-driven test correctness)
+// ---------------------------------------------------------------------------
+//
+// Locks the contract from internal/30-execution/2026-04-27-data-driven-discovery-rebuild/.
+// When a caller passes `--exportName=X` without `--testId/--testIds`, the
+// harness MUST enumerate every test belonging to that export and run all
+// of them (not return only the first row via findTestByExport fallback —
+// which is what every CLI/MCP run was silently doing pre-0.2.6).
+//
+// The fixture is hermetic — inline data, no SDK loaders, no fs reads.
+// This isolates the harness's enumeration behavior from any cwd /
+// environment concern.
+
+const EXPORT_SCOPED_FIXTURE = `
+import { test } from "@glubean/sdk";
+
+// Three rows, three substituted ids, one shared exportName.
+export const demoCases = test.each([
+  { key: "alpha" },
+  { key: "beta" },
+  { key: "gamma" },
+])(
+  { id: "demo-$key", name: "demo $key" },
+  async (ctx, { key }) => {
+    ctx.assert(key.length > 0, "key non-empty for " + key);
+  },
+);
+
+// A second, unrelated export — must NOT show up in events when the
+// caller scopes to demoCases.
+export const otherCase = test(
+  { id: "unrelated-static" },
+  async (ctx) => {
+    ctx.assert(true, "unrelated");
+  },
+);
+`;
+
+test("exportName-scoped mode - enumerates ALL rows of a data-driven export", async () => {
+  const testFile = await makeTempFile(EXPORT_SCOPED_FIXTURE);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  for await (
+    const event of executor.run(
+      `file://${testFile}`,
+      "", // intentionally empty — exportName alone selects the scope
+      { vars: {}, secrets: {} },
+      {
+        exportName: "demoCases",
+        // No testIds, no testId — triggers harness mode 4
+        timeout: 10_000,
+      },
+    )
+  ) {
+    events.push(event);
+  }
+
+  const completed = events.filter(
+    (e) => e.type === "status" && (e as { status: string }).status === "completed",
+  );
+  expect(completed.length).toBe(3);
+
+  // Substituted ids — NOT the template "demo-$key".
+  const ids = completed
+    .map((e) => (e as { testId?: string; id?: string }).testId ??
+      (e as { id?: string }).id)
+    .sort();
+  expect(ids).toEqual(["demo-alpha", "demo-beta", "demo-gamma"]);
+
+  // The unrelated `otherCase` export must NOT have run.
+  for (const e of events) {
+    const eid = (e as { testId?: string; id?: string }).testId ??
+      (e as { id?: string }).id;
+    expect(eid).not.toBe("unrelated-static");
+  }
+});
+
+test("exportName-scoped mode - errors clearly when export has no tests", async () => {
+  const testFile = await makeTempFile(EXPORT_SCOPED_FIXTURE);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  for await (
+    const event of executor.run(
+      `file://${testFile}`,
+      "",
+      { vars: {}, secrets: {} },
+      {
+        exportName: "doesNotExist",
+        timeout: 10_000,
+      },
+    )
+  ) {
+    events.push(event);
+  }
+
+  // Either an explicit error event surfaces, or the harness fails its run.
+  // Crucially the test MUST NOT silently succeed with zero passes — the old
+  // behavior was first-row-only "pass" which masked broken setups.
+  const completed = events.filter(
+    (e) => e.type === "status" && (e as { status: string }).status === "completed",
+  );
+  expect(completed.length).toBe(0);
+
+  const failures = events.filter(
+    (e) =>
+      e.type === "error" ||
+      (e.type === "status" && (e as { status: string }).status === "failed"),
+  );
+  expect(failures.length).toBeGreaterThan(0);
+});
+
+test("exportName-scoped mode - rejects empty input (no testId/testIds/exportName)", async () => {
+  const testFile = await makeTempFile(EXPORT_SCOPED_FIXTURE);
+  const executor = new TestExecutor();
+  const events: ExecutionEvent[] = [];
+
+  // Caller passes empty testId AND no exportName — harness should reject
+  // with the missing-arguments error rather than silently spawning anything.
+  for await (
+    const event of executor.run(
+      `file://${testFile}`,
+      "",
+      { vars: {}, secrets: {} },
+      { timeout: 10_000 },
+    )
+  ) {
+    events.push(event);
+  }
+
+  const errors = events.filter((e) => e.type === "error");
+  expect(errors.length).toBeGreaterThan(0);
+  // Message must mention the new tri-flag contract so a regression that
+  // accidentally accepts empty input is caught.
+  const messages = errors
+    .map((e) => (e as { message?: string }).message ?? "")
+    .join(" ");
+  expect(messages).toMatch(/--testId|--testIds|--exportName/);
+});
