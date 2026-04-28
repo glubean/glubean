@@ -22,6 +22,7 @@ import { specSplitCommand } from "./commands/spec_split.js";
 import { redactCommand } from "./commands/redact.js";
 import { configMcpCommand } from "./commands/config_mcp.js";
 import { upgradeCommand } from "./commands/upgrade.js";
+import { migrateCommand } from "./commands/migrate.js";
 
 import { envShowCommand, envUseCommand, envResetCommand, envListCommand } from "./commands/env.js";
 import { abortUpdateCheck, checkForUpdates } from "./update_check.js";
@@ -216,6 +217,21 @@ program
       dir: options.dir,
       format: options.format,
       title: options.title,
+    });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migrate command
+// ─────────────────────────────────────────────────────────────────────────────
+program
+  .command("migrate")
+  .description("Preview or apply v0.1.x -> v10 project migrations")
+  .option("-d, --dir <path>", "Project directory", ".")
+  .option("--apply", "Write changes instead of printing a dry-run diff")
+  .action(async (options) => {
+    await migrateCommand({
+      dir: options.dir,
+      apply: options.apply,
     });
   });
 

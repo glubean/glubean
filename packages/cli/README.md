@@ -22,6 +22,7 @@ glubean run                     # run all tests in testDir
 glubean run path/to/file.test.ts
 glubean run --filter checkout --tag smoke
 glubean run --ci --upload       # CI mode + push results to Cloud
+glubean migrate                 # preview v0.1.x -> v10 contract changes
 ```
 
 See the full project README at the [repo root](../../README.md) for the broader Glubean story (SDK, MCP, agent workflow).
@@ -84,6 +85,25 @@ Statically analyze a directory and emit `metadata.json` describing the test suit
 glubean scan tests/
 glubean scan --upload --project <id>      # push contract metadata without running
 ```
+
+### `migrate`
+
+Preview or apply v0.1.x -> v10 project migrations. The command rewrites safe legacy patterns and reports anything that needs manual review.
+
+```bash
+glubean migrate
+glubean migrate --dir path/to/project
+glubean migrate --apply
+```
+
+Current automatic changes:
+
+| Pattern | Migration |
+|---------|-----------|
+| `contract.http("id", spec)` | Adds a scoped `contract.http.with(...)` instance and calls it |
+| `import "@glubean/grpc"` / `import "@glubean/graphql"` | Moves plugin installation into `glubean.setup.ts` |
+
+Manual review items are reported for removed case-level `setup` / `teardown`, legacy `definePlugin((runtime) => ...)`, and cases with `needs` that should be wrapped in `defineHttpCase<Needs>(...)`.
 
 ### `validate-metadata`
 
