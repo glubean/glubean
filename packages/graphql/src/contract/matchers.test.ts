@@ -1,5 +1,5 @@
 /**
- * Tests for GraphQL custom matchers registered via side-effect import.
+ * Tests for GraphQL custom matchers (registered via plugin manifest, not side-effect import).
  *
  * Scope:
  *   - toHaveHttpStatus(code) — positive + negative + wrong-shape actual

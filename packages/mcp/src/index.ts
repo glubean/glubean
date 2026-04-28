@@ -1050,7 +1050,14 @@ export async function runLocalTestsFromFile(args: {
         break;
       }
       case "error": {
-        if (!currentTestId) break;
+        if (!currentTestId) {
+          // Subprocess crashed before starting any test (e.g. tsx failed to
+          // start, syntax error before first `start` event). Capture as an
+          // orchestration error so the caller sees a non-empty error field
+          // instead of total:0 which looks like "no tests found" success.
+          if (!orchestrationError) orchestrationError = event.message;
+          break;
+        }
         const acc = accumulators.get(currentTestId);
         if (acc && !acc.errorMessage) acc.errorMessage = event.message;
         break;

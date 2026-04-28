@@ -53,7 +53,6 @@ export {
   matchesTemplateFilter,
   matchesTemplateId,
   stripVariantPrefix,
-  templateIdToRegExp,
 } from "./template-sentinel.js";
 
 // Re-export runtime contract + flow + attachment extraction

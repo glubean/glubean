@@ -149,7 +149,7 @@ function makeCtx(partial: Partial<TestContext> = {}): TestContext {
 
 beforeEach(() => {
   clearRegistry();
-  // Re-register gRPC adapter + wrap factory (mirrors side-effect from package index)
+  // Re-register gRPC adapter + wrap factory (mirrors what installPlugin(grpcPlugin) does)
   contract.register("grpc", grpcAdapter);
   {
     const dispatcher = (contract as any).grpc as Parameters<typeof createGrpcRoot>[0];

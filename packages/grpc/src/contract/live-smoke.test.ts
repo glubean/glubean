@@ -19,7 +19,6 @@ import * as protoLoader from "@grpc/proto-loader";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import "./index.js"; // side-effect: register grpc contract adapter
 import { contract, runFlow } from "@glubean/sdk";
 import type { FlowContract, TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";

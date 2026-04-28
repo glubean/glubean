@@ -13,7 +13,7 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   const originalWrite = process.stdout.write;
   const originalLog = console.log;
   process.stdout.write = ((chunk: string | Uint8Array) => {
-    chunks.push(typeof chunk === "string" ? chunk : chunk.toString("utf-8"));
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8"));
     return true;
   }) as typeof process.stdout.write;
   console.log = (...args: unknown[]) => {
@@ -112,7 +112,7 @@ test("migrate reports legacy definePlugin factories for manual review", async ()
 
   try {
     await writeFile(
-      join(dir, "legacy-plugin.ts"),
+      join(dir, "auth.plugin.ts"),
       `import { definePlugin } from "@glubean/sdk";
 
 export const plugin = definePlugin((runtime) => ({
@@ -126,6 +126,65 @@ export const plugin = definePlugin((runtime) => ({
 
     expect(stdout).toContain("Manual review");
     expect(stdout).toContain("definePlugin((runtime) => ...) was removed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("migrate ignores definePlugin imported from a non-SDK source", async () => {
+  const dir = await createTempDir();
+
+  try {
+    await writeFile(
+      join(dir, "vendor.plugin.ts"),
+      `import { definePlugin } from "some-other-lib";
+
+export const plugin = definePlugin((runtime) => ({
+  do: runtime.something,
+}));
+`,
+      "utf-8",
+    );
+
+    const stdout = await captureStdout(() => migrateCommand({ dir }));
+
+    expect(stdout).toContain("No legacy patterns found.");
+    expect(stdout).not.toContain("definePlugin((runtime) => ...) was removed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("migrate refuses to auto-rewrite when the file already has contract.http.with(...)", async () => {
+  const dir = await createTempDir();
+
+  try {
+    await writeFile(
+      join(dir, "users.contract.ts"),
+      `import { contract } from "@glubean/sdk";
+
+const userApi = contract.http.with("user-service", { client: customHttpClient });
+
+export const legacy = contract.http("legacy-id", {
+  endpoint: "GET /legacy",
+  cases: { ok: { description: "ok", expect: { status: 200 } } },
+});
+
+export const modern = userApi("modern-id", {
+  endpoint: "GET /modern",
+  cases: { ok: { description: "ok", expect: { status: 200 } } },
+});
+`,
+      "utf-8",
+    );
+
+    const stdout = await captureStdout(() => migrateCommand({ dir }));
+
+    expect(stdout).toContain("Manual review");
+    expect(stdout).toContain("alongside an existing contract.http.with(...) instance");
+    // No automatic rewrite should be queued.
+    expect(stdout).not.toContain("Automatic changes");
+    expect(stdout).not.toContain("migratedHttp = contract.http.with");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

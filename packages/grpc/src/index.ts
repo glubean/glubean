@@ -7,7 +7,9 @@
  * gRPC contract adapter:
  *   `installPlugin(grpcPlugin)` → `contract.grpc.with(...)` UX.
  *
- * See `./contract/index.ts` for the registration logic. See
+ * Registration lives in the plugin manifest + `setup()` at the bottom of this
+ * file; `./contract/index.ts` is side-effect-free and only re-exports the
+ * adapter, factory, matchers, and types referenced by the manifest. See
  * `internal/40-discovery/proposals/contract-grpc-graphql-expansion.md` §5.1
  * for the single-package rationale ("contract is a first-class citizen").
  *

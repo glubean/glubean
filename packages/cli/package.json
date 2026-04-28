@@ -1,6 +1,6 @@
 {
   "name": "@glubean/cli",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "bin": {
     "glubean": "./bin/gb.js"
@@ -35,13 +35,21 @@
     "archiver": "^7.0.0",
     "dotenv": "^16.4.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.9.3",
     "yaml": "^2.7.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@glubean/graphql": "workspace:*",
     "@types/node": "^22.0.0",
-    "@types/archiver": "^6.0.0"
+    "@types/archiver": "^6.0.0",
+    "typescript": "^5.9.3"
   },
   "repository": {
     "type": "git",

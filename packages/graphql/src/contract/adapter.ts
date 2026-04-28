@@ -2,8 +2,9 @@
  * Built-in GraphQL contract adapter for @glubean/graphql 0.2.0.
  *
  * Shipped alongside the transport plugin in @glubean/graphql (single-package
- * model — "contract is a first-class citizen"). Registered via
- * `contract.register("graphql", graphqlAdapter)` on import — see ./index.ts.
+ * model — "contract is a first-class citizen"). Registered via the plugin
+ * manifest (`installPlugin(graphqlManifest)` in `glubean.setup.ts`); a bare
+ * import does not register the adapter.
  *
  * Attachment-model v10 adapter (Spike 4 migration). No per-case lifecycle:
  * the case is pure semantics; setup-style work belongs to a

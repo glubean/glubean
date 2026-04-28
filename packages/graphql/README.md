@@ -363,7 +363,7 @@ instance `defaults.headers` < contract `defaultHeaders` < case `headers` < flow-
 ## Migration: 0.1.x → 0.2.0
 
 **What's new:**
-- Contract adapter shipped inside this package. `import "@glubean/graphql"` now also registers `contract.graphql.with(...)`.
+- Contract adapter shipped inside this package. Install the manifest from `glubean.setup.ts` to enable `contract.graphql.with(...)` — a bare `import "@glubean/graphql"` is not enough.
 - Single-package model: no separate `@glubean/contract-graphql` package.
 - `GraphQLClient.query` / `.mutate` return `GraphQLResult<T>` — additive over `GraphQLResponse<T>`: same `data` / `errors` / `extensions`, plus new `httpStatus` / `headers` / `rawBody`.
 
@@ -374,7 +374,7 @@ instance `defaults.headers` < contract `defaultHeaders` < case `headers` < flow-
 - All 0.1.x transport tests still pass without modification.
 
 **Only additive API changes:**
-- `contract.graphql.with(...)` now available from `@glubean/sdk` after importing this package.
+- `contract.graphql.with(...)` available after calling `installPlugin(graphqlManifest)` in `glubean.setup.ts`.
 - `GraphQLResult<T>` is exported alongside `GraphQLResponse<T>` and is returned from client methods.
 - Export surface gained contract types (`GraphqlContractSpec`, `GraphqlContractCase`, etc.).
 

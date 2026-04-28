@@ -1,6 +1,36 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
-import ts from "typescript";
+
+// `typescript` is intentionally lazy-loaded. The CLI ships it as a `devDependency`
+// (and a soft `peerDependency`) — bundling the ~60MB compiler into the standard
+// install path would hit every CLI user just for `glubean migrate`. Most v0.1.x
+// projects already have `typescript` installed; if not, we fail with a clear
+// install hint instead of silently importing nothing.
+type TS = typeof import("typescript");
+async function loadTypeScript(rootDir: string): Promise<TS> {
+  // Try the project's own `typescript` first — a globally or npx-installed
+  // `glubean` would otherwise resolve to the CLI package itself, missing the
+  // version the project uses (or failing entirely if the project has TS but
+  // the CLI doesn't carry it as a dependency).
+  const candidates = [
+    // Project-local: resolves from the project being migrated
+    () => createRequire(join(rootDir, "package.json")).resolve("typescript"),
+    // CLI-local fallback: bare `require` is undefined in ESM; use createRequire rooted at this file
+    () => createRequire(import.meta.url).resolve("typescript"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const resolved = candidate();
+      return (await import(resolved)).default as TS;
+    } catch {
+      // try next
+    }
+  }
+  throw new Error(
+    "glubean migrate requires the `typescript` package. Run `npm install -D typescript` (or pnpm/yarn equivalent) and retry.",
+  );
+}
 
 const colors = {
   reset: "\x1b[0m",
@@ -39,7 +69,11 @@ interface Replacement {
 interface ManualFinding {
   file: string;
   line: number;
-  code: "legacy-lifecycle" | "legacy-plugin" | "needs-factory";
+  code:
+    | "legacy-lifecycle"
+    | "legacy-plugin"
+    | "needs-factory"
+    | "legacy-http-bare";
   message: string;
 }
 
@@ -116,13 +150,14 @@ export async function migrateCommand(options: MigrateCommandOptions = {}): Promi
 }
 
 export async function planMigration(rootDir: string): Promise<MigratePlan> {
+  const ts = await loadTypeScript(rootDir);
   const files = await collectTypeScriptFiles(rootDir);
   const filePlans: FilePlan[] = [];
   const setupPlugins = new Set<string>();
 
   for (const file of files) {
     const source = await readFile(file, "utf-8");
-    const plan = planFileMigration(rootDir, file, source);
+    const plan = planFileMigration(ts, rootDir, file, source);
     for (const plugin of plan.setupPlugins) setupPlugins.add(plugin);
     filePlans.push({
       file,
@@ -167,7 +202,7 @@ export async function planMigration(rootDir: string): Promise<MigratePlan> {
   return { rootDir, files: filePlans, setupPlugins };
 }
 
-function planFileMigration(rootDir: string, file: string, source: string): {
+function planFileMigration(ts: TS, rootDir: string, file: string, source: string): {
   replacements: Replacement[];
   fixes: AutoFix[];
   manual: ManualFinding[];
@@ -178,32 +213,60 @@ function planFileMigration(rootDir: string, file: string, source: string): {
   const fixes: AutoFix[] = [];
   const manual: ManualFinding[] = [];
   const setupPlugins = new Set<string>();
-  const legacyHttpCalls: ts.CallExpression[] = [];
-  const removedImports = new Set<ts.ImportDeclaration>();
+  const legacyHttpCalls: import("typescript").CallExpression[] = [];
+  const removedImports = new Set<import("typescript").ImportDeclaration>();
 
-  const visit = (node: ts.Node): void => {
+  // Track the LOCAL binding names bound to `@glubean/sdk`'s `definePlugin`.
+  // Using a Set handles `import { definePlugin as glubeanPlugin }` aliases —
+  // the old single-flag approach only checked for a callee named literally
+  // "definePlugin", so aliases were missed and unrelated `definePlugin` from
+  // other libraries could still be false-positived when the file also imported
+  // the SDK symbol under an alias.
+  const definePluginLocals = new Set<string>();
+
+  // Detect whether the file already declares its own scoped HTTP instance via
+  // `contract.http.with(...)`. If so, the user is past the trivial-bare-call
+  // pattern and an empty `contract.http.with("<stem>", {})` synthesised by
+  // migrate would clobber meaningful local config. Refuse the auto-rewrite —
+  // surface a manual review instead.
+  let hasExistingHttpWith = false;
+
+  const visit = (node: import("typescript").Node): void => {
     if (ts.isImportDeclaration(node)) {
-      const specifier = stringLiteralText(node.moduleSpecifier);
+      const specifier = stringLiteralText(ts, node.moduleSpecifier);
       if (!node.importClause && specifier && CONTRACT_PLUGIN_IMPORTS[specifier]) {
         setupPlugins.add(specifier);
         removedImports.add(node);
         replacements.push(removeStatementReplacement(source, node));
         fixes.push({
           file,
-          line: lineOf(sourceFile, node),
+          line: lineOf(ts, sourceFile, node),
           message: `Move ${specifier} side-effect plugin import to glubean.setup.ts installPlugin(...).`,
         });
+      }
+      if (specifier === "@glubean/sdk" && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
+        for (const element of node.importClause.namedBindings.elements) {
+          // Track the LOCAL name (after `as`) so aliased imports are caught:
+          // `import { definePlugin as dp } from "@glubean/sdk"` → locals has "dp"
+          const original = element.propertyName?.text ?? element.name.text;
+          if (original === "definePlugin") {
+            definePluginLocals.add(element.name.text);
+          }
+        }
       }
     }
 
     if (ts.isCallExpression(node)) {
-      if (isLegacyHttpCall(node)) {
+      if (isLegacyHttpCall(ts, node)) {
         legacyHttpCalls.push(node);
       }
-      if (isLegacyDefinePluginCall(node)) {
+      if (isExistingHttpWithCall(ts, node)) {
+        hasExistingHttpWith = true;
+      }
+      if (definePluginLocals.size > 0 && isLegacyDefinePluginCall(ts, node, definePluginLocals)) {
         manual.push({
           file,
-          line: lineOf(sourceFile, node),
+          line: lineOf(ts, sourceFile, node),
           code: "legacy-plugin",
           message: "definePlugin((runtime) => ...) was removed; migrate to definePlugin({ matchers, protocols, setup }).",
         });
@@ -211,7 +274,7 @@ function planFileMigration(rootDir: string, file: string, source: string): {
     }
 
     if (ts.isObjectLiteralExpression(node)) {
-      collectCaseFindings(sourceFile, file, node, manual);
+      collectCaseFindings(ts, sourceFile, file, node, manual);
     }
 
     ts.forEachChild(node, visit);
@@ -220,25 +283,51 @@ function planFileMigration(rootDir: string, file: string, source: string): {
   visit(sourceFile);
 
   if (legacyHttpCalls.length > 0) {
-    const instanceName = uniqueIdentifier(source, "migratedHttp");
-    const importEnd = findImportInsertionOffset(sourceFile, removedImports);
-    const instanceLabel = scopedInstanceLabel(file, rootDir);
-    replacements.push({
-      start: importEnd,
-      end: importEnd,
-      text: `${source[importEnd - 1] === "\n" ? "" : "\n"}\nconst ${instanceName} = contract.http.with("${instanceLabel}", {});\n`,
-    });
-
-    for (const call of legacyHttpCalls) {
+    if (hasExistingHttpWith) {
+      // Bail on the auto-rewrite — the file already has a scoped HTTP instance,
+      // so the synthesised `migratedHttp = contract.http.with("<stem>", {})`
+      // would either collide with an existing identifier or contradict the
+      // user's intentional local setup. Report each legacy call as manual.
+      for (const call of legacyHttpCalls) {
+        manual.push({
+          file,
+          line: lineOf(ts, sourceFile, call),
+          code: "legacy-http-bare",
+          message: 'Bare contract.http("id", spec) call found alongside an existing contract.http.with(...) instance. Rebind manually onto the scoped instance to preserve your client/baseUrl config.',
+        });
+      }
+    } else {
+      const instanceName = uniqueIdentifier(source, "migratedHttp");
+      const importEnd = findImportInsertionOffset(ts, sourceFile, removedImports);
+      const instanceLabel = scopedInstanceLabel(file, rootDir);
       replacements.push({
-        start: call.expression.getStart(sourceFile),
-        end: call.expression.getEnd(),
-        text: instanceName,
+        start: importEnd,
+        end: importEnd,
+        text: `${source[importEnd - 1] === "\n" ? "" : "\n"}\nconst ${instanceName} = contract.http.with("${instanceLabel}", {});\n`,
       });
-      fixes.push({
+
+      for (const call of legacyHttpCalls) {
+        replacements.push({
+          start: call.expression.getStart(sourceFile),
+          end: call.expression.getEnd(),
+          text: instanceName,
+        });
+        fixes.push({
+          file,
+          line: lineOf(ts, sourceFile, call),
+          message: 'Rewrite contract.http("id", spec) to a scoped contract.http.with(...) instance.',
+        });
+      }
+
+      // Always surface the synthesised instance config for review — the empty
+      // `{}` is a placeholder. If the user previously relied on plugin-level
+      // HTTP defaults (a global client manifest), this is fine. If they were
+      // bringing per-file http config they will need to add it here.
+      manual.push({
         file,
-        line: lineOf(sourceFile, call),
-        message: 'Rewrite contract.http("id", spec) to a scoped contract.http.with(...) instance.',
+        line: lineOf(ts, sourceFile, legacyHttpCalls[0]!),
+        code: "legacy-http-bare",
+        message: `Created ${instanceName} = contract.http.with("${instanceLabel}", {}). Review the empty options object and add client/baseUrl/headers as needed.`,
       });
     }
   }
@@ -247,14 +336,15 @@ function planFileMigration(rootDir: string, file: string, source: string): {
 }
 
 function collectCaseFindings(
-  sourceFile: ts.SourceFile,
+  ts: TS,
+  sourceFile: import("typescript").SourceFile,
   file: string,
-  object: ts.ObjectLiteralExpression,
+  object: import("typescript").ObjectLiteralExpression,
   manual: ManualFinding[],
 ): void {
   for (const property of object.properties) {
     if (!ts.isPropertyAssignment(property)) continue;
-    if (propertyName(property.name) !== "cases") continue;
+    if (propertyName(ts, property.name) !== "cases") continue;
     if (!ts.isObjectLiteralExpression(property.initializer)) continue;
 
     for (const caseProp of property.initializer.properties) {
@@ -267,11 +357,11 @@ function collectCaseFindings(
 
       for (const field of value.properties) {
         if (!ts.isPropertyAssignment(field)) continue;
-        const name = propertyName(field.name);
+        const name = propertyName(ts, field.name);
         if (name === "setup" || name === "teardown") {
           manual.push({
             file,
-            line: lineOf(sourceFile, field),
+            line: lineOf(ts, sourceFile, field),
             code: "legacy-lifecycle",
             message: `Case-level ${name} was removed; extract lifecycle work into a bootstrap overlay or session.`,
           });
@@ -279,7 +369,7 @@ function collectCaseFindings(
         if (name === "needs") {
           manual.push({
             file,
-            line: lineOf(sourceFile, field),
+            line: lineOf(ts, sourceFile, field),
             code: "needs-factory",
             message: "Case has needs; wrap the case in defineHttpCase<Needs>(...) to preserve body/input typing.",
           });
@@ -289,15 +379,33 @@ function collectCaseFindings(
   }
 }
 
-function isLegacyHttpCall(node: ts.CallExpression): boolean {
+function isLegacyHttpCall(ts: TS, node: import("typescript").CallExpression): boolean {
   const expression = node.expression;
   if (!ts.isPropertyAccessExpression(expression)) return false;
   if (expression.name.text !== "http") return false;
   return ts.isIdentifier(expression.expression) && expression.expression.text === "contract";
 }
 
-function isLegacyDefinePluginCall(node: ts.CallExpression): boolean {
-  if (!ts.isIdentifier(node.expression) || node.expression.text !== "definePlugin") return false;
+/**
+ * Match `contract.http.with(...)` — the v10 scoped instance constructor.
+ * Used to detect "user already declared a scoped http instance in this file"
+ * so we don't auto-rewrite over their config.
+ */
+function isExistingHttpWithCall(ts: TS, node: import("typescript").CallExpression): boolean {
+  const expression = node.expression;
+  if (!ts.isPropertyAccessExpression(expression)) return false;
+  if (expression.name.text !== "with") return false;
+  if (!ts.isPropertyAccessExpression(expression.expression)) return false;
+  if (expression.expression.name.text !== "http") return false;
+  return ts.isIdentifier(expression.expression.expression) && expression.expression.expression.text === "contract";
+}
+
+function isLegacyDefinePluginCall(
+  ts: TS,
+  node: import("typescript").CallExpression,
+  locals: Set<string>,
+): boolean {
+  if (!ts.isIdentifier(node.expression) || !locals.has(node.expression.text)) return false;
   const first = node.arguments[0];
   return !!first && (ts.isArrowFunction(first) || ts.isFunctionExpression(first));
 }
@@ -333,12 +441,22 @@ async function collectTypeScriptFiles(rootDir: string): Promise<string[]> {
 function isMigratableTsFile(path: string): boolean {
   if (!path.endsWith(".ts") || path.endsWith(".d.ts")) return false;
   const name = basename(path);
+  // Migratable file conventions:
+  //   - `glubean.setup.ts` — for installPlugin manifest rewrites
+  //   - `*.contract.ts` / `*.flow.ts` — contract-layer files
+  //   - `*.test.ts` / `*.spec.ts` — tests that may import contract surfaces
+  //   - `*.plugin.ts` / `*.plugins.ts` — plugin authoring (legacy `definePlugin`).
+  //     Pre-fix used `name.includes("plugin")` which over-matched any file
+  //     whose name happened to contain "plugin" (e.g. `eslint-plugin.ts`,
+  //     `plugin-utils.ts`). Now we only match a `.plugin.ts` / `.plugins.ts`
+  //     suffix — the conventional Glubean plugin naming.
   return name === "glubean.setup.ts" ||
     name.endsWith(".contract.ts") ||
     name.endsWith(".flow.ts") ||
     name.endsWith(".test.ts") ||
     name.endsWith(".spec.ts") ||
-    name.includes("plugin");
+    name.endsWith(".plugin.ts") ||
+    name.endsWith(".plugins.ts");
 }
 
 function ensureSetupInstalls(source: string, plugins: Set<string>): string {
@@ -427,7 +545,11 @@ function splitLines(text: string): string[] {
   return lines.filter((line) => line.length > 0);
 }
 
-function findImportInsertionOffset(sourceFile: ts.SourceFile, skip: Set<ts.Node>): number {
+function findImportInsertionOffset(
+  ts: TS,
+  sourceFile: import("typescript").SourceFile,
+  skip: Set<import("typescript").Node>,
+): number {
   let offset = 0;
   for (const statement of sourceFile.statements) {
     if (ts.isImportDeclaration(statement) && !skip.has(statement)) {
@@ -437,23 +559,27 @@ function findImportInsertionOffset(sourceFile: ts.SourceFile, skip: Set<ts.Node>
   return offset;
 }
 
-function removeStatementReplacement(source: string, node: ts.Node): Replacement {
+function removeStatementReplacement(source: string, node: import("typescript").Node): Replacement {
   let end = node.end;
   if (source[end] === "\r" && source[end + 1] === "\n") end += 2;
   else if (source[end] === "\n") end += 1;
   return { start: node.getStart(), end, text: "" };
 }
 
-function stringLiteralText(node: ts.Node): string | undefined {
+function stringLiteralText(ts: TS, node: import("typescript").Node): string | undefined {
   return ts.isStringLiteral(node) ? node.text : undefined;
 }
 
-function propertyName(name: ts.PropertyName): string | undefined {
+function propertyName(ts: TS, name: import("typescript").PropertyName): string | undefined {
   if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text;
   return undefined;
 }
 
-function lineOf(sourceFile: ts.SourceFile, node: ts.Node): number {
+function lineOf(
+  _ts: TS,
+  sourceFile: import("typescript").SourceFile,
+  node: import("typescript").Node,
+): number {
   return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 }
 

@@ -362,7 +362,7 @@ instance `defaults.metadata` < contract `defaultMetadata` < case `metadata` < fl
 ## Migration: 0.1.x → 0.2.0
 
 **What's new:**
-- Contract adapter shipped inside this package. `import "@glubean/grpc"` now also registers `contract.grpc.with(...)`.
+- Contract adapter shipped inside this package. Install the manifest from `glubean.setup.ts` to enable `contract.grpc.with(...)` — a bare `import "@glubean/grpc"` is not enough.
 - Single-package model: no separate `@glubean/contract-grpc` package.
 
 **What's not broken:**
@@ -371,7 +371,7 @@ instance `defaults.metadata` < contract `defaultMetadata` < case `metadata` < fl
 - All 0.1.x transport tests still pass without modification.
 
 **Only additive API changes:**
-- `contract.grpc.with(...)` now available from `@glubean/sdk` after importing this package.
+- `contract.grpc.with(...)` available after calling `installPlugin(grpcManifest)` in `glubean.setup.ts`.
 - Export surface gained contract types (`GrpcContractSpec`, `GrpcContractCase`, etc.).
 
 If you currently use `@glubean/grpc` only as a transport plugin and do not import `contract.grpc` anywhere, no migration is required.

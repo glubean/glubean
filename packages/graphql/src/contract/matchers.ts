@@ -330,14 +330,14 @@ const toHaveGraphqlExtension = (
 };
 
 // =============================================================================
-// Registration — side effect
+// Registration — called from plugin manifest, not a bare import side effect
 // =============================================================================
 
 /**
  * Register GraphQL matchers onto the shared `Expectation` prototype. Called
- * from `./index.ts` during the same side-effect block that registers the
- * contract adapter; users get matchers + adapter from a single
- * `import "@glubean/graphql"`.
+ * from `./index.ts` when the plugin manifest is installed via
+ * `installPlugin(graphqlManifest)` in `glubean.setup.ts`; a bare
+ * `import "@glubean/graphql"` does not register matchers or the adapter.
  *
  * Idempotent: swallows the "matcher already exists" error thrown by
  * `Expectation.extend` on re-evaluation (duplicate imports, Vitest

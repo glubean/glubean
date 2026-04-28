@@ -1,10 +1,11 @@
 /**
  * gRPC custom matchers for `ctx.expect()`.
  *
- * Registered as a side effect of `import "@glubean/grpc"` (see `./index.ts`).
- * No extra import or configure step required — the matchers become available
- * on every `ctx.expect(res)` call and are fully typed via the
- * `CustomMatchers<T>` declaration merging block below.
+ * Registered when the plugin manifest is installed via
+ * `installPlugin(grpcManifest)` in `glubean.setup.ts`. A bare
+ * `import "@glubean/grpc"` does not register matchers — use the manifest.
+ * Matchers become available on every `ctx.expect(res)` call and are fully
+ * typed via the `CustomMatchers<T>` declaration merging block below.
  *
  * Matchers work on any object that carries gRPC response shape, including:
  *   - `GrpcCallResult` from `@glubean/grpc` transport (direct client.call)
