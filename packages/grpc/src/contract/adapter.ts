@@ -308,6 +308,8 @@ function projectGrpc(
       // authoritative rawBypass trigger downstream; `needsSchema` is
       // the live SchemaLike that normalize() converts to JSON-safe.
       given: casted.given,
+      hasVerify: typeof casted.verify === "function",
+      verifyRules: casted.verifyRules,
       runnability: casted.runnability,
       hasNeeds: casted.needs !== undefined,
       needsSchema: casted.needs as unknown,
@@ -358,6 +360,8 @@ function normalizeGrpc(
         ...c,
         schemas: safe,
         given: c.given,
+        hasVerify: c.hasVerify,
+        verifyRules: c.verifyRules,
         runnability: c.runnability,
         hasNeeds: c.hasNeeds,
         needsSchema: safeNeeds,

@@ -88,6 +88,9 @@ type OpenApiSourceContract = {
   cases: Array<{
     key: string;
     description?: string;
+    given?: string;
+    hasVerify?: boolean;
+    verifyRules?: unknown[];
     lifecycle?: string;
     severity?: string;
     [k: string]: unknown;
@@ -356,6 +359,27 @@ export function buildOpenApiPartForHttp(
     responses: openApiResponses,
   };
   if (c.feature) operation.tags = [c.feature];
+
+  const glubeanCases = c.cases
+    .map((cas) => {
+      const hasProjectionMarker =
+        cas.given !== undefined ||
+        cas.hasVerify !== undefined ||
+        cas.verifyRules !== undefined;
+      if (!hasProjectionMarker) return null;
+      const out: Record<string, unknown> = { key: cas.key };
+      if (cas.description) out.description = cas.description;
+      if (cas.given) out.given = cas.given;
+      if (cas.hasVerify !== undefined) out.hasVerify = cas.hasVerify;
+      if (cas.verifyRules !== undefined) out.verifyRules = cas.verifyRules;
+      if (cas.lifecycle) out.lifecycle = cas.lifecycle;
+      if (cas.severity) out.severity = cas.severity;
+      return out;
+    })
+    .filter((cas): cas is Record<string, unknown> => cas !== null);
+  if (glubeanCases.length > 0) {
+    operation["x-glubean-cases"] = glubeanCases;
+  }
 
   // Contract-level deprecated flag
   if (c.deprecated) {

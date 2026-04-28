@@ -42,6 +42,7 @@ import type { SchemaLike, TestContext } from "@glubean/sdk";
 import type {
   BaseCaseSpec,
   Extensions,
+  ProtocolContract,
 } from "@glubean/sdk";
 import type { GraphQLClient, GraphQLError } from "../index.js";
 
@@ -460,7 +461,18 @@ export type GraphqlContractFactory = <
 >(
   id: string,
   spec: GraphqlContractSpec<Vars, Res, Cases>,
-) => unknown; // Return type filled when ProtocolContract wiring lands in CG-12
+) => ProtocolContract<
+  GraphqlContractSpec<Vars, Res, Cases>,
+  GraphqlPayloadSchemas,
+  GraphqlContractMeta,
+  Cases
+>;
+
+declare module "@glubean/sdk" {
+  interface ContractProtocolRoots {
+    graphql: GraphqlContractRoot;
+  }
+}
 
 // =============================================================================
 // Type inference helpers

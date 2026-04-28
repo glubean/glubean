@@ -44,6 +44,7 @@ import {
 } from "./contract-core.js";
 import type {
   ExtractedContractProjection,
+  VerifyRule,
 } from "./contract-types.js";
 import {
   emptyOpenApiDocument,
@@ -483,6 +484,9 @@ export interface MarkdownPart {
     requires?: "headless" | "browser" | "out-of-band";
     deferredReason?: string;
     deprecatedReason?: string;
+    given?: string;
+    hasVerify?: boolean;
+    verifyRules?: VerifyRule[];
   }>;
 }
 
@@ -518,6 +522,9 @@ export function genericMarkdownPart(
       requires: c.requires as MarkdownPart["cases"][number]["requires"],
       deferredReason: c.deferredReason,
       deprecatedReason: c.deprecatedReason,
+      given: c.given,
+      hasVerify: c.hasVerify,
+      verifyRules: c.verifyRules,
     })),
   };
 }
@@ -554,23 +561,41 @@ function computeMarkdownSummary(parts: MarkdownPart[]): _ProjectionSummary {
   };
 }
 
+function formatVerifyRule(rule: VerifyRule): string {
+  if (typeof rule === "string") return rule;
+  const prefix = rule.id ? `${rule.id}: ` : "";
+  return `${prefix}${rule.description}`;
+}
+
+function formatCaseProjectionNotes(c: MarkdownPart["cases"][number]): string {
+  const notes: string[] = [];
+  if (c.given) notes.push(`given: ${c.given}`);
+  if (c.verifyRules && c.verifyRules.length > 0) {
+    notes.push(`verifies: ${c.verifyRules.map(formatVerifyRule).join("; ")}`);
+  } else if (c.hasVerify) {
+    notes.push("has verify()");
+  }
+  return notes.length > 0 ? ` *(${notes.join("; ")})*` : "";
+}
+
 function formatMarkdownCase(c: MarkdownPart["cases"][number]): string {
   const desc = c.description ? ` — ${c.description}` : "";
+  const projectionNotes = formatCaseProjectionNotes(c);
   if (c.lifecycle === "deprecated") {
     const reason = c.deprecatedReason ?? "deprecated";
-    return `- ⊘ **${c.key}** — deprecated: ${reason}`;
+    return `- ⊘ **${c.key}** — deprecated: ${reason}${projectionNotes}`;
   }
   if (c.lifecycle === "deferred") {
     const reason = c.deferredReason ?? "deferred";
-    return `- ⊘ **${c.key}** — deferred: ${reason}`;
+    return `- ⊘ **${c.key}** — deferred: ${reason}${projectionNotes}`;
   }
   if (c.requires === "browser" || c.requires === "out-of-band") {
-    return `- ⊘ **${c.key}** — requires: ${c.requires}`;
+    return `- ⊘ **${c.key}** — requires: ${c.requires}${projectionNotes}`;
   }
   const severityTag =
     c.severity === "critical" ? " 🔴" : c.severity === "info" ? " ℹ️" : "";
   const suffix = c.defaultRun === "opt-in" ? " *(opt-in)*" : "";
-  return `- **${c.key}**${desc}${suffix}${severityTag}`;
+  return `- **${c.key}**${desc}${projectionNotes}${suffix}${severityTag}`;
 }
 
 /**

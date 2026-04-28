@@ -1,10 +1,11 @@
 /**
  * @glubean/grpc 0.2.0 — single-package owner of both:
  *   - Transport / test-plugin layer (this file — unchanged from 0.1.x)
- *   - Contract adapter layer (`./contract/`, registered via side-effect import)
+ *   - Contract adapter layer (`./contract/`, installed via plugin manifest)
  *
- * Importing this package (side-effect) registers the gRPC contract adapter:
- *   `contract.register("grpc", grpcAdapter)` → `contract.grpc.with(...)` UX.
+ * Install the default plugin manifest from glubean.setup.ts to register the
+ * gRPC contract adapter:
+ *   `installPlugin(grpcPlugin)` → `contract.grpc.with(...)` UX.
  *
  * See `./contract/index.ts` for the registration logic. See
  * `internal/40-discovery/proposals/contract-grpc-graphql-expansion.md` §5.1

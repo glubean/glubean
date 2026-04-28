@@ -18,6 +18,7 @@ import type { SchemaLike, TestContext } from "@glubean/sdk";
 import type {
   BaseCaseSpec,
   Extensions,
+  ProtocolContract,
 } from "@glubean/sdk";
 import type { GrpcClient } from "../index.js";
 
@@ -310,7 +311,18 @@ export type GrpcContractFactory = <
 >(
   id: string,
   spec: GrpcContractSpec<Req, Res, Cases>,
-) => unknown; // Return type filled when ProtocolContract wiring lands in CG-4
+) => ProtocolContract<
+  GrpcContractSpec<Req, Res, Cases>,
+  GrpcPayloadSchemas,
+  GrpcContractMeta,
+  Cases
+>;
+
+declare module "@glubean/sdk" {
+  interface ContractProtocolRoots {
+    grpc: GrpcContractRoot;
+  }
+}
 
 // =============================================================================
 // Type inference helpers (CG-2 skeleton; expanded in CG-3 as adapter lands)

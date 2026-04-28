@@ -12,15 +12,14 @@
  *   - Cookbook examples illustrating attachment-model §5.1 / §8 flows.
  *
  * Implementation strategy: serialize the per-test inputs into the same
- * env vars the harness reads (`GLUBEAN_RUNNER_*`), then construct a
- * `ProjectRunner` with a single test descriptor. Env vars are restored
- * to their prior values in `finally`, so concurrent callers in the
- * same process don't leak state.
+ * env vars the harness reads (`GLUBEAN_RUNNER_*`), but attach them to
+ * this run's executor env instead of mutating process-wide state.
  */
 
 import { dirname, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { ProjectRunner } from "./project-runner.js";
+import { TestExecutor } from "./executor.js";
 import type {
   ProjectRunEvent,
   ProjectRunnerTest,
@@ -236,11 +235,11 @@ export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
   const effectiveVars = { ...loadedVars, ...(opts.vars ?? {}) };
   const effectiveSecrets = { ...loadedSecrets, ...(opts.secrets ?? {}) };
 
-  // Capture & set env vars BEFORE constructing ProjectRunner — the
-  // executor inherits parent env when spawning the harness subprocess.
-  const savedExplicit = process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
-  const savedBootstrap = process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
-  const savedForce = process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
+  const runnerEnv: Record<string, string | undefined> = {
+    GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP: undefined,
+    GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP: undefined,
+    GLUBEAN_RUNNER_FORCE_STANDALONE_IDS: undefined,
+  };
 
   // §8 templating env — caller override, else built from
   // `{ ...vars, ...secrets, ...process.env }` matching CLI / MCP
@@ -256,39 +255,21 @@ export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
 
   if (opts.input !== undefined) {
     const templated = applyEnvTemplating(opts.input, templatingEnv);
-    process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = JSON.stringify({
+    runnerEnv["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = JSON.stringify({
       [opts.testId]: templated,
     });
   }
   if (opts.bootstrapInput !== undefined) {
     const templated = applyEnvTemplating(opts.bootstrapInput, templatingEnv);
-    process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = JSON.stringify({
+    runnerEnv["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = JSON.stringify({
       [opts.testId]: templated,
     });
   }
   if (opts.forceStandalone === true) {
-    process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = JSON.stringify([
+    runnerEnv["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = JSON.stringify([
       opts.testId,
     ]);
   }
-
-  const restoreEnv = () => {
-    if (savedExplicit === undefined) {
-      delete process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
-    } else {
-      process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = savedExplicit;
-    }
-    if (savedBootstrap === undefined) {
-      delete process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
-    } else {
-      process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = savedBootstrap;
-    }
-    if (savedForce === undefined) {
-      delete process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
-    } else {
-      process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = savedForce;
-    }
-  };
 
   const test: ProjectRunnerTest = {
     filePath,
@@ -306,33 +287,33 @@ export async function runCase(opts: RunCaseOptions): Promise<RunCaseResult> {
     secrets: effectiveSecrets,
     tests: [test],
     noSession: opts.noSession ?? false,
+    executor: TestExecutor.fromSharedConfig(opts.sharedConfig, {
+      cwd: rootDir,
+      env: runnerEnv,
+    }),
   });
 
   const events: ProjectRunEvent[] = [];
   let success = false;
   let orchestrationError: string | undefined;
 
-  try {
-    for await (const evt of runner.run()) {
-      events.push(evt);
-      if (evt.type === "bootstrap:failed") {
-        orchestrationError = `Bootstrap failed: ${evt.error.message}`;
-      } else if (evt.type === "session:setup:failed") {
-        orchestrationError = `Session setup failed${evt.error ? `: ${evt.error}` : ""}`;
-      } else if (evt.type === "run:failed") {
-        if (!orchestrationError) {
-          orchestrationError = `Run failed (${evt.reason})${evt.error ? `: ${evt.error}` : ""}`;
-        }
-      } else if (evt.type === "file:event") {
-        // ExecutionEvent's `status` event encodes the final per-test
-        // outcome: "completed" = pass, "failed" = fail, "skipped" = neither.
-        if (evt.event.type === "status" && evt.event.id === opts.testId) {
-          success = evt.event.status === "completed";
-        }
+  for await (const evt of runner.run()) {
+    events.push(evt);
+    if (evt.type === "bootstrap:failed") {
+      orchestrationError = `Bootstrap failed: ${evt.error.message}`;
+    } else if (evt.type === "session:setup:failed") {
+      orchestrationError = `Session setup failed${evt.error ? `: ${evt.error}` : ""}`;
+    } else if (evt.type === "run:failed") {
+      if (!orchestrationError) {
+        orchestrationError = `Run failed (${evt.reason})${evt.error ? `: ${evt.error}` : ""}`;
+      }
+    } else if (evt.type === "file:event") {
+      // ExecutionEvent's `status` event encodes the final per-test
+      // outcome: "completed" = pass, "failed" = fail, "skipped" = neither.
+      if (evt.event.type === "status" && evt.event.id === opts.testId) {
+        success = evt.event.status === "completed";
       }
     }
-  } finally {
-    restoreEnv();
   }
 
   return {

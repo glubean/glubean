@@ -163,9 +163,14 @@ beforeEach(() => {
 
 describe("factory", () => {
   test("contract.grpc.with returns a factory", () => {
-    const grpc = (contract as any).grpc as GrpcContractRoot;
+    const grpc = contract.grpc;
     const factory = grpc.with("users", {});
     expect(typeof factory).toBe("function");
+    const carrier = factory("typed-payment", {
+      target: "PaymentService/Complete",
+      cases: { ok: { description: "ok" } },
+    });
+    expect(typeof carrier.case).toBe("function");
   });
 
   test("direct contract.grpc(id, spec) throws with helpful error", () => {
@@ -190,7 +195,13 @@ describe("project + normalize", () => {
       description: "Payment completion",
       tags: ["billing"],
       cases: {
-        ok: { description: "happy", expect: { statusCode: 0 } },
+        ok: {
+          description: "happy",
+          expect: { statusCode: 0 },
+          given: "payment intent exists",
+          verifyRules: ["settlement event is emitted"],
+          verify: async () => {},
+        },
         legacyFlow: { description: "old", deprecated: "use v2" },
         notYet: { description: "future", deferred: "Q3" },
       },
@@ -205,6 +216,9 @@ describe("project + normalize", () => {
 
     const okCase = projection.cases.find((c) => c.key === "ok")!;
     expect(okCase.lifecycle).toBe("active");
+    expect(okCase.given).toBe("payment intent exists");
+    expect(okCase.hasVerify).toBe(true);
+    expect(okCase.verifyRules).toEqual(["settlement event is emitted"]);
 
     const deprecatedCase = projection.cases.find((c) => c.key === "legacyFlow")!;
     expect(deprecatedCase.lifecycle).toBe("deprecated");
@@ -224,7 +238,14 @@ describe("project + normalize", () => {
   test("normalize produces JSON-safe projection", () => {
     const spec: GrpcContractSpec = {
       target: "A/B",
-      cases: { ok: { description: "ok" } },
+      cases: {
+        ok: {
+          description: "ok",
+          given: "account exists",
+          verifyRules: [{ id: "balance", description: "balance unchanged" }],
+          verify: async () => {},
+        },
+      },
     };
     const runtime = grpcAdapter.project(spec);
     const extracted = grpcAdapter.normalize!({ ...runtime, id: "my-id" });
@@ -232,6 +253,11 @@ describe("project + normalize", () => {
     expect(extracted.id).toBe("my-id");
     expect(extracted.protocol).toBe("grpc");
     expect(extracted.cases[0].key).toBe("ok");
+    expect(extracted.cases[0].given).toBe("account exists");
+    expect(extracted.cases[0].hasVerify).toBe(true);
+    expect(extracted.cases[0].verifyRules).toEqual([
+      { id: "balance", description: "balance unchanged" },
+    ]);
     // JSON-safe check: round-trip through JSON should preserve shape
     expect(() => JSON.parse(JSON.stringify(extracted))).not.toThrow();
   });

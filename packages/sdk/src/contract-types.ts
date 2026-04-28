@@ -64,6 +64,22 @@ export type CaseRequires = "headless" | "browser" | "out-of-band";
  */
 export type CaseDefaultRun = "always" | "opt-in";
 
+/**
+ * Projectable description of opaque `verify()` logic.
+ *
+ * `verify()` itself is executable code and cannot be inferred reliably by
+ * projection tools. Authors can attach `verifyRules` so PM/review/Cloud
+ * surfaces can show the business assertions that live behind the callback.
+ */
+export type VerifyRule =
+  | string
+  | {
+      id?: string;
+      description: string;
+      severity?: CaseSeverity;
+      extensions?: Extensions;
+    };
+
 // =============================================================================
 // Extensions (OpenAPI-style x-* keys)
 // =============================================================================
@@ -140,6 +156,13 @@ export interface BaseCaseSpec {
    * relevant precondition is declared.
    */
   given?: string;
+
+  /**
+   * Projectable companion for opaque adapter-specific `verify()` callbacks.
+   * Use this for review / Cloud-visible business assertions that cannot be
+   * represented in `expect`.
+   */
+  verifyRules?: VerifyRule[];
 
   /**
    * Runnability metadata — grouped under `runnability` to make the
@@ -240,6 +263,16 @@ export interface CaseMeta<PayloadSchemas = unknown, Meta = unknown> {
    * Adapter-independent — threaded verbatim from `BaseCaseSpec.given`.
    */
   given?: string;
+
+  /**
+   * True when the case has an executable adapter-specific `verify()`
+   * callback. Projection tools should treat this as "semantics may be
+   * hidden in code" unless `verifyRules` explains them.
+   */
+  hasVerify?: boolean;
+
+  /** Projectable companion rules for opaque `verify()` callbacks. */
+  verifyRules?: VerifyRule[];
 
   /**
    * Runnability metadata (contract-attachment-model.md §7.2). Not contract

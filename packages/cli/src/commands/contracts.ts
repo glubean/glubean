@@ -119,25 +119,42 @@ function computeSummary(contracts: ContractStaticMeta[]): ProjectionSummary {
 
 // ── Markdown outline formatter ──────────────────────────────────────────────
 
+function formatStaticVerifyRule(
+  rule: NonNullable<ContractCaseStaticMeta["verifyRules"]>[number],
+): string {
+  if (typeof rule === "string") return rule;
+  const prefix = rule.id ? `${rule.id}: ` : "";
+  return `${prefix}${rule.description}`;
+}
+
 function formatCase(c: ContractCaseStaticMeta): string {
   const desc = c.description ? ` — ${c.description}` : "";
+  const projectionNotes = [
+    c.given ? `given: ${c.given}` : undefined,
+    c.verifyRules && c.verifyRules.length > 0
+      ? `verifies: ${c.verifyRules.map(formatStaticVerifyRule).join("; ")}`
+      : c.hasVerify
+        ? "has verify()"
+        : undefined,
+  ].filter(Boolean);
+  const notes = projectionNotes.length > 0 ? ` *(${projectionNotes.join("; ")})*` : "";
   // Key off lifecycle first (authoritative), fall back to reason strings
   const lifecycle = c.lifecycle
     ?? (c.deprecated ? "deprecated" : c.deferred ? "deferred" : "active");
   if (lifecycle === "deprecated") {
     const reason = c.deprecated ?? "deprecated";
-    return `- ⊘ **${c.key}** — deprecated: ${reason}`;
+    return `- ⊘ **${c.key}** — deprecated: ${reason}${notes}`;
   }
   if (lifecycle === "deferred") {
     const reason = c.deferred ?? "deferred";
-    return `- ⊘ **${c.key}** — deferred: ${reason}`;
+    return `- ⊘ **${c.key}** — deferred: ${reason}${notes}`;
   }
   if (c.requires === "browser" || c.requires === "out-of-band") {
-    return `- ⊘ **${c.key}** — requires: ${c.requires}`;
+    return `- ⊘ **${c.key}** — requires: ${c.requires}${notes}`;
   }
   const severityTag = c.severity === "critical" ? " 🔴" : c.severity === "info" ? " ℹ️" : "";
   const suffix = c.defaultRun === "opt-in" ? " *(opt-in)*" : "";
-  return `- **${c.key}**${desc}${suffix}${severityTag}`;
+  return `- **${c.key}**${desc}${notes}${suffix}${severityTag}`;
 }
 
 /**
@@ -181,6 +198,9 @@ export function formatMdOutline(contracts: ContractStaticMeta[]): string {
         requires: cs.requires as MarkdownPart["cases"][number]["requires"],
         deferredReason: cs.deferred,
         deprecatedReason: cs.deprecated,
+        given: cs.given,
+        hasVerify: cs.hasVerify,
+        verifyRules: cs.verifyRules as MarkdownPart["cases"][number]["verifyRules"],
       };
     }),
   }));
@@ -214,6 +234,9 @@ export function formatJson(
           deprecated: cas.deprecated,
           requires: cas.requires,
           defaultRun: cas.defaultRun,
+          given: cas.given,
+          hasVerify: cas.hasVerify,
+          verifyRules: cas.verifyRules,
         })),
       })),
     })),
@@ -440,6 +463,9 @@ export async function contractsCommand(
         severity: c.severity,
         requires: c.requires as any,
         defaultRun: c.defaultRun as any,
+        given: c.given,
+        hasVerify: c.hasVerify,
+        verifyRules: c.verifyRules as any,
         hasHeaderSchema: schemas?.response?.headers != null,
         hasExample: schemas?.response?.examples != null,
         line: 0,

@@ -835,6 +835,15 @@ export function extractPickExamples(
 // ---------------------------------------------------------------------------
 
 /** Metadata for a discovered contract case. */
+export type ContractVerifyRule =
+  | string
+  | {
+      id?: string;
+      description: string;
+      severity?: string;
+      extensions?: Record<string, unknown>;
+    };
+
 export interface ContractCaseStaticMeta {
   /** Case key (e.g. "success", "notFound") */
   key: string;
@@ -860,6 +869,12 @@ export interface ContractCaseStaticMeta {
   hasHeaderSchema?: boolean;
   /** True if case declares an example or examples */
   hasExample?: boolean;
+  /** World-state precondition projected from BaseCaseSpec.given */
+  given?: string;
+  /** True when adapter-specific verify() code exists */
+  hasVerify?: boolean;
+  /** Projectable companion rules for opaque verify() callbacks */
+  verifyRules?: ContractVerifyRule[];
 }
 
 /** Metadata for a discovered contract.http() call. */

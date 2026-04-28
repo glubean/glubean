@@ -61,6 +61,9 @@ interface LegacyHttpCase {
   defaultRun?: string;
   tags?: string[];
   extensions?: Record<string, unknown>;
+  given?: string;
+  hasVerify?: boolean;
+  verifyRules?: unknown[];
   // HTTP-flattened fields (undefined for non-HTTP protocols):
   protocolExpect?: { status?: number };
   responseSchema?: unknown;
@@ -177,6 +180,9 @@ function toLegacyHttpContract(c: SharedExtractedContract): LegacyHttpContract {
         defaultRun: cs.defaultRun,
         tags: cs.tags,
         extensions: cs.extensions,
+        given: cs.given ?? csAny.given,
+        hasVerify: cs.hasVerify ?? csAny.hasVerify,
+        verifyRules: cs.verifyRules ?? csAny.verifyRules,
         protocolExpect:
           response?.status != null
             ? { status: response.status }
@@ -838,17 +844,18 @@ export async function runLocalTestsFromFile(args: {
   }));
 
   // ── Spike 3 runner input channels (attachment-model §8) ─────────────────
-  // ProjectRunner spawns a tsx subprocess inheriting parent env; the harness
-  // reads `GLUBEAN_RUNNER_*` env vars and populates the SDK's runner-input
-  // channel. Mirrors CLI run.ts. Restored in finally so concurrent MCP
-  // tool calls don't leak state.
+  // The harness reads `GLUBEAN_RUNNER_*` env vars and populates the SDK's
+  // runner-input channel. MCP is a long-lived server, so these values are
+  // attached to the per-run executor env instead of process.env.
   const hasInputChannel =
     args.inputJson !== undefined ||
     args.bootstrapInput !== undefined ||
     args.forceStandalone === true;
-  let savedExplicitMap: string | undefined;
-  let savedBootstrapMap: string | undefined;
-  let savedForceIds: string | undefined;
+  const runnerEnv: Record<string, string | undefined> = {
+    GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP: undefined,
+    GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP: undefined,
+    GLUBEAN_RUNNER_FORCE_STANDALONE_IDS: undefined,
+  };
   if (hasInputChannel) {
     // §5.1 invariant: explicit input always wins; overlay never invoked.
     // Two channels are mutually exclusive — surface boundary enforces it
@@ -884,9 +891,6 @@ export async function runLocalTestsFromFile(args: {
       };
     }
     const targetTestId = selected[0]!.id;
-    savedExplicitMap = process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
-    savedBootstrapMap = process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
-    savedForceIds = process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
     // §8 templating env — project vars+secrets + process.env (secrets win
     // over vars; process.env wins over both, matching loadProjectEnv).
     const templatingEnv: Record<string, string | undefined> = {
@@ -896,40 +900,22 @@ export async function runLocalTestsFromFile(args: {
     };
     if (args.inputJson !== undefined) {
       const templated = applyEnvTemplating(args.inputJson, templatingEnv);
-      process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = JSON.stringify({
+      runnerEnv["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = JSON.stringify({
         [targetTestId]: templated,
       });
     }
     if (args.bootstrapInput !== undefined) {
       const templated = applyEnvTemplating(args.bootstrapInput, templatingEnv);
-      process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = JSON.stringify({
+      runnerEnv["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = JSON.stringify({
         [targetTestId]: templated,
       });
     }
     if (args.forceStandalone === true) {
-      process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = JSON.stringify([
+      runnerEnv["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = JSON.stringify([
         targetTestId,
       ]);
     }
   }
-  const restoreEnv = () => {
-    if (!hasInputChannel) return;
-    if (savedExplicitMap === undefined) {
-      delete process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"];
-    } else {
-      process.env["GLUBEAN_RUNNER_EXPLICIT_INPUT_MAP"] = savedExplicitMap;
-    }
-    if (savedBootstrapMap === undefined) {
-      delete process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"];
-    } else {
-      process.env["GLUBEAN_RUNNER_BOOTSTRAP_INPUT_MAP"] = savedBootstrapMap;
-    }
-    if (savedForceIds === undefined) {
-      delete process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
-    } else {
-      process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"] = savedForceIds;
-    }
-  };
 
   // Index results by testId as events stream in. Each test's events flow
   // between its `start` and `status` events; we key the accumulator by the
@@ -952,6 +938,10 @@ export async function runLocalTestsFromFile(args: {
     secrets,
     tests: facadeTests,
     sessionStartDir: testDir,
+    executor: TestExecutor.fromSharedConfig(shared, {
+      cwd: projectRoot,
+      env: runnerEnv,
+    }),
   });
 
   let currentTestId: string | undefined;
@@ -961,7 +951,6 @@ export async function runLocalTestsFromFile(args: {
   // `session:setup:failed` events from the facade.
   let orchestrationError: string | undefined;
 
-  try {
   for await (const evt of runner.run()) {
     // Surface non-file failure events so callers can distinguish them from
     // "clean empty run" outcomes.
@@ -1057,9 +1046,6 @@ export async function runLocalTestsFromFile(args: {
         break;
       }
     }
-  }
-  } finally {
-    restoreEnv();
   }
 
   // Preserve the original `selected` order (also matches AI-agent
@@ -1477,6 +1463,9 @@ server.registerTool(
             lifecycle: cas.lifecycle,
             severity: cas.severity,
             status: (cas.protocolExpect as any)?.status,
+            given: cas.given,
+            hasVerify: cas.hasVerify,
+            verifyRules: cas.verifyRules,
           })),
         })),
       })),

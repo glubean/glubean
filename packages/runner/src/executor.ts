@@ -198,6 +198,7 @@ export interface ExecutorOptions {
   maxHeapSizeMb?: number;
   v8Flags?: string[];
   cwd?: string;
+  env?: Record<string, string | undefined>;
   emitFullTrace?: boolean;
   inferSchema?: boolean;
   truncateArrays?: boolean;
@@ -403,9 +404,11 @@ export class TestExecutor {
     const registerPath = resolve(__dirname, "zero-project-register.mjs");
     this._zeroProjectTsxArgs.push("--import", registerPath);
 
-    const sdkUrl = import.meta.resolve("@glubean/sdk");
-    const sdkEntry = fileURLToPath(sdkUrl);
-    this._zeroProjectEnv["GLUBEAN_VENDORED_ROOT"] = resolve(dirname(sdkEntry), "../../..");
+    // Use the runner package root as the synthetic parent. From there,
+    // Node's normal package resolution finds sibling @glubean/* packages in
+    // both workspace installs (packages/runner/node_modules) and published
+    // installs (ancestor node_modules).
+    this._zeroProjectEnv["GLUBEAN_VENDORED_ROOT"] = resolve(__dirname, "..");
 
     const pkgPath = join(cwd, "package.json");
     if (!existsSync(pkgPath)) {
@@ -547,6 +550,13 @@ export class TestExecutor {
 
     // Build env
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    for (const [key, value] of Object.entries(this.options.env ?? {})) {
+      if (value === undefined) {
+        delete env[key];
+      } else {
+        env[key] = value;
+      }
+    }
     if (nodeOptions.length > 0) {
       env["NODE_OPTIONS"] = nodeOptions.join(" ");
     }

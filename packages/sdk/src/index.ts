@@ -529,7 +529,9 @@ _contract.register("http", httpAdapter);
  *   - `contract.register(protocol, adapter)` — plugin extension point
  *   - `contract[protocol](id, spec)` — attached by `register()`
  */
-export const contract: {
+export interface ContractProtocolRoots {}
+
+export type ContractNamespace = ContractProtocolRoots & {
   http: HttpContractRoot;
   flow: (idOrMeta: string | FlowMeta) => FlowBuilder<unknown>;
   register: <Spec, Rt = unknown, RtM = unknown, Sf = unknown, SfM = unknown>(
@@ -544,7 +546,9 @@ export const contract: {
     >,
   ) => import("./contract-types.js").BootstrapAttachment<Needs, Params>;
   [protocol: string]: unknown;
-} = _contract as any;
+};
+
+export const contract: ContractNamespace = _contract as any;
 
 export {
   createHttpFactory,

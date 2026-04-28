@@ -25,6 +25,7 @@ import {
   listArtifactProducers,
   listArtifactCapability,
   __resetArtifactKindsForTesting,
+  markdownArtifact,
 } from "./contract-artifacts.js";
 import type {
   ArtifactKind,
@@ -274,6 +275,34 @@ describe("renderArtifact", () => {
     );
     // No producer used (preferDefault forced), no defaultRender → 0 parts → empty
     expect(output).toBe("<empty>");
+  });
+
+  test("markdown default renderer surfaces given and verify markers", () => {
+    contract.register("p-markdown", makeAdapter());
+
+    const output = renderArtifact(markdownArtifact, [
+      makeContract("p-markdown", "checkout", {
+        target: "POST /checkout",
+        feature: "checkout",
+        cases: [
+          {
+            key: "happy",
+            description: "order is accepted",
+            lifecycle: "active",
+            severity: "warning",
+            given: "cart has inventory",
+            hasVerify: true,
+            verifyRules: [
+              { id: "inventory", description: "inventory is reserved" },
+            ],
+          },
+        ],
+      }),
+    ]);
+
+    expect(output).toContain(
+      "- **happy** — order is accepted *(given: cart has inventory; verifies: inventory: inventory is reserved)*",
+    );
   });
 });
 

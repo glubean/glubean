@@ -384,6 +384,8 @@ function projectGraphql(
       defaultRun: casted.defaultRun,
       // v10 attachment-model — semantic + inventory + needs surface.
       given: casted.given,
+      hasVerify: typeof casted.verify === "function",
+      verifyRules: casted.verifyRules,
       runnability: casted.runnability,
       hasNeeds: casted.needs !== undefined,
       needsSchema: casted.needs as unknown,
@@ -440,6 +442,8 @@ function normalizeGraphql(
         ...c,
         schemas: safe,
         given: c.given,
+        hasVerify: c.hasVerify,
+        verifyRules: c.verifyRules,
         runnability: c.runnability,
         hasNeeds: c.hasNeeds,
         needsSchema: safeNeeds,

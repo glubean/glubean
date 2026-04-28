@@ -5,7 +5,7 @@ gRPC for [Glubean](https://glubean.dev). This package owns two layers:
 - **Contract** — author gRPC API intent as a single artifact (`contract.grpc.with(...)`). Executable spec, agent-readable, fits `contract.flow()` composition. **Recommended for new work.**
 - **Transport plugin** — low-level gRPC client with auto-tracing, used via `configure({ plugins: { ... } })`. Still supported for test-after / exploratory work.
 
-> **v0.2.0 single-package release note:** in earlier drafts, gRPC contract was planned as a separate `@glubean/contract-grpc` package. Decision 2026-04-20: one package per protocol. Importing `@glubean/grpc` now registers the contract adapter as a side effect. No new install, no second package.
+> **v0.2.0 single-package release note:** in earlier drafts, gRPC contract was planned as a separate `@glubean/contract-grpc` package. Decision 2026-04-20: one package per protocol. The package now ships a plugin manifest; install it explicitly from `glubean.setup.ts` to enable `contract.grpc`.
 
 ## Install
 
@@ -15,6 +15,16 @@ npm install @glubean/grpc @grpc/grpc-js @grpc/proto-loader
 
 `@grpc/grpc-js` and `@grpc/proto-loader` are peer dependencies.
 
+Install the contract plugin in your project setup:
+
+```ts
+// glubean.setup.ts
+import { installPlugin } from "@glubean/sdk";
+import grpcPlugin from "@glubean/grpc";
+
+await installPlugin(grpcPlugin);
+```
+
 ---
 
 ## Quick Start — Contract
@@ -22,7 +32,7 @@ npm install @glubean/grpc @grpc/grpc-js @grpc/proto-loader
 ```ts
 import { contract, configure } from "@glubean/sdk";
 import { grpc } from "@glubean/grpc";
-// ^ importing @glubean/grpc registers contract.grpc side-effect
+import { z } from "zod";
 
 const { payment } = configure({
   plugins: {
@@ -45,7 +55,8 @@ export const completePayment = paymentContracts("complete-payment", {
   cases: {
     happy: {
       description: "order with valid payment method completes successfully",
-      request: { currency: "USD" },
+      needs: z.object({ orderId: z.string(), amount: z.number() }),
+      request: ({ orderId, amount }) => ({ orderId, amount, currency: "USD" }),
       expect: {
         statusCode: 0, // OK
         message: { status: "completed" },
@@ -85,12 +96,12 @@ export const checkoutFlow = contract
   })
   // Step 2: gRPC — complete payment
   .step(completePayment.case("happy"), {
-    in: (s: any) => ({ request: { orderId: s.orderId, amount: s.amount } }),
+    in: (s: any) => ({ orderId: s.orderId, amount: s.amount }),
     out: (s, res: any) => ({ ...s, paymentId: res.message.paymentId }),
   })
   // Step 3: HTTP — confirm
   .step(getOrder.case("byId"), {
-    in: (s: any) => ({ params: { id: s.orderId } }),
+    in: (s: any) => ({ id: s.orderId }),
   });
 ```
 
@@ -102,7 +113,7 @@ Flow state threads through via typed `in` / `out` lenses, **across protocols**.
 - **Structured failure classification** — gRPC status codes map to `transient` / `client` / `semantic` / `auth` / `server` kinds; transient codes (1 CANCELLED, 4 DEADLINE_EXCEEDED, 8 RESOURCE_EXHAUSTED, 14 UNAVAILABLE) marked `retryable`
 - **Projection to Markdown** — case inventory with lifecycle markers, via `glubean contracts`
 - **Flow composition** — mix with HTTP / GraphQL cases, same artifact
-- **Scanner + MCP integration** — `glubean scan`, `glubean_extract_contracts` MCP tool, all work unchanged for `contract.grpc(...)`
+- **Scanner + MCP integration** — `glubean scan`, `glubean_extract_contracts` MCP tool, all work unchanged for `contract.grpc.with(...)`
 
 ---
 
@@ -284,12 +295,10 @@ Close the underlying gRPC channel.
 
 ## Custom matchers
 
-`import "@glubean/grpc"` side-effect registers gRPC matchers onto the shared
-`ctx.expect()` surface. No extra import or configure field needed.
+Installing the `@glubean/grpc` plugin manifest from `glubean.setup.ts`
+registers gRPC matchers onto the shared `ctx.expect()` surface.
 
 ```ts
-import "@glubean/grpc";
-
 // Works on GrpcCallResult (transport) and GrpcCaseResult (contract verify / flow out lens)
 ctx.expect(res).toHaveGrpcStatus(0);                  // exact code
 ctx.expect(res).toHaveGrpcOk();                       // convenience for code 0

@@ -36,6 +36,16 @@ export type CaseRequires = "headless" | "browser" | "out-of-band";
 /** Case default run policy. */
 export type CaseDefaultRun = "always" | "opt-in";
 
+/** Projectable description of opaque verify() semantics. */
+export type VerifyRule =
+  | string
+  | {
+      id?: string;
+      description: string;
+      severity?: CaseSeverity;
+      extensions?: Record<string, unknown>;
+    };
+
 /** A named example entry for OpenAPI docs. */
 export interface NormalizedExample {
   value: unknown;
@@ -77,6 +87,10 @@ export interface NormalizedCaseMeta {
    * but projected because it changes what `expect` means.
    */
   given?: string;
+  /** True when executable semantics also live in an adapter verify() callback. */
+  hasVerify?: boolean;
+  /** Projectable companion rules for opaque verify() callbacks. */
+  verifyRules?: VerifyRule[];
   /**
    * Runnability metadata — attachment-model §7.2. `requireAttachment`
    * blocks raw execution (case MUST run via a bootstrap overlay). Lives
@@ -426,6 +440,8 @@ export function protocolContractToNormalized(
       schemas: c.schemas,
       meta: c.meta,
       given: c.given,
+      hasVerify: c.hasVerify,
+      verifyRules: c.verifyRules,
       runnability: c.runnability,
       hasNeeds: c.hasNeeds,
       needsSchema: c.needsSchema,

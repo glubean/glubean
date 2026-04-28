@@ -608,6 +608,48 @@ test("contractsToOpenApi: multiple cases with same status merge examples + heade
   expect(r200.headers["x-rate-limit"]).toBeDefined();
 });
 
+test("contractsToOpenApi: emits x-glubean-cases for given and verify markers", () => {
+  const contract = {
+    id: "checkout",
+    exportName: "checkout",
+    protocol: "http",
+    target: "POST /checkout",
+    description: "Checkout",
+    feature: "orders",
+    cases: [
+      {
+        key: "happy",
+        description: "order completes",
+        lifecycle: "active",
+        severity: "critical",
+        given: "cart has inventory",
+        hasVerify: true,
+        verifyRules: [
+          { id: "audit", description: "audit row is written" },
+        ],
+        protocolExpect: { status: 201 },
+      },
+    ],
+  };
+
+  const spec = contractsToOpenApi([contract as any]);
+  const op = (spec as any).paths["/checkout"].post;
+
+  expect(op["x-glubean-cases"]).toEqual([
+    {
+      key: "happy",
+      description: "order completes",
+      given: "cart has inventory",
+      hasVerify: true,
+      verifyRules: [
+        { id: "audit", description: "audit row is written" },
+      ],
+      lifecycle: "active",
+      severity: "critical",
+    },
+  ]);
+});
+
 test("contractsToOpenApi: param schemas merged across all cases (P2 regression)", () => {
   const contract = {
     id: "get-user",

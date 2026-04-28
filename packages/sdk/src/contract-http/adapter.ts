@@ -456,6 +456,8 @@ function projectHttp(
         // adapter.normalize() so scanner/CLI/MCP see them. `extensions`
         // is NOT the place for these (per §0.9 + §7.2).
         given: c.given,
+        hasVerify: typeof c.verify === "function",
+        verifyRules: c.verifyRules,
         runnability: c.runnability,
         // Live `needs` SchemaLike for normalize() to convert to JSON-safe.
         // `hasNeeds` is set whenever the case declared `needs`, even when
@@ -537,6 +539,8 @@ function normalizeHttp(
       // live schema can't be converted to JSON Schema (custom safeParse-
       // only validator); `hasNeeds` is the authoritative rawBypass trigger.
       given: c.given,
+      hasVerify: c.hasVerify,
+      verifyRules: c.verifyRules,
       runnability: c.runnability,
       hasNeeds: c.hasNeeds,
       needsSchema: c.needsSchema

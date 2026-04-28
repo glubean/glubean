@@ -610,6 +610,30 @@ test("HTTP carrier exposes _extracted auto-populated from httpAdapter.normalize"
   expect(((c as any)._extracted.schemas as any)?.security).toBe("bearer");
 });
 
+test("HTTP projection surfaces given and verify markers", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: {
+        description: "x",
+        expect: { status: 200 },
+        given: "user is signed in",
+        verifyRules: [{ id: "audit", description: "audit row is written" }],
+        verify: async () => {},
+      },
+    },
+  });
+
+  const caseMeta = (c as any)._extracted.cases[0];
+  expect(caseMeta.given).toBe("user is signed in");
+  expect(caseMeta.hasVerify).toBe(true);
+  expect(caseMeta.verifyRules).toEqual([
+    { id: "audit", description: "audit row is written" },
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // classifyFailure
 // ---------------------------------------------------------------------------

@@ -168,9 +168,13 @@ beforeEach(() => {
 
 describe("factory", () => {
   test("contract.graphql.with returns a factory", () => {
-    const gql = (contract as any).graphql as GraphqlContractRoot;
+    const gql = contract.graphql;
     const factory = gql.with("api", {});
     expect(typeof factory).toBe("function");
+    const carrier = factory("typed-user", {
+      cases: { ok: { description: "ok", query: "{ user { id } }" } },
+    });
+    expect(typeof carrier.case).toBe("function");
   });
 
   test("direct contract.graphql(id, spec) throws with helpful error", () => {
@@ -197,6 +201,9 @@ describe("project + normalize", () => {
         short: {
           description: "name only",
           query: "query GetUser { user(id:\"1\") { name } }",
+          given: "user exists",
+          verifyRules: ["profile is visible"],
+          verify: async () => {},
         },
         full: {
           description: "name + orders",
@@ -217,6 +224,9 @@ describe("project + normalize", () => {
     expect(shortCase.schemas?.operation).toBe("query");
     expect(shortCase.schemas?.operationName).toBe("GetUser");
     expect(shortCase.schemas?.query).toContain("{ name }");
+    expect(shortCase.given).toBe("user exists");
+    expect(shortCase.hasVerify).toBe(true);
+    expect(shortCase.verifyRules).toEqual(["profile is visible"]);
 
     const fullCase = projection.cases.find((c) => c.key === "full")!;
     expect(fullCase.schemas?.query).toContain("orders");
@@ -262,7 +272,15 @@ describe("project + normalize", () => {
   test("normalize produces JSON-safe projection", () => {
     const spec: GraphqlContractSpec = {
       endpoint: "/graphql",
-      cases: { ok: { description: "ok", query: "{ hi }" } },
+      cases: {
+        ok: {
+          description: "ok",
+          query: "{ hi }",
+          given: "session exists",
+          verifyRules: [{ id: "audit", description: "audit row is written" }],
+          verify: async () => {},
+        },
+      },
     };
     const runtime = graphqlAdapter.project(spec);
     const extracted = graphqlAdapter.normalize!({ ...runtime, id: "my-gql" });
@@ -270,6 +288,11 @@ describe("project + normalize", () => {
     expect(extracted.id).toBe("my-gql");
     expect(extracted.protocol).toBe("graphql");
     expect(extracted.cases[0].key).toBe("ok");
+    expect(extracted.cases[0].given).toBe("session exists");
+    expect(extracted.cases[0].hasVerify).toBe(true);
+    expect(extracted.cases[0].verifyRules).toEqual([
+      { id: "audit", description: "audit row is written" },
+    ]);
     expect(() => JSON.parse(JSON.stringify(extracted))).not.toThrow();
   });
 });

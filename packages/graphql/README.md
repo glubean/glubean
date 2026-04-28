@@ -5,7 +5,7 @@ GraphQL for [Glubean](https://glubean.dev). This package owns two layers:
 - **Contract** — author GraphQL API intent as a single artifact (`contract.graphql.with(...)`). Executable spec, agent-readable, fits `contract.flow()` composition. **Recommended for new work.**
 - **Transport / test plugin** — thin wrapper over `ctx.http` with operation-name tracing, used via `configure({ plugins: { ... } })` or `createGraphQLClient(...)`. Still supported for test-after / exploratory work.
 
-> **v0.2.0 single-package release note:** in earlier drafts, GraphQL contract was planned as a separate `@glubean/contract-graphql` package. Decision 2026-04-20: one package per protocol. Importing `@glubean/graphql` now registers the contract adapter as a side effect. No new install, no second package.
+> **v0.2.0 single-package release note:** in earlier drafts, GraphQL contract was planned as a separate `@glubean/contract-graphql` package. Decision 2026-04-20: one package per protocol. The package now ships a plugin manifest; install it explicitly from `glubean.setup.ts` to enable `contract.graphql`.
 
 ## Install
 
@@ -15,6 +15,16 @@ npm install @glubean/graphql
 
 No native peer dependencies — the client runs over `ctx.http` (ky).
 
+Install the contract plugin in your project setup:
+
+```ts
+// glubean.setup.ts
+import { installPlugin } from "@glubean/sdk";
+import graphqlPlugin from "@glubean/graphql";
+
+await installPlugin(graphqlPlugin);
+```
+
 ---
 
 ## Quick Start — Contract
@@ -22,7 +32,7 @@ No native peer dependencies — the client runs over `ctx.http` (ky).
 ```ts
 import { contract, configure } from "@glubean/sdk";
 import { graphql, gql } from "@glubean/graphql";
-// ^ importing @glubean/graphql registers contract.graphql side-effect
+import { z } from "zod";
 
 const { api } = configure({
   plugins: {
@@ -43,12 +53,13 @@ export const getUser = userContracts("get-user", {
   cases: {
     happy: {
       description: "existing user returns name + email",
+      needs: z.object({ id: z.string() }),
       query: gql`
         query GetUser($id: ID!) {
           user(id: $id) { id name email }
         }
       `,
-      variables: { id: "u_123" },
+      variables: ({ id }) => ({ id }),
       expect: {
         httpStatus: 200,
         data: { user: { id: "u_123", name: "Alice" } },
@@ -97,12 +108,12 @@ export const checkoutFlow = contract
   })
   // Step 2: gRPC — complete payment
   .step(completePayment.case("happy"), {
-    in: (s: any) => ({ request: { orderId: s.orderId } }),
+    in: (s: any) => ({ orderId: s.orderId }),
     out: (s, res: any) => ({ ...s, paymentId: res.message.paymentId }),
   })
   // Step 3: GraphQL — notify
   .step(notifyUser.case("orderComplete"), {
-    in: (s: any) => ({ variables: { userId: s.userId, orderId: s.orderId } }),
+    in: (s: any) => ({ userId: s.userId, orderId: s.orderId }),
   });
 ```
 
@@ -116,7 +127,7 @@ Flow state threads through via typed `in` / `out` lenses.
 - **Envelope exposure** — `GraphqlCaseResult` surfaces `httpStatus`, `headers`, `rawBody` alongside `data` / `errors` for negative-case assertions and flow `out` lens inspection.
 - **Projection to Markdown** — case inventory with operation / `operationName` / query snippets, via `glubean contracts`.
 - **Flow composition** — mix with HTTP / gRPC cases, same artifact.
-- **Scanner + MCP integration** — `glubean scan`, `glubean_extract_contracts` MCP tool, all work unchanged for `contract.graphql(...)`.
+- **Scanner + MCP integration** — `glubean scan`, `glubean_extract_contracts` MCP tool, all work unchanged for `contract.graphql.with(...)`.
 
 ---
 
@@ -293,12 +304,10 @@ Reads a GraphQL document file relative to the test file. Prefer this for full ID
 
 ## Custom matchers
 
-`import "@glubean/graphql"` side-effect registers GraphQL matchers onto the
-shared `ctx.expect()` surface. No extra import or configure field needed.
+Installing the `@glubean/graphql` plugin manifest from `glubean.setup.ts`
+registers GraphQL matchers onto the shared `ctx.expect()` surface.
 
 ```ts
-import "@glubean/graphql";
-
 // Works on GraphQLResult (transport) and GraphqlCaseResult (contract verify / flow out lens)
 ctx.expect(res).toHaveHttpStatus(200);                // transport-layer
 ctx.expect(res).toHaveGraphqlNoErrors();              // errors absent / empty
