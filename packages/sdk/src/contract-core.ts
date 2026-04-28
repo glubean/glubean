@@ -24,6 +24,7 @@ import type {
   BaseCaseSpec,
   Bootstrap,
   BootstrapAttachment,
+  CaseRunnability,
   ContractCaseRef,
   ContractProtocolAdapter,
   ContractProjection,
@@ -121,6 +122,14 @@ function validateNeedsOutput(
   }
   // Schema declares neither safeParse nor parse — type-level only, pass through.
   return value;
+}
+
+function hasSessionState(ctx: TestContext): boolean {
+  try {
+    return Object.keys(ctx.session.entries()).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 // =============================================================================
@@ -347,9 +356,19 @@ function dispatchContract<
         // in `contract.test.ts` (search "§5.1").
 
         const needsSchema = (caseSpec as { needs?: unknown }).needs;
-        const requireAttachment = (caseSpec as {
-          runnability?: { requireAttachment?: boolean };
-        }).runnability?.requireAttachment;
+        const runnability = (caseSpec as { runnability?: CaseRunnability })
+          .runnability;
+        const requireAttachment = runnability?.requireAttachment;
+        const requireSession = runnability?.requireSession;
+
+        if (requireSession && !hasSessionState(ctx)) {
+          throw new Error(
+            `case "${testId}" sets \`runnability.requireSession: true\` ` +
+              `but no session state is available. Define a project ` +
+              `\`session.ts\` that sets at least one session value, or run ` +
+              `without \`--no-session\` if a session already exists.`,
+          );
+        }
 
         // §5.1 Step 1 — explicit input always wins. Bootstrap overlay (even
         // if registered) is NOT invoked. No "run bootstrap for side-effects
@@ -703,8 +722,11 @@ function makeContractCaseRef(
   target: string,
   caseKey: string,
   contract: ProtocolContract<any, any, any>,
-  _spec: unknown,
+  spec: unknown,
 ): ContractCaseRef<any, any> {
+  const caseSpec = (spec as {
+    cases?: Record<string, { runnability?: CaseRunnability }>;
+  }).cases?.[caseKey];
   return {
     __glubean_type: "contract-case-ref",
     contractId,
@@ -712,6 +734,7 @@ function makeContractCaseRef(
     protocol,
     target,
     contract,
+    ...(caseSpec?.runnability ? { runnability: caseSpec.runnability } : {}),
   };
 }
 

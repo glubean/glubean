@@ -80,6 +80,30 @@ export type VerifyRule =
       extensions?: Extensions;
     };
 
+/**
+ * Runnability gates for a contract case.
+ *
+ * These are not contract semantics and are intentionally kept outside
+ * `expect` / projection payloads. They describe runner context that must
+ * exist before the case may execute.
+ *
+ * Gate semantics are conjunctive: every true flag must be satisfied.
+ */
+export interface CaseRunnability {
+  /**
+   * The case must not run as a bare/raw case. It requires a bootstrap overlay,
+   * flow-provided input, explicit input, or a debug `forceStandalone` bypass.
+   */
+  requireAttachment?: boolean;
+
+  /**
+   * The case requires project session state to exist before execution. The
+   * current proof implementation treats a non-empty `ctx.session.entries()`
+   * as the session-ready signal.
+   */
+  requireSession?: boolean;
+}
+
 // =============================================================================
 // Extensions (OpenAPI-style x-* keys)
 // =============================================================================
@@ -169,9 +193,7 @@ export interface BaseCaseSpec {
    * "not contract semantic" stance structurally visible. Fields here
    * do NOT enter contract projection; they enter runnable inventory.
    */
-  runnability?: {
-    requireAttachment?: boolean;
-  };
+  runnability?: CaseRunnability;
 
   deferred?: string;
   deprecated?: string;
@@ -279,9 +301,7 @@ export interface CaseMeta<PayloadSchemas = unknown, Meta = unknown> {
    * semantic; drives runnable inventory (e.g. `requireAttachment` blocks
    * raw execution). Threaded verbatim from `BaseCaseSpec.runnability`.
    */
-  runnability?: {
-    requireAttachment?: boolean;
-  };
+  runnability?: CaseRunnability;
 
   /**
    * v10 attachment-model — the case's logical-input (`needs`) schema in

@@ -46,6 +46,12 @@ export type VerifyRule =
       extensions?: Record<string, unknown>;
     };
 
+/** Runnability gates mirrored from the SDK's CaseRunnability. */
+export interface NormalizedRunnability {
+  requireAttachment?: boolean;
+  requireSession?: boolean;
+}
+
 /** A named example entry for OpenAPI docs. */
 export interface NormalizedExample {
   value: unknown;
@@ -96,9 +102,7 @@ export interface NormalizedCaseMeta {
    * blocks raw execution (case MUST run via a bootstrap overlay). Lives
    * as a first-class field, not in `extensions`, per proposal.
    */
-  runnability?: {
-    requireAttachment?: boolean;
-  };
+  runnability?: NormalizedRunnability;
   /**
    * True iff the case declared `needs`. Authoritative trigger for
    * `rawBypass` in the attachment inventory. Decoupled from `needsSchema`:
@@ -216,8 +220,8 @@ export interface NormalizedRawAttachment {
   caseKey: string;
   /** Export name of the contract this case belongs to. */
   exportName: string;
-  /** Whether the case declares `runnability.requireAttachment` (raw blocked). */
-  runnability?: { requireAttachment?: boolean };
+  /** Runnability gates declared by the case. */
+  runnability?: NormalizedRunnability;
 }
 
 /**
@@ -584,6 +588,20 @@ export function bootstrapAttachmentToNormalized(
   };
 }
 
+function normalizeRunnability(
+  runnability: NormalizedRunnability | undefined,
+): NormalizedRunnability | undefined {
+  if (!runnability) return undefined;
+  const normalized: NormalizedRunnability = {};
+  if (runnability.requireAttachment !== undefined) {
+    normalized.requireAttachment = runnability.requireAttachment;
+  }
+  if (runnability.requireSession !== undefined) {
+    normalized.requireSession = runnability.requireSession;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 /**
  * Synthesize the §7.3 attachment inventory from raw materials.
  *
@@ -620,22 +638,19 @@ export function synthesizeAttachments(
     }
   }
 
-  // Step 1: seed raw entries. Reads `runnability.requireAttachment`
-  // directly from the case projection (post-Phase-2f-fix: the adapter
-  // now threads it as a first-class field, no longer hidden under
-  // `extensions`).
+  // Step 1: seed raw entries. Reads `runnability` directly from the case
+  // projection (post-Phase-2f-fix: the adapter now threads it as a
+  // first-class field, no longer hidden under `extensions`).
   const byTestId = new Map<string, NormalizedAttachmentMeta>();
   for (const [testId, { contract, case: c }] of caseByTestId) {
-    const requireAttachment = c.runnability?.requireAttachment;
+    const runnability = normalizeRunnability(c.runnability);
     byTestId.set(testId, {
       kind: "raw",
       testId,
       contractId: contract.id,
       caseKey: c.key,
       exportName: contract.exportName,
-      ...(requireAttachment !== undefined
-        ? { runnability: { requireAttachment } }
-        : {}),
+      ...(runnability ? { runnability } : {}),
     });
   }
 

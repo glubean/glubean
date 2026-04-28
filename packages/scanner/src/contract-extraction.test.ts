@@ -30,6 +30,7 @@ function makeContract(
     needsSchema?: unknown;
     hasNeeds?: boolean;
     requireAttachment?: boolean;
+    requireSession?: boolean;
   } = {},
 ): NormalizedContractMeta {
   return {
@@ -51,8 +52,17 @@ function makeContract(
             ? { hasNeeds: true }
             : {}),
         ...(opts.needsSchema !== undefined ? { needsSchema: opts.needsSchema } : {}),
-        ...(opts.requireAttachment !== undefined
-          ? { runnability: { requireAttachment: opts.requireAttachment } }
+        ...(opts.requireAttachment !== undefined || opts.requireSession !== undefined
+          ? {
+              runnability: {
+                ...(opts.requireAttachment !== undefined
+                  ? { requireAttachment: opts.requireAttachment }
+                  : {}),
+                ...(opts.requireSession !== undefined
+                  ? { requireSession: opts.requireSession }
+                  : {}),
+              },
+            }
           : {}),
       },
     ],
@@ -355,5 +365,20 @@ test("synthesize: case extensions.runnability.requireAttachment surfaces on raw"
   expect(attachments[0]).toMatchObject({
     kind: "raw",
     runnability: { requireAttachment: true },
+  });
+});
+
+test("synthesize: multiple runnability gates surface on raw", () => {
+  const c = makeContract("orders.create", "session-bound", "createContract", {
+    requireAttachment: true,
+    requireSession: true,
+  });
+  const { attachments } = synthesizeAttachments([c], [], []);
+  expect(attachments[0]).toMatchObject({
+    kind: "raw",
+    runnability: {
+      requireAttachment: true,
+      requireSession: true,
+    },
   });
 });

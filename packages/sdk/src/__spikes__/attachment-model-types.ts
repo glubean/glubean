@@ -51,6 +51,11 @@ interface StandaloneBootstrapContext extends TestContext {
   cleanup(fn: () => Promise<void> | void): void;
 }
 
+interface CaseRunnability {
+  requireAttachment?: boolean;
+  requireSession?: boolean;
+}
+
 // =============================================================================
 // 2. BaseCaseSpec — semantic surface + runnability metadata
 // =============================================================================
@@ -63,9 +68,7 @@ interface BaseCaseSpec<Needs = void> {
   given?: string; // world-state precondition (§0.9 principle)
 
   // Runnability metadata — nested to make non-semantic stance visible
-  runnability?: {
-    requireAttachment?: boolean;
-  };
+  runnability?: CaseRunnability;
 
   // Standard metadata (unchanged from v1–v9)
   deferred?: string;
@@ -151,9 +154,7 @@ interface ContractCaseRef<CaseInput = void, CaseOutput = unknown> {
   readonly caseKey: string;
   readonly protocol: string;
   readonly target: string;
-  readonly runnability?: {
-    requireAttachment?: boolean;
-  };
+  readonly runnability?: CaseRunnability;
   readonly __phantom_input?: CaseInput;
   readonly __phantom_output?: CaseOutput;
 }

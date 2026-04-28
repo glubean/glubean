@@ -507,6 +507,58 @@ test("no-needs case with requireAttachment hard-errors when overlay missing (RFR
   expect(log).not.toContain("execute:no needs but requires attachment");
 });
 
+test("no-needs case with requireSession hard-errors when session state is absent", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  contract.register("mock_require_session", adapter);
+
+  const c = (contract as any).mock_require_session("svc", {
+    target: "/x",
+    cases: {
+      ok: {
+        description: "requires project session",
+        runnability: { requireSession: true },
+      },
+    },
+  }) as ProtocolContract<MockSpec>;
+
+  await expect(c[0]!.fn!(makeMockCtx())).rejects.toThrow(
+    /runnability\.requireSession.*no session state is available/,
+  );
+  expect(log).not.toContain("execute:requires project session");
+});
+
+test("no-needs case with requireSession executes when session state exists", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  contract.register("mock_require_session_present", adapter);
+
+  const c = (contract as any).mock_require_session_present("svc", {
+    target: "/x",
+    cases: {
+      ok: {
+        description: "requires project session",
+        runnability: { requireSession: true },
+      },
+    },
+  }) as ProtocolContract<MockSpec>;
+
+  expect(c.case("ok").runnability).toEqual({ requireSession: true });
+
+  await c[0]!.fn!(
+    makeMockCtx({
+      session: {
+        get: () => "session-token",
+        set: () => {},
+        require: () => "session-token",
+        entries: () => ({ token: "session-token" }),
+      } as any,
+    }),
+  );
+
+  expect(log).toContain("execute:requires project session");
+});
+
 test("overlay with adapter missing executeCase hard-errors (no silent fallback)", async () => {
   const log: string[] = [];
   const adapter = makeMockAdapter({ executionLog: log });
