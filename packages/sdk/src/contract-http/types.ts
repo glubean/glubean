@@ -38,6 +38,11 @@ export type HttpSecurityScheme =
 export interface HttpContractDefaults {
   /** Default HTTP client for all contracts in this instance. */
   client?: HttpClient;
+  /**
+   * Default response schema for non-2xx cases whose `expect.schema` is not
+   * specified. Intended for project-wide error envelopes.
+   */
+  errorEnvelope?: SchemaLike<unknown>;
   /** Security scheme (authoritative, maps to OpenAPI). */
   security?: HttpSecurityScheme;
   /** Tags inherited by all contracts in this instance. */

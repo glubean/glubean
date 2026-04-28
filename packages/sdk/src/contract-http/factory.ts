@@ -16,6 +16,7 @@
 
 import type { Extensions } from "../contract-types.js";
 import type { ProtocolContract } from "../contract-types.js";
+import type { SchemaLike } from "../types.js";
 import type {
   ContractCase,
   HttpContractDefaults,
@@ -46,6 +47,34 @@ function mergeExtensions(
   return Object.keys(merged).length > 0 ? (merged as Extensions) : undefined;
 }
 
+function isNonSuccessStatus(status: number): boolean {
+  return status < 200 || status >= 300;
+}
+
+function mergeErrorEnvelopeDefaults(
+  cases: Record<string, ContractCase<any, any>>,
+  errorEnvelope: SchemaLike<unknown> | undefined,
+): Record<string, ContractCase<any, any>> {
+  if (!errorEnvelope) return cases;
+  return Object.fromEntries(
+    Object.entries(cases).map(([key, c]) => {
+      if (!isNonSuccessStatus(c.expect.status) || c.expect.schema) {
+        return [key, c];
+      }
+      return [
+        key,
+        {
+          ...c,
+          expect: {
+            ...c.expect,
+            schema: errorEnvelope,
+          },
+        },
+      ];
+    }),
+  );
+}
+
 function mergeHttpDefaults(
   defaults: InternalDefaults | undefined,
   spec: HttpContractSpec,
@@ -61,6 +90,7 @@ function mergeHttpDefaults(
     ...spec,
     client: spec.client ?? defaults.client,
     feature: spec.feature ?? defaults.feature,
+    cases: mergeErrorEnvelopeDefaults(spec.cases, defaults.errorEnvelope),
     tags: mergedTags.length > 0 ? mergedTags : undefined,
     extensions: mergedExtensions,
   };
@@ -117,4 +147,3 @@ export function createHttpFactory(
 export function createHttpRoot(dispatch: HttpDispatch): HttpContractRoot {
   return createHttpFactory(dispatch) as unknown as HttpContractRoot;
 }
-

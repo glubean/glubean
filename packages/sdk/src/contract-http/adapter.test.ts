@@ -634,6 +634,55 @@ test("HTTP projection surfaces given and verify markers", () => {
   ]);
 });
 
+test("contract.http.with errorEnvelope applies to non-2xx cases without schema", () => {
+  const client = makeMockClient();
+  const errorEnvelope = {
+    safeParse: (input: unknown) => ({ success: true as const, data: input }),
+    toJSONSchema: () => ({
+      type: "object",
+      required: ["error", "requestId"],
+      properties: {
+        error: { type: "string" },
+        requestId: { type: "string" },
+      },
+    }),
+  } satisfies SchemaLike<unknown> & { toJSONSchema(): unknown };
+  const explicitNotFoundSchema = {
+    safeParse: (input: unknown) => ({ success: true as const, data: input }),
+    toJSONSchema: () => ({ type: "object", properties: { missing: { type: "boolean" } } }),
+  } satisfies SchemaLike<unknown> & { toJSONSchema(): unknown };
+
+  const api = contract.http.with("api", { client, errorEnvelope });
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "ok", expect: { status: 200 } },
+      invalid: { description: "bad request", expect: { status: 400 } },
+      missing: {
+        description: "not found",
+        expect: { status: 404, schema: explicitNotFoundSchema },
+      },
+    },
+  });
+
+  const cases = Object.fromEntries(
+    (c as any)._extracted.cases.map((item: any) => [item.key, item]),
+  );
+  expect(cases.ok.schemas.response.body).toBeUndefined();
+  expect(cases.invalid.schemas.response.body).toEqual({
+    type: "object",
+    required: ["error", "requestId"],
+    properties: {
+      error: { type: "string" },
+      requestId: { type: "string" },
+    },
+  });
+  expect(cases.missing.schemas.response.body).toEqual({
+    type: "object",
+    properties: { missing: { type: "boolean" } },
+  });
+});
+
 // ---------------------------------------------------------------------------
 // classifyFailure
 // ---------------------------------------------------------------------------
