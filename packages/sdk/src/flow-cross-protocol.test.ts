@@ -23,6 +23,11 @@ import { test, expect, beforeEach } from "vitest";
 import { contract, runFlow } from "./index.js";
 import { httpAdapter } from "./contract-http/adapter.js";
 import { createHttpRoot } from "./contract-http/factory.js";
+import { grpcAdapter, createGrpcRoot } from "../../grpc/src/contract/index.js";
+import {
+  graphqlAdapter,
+  createGraphqlRoot,
+} from "../../graphql/src/contract/index.js";
 import type {
   ContractProjection,
   ContractProtocolAdapter,
@@ -78,6 +83,75 @@ function makeMockHttpClient(
   return client as HttpClient & { _calls: MockHttpCall[] };
 }
 
+interface MockGrpcCall {
+  method: string;
+  request: Record<string, unknown>;
+  options: Record<string, unknown>;
+}
+
+function makeMockGrpcClient(
+  resolveMessage: (call: MockGrpcCall) => Record<string, unknown>,
+) {
+  const calls: MockGrpcCall[] = [];
+  return {
+    _calls: calls,
+    async call(
+      method: string,
+      request: Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ) {
+      const call = { method, request, options: options ?? {} };
+      calls.push(call);
+      return {
+        message: resolveMessage(call),
+        status: { code: 0, details: "OK" },
+        responseMetadata: { "x-grpc-trace": "grpc-1" },
+        duration: 1,
+      };
+    },
+    close() {},
+    raw: {},
+  };
+}
+
+interface MockGraphqlCall {
+  operation: "query" | "mutation";
+  document: string;
+  options: {
+    variables?: Record<string, unknown>;
+    headers?: Record<string, string>;
+    operationName?: string;
+  };
+}
+
+function makeMockGraphqlClient(
+  resolveData: (call: MockGraphqlCall) => Record<string, unknown>,
+) {
+  const calls: MockGraphqlCall[] = [];
+  const run = async (
+    operation: MockGraphqlCall["operation"],
+    document: string,
+    options?: MockGraphqlCall["options"],
+  ) => {
+    const call = { operation, document, options: options ?? {} };
+    calls.push(call);
+    return {
+      data: resolveData(call),
+      errors: undefined,
+      httpStatus: 200,
+      headers: { "content-type": "application/json" },
+      rawBody: null,
+    };
+  };
+  return {
+    _calls: calls,
+    query: (document: string, options?: MockGraphqlCall["options"]) =>
+      run("query", document, options),
+    mutate: (document: string, options?: MockGraphqlCall["options"]) =>
+      run("mutation", document, options),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mock ctx (minimal)
 // ---------------------------------------------------------------------------
@@ -98,6 +172,7 @@ function makeCtx(partial: Partial<TestContext> = {}): TestContext {
       const e = {
         toBe: () => {},
         toEqual: () => {},
+        toMatchObject: () => {},
         toHaveStatus: () => {},
         toMatchSchema: () => {},
         toHaveHeader: () => {},
@@ -399,5 +474,181 @@ test("CG-0 spike: state lens purity holds across protocols", async () => {
   expect(rpcLog).toHaveLength(1);
   expect(rpcLog[0].mergedRequest).toMatchObject({
     authorization: "Bearer t1",
+  });
+});
+
+test("first-party adapters: HTTP + gRPC + GraphQL flow passes logical input across protocols", async () => {
+  contract.register("grpc", grpcAdapter);
+  const grpcDispatcher = (contract as any)
+    .grpc as Parameters<typeof createGrpcRoot>[0];
+  (contract as unknown as { grpc: unknown }).grpc = createGrpcRoot(grpcDispatcher);
+
+  contract.register("graphql", graphqlAdapter);
+  const graphqlDispatcher = (contract as any)
+    .graphql as Parameters<typeof createGraphqlRoot>[0];
+  (contract as unknown as { graphql: unknown }).graphql =
+    createGraphqlRoot(graphqlDispatcher);
+
+  const createOrderClient = makeMockHttpClient({
+    status: 201,
+    body: { id: "order-42", total: 49.5 },
+  });
+  const ordersHttp = contract.http.with("orders", { client: createOrderClient });
+  const createOrder = ordersHttp("create-order", {
+    endpoint: "POST /orders",
+    cases: {
+      ok: {
+        description: "create order",
+        body: { sku: "sku-1" },
+        expect: { status: 201 },
+      },
+    },
+  });
+
+  const paymentGrpcClient = makeMockGrpcClient((call) => ({
+    paymentId: `pay-${call.request.orderId}`,
+    chargedAmount: call.request.amount,
+    auth: (call.options.metadata as Record<string, string> | undefined)
+      ?.authorization,
+  }));
+  const payments = (contract as any).grpc.with("payments", {
+    client: paymentGrpcClient,
+  });
+  const capturePayment = payments("capture-payment", {
+    target: "PaymentService/Capture",
+    defaultMetadata: { "x-service": "orders" },
+    cases: {
+      capture: {
+        description: "capture order payment",
+        needs: {} as SchemaLike<{ orderId: string; amount: number }>,
+        request: ({ orderId, amount }: { orderId: string; amount: number }) => ({
+          orderId,
+          amount,
+        }),
+        metadata: ({ orderId }: { orderId: string }) => ({
+          authorization: `Bearer ${orderId}`,
+        }),
+        expect: {
+          statusCode: 0,
+          message: { paymentId: "pay-order-42" },
+        },
+      },
+    },
+  });
+
+  const auditGraphqlClient = makeMockGraphqlClient((call) => ({
+    order: {
+      id: call.options.variables?.orderId,
+      paymentId: call.options.variables?.paymentId,
+      auditToken: call.options.headers?.authorization,
+    },
+  }));
+  const audit = (contract as any).graphql.with("audit", {
+    client: auditGraphqlClient,
+    endpoint: "/graphql",
+  });
+  const auditOrder = audit("audit-order", {
+    cases: {
+      lookup: {
+        description: "lookup audited order",
+        needs: {} as SchemaLike<{ orderId: string; paymentId: string }>,
+        query: `query AuditOrder($orderId: ID!, $paymentId: ID!) {
+          order(id: $orderId) { id paymentId auditToken }
+        }`,
+        variables: ({
+          orderId,
+          paymentId,
+        }: {
+          orderId: string;
+          paymentId: string;
+        }) => ({ orderId, paymentId }),
+        headers: ({ paymentId }: { paymentId: string }) => ({
+          authorization: `Payment ${paymentId}`,
+        }),
+        expect: {
+          httpStatus: 200,
+          data: {
+            order: {
+              id: "order-42",
+              paymentId: "pay-order-42",
+            },
+          },
+        },
+      },
+    },
+  });
+
+  let finalState: unknown;
+  const flowObj = contract
+    .flow("http-grpc-graphql-checkout")
+    .meta({
+      description:
+        "HTTP order creation, gRPC payment capture, GraphQL audit lookup",
+      tags: ["cross-protocol"],
+    })
+    .step(createOrder.case("ok"), {
+      out: (_state, res: any) => ({
+        orderId: res.body.id as string,
+        total: res.body.total as number,
+      }),
+    })
+    .step(capturePayment.case("capture"), {
+      in: (state: any) => ({
+        orderId: state.orderId,
+        amount: state.total,
+      }),
+      out: (state: any, res: any) => ({
+        ...state,
+        paymentId: res.message.paymentId as string,
+      }),
+    })
+    .step(auditOrder.case("lookup"), {
+      in: (state: any) => ({
+        orderId: state.orderId,
+        paymentId: state.paymentId,
+      }),
+      out: (state: any, res: any) => {
+        finalState = { ...state, audit: res.data.order };
+        return finalState as Record<string, unknown>;
+      },
+    })
+    .build() as FlowContract<unknown>;
+
+  await runFlow(flowObj, makeCtx());
+
+  expect(createOrderClient._calls).toHaveLength(1);
+  expect(createOrderClient._calls[0].method).toBe("post");
+
+  expect(paymentGrpcClient._calls).toHaveLength(1);
+  expect(paymentGrpcClient._calls[0]).toMatchObject({
+    method: "Capture",
+    request: { orderId: "order-42", amount: 49.5 },
+  });
+  expect(paymentGrpcClient._calls[0].options).toMatchObject({
+    metadata: {
+      "x-service": "orders",
+      authorization: "Bearer order-42",
+    },
+  });
+
+  expect(auditGraphqlClient._calls).toHaveLength(1);
+  expect(auditGraphqlClient._calls[0]).toMatchObject({
+    operation: "query",
+    options: {
+      variables: { orderId: "order-42", paymentId: "pay-order-42" },
+      headers: { authorization: "Payment pay-order-42" },
+      operationName: "AuditOrder",
+    },
+  });
+
+  expect(finalState).toMatchObject({
+    orderId: "order-42",
+    total: 49.5,
+    paymentId: "pay-order-42",
+    audit: {
+      id: "order-42",
+      paymentId: "pay-order-42",
+      auditToken: "Payment pay-order-42",
+    },
   });
 });
