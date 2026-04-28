@@ -23,7 +23,13 @@ import type { ProjectRunnerTest } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { renderArtifact, openapiArtifact } from "@glubean/sdk";
 import type { ExtractedContractProjection } from "@glubean/sdk";
-import { createScanner, extractFromSource, scan } from "@glubean/scanner";
+import {
+  createScanner,
+  extractFromSource,
+  matchesTemplateFilter,
+  matchesTemplateId,
+  scan,
+} from "@glubean/scanner";
 import { extractContractCases } from "@glubean/scanner/static";
 import {
   extractContractFromFile as sharedExtractFromFile,
@@ -407,6 +413,7 @@ interface DiscoveredTest {
   skip?: boolean;
   only?: boolean;
   tags?: string[];
+  groupId?: string;
   requires?: string;
   defaultRun?: string;
   deferred?: string;
@@ -502,6 +509,7 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
     skip: m.skip,
     only: m.only,
     tags: m.tags,
+    groupId: m.groupId ?? (m.variant === "pick" || m.parallel ? m.id : undefined),
   }));
   return { fileUrl, tests };
 }
@@ -796,7 +804,8 @@ export async function runLocalTestsFromFile(args: {
     const haystack = [t.id, t.name ?? "", ...(t.tags ?? [])]
       .join(" ")
       .toLowerCase();
-    return haystack.includes(normalizedFilter);
+    return haystack.includes(normalizedFilter) ||
+      matchesTemplateFilter(t.id, normalizedFilter);
   });
 
   if (selected.length === 0) {
@@ -838,6 +847,7 @@ export async function runLocalTestsFromFile(args: {
       id: t.id,
       name: t.name,
       tags: t.tags,
+      groupId: t.groupId,
       only: t.only,
       skip: t.skip,
     } as ProjectRunnerTest["meta"],
@@ -1021,7 +1031,7 @@ export async function runLocalTestsFromFile(args: {
         // Finalize this test's result.
         const allAssertionsPassed = acc.assertions.every((a) => a.passed);
         const success = acc.statusSuccess && allAssertionsPassed && !acc.errorMessage;
-        const testMeta = selected.find((t) => t.id === currentTestId);
+        const testMeta = selected.find((t) => matchesTemplateId(t.id, currentTestId!));
         const result: LocalRunResult = {
           exportName: testMeta?.exportName ?? "",
           id: currentTestId,
@@ -1051,9 +1061,15 @@ export async function runLocalTestsFromFile(args: {
   // Preserve the original `selected` order (also matches AI-agent
   // expectation: results in the order they were listed).
   const results: LocalRunResult[] = [];
+  const emitted = new Set<string>();
+  const resultValues = [...resultsByTestId.values()];
   for (const t of selected) {
-    const r = resultsByTestId.get(t.id);
-    if (r) results.push(r);
+    const matches = resultValues.filter((r) => matchesTemplateId(t.id, r.id));
+    for (const r of matches) {
+      if (emitted.has(r.id)) continue;
+      emitted.add(r.id);
+      results.push(r);
+    }
   }
 
   const passed = results.filter((r) => r.success).length;

@@ -429,6 +429,37 @@ export const smoke = test("smoke-check", (ctx) => {
   }
 });
 
+test("discoverTestsFromFile keeps one data-driven template sentinel with grouping metadata", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-data-driven-"));
+  const filePath = join(dir, "cases.test.ts");
+  await writeFile(filePath, `
+import { test } from "@glubean/sdk";
+
+export const cases = test.each([
+  { id: "alpha" },
+  { id: "beta" },
+  { id: "gamma" },
+], { parallel: true })(
+  { id: "case-$id", name: "case $id", tags: ["data"] },
+  async (_ctx, _row) => {},
+);
+`);
+
+  try {
+    const { tests } = await discoverTestsFromFile(filePath);
+    expect(tests).toHaveLength(1);
+    expect(tests[0]).toMatchObject({
+      exportName: "cases",
+      id: "case-$id",
+      name: "case $id",
+      tags: ["data"],
+      groupId: "case-$id",
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("runLocalTestsFromFile filters deferred/browser/out-of-band/opt-in contract cases", async () => {
   const dir = await makeSessionTempDir();
   await mkdir(join(dir, "tests"), { recursive: true });

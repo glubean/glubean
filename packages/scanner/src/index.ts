@@ -47,6 +47,14 @@ export type { FileSystem, Hasher, MetadataExtractor } from "./scanner.js";
 // Re-export static analysis extractor
 export { createStaticExtractor, extractAliasesFromSource, extractContractCases, extractFromSource, isGlubeanFile } from "./extractor-static.js";
 export type { ContractStaticMeta, ContractCaseStaticMeta } from "./extractor-static.js";
+export {
+  findTemplateMatch,
+  hasTemplatePlaceholders,
+  matchesTemplateFilter,
+  matchesTemplateId,
+  stripVariantPrefix,
+  templateIdToRegExp,
+} from "./template-sentinel.js";
 
 // Re-export runtime contract + flow + attachment extraction
 export {

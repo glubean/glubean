@@ -17,7 +17,12 @@ import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
-import { extractContractFromFile, loadProjectOverlays } from "@glubean/scanner";
+import {
+  extractContractFromFile,
+  findTemplateMatch,
+  loadProjectOverlays,
+  matchesTemplateFilter,
+} from "@glubean/scanner";
 import { applyEnvTemplating } from "@glubean/runner";
 
 // ANSI color codes for pretty output
@@ -334,7 +339,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
   }
 
   const metas = extractFromSource(content);
-  return metas.map((m: any) => ({
+  return metas.map((m) => ({
     exportName: m.exportName,
     meta: {
       id: m.id,
@@ -343,7 +348,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
       timeout: m.timeout,
       skip: m.skip,
       only: m.only,
-      groupId: m.groupId,
+      groupId: m.groupId ?? (m.variant === "pick" || m.parallel ? m.id : undefined),
       parallel: m.parallel,
     },
   }));
@@ -351,7 +356,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
 
 function matchesFilter(testItem: DiscoveredTest, filter: string): boolean {
   const lowerFilter = filter.toLowerCase();
-  if (testItem.meta.id.toLowerCase().includes(lowerFilter)) return true;
+  if (matchesTemplateFilter(testItem.meta.id, lowerFilter)) return true;
   if (testItem.meta.name?.toLowerCase().includes(lowerFilter)) return true;
   return false;
 }
@@ -377,6 +382,17 @@ interface FileTest {
   filePath: string;
   exportName: string;
   test: DiscoveredTest;
+}
+
+function findFileTestByRuntimeId(
+  tests: readonly FileTest[],
+  runtimeId: string,
+): FileTest | undefined {
+  const match = findTemplateMatch(
+    tests.map((ft) => ({ id: ft.test.meta.id, ft })),
+    runtimeId,
+  );
+  return match?.ft;
 }
 
 function resolveOutputPath(userPath: string, cwd: string): string {
@@ -956,6 +972,7 @@ export async function runCommand(
   // "start" event inside file:event handlers.
   let currentGroupFilePath = "";
   let currentTestMap: Map<string, (typeof testsToRun)[number]> | undefined;
+  let currentTestItems: (typeof testsToRun) | undefined;
   let testId = "";
   let testName = "";
   let testItem: (typeof testsToRun)[number]["test"] | null = null;
@@ -1212,6 +1229,7 @@ export async function runCommand(
         currentGroupFilePath = ev.filePath;
         startedFiles.add(ev.filePath);
         const runnable = runnableByFile.get(ev.filePath) ?? [];
+        currentTestItems = runnable;
         currentTestMap = new Map(runnable.map((ft) => [ft.test.meta.id, ft]));
 
         if (isMultiFile) {
@@ -1249,7 +1267,9 @@ export async function runCommand(
         const event = ev.event;
         switch (event.type) {
           case "start": {
-            const entry = currentTestMap?.get(event.id);
+            const entry =
+              currentTestMap?.get(event.id) ??
+              (currentTestItems ? findFileTestByRuntimeId(currentTestItems, event.id) : undefined);
             testId = event.id;
             testName = entry?.test.meta.name || event.name || event.id;
             testItem = entry?.test || null;
