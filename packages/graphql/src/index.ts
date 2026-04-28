@@ -535,6 +535,7 @@ export {
   graphqlAdapter,
   createGraphqlFactory,
   createGraphqlRoot,
+  defineGraphqlCase,
   graphqlMatchers,
 } from "./contract/index.js";
 export type {

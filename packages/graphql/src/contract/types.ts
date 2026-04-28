@@ -241,6 +241,23 @@ export interface GraphqlContractCase<
   verify?: (ctx: TestContext, res: GraphqlCaseResult<Res>) => void | Promise<void>;
 }
 
+/**
+ * Case factory for input-bearing GraphQL cases.
+ *
+ * Captures `Needs` at the case's own const site so function-valued
+ * `variables` and `headers` fields are checked against the declared logical
+ * input instead of drifting independently from the `needs` schema.
+ */
+export function defineGraphqlCase<
+  Needs = void,
+  Vars extends Record<string, unknown> = Record<string, unknown>,
+  Res = unknown,
+>(
+  c: GraphqlContractCase<Vars, Res, Needs>,
+): GraphqlContractCase<Vars, Res, Needs> {
+  return c;
+}
+
 // =============================================================================
 // Case result (shape passed to verify and to flow `out` lens)
 // =============================================================================

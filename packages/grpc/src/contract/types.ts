@@ -139,6 +139,25 @@ export interface GrpcContractCase<Req = unknown, Res = unknown, Needs = void>
   verify?: (ctx: TestContext, res: GrpcCaseResult<Res>) => void | Promise<void>;
 }
 
+/**
+ * Case factory for input-bearing gRPC cases.
+ *
+ * TypeScript cannot infer and correlate `needs` with function-valued sibling
+ * fields inside a plain object literal. Capturing `Needs` at the case's own
+ * const site makes `request` and `metadata` functions type-check against the
+ * declared logical input.
+ *
+ * The default request type is a record rather than `unknown` so the static
+ * branch does not swallow function values and bypass the `Needs` check.
+ */
+export function defineGrpcCase<
+  Needs = void,
+  Req = Record<string, unknown>,
+  Res = unknown,
+>(c: GrpcContractCase<Req, Res, Needs>): GrpcContractCase<Req, Res, Needs> {
+  return c;
+}
+
 // =============================================================================
 // Case result (shape passed to verify and to flow `out` lens)
 // =============================================================================
