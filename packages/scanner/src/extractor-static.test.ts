@@ -1313,6 +1313,24 @@ export const checkout = contract.http("checkout", {
   expect(result[0].cases[0].defaultRun).toBe("opt-in");
 });
 
+test("extractContractCases — given precondition", () => {
+  const source = `
+export const invite = contract.http("invite-member", {
+  endpoint: "POST /teams/:teamId/invites",
+  cases: {
+    duplicate: {
+      description: "Existing member email is rejected.",
+      given: "the email already belongs to a team member",
+      expect: { status: 409 },
+    },
+  },
+});`;
+  const result = extractContractCases(source);
+  expect(result[0].cases[0].given).toBe(
+    "the email already belongs to a team member",
+  );
+});
+
 test("extractContractCases — no requires/defaultRun returns undefined", () => {
   const source = `
 export const simple = contract.http("simple", {

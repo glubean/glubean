@@ -143,6 +143,26 @@ describe("formatMdOutline", () => {
     // Falls back to endpoint since feature != endpoint
     expect(output).toContain("POST /users");
   });
+
+  test("surfaces given preconditions in case notes", () => {
+    const output = formatMdOutline([
+      {
+        ...userRegistration,
+        cases: [
+          {
+            key: "duplicateEmail",
+            line: 15,
+            description: "Duplicate email is rejected.",
+            expectStatus: 409,
+            given: "a user with this email already exists",
+          },
+        ],
+      },
+    ]);
+    expect(output).toContain(
+      "**duplicateEmail** — Duplicate email is rejected. *(given: a user with this email already exists)*",
+    );
+  });
 });
 
 // ── json ────────────────────────────────────────────────────────────────────
@@ -174,6 +194,28 @@ describe("formatJson", () => {
     expect(parsed.features[0].name).toBe("用户注册");
     expect(parsed.features[0].contracts[0].feature).toBe("用户注册");
     expect(parsed.features[0].contracts[0].description).toBe("新用户注册账号");
+  });
+
+  test("includes given preconditions on cases", () => {
+    const parsed = JSON.parse(
+      formatJson([
+        {
+          ...userRegistration,
+          cases: [
+            {
+              key: "duplicateEmail",
+              line: 15,
+              description: "Duplicate email is rejected.",
+              expectStatus: 409,
+              given: "a user with this email already exists",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(parsed.features[0].contracts[0].cases[0].given).toBe(
+      "a user with this email already exists",
+    );
   });
 });
 

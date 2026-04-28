@@ -1,6 +1,11 @@
 import { test, expect } from "vitest";
-import type { FileMeta } from "@glubean/scanner";
-import { computeRootHash, deriveMetadataStats, normalizeFileMap } from "./metadata.js";
+import type { FileMeta, ScanResult } from "@glubean/scanner";
+import {
+  buildMetadata,
+  computeRootHash,
+  deriveMetadataStats,
+  normalizeFileMap,
+} from "./metadata.js";
 
 test("computeRootHash is order independent", async () => {
   const fileA: FileMeta = { hash: "sha256-a", exports: [] };
@@ -53,5 +58,44 @@ test("normalizeFileMap rejects duplicate normalized paths", () => {
 
   expect(() => normalizeFileMap(files)).toThrow(
     "Duplicate file path after normalization",
+  );
+});
+
+test("buildMetadata preserves contract given preconditions for upload payloads", async () => {
+  const scanResult: ScanResult = {
+    specVersion: "1",
+    files: {},
+    testCount: 0,
+    fileCount: 0,
+    tags: [],
+    warnings: [],
+    flows: [],
+    contracts: [
+      {
+        contractId: "invite-member",
+        exportName: "inviteMember",
+        line: 1,
+        endpoint: "POST /teams/:teamId/invites",
+        protocol: "http",
+        cases: [
+          {
+            key: "duplicate",
+            line: 10,
+            description: "Duplicate member email is rejected.",
+            expectStatus: 409,
+            given: "the email already belongs to a team member",
+          },
+        ],
+      },
+    ],
+  };
+
+  const metadata = await buildMetadata(scanResult, {
+    generatedBy: "test",
+    generatedAt: "2026-04-28T00:00:00.000Z",
+  });
+
+  expect(metadata.contracts?.[0]?.cases[0]?.given).toBe(
+    "the email already belongs to a team member",
   );
 });

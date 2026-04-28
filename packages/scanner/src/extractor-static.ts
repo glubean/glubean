@@ -1028,7 +1028,20 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
       const defaultRunMatch = caseBody.match(/defaultRun\s*:\s*["'](always|opt-in)["']/);
       if (defaultRunMatch) defaultRun = defaultRunMatch[1];
 
-      cases.push({ key, line: caseLine, description, expectStatus, deferred, requires, defaultRun });
+      let given: string | undefined;
+      const givenMatch = caseBody.match(/given\s*:\s*["']([^"']+)["']/);
+      if (givenMatch) given = givenMatch[1];
+
+      cases.push({
+        key,
+        line: caseLine,
+        description,
+        expectStatus,
+        deferred,
+        requires,
+        defaultRun,
+        given,
+      });
     }
 
     results.push({ contractId, exportName, line, endpoint, protocol, description, feature, cases });
