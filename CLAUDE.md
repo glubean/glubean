@@ -1,5 +1,7 @@
 # Glubean OSS (Node.js) — Project Rules
 
+> **Workspace-level rules: see [`../internal/CLAUDE.md`](../internal/CLAUDE.md)** (read first if you haven't this session).
+
 ## Repo Structure
 - Monorepo with pnpm workspaces
 - Packages: sdk, scanner, redaction, runner, auth, mcp, graphql, browser, cli
@@ -38,3 +40,14 @@ The CI workflow handles this automatically. Do not change the order without upda
 ## Branch Policy
 - Solo development: direct commits to main are OK.
 - With collaborators: require branch + PR + squash merge. Add branch protection when the team grows.
+
+## Commit gate (default: converge)
+
+Default — any commit, before "done":
+1. Run vitest on the changed package — paste real output, no summary
+2. Run: `codex review --base <baseSha>`  (codex 5.5, --xhigh, no custom prompt)
+3. P1+ findings fix-iterate to 0
+4. Don't hand back with unresolved findings
+5. RFR Round ≤ 3 — beyond that, owner decides "ship or abort"
+
+Skip ONLY when owner explicitly says so (e.g. "just bump version", "only fix this typo"). Default is converge — never skip silently.
