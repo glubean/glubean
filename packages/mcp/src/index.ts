@@ -38,6 +38,7 @@ import {
 } from "@glubean/scanner";
 import type { BundleMetadata, ExportMeta, FileMeta, ScanResult } from "@glubean/scanner";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
+import { checkSdkCompat, type CompatResult } from "./version-compat.js";
 
 type Vars = Record<string, string>;
 const METADATA_SCHEMA_VERSION = "1";
@@ -781,10 +782,44 @@ export async function runLocalTestsFromFile(args: {
   error?: string;
   /** Runner-fallback or protocol warnings emitted by the executor. (Plan 1 AC6) */
   warnings?: string[];
+  /**
+   * SDK / runner version compat probe result (Plan 3).
+   * Always populated. When `ok: false`, tests were NOT run because we
+   * detected a dual-package hazard that would have produced misleading
+   * errors. See `versionInfo.message` for the install command.
+   */
+  versionInfo?: CompatResult;
 }> {
   const absolutePath = resolve(args.filePath);
   const testDir = dirname(absolutePath);
   const projectRoot = await findProjectRoot(testDir);
+
+  // Plan 3: SDK / runner version-skew probe. Fires BEFORE we spawn the
+  // harness so an unrecoverable dual-package hazard (project has @glubean/sdk
+  // pinned at a different version + no @glubean/runner installed → Plan 1's
+  // fallback path can't produce a hazard-free spawn) is reported as a
+  // structured `sdk_version_skew` error instead of a misleading runtime
+  // error inside the test. Plan 1's runner fix transparently handles the
+  // common case (project-local runner present); this probe only short-
+  // circuits the residual sdk-only scenario.
+  const versionInfo = checkSdkCompat(projectRoot);
+  if (!versionInfo.ok) {
+    const fileUrl = pathToFileURL(absolutePath).href;
+    return {
+      fileUrl,
+      projectRoot,
+      vars: {},
+      secrets: {},
+      results: [],
+      summary: { total: 0, passed: 0, failed: 0 },
+      // Failure class differentiates the two `ok: false` paths in checkSdkCompat:
+      //   - "sdk_version_skew" — recoverable; user installs @glubean/runner
+      //   - "mcp_packaging_bug" — MCP itself broken; file an issue
+      error: versionInfo.failureCode ?? "sdk_version_skew",
+      versionInfo,
+    };
+  }
+
   const traceConfig = await loadMcpTraceConfig(projectRoot);
 
   const envPath = await resolveEnvPath(projectRoot, args.envFile);
@@ -822,6 +857,7 @@ export async function runLocalTestsFromFile(args: {
         ? "No tests discovered in file. Check that exports use test() or contract.http.with() from @glubean/sdk."
         : `No tests matched filter "${args.filter}". Available: ${tests.map((t) => t.id).join(", ")}`,
       ...(discoveryErrors && discoveryErrors.length > 0 ? { importErrors: discoveryErrors } : {}),
+      versionInfo,
     };
   }
 
@@ -883,6 +919,7 @@ export async function runLocalTestsFromFile(args: {
         error:
           "inputJson and bootstrapInput are mutually exclusive. " +
           "Per attachment-model §5.1: explicit input bypasses the overlay, so bootstrap params would be ignored. Pick one channel per run.",
+        versionInfo,
       };
     }
     if (selected.length !== 1) {
@@ -900,6 +937,7 @@ export async function runLocalTestsFromFile(args: {
             ? `: ${selected.map((t) => t.id).slice(0, 10).join(", ")}`
             : "") +
           ".",
+        versionInfo,
       };
     }
     const targetTestId = selected[0]!.id;
@@ -1110,6 +1148,7 @@ export async function runLocalTestsFromFile(args: {
     summary: { total: results.length, passed, failed },
     ...(orchestrationError !== undefined && { error: orchestrationError }),
     ...(warningsArr.length > 0 && { warnings: warningsArr }),
+    versionInfo,
   };
 }
 
@@ -1276,6 +1315,12 @@ server.registerTool(
     // the user with mysterious "configure() values" errors.
     if (result.warnings && result.warnings.length > 0) {
       safe.warnings = result.warnings;
+    }
+    // Plan 3: forward structured compat info. Always include — even when
+    // tests ran successfully — so the agent has full SDK/runner version
+    // context if it wants to render it.
+    if (result.versionInfo) {
+      safe.versionInfo = result.versionInfo;
     }
 
     lastLocalRunSnapshot = {
