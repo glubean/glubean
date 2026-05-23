@@ -23,3 +23,5 @@ package-lock.json
 # test-project build artifacts
 test-project/**/*.js
 test-project/**/*.d.ts
+
+.claude/

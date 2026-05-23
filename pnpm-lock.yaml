@@ -136,6 +136,9 @@ importers:
       '@glubean/scanner':
         specifier: workspace:*
         version: link:../scanner
+      '@glubean/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@modelcontextprotocol/sdk':
         specifier: ^1.18.0
         version: 1.27.1(zod@4.3.6)
@@ -149,9 +152,6 @@ importers:
       '@glubean/graphql':
         specifier: workspace:*
         version: link:../graphql
-      '@glubean/sdk':
-        specifier: workspace:*
-        version: link:../sdk
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.15
