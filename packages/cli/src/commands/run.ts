@@ -986,10 +986,17 @@ export async function runCommand(
   }> = [];
   let success = false;
   let errorMsg: string | undefined;
+  let errorStack: string | undefined;
+  let errorReason: string | undefined;
+  let errorMissingPath: string | undefined;
+  let errorSuggestions: string[] | undefined;
   let peakMemoryMB: string | undefined;
   let stepAssertionCount = 0;
   let stepTraceLines: string[] = [];
   let testStarted = false;
+  // Plan 1 AC5: dedupe warning messages per session so the same warning
+  // doesn't repeat across session setup + each file's run() call.
+  const emittedWarnings = new Set<string>();
 
   const addLogEntry = (
     type: LogEntry["type"],
@@ -1090,7 +1097,33 @@ export async function runCommand(
     }
 
     if (errorMsg) {
-      console.log(`      ${colors.red}Error: ${errorMsg}${colors.reset}`);
+      if (errorReason === "test_file_missing" && errorMissingPath) {
+        console.log(
+          `      ${colors.red}✗ Test file not found: ${errorMissingPath}${colors.reset}`,
+        );
+        if (errorSuggestions && errorSuggestions.length > 0) {
+          console.log(`        ${colors.dim}Did you mean:${colors.reset}`);
+          for (const s of errorSuggestions) {
+            console.log(`          ${s}`);
+          }
+        }
+      } else {
+        console.log(`      ${colors.red}Error: ${errorMsg}${colors.reset}`);
+        if (errorStack) {
+          const lines = errorStack.split("\n").slice(1);
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            const isFramework =
+              trimmed.includes("/node_modules/") ||
+              trimmed.includes("/@glubean/runner/") ||
+              trimmed.includes("internal/modules/");
+            console.log(
+              `        ${isFramework ? colors.dim : colors.reset}${trimmed}${colors.reset}`,
+            );
+          }
+        }
+      }
     }
   };
 
@@ -1190,6 +1223,16 @@ export async function runCommand(
           console.log(
             `  ${colors.dim}[session] ${se.message}${colors.reset}`,
           );
+        } else if (se.type === "warning") {
+          // Plan 1 AC5: render runner-fallback warnings emitted during
+          // session setup. Only dedupe runner diagnostics (those carry a
+          // `code` field — see ExecutionEvent.warning schema); user-emitted
+          // ctx.warn(false, ...) warnings have no code and pass through.
+          const isRunnerDiag = !!(se as { code?: string }).code;
+          if (!isRunnerDiag || !emittedWarnings.has(se.message)) {
+            if (isRunnerDiag) emittedWarnings.add(se.message);
+            console.log(`  ${colors.yellow}⚠ ${se.message}${colors.reset}`);
+          }
         }
         break;
       }
@@ -1278,6 +1321,10 @@ export async function runCommand(
             assertions = [];
             success = false;
             errorMsg = undefined;
+            errorStack = undefined;
+            errorReason = undefined;
+            errorMissingPath = undefined;
+            errorSuggestions = undefined;
             peakMemoryMB = undefined;
             stepAssertionCount = 0;
             stepTraceLines = [];
@@ -1301,6 +1348,10 @@ export async function runCommand(
             success = event.status === "completed";
             if (event.error) {
               errorMsg = event.error;
+              errorStack = event.stack;
+              errorReason = event.reason;
+              errorMissingPath = event.missingPath;
+              errorSuggestions = event.suggestions;
               addLogEntry("error", event.error);
             }
             if (event.peakMemoryMB) peakMemoryMB = event.peakMemoryMB;
@@ -1309,7 +1360,13 @@ export async function runCommand(
 
           case "error":
             success = false;
-            if (!errorMsg) errorMsg = event.message;
+            if (!errorMsg) {
+              errorMsg = event.message;
+              errorStack = event.stack;
+              errorReason = event.reason;
+              errorMissingPath = event.missingPath;
+              errorSuggestions = event.suggestions;
+            }
             addLogEntry("error", event.message);
             break;
 
@@ -1474,9 +1531,17 @@ export async function runCommand(
 
           case "warning": {
             const warnIcon = event.condition ? `${colors.green}✓${colors.reset}` : `${colors.yellow}⚠${colors.reset}`;
-            console.log(
-              `      ${warnIcon} ${colors.yellow}${event.message}${colors.reset}`,
-            );
+            // Plan 1 AC5: dedupe runner-fallback / protocol-min warnings
+            // (carry a `code` field — see ExecutionEvent.warning schema).
+            // User-emitted ctx.warn(false, ...) warnings have no code and
+            // pass through every time so test authors can see them repeat.
+            const isRunnerDiag = !!event.code;
+            if (!isRunnerDiag || !emittedWarnings.has(event.message)) {
+              if (isRunnerDiag) emittedWarnings.add(event.message);
+              console.log(
+                `      ${warnIcon} ${colors.yellow}${event.message}${colors.reset}`,
+              );
+            }
             break;
           }
 
@@ -1506,9 +1571,37 @@ export async function runCommand(
         // mid-test or emitted no start event, promote the leftover state
         // to a visible failure row.
         if (!testStarted && errorMsg) {
-          console.log(
-            `  ${colors.red}✗ ${errorMsg}${colors.reset}`,
-          );
+          // Plan 4: rich render for orphan-error case (no leading start event,
+          // e.g. harness died during userModule import).
+          if (errorReason === "test_file_missing" && errorMissingPath) {
+            console.log(
+              `  ${colors.red}✗ Test file not found: ${errorMissingPath}${colors.reset}`,
+            );
+            if (errorSuggestions && errorSuggestions.length > 0) {
+              console.log(`    ${colors.dim}Did you mean:${colors.reset}`);
+              for (const s of errorSuggestions) {
+                console.log(`      ${s}`);
+              }
+            }
+          } else {
+            console.log(
+              `  ${colors.red}✗ ${errorMsg}${colors.reset}`,
+            );
+            if (errorStack) {
+              const lines = errorStack.split("\n").slice(1);
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                const isFramework =
+                  trimmed.includes("/node_modules/") ||
+                  trimmed.includes("/@glubean/runner/") ||
+                  trimmed.includes("internal/modules/");
+                console.log(
+                  `    ${isFramework ? colors.dim : colors.reset}${trimmed}${colors.reset}`,
+                );
+              }
+            }
+          }
           failed++;
         }
         if (testStarted) {

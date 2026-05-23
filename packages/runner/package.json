@@ -2,6 +2,8 @@
   "name": "@glubean/runner",
   "version": "0.2.6",
   "type": "module",
+  "glubeanRunnerProtocol": "1",
+  "glubeanRunnerProtocolMinimum": "1",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

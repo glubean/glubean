@@ -27,13 +27,13 @@
   "dependencies": {
     "@glubean/runner": "workspace:*",
     "@glubean/scanner": "workspace:*",
+    "@glubean/sdk": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.18.0",
     "dotenv": "^16.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@glubean/graphql": "workspace:*",
-    "@glubean/sdk": "workspace:*",
     "@types/node": "^22.0.0"
   },
   "repository": {
