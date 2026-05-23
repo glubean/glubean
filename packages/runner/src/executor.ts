@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { readFile, writeFile, rm } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve, join } from "node:path";
@@ -12,6 +12,239 @@ import { discoverSessionFile, createContextWithSession } from "./orchestrator.js
 
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_TIMEOUT_MS = 30000;
+
+// ── Project-local runner resolution (Plan 1) ────────────────────────────────
+
+/**
+ * Walk up from a starting file path looking for the first package.json
+ * whose `name` field matches `expectedName`. Layout-independent — works
+ * regardless of dist/ depth.
+ *
+ * Returns the realpath of the package root, or undefined if not found.
+ */
+function findPackageRoot(startFile: string, expectedName: string): string | undefined {
+  let dir = dirname(startFile);
+  for (let i = 0; i < 16; i++) {
+    const candidate = resolve(dir, "package.json");
+    if (existsSync(candidate)) {
+      try {
+        const pkg = JSON.parse(readFileSync(candidate, "utf-8"));
+        if (pkg?.name === expectedName) {
+          try {
+            return realpathSync(dir);
+          } catch {
+            return dir;
+          }
+        }
+      } catch {
+        // corrupt / non-json; keep walking
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+  return undefined;
+}
+
+/**
+ * Compare two version strings (numeric major.minor.patch). Returns true
+ * if `a < b`. Tolerant of missing fields and non-numeric tails.
+ */
+function semverLt(a: string, b: string): boolean {
+  const parse = (s: string) =>
+    s.split(/[.\-+]/).slice(0, 3).map((p) => parseInt(p, 10) || 0);
+  const [aMajor, aMinor, aPatch] = parse(a);
+  const [bMajor, bMinor, bPatch] = parse(b);
+  if (aMajor !== bMajor) return aMajor < bMajor;
+  if (aMinor !== bMinor) return aMinor < bMinor;
+  return aPatch < bPatch;
+}
+
+/** Diagnostic warning emitted by the executor's runner resolver. */
+interface RunnerWarning {
+  /** Human-readable message. */
+  message: string;
+  /** Stable code for filtering / consumer dedupe. */
+  code: "runner_fallback_no_project" | "runner_fallback_no_dist" | "runner_protocol_old" | "runner_pkg_root_not_found";
+}
+
+interface ResolvedRunner {
+  distDir: string;
+  pkgRoot: string;
+  source: "project" | "bundled";
+  resolvedFrom?: string;
+  version?: string;
+  pendingWarnings: RunnerWarning[];
+}
+
+/**
+ * Resolve the runner dist/ directory + package root.
+ *
+ * Preference: project-local `@glubean/runner` (found from `projectCwd`'s
+ * `node_modules` chain). Fallback: bundled (the consumer's own runner copy).
+ *
+ * Returns warnings to be yielded as `{ type: "warning", ... }` events at
+ * the start of every `run()` call. Always emits a warning when falling
+ * back to bundled (so users see why "configure() values..." errors may
+ * appear in a misconfigured project).
+ */
+function resolveRunnerRoot(
+  projectCwd: string,
+  bundledDistDir: string,
+  bundledPkgRoot: string,
+): ResolvedRunner {
+  const warnings: RunnerWarning[] = [];
+  try {
+    // Root `createRequire` at a stub path INSIDE the project cwd — not
+    // at `import.meta.url` (the workspace executor file). If we use the
+    // workspace URL, Node's resolver returns the workspace's own
+    // `@glubean/runner` via package self-reference (the `exports` field
+    // points back at itself), regardless of `paths: [projectCwd]`. With
+    // a cwd-rooted stub there's no self-reference and Node walks the
+    // project's node_modules chain correctly.
+    const req = createRequire(resolve(projectCwd, "__glubean_resolve_stub__.js"));
+    const mainEntry = req.resolve("@glubean/runner");
+
+    const pkgRoot = findPackageRoot(mainEntry, "@glubean/runner");
+    if (!pkgRoot) {
+      warnings.push({
+        code: "runner_pkg_root_not_found",
+        message: `Could not locate @glubean/runner's package.json above ${mainEntry}; using bundled runner.`,
+      });
+      return {
+        distDir: bundledDistDir,
+        pkgRoot: bundledPkgRoot,
+        source: "bundled",
+        pendingWarnings: warnings,
+      };
+    }
+
+    const projectDistDir = dirname(mainEntry);
+    if (!existsSync(resolve(projectDistDir, "harness.js"))) {
+      warnings.push({
+        code: "runner_fallback_no_dist",
+        message: `Project @glubean/runner at ${pkgRoot} has no built harness.js (looked in ${projectDistDir}); using bundled runner.`,
+      });
+      return {
+        distDir: bundledDistDir,
+        pkgRoot: bundledPkgRoot,
+        source: "bundled",
+        pendingWarnings: warnings,
+      };
+    }
+
+    let version: string | undefined;
+    let projectProtocol: string | undefined;
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(pkgRoot, "package.json"), "utf-8"));
+      version = pkg.version;
+      projectProtocol = pkg.glubeanRunnerProtocol;
+    } catch {
+      // best effort
+    }
+
+    // Min-protocol check: emit a warning if project's protocol is older
+    // than what this consumer needs, but DON'T fall back. Using project-
+    // local runner with an old protocol just means some new env channels
+    // may be silently ignored. Falling back to bundled when the project
+    // has its own SDK would re-introduce the dual-package hazard the
+    // whole fix exists to prevent. Project-local wins; missing features
+    // are surfaced via warning so the user knows to upgrade.
+    try {
+      const bundledPkg = JSON.parse(
+        readFileSync(resolve(bundledPkgRoot, "package.json"), "utf-8"),
+      );
+      const bundledMin: string | undefined = bundledPkg.glubeanRunnerProtocolMinimum;
+      if (bundledMin && (!projectProtocol || semverLt(projectProtocol, bundledMin))) {
+        warnings.push({
+          code: "runner_protocol_old",
+          message:
+            `Project @glubean/runner ${version ?? "<unknown>"} declares glubeanRunnerProtocol=${projectProtocol ?? "<unset>"}, ` +
+            `but this consumer was built for >= ${bundledMin}. ` +
+            `Using project-local runner anyway; some newer features may be silently unavailable. ` +
+            `Run \`npm i -D @glubean/runner@latest\` to silence.`,
+        });
+      }
+    } catch {
+      // bundled pkg.json unreadable — skip the check; happens in test fixtures
+    }
+
+    return {
+      distDir: projectDistDir,
+      pkgRoot,
+      source: "project",
+      resolvedFrom: mainEntry,
+      version,
+      pendingWarnings: warnings,
+    };
+  } catch {
+    // No project-local runner installed. Plan 1 AC4: emit a warning whenever
+    // bundled is used so users see why version-skew "configure() values..."
+    // errors may appear.
+    warnings.push({
+      code: "runner_fallback_no_project",
+      message:
+        `No project-local @glubean/runner found at ${projectCwd}; using consumer's bundled runner. ` +
+        `If your tests import @glubean/sdk from this project, install runner to keep module identity ` +
+        `consistent: \`npm i -D @glubean/runner\`.`,
+    });
+    return {
+      distDir: bundledDistDir,
+      pkgRoot: bundledPkgRoot,
+      source: "bundled",
+      pendingWarnings: warnings,
+    };
+  }
+}
+
+// ── End of project-local resolution ─────────────────────────────────────────
+
+// ── Sibling-file suggestions for missing test file (Plan 4) ────────────────
+
+/**
+ * Quick Levenshtein distance (capped at 5 for early termination).
+ */
+function editDistance(a: string, b: string, cap = 5): number {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > cap) return cap + 1;
+  const m = a.length;
+  const n = b.length;
+  let prev = new Array(n + 1).fill(0).map((_, i) => i);
+  let curr = new Array(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > cap) return cap + 1;
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+async function siblingSuggestions(missingPath: string): Promise<string[]> {
+  try {
+    const { readdir } = await import("node:fs/promises");
+    const parentDir = dirname(missingPath);
+    const wantedBase = missingPath.split("/").pop()!;
+    const candidates = await readdir(parentDir);
+    return candidates
+      .filter((c) => c.endsWith(".test.ts") || c.endsWith(".test.js") || c.endsWith(".test.mts"))
+      .map((c) => ({ name: c, full: resolve(parentDir, c) }))
+      .map(({ name, full }) => ({ full, d: editDistance(wantedBase, name) }))
+      .filter(({ d }) => d <= 5)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 5)
+      .map(({ full }) => full);
+  } catch {
+    return [];
+  }
+}
+
 
 // ── Event Types ─────────────────────────────────────────────────────────────
 
@@ -47,6 +280,14 @@ export type ExecutionEvent = { testId?: string } & (
     condition: boolean;
     message: string;
     stepIndex?: number;
+    /**
+     * Discriminator for executor-emitted diagnostic warnings. Set by the
+     * executor itself (e.g. "runner_fallback", "runner_protocol_old") so
+     * consumers can distinguish runner diagnostics from user-emitted
+     * `ctx.warn(false, "...")` soft warnings, which omit this field.
+     * Used by CLI's dedupe set and MCP's `warnings: []` collection.
+     */
+    code?: string;
   }
   | {
     type: "schema_validation";
@@ -73,8 +314,18 @@ export type ExecutionEvent = { testId?: string } & (
     reason?: string;
     peakMemoryBytes?: number;
     peakMemoryMB?: string;
+    // Rich fields for load-phase failures (Plan 4 — pre-check missing file).
+    missingPath?: string;
+    suggestions?: string[];
   }
-  | { type: "error"; message: string; reason?: "http_timeout" | "test_timeout" | "network" | "oom" }
+  | {
+    type: "error";
+    message: string;
+    reason?: "http_timeout" | "test_timeout" | "network" | "oom" | "test_file_missing";
+    stack?: string;
+    missingPath?: string;
+    suggestions?: string[];
+  }
   | {
     type: "step_start";
     index: number;
@@ -252,10 +503,58 @@ export class TestExecutor {
   private _tempPackageJson: "created" | "patched" | false = false;
   private _originalPackageJson?: string;
 
+  // ── Resolved runner dist (Plan 1 — project-local or bundled) ──────────
+  /** Directory containing harness.js, zero-project-register.mjs. */
+  private _runnerDistDir!: string;
+  /** Package root of the resolved runner — used for GLUBEAN_VENDORED_ROOT. */
+  private _runnerPkgRoot!: string;
+  /** "project" if resolved from cwd's node_modules, else "bundled". */
+  private _runnerSource!: "project" | "bundled";
+  /** Absolute path of the main entry that was resolved (telemetry). */
+  private _runnerResolvedFrom?: string;
+  /** Version field of the resolved runner package.json. */
+  private _runnerVersion?: string;
+  /**
+   * Warnings collected at constructor time that must be surfaced before
+   * any spawn. Yielded at the very start of every run() call (NOT cleared
+   * — see Plan 1 §3.1 R4 reasoning: ProjectRunner runs session setup via
+   * a `run()` call whose consumer doesn't render warnings, so first-call
+   * clearing would lose them).
+   *
+   * Carries a `code` so CLI/MCP consumers can distinguish runner diagnostics
+   * from `ctx.warn(false, ...)` user warnings (both share the same
+   * { type: "warning", condition: false } shape on the wire).
+   */
+  private _pendingWarnings: RunnerWarning[] = [];
+
   constructor(options: ExecutorOptions = {}) {
-    // Use .js (compiled) — works with tsx and matches npm-published dist/
-    this.harnessPath = resolve(__dirname, "harness.js");
+    const bundledDistDir = __dirname;
+    const bundledPkgRoot = resolve(__dirname, "..");
+    const cwd = options.cwd ?? process.cwd();
+    const resolved = resolveRunnerRoot(cwd, bundledDistDir, bundledPkgRoot);
+
+    this._runnerDistDir = resolved.distDir;
+    this._runnerPkgRoot = resolved.pkgRoot;
+    this._runnerSource = resolved.source;
+    this._runnerResolvedFrom = resolved.resolvedFrom;
+    this._runnerVersion = resolved.version;
+    this._pendingWarnings = resolved.pendingWarnings;
+
+    this.harnessPath = resolve(this._runnerDistDir, "harness.js");
     this.options = options;
+  }
+
+  /** @internal — exposed for testing / telemetry. */
+  get runnerSource(): "project" | "bundled" {
+    return this._runnerSource;
+  }
+  /** @internal */
+  get runnerResolvedFrom(): string | undefined {
+    return this._runnerResolvedFrom;
+  }
+  /** @internal */
+  get runnerVersion(): string | undefined {
+    return this._runnerVersion;
   }
 
   static fromSharedConfig(
@@ -401,14 +700,18 @@ export class TestExecutor {
 
     if (existsSync(join(cwd, "node_modules", "@glubean", "sdk"))) return;
 
-    const registerPath = resolve(__dirname, "zero-project-register.mjs");
+    // Plan 1: relocate zero-project subpaths with the harness — if harness
+    // moved to project-local runner, register + vendored root must move too,
+    // otherwise scratch mode mixes project harness with bundled @glubean/*
+    // resolution.
+    const registerPath = resolve(this._runnerDistDir, "zero-project-register.mjs");
     this._zeroProjectTsxArgs.push("--import", registerPath);
 
     // Use the runner package root as the synthetic parent. From there,
     // Node's normal package resolution finds sibling @glubean/* packages in
     // both workspace installs (packages/runner/node_modules) and published
     // installs (ancestor node_modules).
-    this._zeroProjectEnv["GLUBEAN_VENDORED_ROOT"] = resolve(__dirname, "..");
+    this._zeroProjectEnv["GLUBEAN_VENDORED_ROOT"] = this._runnerPkgRoot;
 
     const pkgPath = join(cwd, "package.json");
     if (!existsSync(pkgPath)) {
@@ -459,6 +762,64 @@ export class TestExecutor {
     context: ExecutionContext,
     options?: { timeout?: number; exportName?: string; testIds?: string[]; exportNames?: Record<string, string>; signal?: AbortSignal; concurrency?: number },
   ): AsyncGenerator<ExecutionEvent> {
+    // ── Plan 1 R6: yield pending warnings FIRST (before pre-check / session
+    //    / spawn). Do NOT clear after yielding: ProjectRunner may call run()
+    //    multiple times (session setup + each file), and the first call's
+    //    consumer may not render warnings. Consumers (CLI / MCP) dedupe by
+    //    message at render time.
+    //
+    //    Each warning carries a `code` so consumers can distinguish runner
+    //    diagnostics from `ctx.warn(false, ...)` user warnings (which omit
+    //    `code` — see ExecutionEvent.warning schema).
+    for (const w of this._pendingWarnings) {
+      yield { type: "warning", condition: false, message: w.message, code: w.code };
+    }
+
+    // ── Plan 4: file pre-check. Emit start + status:failed (matches harness's
+    //    "test not found" pattern) so ProjectRunner counts the failure and
+    //    MCP attributes it to the requested test. Skip for the synthetic
+    //    __session__ "test" — session files are discovered/validated upstream.
+    if (testId !== "__session__") {
+      const filePath = fileURLToPath(testUrl);
+      let preCheckFailure: { message: string; suggestions?: string[] } | undefined;
+      try {
+        const { stat } = await import("node:fs/promises");
+        const s = await stat(filePath);
+        if (!s.isFile()) {
+          preCheckFailure = { message: `Test path is not a file: ${filePath}` };
+        }
+      } catch {
+        preCheckFailure = {
+          message: `Test file not found: ${filePath}`,
+          suggestions: await siblingSuggestions(filePath),
+        };
+      }
+
+      if (preCheckFailure) {
+        // Codex R7 P2-2: ProjectRunner batch mode calls run() with
+        // testId="" + options.testIds=[a,b,c]. Empty testId means MCP
+        // / counters lose attribution. Emit one (start, status:failed)
+        // pair per requested testId so the failure attributes correctly.
+        const idsToAttribute = options?.testIds && options.testIds.length > 0
+          ? options.testIds
+          : [testId || filePath];
+        for (const id of idsToAttribute) {
+          yield { type: "start", id, name: id, testId: id };
+          yield {
+            type: "status",
+            status: "failed",
+            id,
+            testId: id,
+            error: preCheckFailure.message,
+            reason: "test_file_missing",
+            missingPath: filePath,
+            ...(preCheckFailure.suggestions && { suggestions: preCheckFailure.suggestions }),
+          };
+        }
+        return;
+      }
+    }
+
     // Auto-session: run setup on first call (skip for __session__ calls to avoid recursion)
     if (this._sessionEnabled && testId !== "__session__") {
       // Capture env from the first real test run so session setup can
@@ -557,8 +918,20 @@ export class TestExecutor {
         env[key] = value;
       }
     }
-    if (nodeOptions.length > 0) {
-      env["NODE_OPTIONS"] = nodeOptions.join(" ");
+    // Plan 4 (E): always enable source maps so strip-types stack frames
+    // translate back to original .ts source lines.
+    nodeOptions.push("--enable-source-maps");
+
+    // Plan 4 R3 P1: merge with caller-set NODE_OPTIONS (after options.env
+    // overrides have already mutated env[]) instead of overwriting. Pre-empts
+    // the regression where setting `options.env.NODE_OPTIONS = undefined`
+    // or `--max-old-space-size=4096` would be discarded.
+    const existingNodeOpts = env["NODE_OPTIONS"]?.trim();
+    const mergedNodeOpts = [existingNodeOpts, ...nodeOptions]
+      .filter(Boolean)
+      .join(" ");
+    if (mergedNodeOpts) {
+      env["NODE_OPTIONS"] = mergedNodeOpts;
     }
 
     // ── Zero-project mode (scratch) ────────────────────────────────────────

@@ -779,6 +779,8 @@ export async function runLocalTestsFromFile(args: {
   results: LocalRunResult[];
   summary: { total: number; passed: number; failed: number };
   error?: string;
+  /** Runner-fallback or protocol warnings emitted by the executor. (Plan 1 AC6) */
+  warnings?: string[];
 }> {
   const absolutePath = resolve(args.filePath);
   const testDir = dirname(absolutePath);
@@ -960,6 +962,10 @@ export async function runLocalTestsFromFile(args: {
   // "no tests" success). Populated by `run:failed` / `bootstrap:failed` /
   // `session:setup:failed` events from the facade.
   let orchestrationError: string | undefined;
+  // Plan 1 AC6: collect runner-fallback / protocol warnings emitted at the
+  // start of every TestExecutor.run() call. Deduped by message so the same
+  // warning doesn't repeat across session setup + each file's invocation.
+  const warningSet = new Set<string>();
 
   for await (const evt of runner.run()) {
     // Surface non-file failure events so callers can distinguish them from
@@ -1062,6 +1068,17 @@ export async function runLocalTestsFromFile(args: {
         if (acc && !acc.errorMessage) acc.errorMessage = event.message;
         break;
       }
+      case "warning": {
+        // Plan 1 AC6: collect runner-fallback / protocol-min warnings.
+        // Discriminate by the `code` field (set by executor diagnostics
+        // only — user-emitted ctx.warn(false, "...") warnings have no
+        // code and are intentionally NOT surfaced at the run level since
+        // they're per-test concerns, not project-wide).
+        if (event.code && event.message) {
+          warningSet.add(event.message);
+        }
+        break;
+      }
     }
   }
 
@@ -1082,6 +1099,8 @@ export async function runLocalTestsFromFile(args: {
   const passed = results.filter((r) => r.success).length;
   const failed = results.filter((r) => !r.success).length;
 
+  const warningsArr = [...warningSet];
+
   return {
     fileUrl,
     projectRoot,
@@ -1090,6 +1109,7 @@ export async function runLocalTestsFromFile(args: {
     results,
     summary: { total: results.length, passed, failed },
     ...(orchestrationError !== undefined && { error: orchestrationError }),
+    ...(warningsArr.length > 0 && { warnings: warningsArr }),
   };
 }
 
@@ -1250,6 +1270,12 @@ server.registerTool(
     };
     if (result.error) {
       safe.error = result.error;
+    }
+    // Plan 1 AC6: forward runner-fallback / protocol warnings to the agent
+    // so it can surface version-skew misconfigurations instead of leaving
+    // the user with mysterious "configure() values" errors.
+    if (result.warnings && result.warnings.length > 0) {
+      safe.warnings = result.warnings;
     }
 
     lastLocalRunSnapshot = {
