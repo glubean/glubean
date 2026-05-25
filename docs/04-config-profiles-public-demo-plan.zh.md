@@ -6,13 +6,13 @@
 
 **2026-05-25 (post-author priority decision)**: 启动时间推迟到 **2026-W23+** (≥ 2026-06-01)。W22 期间 plan 文件冻结，不再扩 scope；review feedback 走 issue/branch，W23 启动时一并 fold 入。
 
-启动时 scope 切片建议：先做 Phase 1+3+4 一起 ship (canonical `glubean.yaml` + `resolveRunPlan` + `glubean ci run` + resolved plan printout 杀手 feature + init 模板迁移到新 config，~6-7d)。**Phase 3 跟 4 必须同 slice / 同 PR** — Phase 3 删 `--ci` 但 Phase 4 才迁 init templates，分开 ship 会让新 init 项目立刻断（template 还引用已删 flag）。Phase 2/5/6 排后续 sprint。
+启动时 scope 切片建议：先做 Phase 1+3+4 一起 ship (canonical `glubean.yaml` + `resolveRunPlan` + `glubean ci run` + resolved plan printout 杀手 feature + init 模板迁移到新 config，~6-7d)。**Phase 3 跟 4 必须同 slice / 同 PR** — Phase 3 删 `--ci` 但 Phase 4 才迁 init templates，分开 ship 会让新 init 项目立刻断（template 还引用已删 flag）。Phase 2/5/6/7 排后续 sprint（Phase 7 是 cross-repo cloud 端，依赖 Phase 5 先 ship）。
 
 Review notes (2026-05-25 review 后总结的 nail-before-Phase-1)：
 
 - **reporter override 语义需精确**：CLI flag 覆盖 profile reporters 时，应只替换对应 channel（如 `--reporter detailed` 只改 console），不要整套替换 reporters dict（不然 junit/resultJson 输出意外丢）
 - **Phase 3+4 顺序风险**：Phase 3 删 `--ci` 后老项目若没 `profiles.ci` 立刻断；必须 Phase 3+4 同 PR 或加 transition warning，不能分次 ship
-- **Phase 5 跨 repo 改动遗漏**：Phase 5 文件范围只列 CLI，但 "Cloud 能按 profile/suite 展示" 实际要扩 server `IngestRunDto` + 后台展示 UI；要在 Phase 5 验收里加显式 cross-repo dependency
+- ~~Phase 5 跨 repo 改动遗漏~~ → 已修：Phase 5 现在纯 CLI side (emit metadata)，Cloud 服务端 + dashboard 改动拆到独立的 Phase 7 (cross-repo, 依赖 Phase 5 先 ship)
 - **`tagMode: or` default**：改 default 前 audit 当前 `--tag a --tag b` 实际语义 (AND 还是 OR)，错的话改 default 是隐性 breaking
 - **Phase 2 高风险**：scanner + sdk + contract-core 一起改，建议启动前 snapshot dogfood baseline，Phase 2 完成后 diff 验证零回归
 
@@ -437,29 +437,31 @@ Public dashboard 展示重点：
 - 新项目第一眼能在 `glubean.yaml` 里看懂 CI 跑什么。
 - GitHub Actions log 第一屏显示 resolved plan。
 
-### Phase 5：Demo/Public Project 路径
+### Phase 5：Demo/Public Project 路径（CLI 端）
 
-文件范围：
+文件范围（CLI repo only）：
 
 - `packages/cli/src/commands/init.ts`
 - `packages/cli/templates/demo/**`
 - `packages/cli/templates/demo-ai-evals/**`
-- Cloud upload metadata payload 如需要扩展：`packages/cli/src/lib/upload.ts`
+- `packages/cli/src/lib/upload.ts`（往**现有** `IngestRunPayload.metadata` 对象里 emit profile/suite/capability/eval 字段）
 
 任务：
 
 1. 新增 `glubean init --template demo`。
 2. 新增 `glubean init --template demo-ai-evals`。
 3. Demo 模板生成 `profiles.public-demo`。
-4. Result payload 增加 profile/suite 信息，Cloud 能按 profile/suite 展示。
-5. Public demo run 带 `tags: [public-demo]`，并带 capability/eval metadata。
-6. 文档把 “public project” 讲成 demo result 的公开展示，不是新的 authoring abstraction。
+4. Result payload 在**现有 `metadata` 对象内**新增 profile/suite/capability/eval 字段（不要加 top-level 新字段——cloud server 现用 `ValidationPipe({ forbidNonWhitelisted: true })`，未知 top-level 字段直接 400 reject；nested under metadata 是已经 accept 的 generic bucket，向前兼容真的成立）。
+5. Public demo run 带 `tags: [public-demo]`，capability/eval metadata 也走同一 `metadata` 对象。
+6. 文档把 "public project" 讲成 demo result 的公开展示，不是新的 authoring abstraction。
 
 验收：
 
 - demo 项目 clone 后能直接 `npm test`。
 - `glubean run --profile public-demo` 产生可上传 result。
-- public-demo result 中能看出 profile、suite、tags、capability/eval metadata。
+- public-demo result JSON 中能看出 profile、suite、tags、capability/eval metadata 都在 `metadata` 子对象里。
+- 上传 payload 不引入 top-level 新字段；上传到当前 prod cloud server 能 200 通过（不被 `ValidationPipe` reject）。
+- ⚠️ **不能仅验证 HTTP 200** — 当前 `ingestRun` 实现只持久化 `metadata.files`，其余字段被 silently dropped (codex round 5 catch, 2026-05-25)。必须**先 ship Phase 7 (server 持久化)**，然后 Phase 5 emit 才有意义，否则历史 Phase 5 uploads 即使 Phase 7 后也无法 recover。
 
 ### Phase 6：清理旧模式
 
@@ -476,6 +478,35 @@ Public dashboard 展示重点：
 - `rg -- "--ci|ci-config"` 只剩历史/迁移说明，或完全没有。
 - CLI tests 不再依赖旧 config fixture。
 - 新 README 的 CI 入口只有 `glubean ci run` 或 profile 命令。
+
+### Phase 7：Cloud 服务端 + Dashboard（cross-repo）
+
+跨仓库阶段。**不在本 plan 文件 (glubean repo) 的实施范围内**——目标是让 Phase 5 上传的 metadata 在 cloud 端可读可看可过滤。**不需要扩 `IngestRunDto` 接受新 top-level 字段**——Phase 5 字段已经在现有 `metadata` 对象内，server 已经接受；Phase 7 只读 + 展示。
+
+文件范围（位于独立 cloud repo，本 plan 仅作 dependency 约束）：
+
+- `cloud/apps/server/src/cli-runs/cli-runs.service.ts`（ingestRun 把 `metadata.profile` / `metadata.suite` / `metadata.capability` / `metadata.eval` 投射到 `runs` collection 顶层字段，方便查询/索引）
+- `cloud/apps/server/src/tasks/schemas/run.schema.ts`（顶层加投射字段 + 索引视查询需要而加）
+- `cloud/apps/server/src/cli-runs/cli-runs.controller.ts` 或新 endpoint（`GET /open/v1/runs` 支持 profile/suite/capability filter query）
+- Public dashboard 路由 + UI 组件（按 profile/suite/tag/capability 过滤；展示 capability pass/fail 而非 raw test pass rate）
+
+任务：
+
+1. ingestRun 读取 `metadata` 内 profile/suite/capability/eval 并投射到 run document 顶层字段（保持 metadata 原值不动，便于历史追溯）。
+2. `GET /open/v1/runs` 支持 profile/suite/capability filter query。
+3. Run detail 页展示 profile/suite/capability/eval metadata。
+4. Public project 页加 capability pass/fail 总览 + 复现命令 hint (`glubean run --profile public-demo --filter ...`)。
+5. Cloud 端 e2e 验证：Phase 5 的 CLI upload result 在 dashboard 可见 + 可过滤。
+
+验收：
+
+- Phase 5 上传的 result 在 cloud dashboard 上 profile/suite/capability metadata 可见。
+- 老 client（无新 metadata 字段）仍然能正常上传，dashboard 显示退化为 "未标 profile/suite" 而不是失败。
+- public-demo run 在 public project 页能按 capability 维度过滤展示。
+
+**依赖关系 (codex round 5 修正, 2026-05-25)**: **Phase 7 必须先 ship 或与 Phase 5 同 sprint ship**。原假设"Phase 5 先 ship, 数据先到 server, Phase 7 后点亮"不成立——当前 `ingestRun` 只持久化 `metadata.files` 子字段, 其余 metadata 在 server 收下后 silently dropped。如果 Phase 5 先 ship, Phase 5 期间所有 public-demo upload 的 profile/suite 字段全丢, Phase 7 ship 后这批历史 upload 也 recover 不了。
+
+建议落地: Phase 5 + Phase 7 作 **single sprint 一起 ship**, 或 Phase 7 server persistence 先 ship → Phase 5 CLI emit 才接得住。
 
 ## 风险与决策点
 
@@ -512,10 +543,11 @@ glubean project create --alias glubean-public-demo --public
 
 ## 推荐落地顺序
 
-1. 先做 `glubean.yaml` schema + `resolveRunPlan()`，不碰 Cloud。
-2. 再修 contract/test discovery 对齐，否则 profiles 的 `tags` 对 contracts 仍然不可用。
-3. 再加 `glubean ci run` 和 plan 输出，替换 `--ci`。
-4. 再改 init/templates/README。
-5. 最后做 demo/public project metadata 和 Cloud 展示对接。
+1. 先做 `glubean.yaml` schema + `resolveRunPlan()`，不碰 Cloud（Phase 1）。
+2. 再修 contract/test discovery 对齐，否则 profiles 的 `tags` 对 contracts 仍然不可用（Phase 2）。
+3. 再加 `glubean ci run` 和 plan 输出，替换 `--ci`（Phase 3）+ 同步迁移 init 模板（Phase 4）—— 这两步必须同 PR ship，分开 ship 新 init 项目立刻断。
+4. 再做 demo/public project CLI 端 metadata emit（Phase 5）。
+5. 最后做 Cloud 服务端 + dashboard 展示对接（Phase 7，跨 repo，依赖 Phase 5 已 ship）。
+6. 全程结束后清理旧模式（Phase 6 — 也可以并入 Phase 4 顺手做掉）。
 
 这条顺序能先解决当前最伤产品可信度的问题：用户从配置和 CI log 看不到真实运行计划。
