@@ -89,8 +89,9 @@ profiles:
   ci:
     suites: [contracts, tests]
     selection:
-      excludeTags: [manual, destructive]
       tagMode: or
+    # 注: excludeTags 字段先不放进 canonical ci profile，
+    # 待 resolver + runner 实施 exclude-tag 过滤后再加回（独立 backlog row）
     execution:
       failFast: true
       concurrency: 2
@@ -117,7 +118,18 @@ profiles:
       failFast: false
     reporters:
       console: detailed
+```
 
+Demo 项目在 canonical config 之上**合并**（不是替换）下面这块——在自己的 `suites:` 和 `profiles:` block 里追加对应条目：
+
+```yaml
+suites:
+  demo-evals:
+    target: ./demo/evals
+    kinds: [test]
+    data: ./demo/data
+
+profiles:
   public-demo:
     suites: [demo-evals]
     selection:
@@ -132,16 +144,6 @@ profiles:
     upload:
       enabled: true
       projectAlias: glubean-public-demo
-```
-
-Public/demo 项目可以额外声明 suite：
-
-```yaml
-suites:
-  demo-evals:
-    target: ./demo/evals
-    kinds: [test]
-    data: ./demo/data
 ```
 
 ## 配置语义
@@ -238,7 +240,6 @@ Suites:
   tests     -> ./tests [test]
 
 Selection:
-  excludeTags: manual, destructive
   tagMode: or
 
 Execution:
@@ -333,6 +334,7 @@ Public dashboard 展示重点：
 - `packages/cli/src/lib/config.ts`
 - `packages/cli/src/lib/config.test.ts`
 - `packages/cli/src/main.ts`
+- `packages/cli/src/commands/run.ts`（task 7 让 runCommand 接收 resolved plan，需改这里）
 
 任务：
 
