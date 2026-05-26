@@ -106,6 +106,13 @@ export const getUser = api("users.get", {
     "requires:browser",
     "default-run:opt-in",
   ]);
+
+  // Contract case name matches SDK testName format `${id} — ${caseKey}`
+  // so --filter (which checks meta.name) is consistent with the runtime.
+  expect(byId.get("users.get.ok")?.meta.name).toBe("users.get — ok");
+  expect(byId.get("users.get.browserCase")?.meta.name).toBe(
+    "users.get — browserCase",
+  );
 });
 
 test("discoverTests propagates flow tags + only + skip (as deferred)", async () => {

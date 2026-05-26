@@ -54,7 +54,7 @@ Discovering tests...
 
 Running 2 test(s)...
 
-  ⊘ oauth-login.browserFlow — skipped (requires: browser (use --include-browser to run))
+  ⊘ oauth-login — browserFlow — skipped (requires: browser (use --include-browser to run))
   ● oauth-login — headlessCheck
     runs by default
     ✗ FAILED (<Nms>, 1 checks)

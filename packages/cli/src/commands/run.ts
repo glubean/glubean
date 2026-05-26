@@ -310,6 +310,10 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
           exportName: ec.exportName,
           meta: {
             id: `${ec.id}.${c.key}`,
+            // Mirror SDK dispatchContract testName: `${contractId} — ${caseKey}`.
+            // Phase 1 matchesFilter checks meta.name; without this, --filter
+            // matches against testId only for contract cases (uneven with test()).
+            name: `${ec.id} — ${c.key}`,
             description: c.description,
             tags: finalTags.length > 0 ? finalTags : undefined,
             requires: c.requires,
