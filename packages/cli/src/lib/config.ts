@@ -22,6 +22,150 @@ import { LOCAL_RUN_DEFAULTS } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import type { ThresholdConfig } from "@glubean/sdk";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// V1 PROFILE-BASED CONFIG (Phase 1 sub-task B — new shape, not yet wired)
+// ─────────────────────────────────────────────────────────────────────────────
+// These types model the canonical `glubean.yaml` v1 schema (plan §"新配置文件").
+// Loading + resolution arrive in sub-task C (loadProjectConfigV1) and sub-task D
+// (resolveRunPlan). runCommand starts consuming ResolvedRunPlan in sub-task E.
+// The legacy GlubeanConfig + loadConfig() below stay in place during Phase 1
+// transition; Phase 6 cleans them up.
+
+/** Suite = where the runner finds runnable items. */
+export interface SuiteConfig {
+  /** File path, directory, or glob (e.g. `./tests`, `./contracts/*.contract.ts`). */
+  target: string;
+  /** Which kinds of items to extract from `target`. */
+  kinds: Array<"test" | "contract" | "flow">;
+  /** Optional path to fixture/eval data (for demo/eval-style suites). */
+  data?: string;
+}
+
+/** Selection (positive `tags` + filter/pick + always-OR `excludeTags`). */
+export interface SelectionConfig {
+  tags?: string[];
+  /** Always-OR exclusion — any match drops the case. Independent of `tagMode`. */
+  excludeTags?: string[];
+  filter?: string;
+  pick?: string;
+  /** Default "or". Governs `tags` only; never affects `excludeTags`. */
+  tagMode?: "or" | "and";
+}
+
+/** Execution-time runtime settings. */
+export interface ExecutionConfig {
+  failFast?: boolean;
+  /** Stop after N test failures. null = never stop on count. */
+  failAfter?: number | null;
+  /** Per-test timeout in ms. */
+  timeoutMs?: number;
+  concurrency?: number;
+  /** When true, skip session/runs-context initialization for tests. */
+  noSession?: boolean;
+}
+
+/** Opt-in capability gates. */
+export interface CapabilitiesConfig {
+  browser?: boolean;
+  outOfBand?: boolean;
+  optIn?: boolean;
+}
+
+/** Reporter sinks. Each is independently overridable by CLI flag. */
+export interface ReportersConfig {
+  console?: "detailed" | "summary";
+  /** JUnit XML output path (relative to project root). */
+  junit?: string;
+  /** Structured JSON results path. */
+  resultJson?: string;
+  emitFullTrace?: boolean;
+}
+
+/** Optional cloud upload directive (per-profile). */
+export interface UploadConfig {
+  enabled?: boolean;
+  /** Project alias on cloud (resolves to projectId via cloud lookup). */
+  projectAlias?: string;
+}
+
+/** Profile = one named run plan. References suites by name. */
+export interface ProfileConfig {
+  /** Names of suites (top-level `suites:` block) this profile includes. */
+  suites: string[];
+  selection?: SelectionConfig;
+  execution?: ExecutionConfig;
+  capabilities?: CapabilitiesConfig;
+  reporters?: ReportersConfig;
+  upload?: UploadConfig;
+}
+
+/** Top-level `defaults:` — merged into every profile before profile-specific values. */
+export interface DefaultsConfig {
+  envFile?: string;
+  selection?: SelectionConfig;
+  execution?: ExecutionConfig;
+  capabilities?: CapabilitiesConfig;
+  reporters?: ReportersConfig;
+  redaction?: GlubeanRedactionConfigInput;
+}
+
+/** Canonical v1 project config — the entire `glubean.yaml` content. */
+export interface GlubeanProjectConfigV1 {
+  version: 1;
+  defaults?: DefaultsConfig;
+  /** Named suite definitions referenced by profiles. */
+  suites: Record<string, SuiteConfig>;
+  /** Named profiles. `glubean run --profile <name>` selects one. */
+  profiles: Record<string, ProfileConfig>;
+}
+
+/**
+ * ResolvedRunPlan — what a profile resolves to after merging
+ * defaults → profile → CLI overrides. All required fields are populated;
+ * `runCommand` consumes this (sub-task E) instead of assembling options
+ * piecemeal. Selection arrays are always [] rather than undefined.
+ */
+export interface ResolvedRunPlan {
+  /** Profile name selected (e.g. "ci"). */
+  profile: string;
+  /** Absolute path of the loaded `glubean.yaml`. */
+  configPath: string;
+  /** Suites included in the run, expanded with their definitions. */
+  suites: Array<{ name: string } & SuiteConfig>;
+  selection: {
+    tags: string[];
+    excludeTags: string[];
+    filter?: string;
+    pick?: string;
+    tagMode: "or" | "and";
+  };
+  execution: {
+    failFast: boolean;
+    failAfter: number | null;
+    timeoutMs: number;
+    concurrency: number;
+    noSession: boolean;
+  };
+  capabilities: {
+    browser: boolean;
+    outOfBand: boolean;
+    optIn: boolean;
+  };
+  reporters: {
+    console: "detailed" | "summary";
+    junit?: string;
+    resultJson?: string;
+    emitFullTrace: boolean;
+  };
+  upload?: UploadConfig;
+  envFile: string;
+  redaction: RedactionConfig;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY (pre-v1) — kept during Phase 1 transition; removed in Phase 6
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /** Run-related configuration (resolved — all fields have values). */
