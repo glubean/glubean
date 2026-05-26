@@ -163,6 +163,592 @@ export interface ResolvedRunPlan {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// V1 LOADER (Phase 1 sub-task C — loadProjectConfigV1 with hard-error
+// validation). Resolve + runtime wiring arrive in sub-tasks D and E.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Thrown by loadProjectConfigV1 — all hard validation failures use this. */
+export class GlubeanConfigError extends Error {
+  constructor(message: string, public readonly path?: string) {
+    super(path ? `${message}\n  in: ${path}` : message);
+    this.name = "GlubeanConfigError";
+  }
+}
+
+const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles"]);
+const V1_SUITE_KEYS = new Set(["target", "kinds", "data"]);
+const V1_SUITE_KINDS = new Set(["test", "contract", "flow"]);
+const V1_SELECTION_KEYS = new Set([
+  "tags",
+  "excludeTags",
+  "filter",
+  "pick",
+  "tagMode",
+]);
+const V1_EXECUTION_KEYS = new Set([
+  "failFast",
+  "failAfter",
+  "timeoutMs",
+  "concurrency",
+  "noSession",
+]);
+const V1_CAPABILITIES_KEYS = new Set(["browser", "outOfBand", "optIn"]);
+const V1_REPORTERS_KEYS = new Set([
+  "console",
+  "junit",
+  "resultJson",
+  "emitFullTrace",
+]);
+const V1_UPLOAD_KEYS = new Set(["enabled", "projectAlias"]);
+const V1_DEFAULTS_KEYS = new Set([
+  "envFile",
+  "selection",
+  "execution",
+  "capabilities",
+  "reporters",
+  "redaction",
+]);
+const V1_PROFILE_KEYS = new Set([
+  "suites",
+  "selection",
+  "execution",
+  "capabilities",
+  "reporters",
+  "upload",
+]);
+const V1_REDACTION_KEYS = new Set([
+  "sensitiveKeys",
+  "customPatterns",
+  "replacementFormat",
+]);
+
+function assertOnlyKnownKeys(
+  obj: unknown,
+  known: Set<string>,
+  context: string,
+  configPath: string,
+): void {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+  const unknown = Object.keys(obj as Record<string, unknown>).filter(
+    (k) => !known.has(k),
+  );
+  if (unknown.length > 0) {
+    throw new GlubeanConfigError(
+      `Unknown key(s) at \`${context}\`: ${unknown.map((k) => `"${k}"`).join(", ")}. ` +
+        `Allowed keys: ${[...known].join(", ")}.`,
+      configPath,
+    );
+  }
+}
+
+function assertType(
+  value: unknown,
+  expected: "string" | "number" | "boolean" | "array" | "object",
+  context: string,
+  configPath: string,
+): void {
+  let ok = false;
+  if (expected === "array") ok = Array.isArray(value);
+  else if (expected === "object")
+    ok = value !== null && typeof value === "object" && !Array.isArray(value);
+  else if (expected === "number") {
+    // YAML `.nan` / `.inf` / `-.inf` parse as JS numbers but are not usable
+    // for execution settings (NaN concurrency → no workers, etc). Reject.
+    ok = typeof value === "number" && Number.isFinite(value);
+  } else ok = typeof value === expected;
+  if (!ok) {
+    let got: string;
+    if (value === null) got = "null";
+    else if (Array.isArray(value)) got = "array";
+    else if (typeof value === "number" && !Number.isFinite(value)) {
+      got = Number.isNaN(value) ? "NaN" : value > 0 ? "Infinity" : "-Infinity";
+    } else got = typeof value;
+    throw new GlubeanConfigError(
+      `Expected \`${context}\` to be ${expected}, got ${got}.`,
+      configPath,
+    );
+  }
+}
+
+function validateSuite(
+  name: string,
+  raw: unknown,
+  configPath: string,
+): SuiteConfig {
+  assertType(raw, "object", `suites.${name}`, configPath);
+  assertOnlyKnownKeys(raw, V1_SUITE_KEYS, `suites.${name}`, configPath);
+  const s = raw as Record<string, unknown>;
+  if (s.target === undefined) {
+    throw new GlubeanConfigError(
+      `Missing required field \`suites.${name}.target\`.`,
+      configPath,
+    );
+  }
+  assertType(s.target, "string", `suites.${name}.target`, configPath);
+  if (s.kinds === undefined) {
+    throw new GlubeanConfigError(
+      `Missing required field \`suites.${name}.kinds\` ` +
+        `(any of: ${[...V1_SUITE_KINDS].join(", ")}).`,
+      configPath,
+    );
+  }
+  assertType(s.kinds, "array", `suites.${name}.kinds`, configPath);
+  const kinds = s.kinds as unknown[];
+  if (kinds.length === 0) {
+    throw new GlubeanConfigError(
+      `\`suites.${name}.kinds\` cannot be empty.`,
+      configPath,
+    );
+  }
+  for (const k of kinds) {
+    if (typeof k !== "string" || !V1_SUITE_KINDS.has(k)) {
+      throw new GlubeanConfigError(
+        `Invalid kind ${JSON.stringify(k)} in \`suites.${name}.kinds\`. ` +
+          `Allowed: ${[...V1_SUITE_KINDS].join(", ")}.`,
+        configPath,
+      );
+    }
+  }
+  if (s.data !== undefined) {
+    assertType(s.data, "string", `suites.${name}.data`, configPath);
+  }
+  return {
+    target: s.target as string,
+    kinds: kinds as Array<"test" | "contract" | "flow">,
+    ...(s.data !== undefined && { data: s.data as string }),
+  };
+}
+
+function validateSelection(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): SelectionConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_SELECTION_KEYS, context, configPath);
+  const s = raw as Record<string, unknown>;
+  const out: SelectionConfig = {};
+  if (s.tags !== undefined) {
+    assertType(s.tags, "array", `${context}.tags`, configPath);
+    out.tags = (s.tags as unknown[]).map((t) => {
+      if (typeof t !== "string") {
+        throw new GlubeanConfigError(
+          `\`${context}.tags\` must be an array of strings.`,
+          configPath,
+        );
+      }
+      return t;
+    });
+  }
+  if (s.excludeTags !== undefined) {
+    assertType(s.excludeTags, "array", `${context}.excludeTags`, configPath);
+    out.excludeTags = (s.excludeTags as unknown[]).map((t) => {
+      if (typeof t !== "string") {
+        throw new GlubeanConfigError(
+          `\`${context}.excludeTags\` must be an array of strings.`,
+          configPath,
+        );
+      }
+      return t;
+    });
+  }
+  if (s.filter !== undefined) {
+    assertType(s.filter, "string", `${context}.filter`, configPath);
+    out.filter = s.filter as string;
+  }
+  if (s.pick !== undefined) {
+    assertType(s.pick, "string", `${context}.pick`, configPath);
+    out.pick = s.pick as string;
+  }
+  if (s.tagMode !== undefined) {
+    if (s.tagMode !== "or" && s.tagMode !== "and") {
+      throw new GlubeanConfigError(
+        `\`${context}.tagMode\` must be "or" or "and", got ${JSON.stringify(s.tagMode)}.`,
+        configPath,
+      );
+    }
+    out.tagMode = s.tagMode;
+  }
+  return out;
+}
+
+function assertPositiveInt(
+  value: number,
+  context: string,
+  configPath: string,
+): void {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new GlubeanConfigError(
+      `\`${context}\` must be a positive integer (≥ 1), got ${value}.`,
+      configPath,
+    );
+  }
+}
+
+function validateExecution(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): ExecutionConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_EXECUTION_KEYS, context, configPath);
+  const s = raw as Record<string, unknown>;
+  const out: ExecutionConfig = {};
+  if (s.failFast !== undefined) {
+    assertType(s.failFast, "boolean", `${context}.failFast`, configPath);
+    out.failFast = s.failFast as boolean;
+  }
+  if (s.failAfter !== undefined && s.failAfter !== null) {
+    assertType(s.failAfter, "number", `${context}.failAfter`, configPath);
+    // Runner stops at `failedCount >= failureLimit`. 0/negative would
+    // make the profile run zero tests. Use `null` to disable the limit.
+    assertPositiveInt(s.failAfter as number, `${context}.failAfter`, configPath);
+    out.failAfter = s.failAfter as number;
+  } else if (s.failAfter === null) {
+    out.failAfter = null;
+  }
+  if (s.timeoutMs !== undefined) {
+    assertType(s.timeoutMs, "number", `${context}.timeoutMs`, configPath);
+    assertPositiveInt(s.timeoutMs as number, `${context}.timeoutMs`, configPath);
+    out.timeoutMs = s.timeoutMs as number;
+  }
+  if (s.concurrency !== undefined) {
+    assertType(s.concurrency, "number", `${context}.concurrency`, configPath);
+    assertPositiveInt(s.concurrency as number, `${context}.concurrency`, configPath);
+    out.concurrency = s.concurrency as number;
+  }
+  if (s.noSession !== undefined) {
+    assertType(s.noSession, "boolean", `${context}.noSession`, configPath);
+    out.noSession = s.noSession as boolean;
+  }
+  return out;
+}
+
+function validateBoolMap(
+  raw: unknown,
+  known: Set<string>,
+  context: string,
+  configPath: string,
+): Record<string, boolean> {
+  if (raw === undefined) return {};
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, known, context, configPath);
+  const s = raw as Record<string, unknown>;
+  const out: Record<string, boolean> = {};
+  for (const k of Object.keys(s)) {
+    assertType(s[k], "boolean", `${context}.${k}`, configPath);
+    out[k] = s[k] as boolean;
+  }
+  return out;
+}
+
+function validateReporters(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): ReportersConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_REPORTERS_KEYS, context, configPath);
+  const s = raw as Record<string, unknown>;
+  const out: ReportersConfig = {};
+  if (s.console !== undefined) {
+    if (s.console !== "detailed" && s.console !== "summary") {
+      throw new GlubeanConfigError(
+        `\`${context}.console\` must be "detailed" or "summary", got ${JSON.stringify(s.console)}.`,
+        configPath,
+      );
+    }
+    out.console = s.console;
+  }
+  if (s.junit !== undefined) {
+    assertType(s.junit, "string", `${context}.junit`, configPath);
+    out.junit = s.junit as string;
+  }
+  if (s.resultJson !== undefined) {
+    assertType(s.resultJson, "string", `${context}.resultJson`, configPath);
+    out.resultJson = s.resultJson as string;
+  }
+  if (s.emitFullTrace !== undefined) {
+    assertType(s.emitFullTrace, "boolean", `${context}.emitFullTrace`, configPath);
+    out.emitFullTrace = s.emitFullTrace as boolean;
+  }
+  return out;
+}
+
+function validateUpload(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): UploadConfig {
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_UPLOAD_KEYS, context, configPath);
+  const s = raw as Record<string, unknown>;
+  const out: UploadConfig = {};
+  if (s.enabled !== undefined) {
+    assertType(s.enabled, "boolean", `${context}.enabled`, configPath);
+    out.enabled = s.enabled as boolean;
+  }
+  if (s.projectAlias !== undefined) {
+    assertType(s.projectAlias, "string", `${context}.projectAlias`, configPath);
+    out.projectAlias = s.projectAlias as string;
+  }
+  return out;
+}
+
+function validateRedaction(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): GlubeanRedactionConfigInput {
+  if (raw === undefined) return {};
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_REDACTION_KEYS, context, configPath);
+  const r = raw as Record<string, unknown>;
+  const out: GlubeanRedactionConfigInput = {};
+  if (r.sensitiveKeys !== undefined) {
+    assertType(r.sensitiveKeys, "array", `${context}.sensitiveKeys`, configPath);
+    out.sensitiveKeys = (r.sensitiveKeys as unknown[]).map((k, i) => {
+      if (typeof k !== "string") {
+        throw new GlubeanConfigError(
+          `\`${context}.sensitiveKeys[${i}]\` must be a string, got ${typeof k}.`,
+          configPath,
+        );
+      }
+      return k;
+    });
+  }
+  if (r.customPatterns !== undefined) {
+    assertType(r.customPatterns, "array", `${context}.customPatterns`, configPath);
+    out.customPatterns = (r.customPatterns as unknown[]).map((p, i) => {
+      const ctx = `${context}.customPatterns[${i}]`;
+      assertType(p, "object", ctx, configPath);
+      assertOnlyKnownKeys(p, new Set(["name", "regex"]), ctx, configPath);
+      const obj = p as Record<string, unknown>;
+      if (typeof obj.name !== "string") {
+        throw new GlubeanConfigError(
+          `\`${ctx}.name\` is required and must be a string.`,
+          configPath,
+        );
+      }
+      if (typeof obj.regex !== "string") {
+        throw new GlubeanConfigError(
+          `\`${ctx}.regex\` is required and must be a string.`,
+          configPath,
+        );
+      }
+      // Compile regex eagerly so malformed patterns fail at load time.
+      try {
+        new RegExp(obj.regex);
+      } catch (err) {
+        throw new GlubeanConfigError(
+          `\`${ctx}.regex\` is not a valid regular expression: ${(err as Error).message}`,
+          configPath,
+        );
+      }
+      return { name: obj.name, regex: obj.regex };
+    });
+  }
+  if (r.replacementFormat !== undefined) {
+    if (
+      r.replacementFormat !== "simple" &&
+      r.replacementFormat !== "labeled" &&
+      r.replacementFormat !== "partial"
+    ) {
+      throw new GlubeanConfigError(
+        `\`${context}.replacementFormat\` must be "simple", "labeled", or "partial", got ${JSON.stringify(r.replacementFormat)}.`,
+        configPath,
+      );
+    }
+    out.replacementFormat = r.replacementFormat;
+  }
+  return out;
+}
+
+function validateProfile(
+  name: string,
+  raw: unknown,
+  suiteNames: Set<string>,
+  configPath: string,
+): ProfileConfig {
+  assertType(raw, "object", `profiles.${name}`, configPath);
+  assertOnlyKnownKeys(raw, V1_PROFILE_KEYS, `profiles.${name}`, configPath);
+  const p = raw as Record<string, unknown>;
+  if (p.suites === undefined) {
+    throw new GlubeanConfigError(
+      `Missing required field \`profiles.${name}.suites\` (array of suite names).`,
+      configPath,
+    );
+  }
+  assertType(p.suites, "array", `profiles.${name}.suites`, configPath);
+  const suites = (p.suites as unknown[]).map((s) => {
+    if (typeof s !== "string") {
+      throw new GlubeanConfigError(
+        `\`profiles.${name}.suites\` must be an array of suite-name strings.`,
+        configPath,
+      );
+    }
+    if (!suiteNames.has(s)) {
+      throw new GlubeanConfigError(
+        `\`profiles.${name}.suites\` references undefined suite "${s}". ` +
+          `Defined suites: ${[...suiteNames].join(", ") || "(none)"}.`,
+        configPath,
+      );
+    }
+    return s;
+  });
+  return {
+    suites,
+    selection: validateSelection(p.selection, `profiles.${name}.selection`, configPath),
+    execution: validateExecution(p.execution, `profiles.${name}.execution`, configPath),
+    capabilities: validateBoolMap(
+      p.capabilities,
+      V1_CAPABILITIES_KEYS,
+      `profiles.${name}.capabilities`,
+      configPath,
+    ) as CapabilitiesConfig,
+    reporters: validateReporters(p.reporters, `profiles.${name}.reporters`, configPath),
+    ...(p.upload !== undefined && {
+      upload: validateUpload(p.upload, `profiles.${name}.upload`, configPath),
+    }),
+  };
+}
+
+function validateDefaults(
+  raw: unknown,
+  configPath: string,
+): DefaultsConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", "defaults", configPath);
+  assertOnlyKnownKeys(raw, V1_DEFAULTS_KEYS, "defaults", configPath);
+  const d = raw as Record<string, unknown>;
+  const out: DefaultsConfig = {};
+  if (d.envFile !== undefined) {
+    assertType(d.envFile, "string", "defaults.envFile", configPath);
+    out.envFile = d.envFile as string;
+  }
+  out.selection = validateSelection(d.selection, "defaults.selection", configPath);
+  out.execution = validateExecution(d.execution, "defaults.execution", configPath);
+  out.capabilities = validateBoolMap(
+    d.capabilities,
+    V1_CAPABILITIES_KEYS,
+    "defaults.capabilities",
+    configPath,
+  ) as CapabilitiesConfig;
+  out.reporters = validateReporters(d.reporters, "defaults.reporters", configPath);
+  out.redaction = validateRedaction(d.redaction, "defaults.redaction", configPath);
+  return out;
+}
+
+/**
+ * Load + validate `glubean.yaml` at `rootDir/glubean.yaml`.
+ *
+ * Hard-errors on:
+ * - File missing → `GlubeanConfigError("glubean.yaml not found ...")`
+ * - YAML parse failure → wraps underlying error in `GlubeanConfigError`
+ * - Missing/wrong `version` (must be `1`)
+ * - Any unknown key at any nesting level (drops the warning behavior of the
+ *   legacy loader)
+ * - Missing required fields (`suites`, `profiles`, `suite.target`, `suite.kinds`,
+ *   `profile.suites`)
+ * - Wrong type on any field
+ * - Profile that references an undefined suite name
+ *
+ * Returns the parsed + validated config plus the absolute path it loaded from
+ * (used downstream so `ResolvedRunPlan.configPath` can be populated in sub-task D).
+ */
+export async function loadProjectConfigV1(
+  rootDir: string,
+): Promise<{ config: GlubeanProjectConfigV1; configPath: string }> {
+  const configPath = resolve(rootDir, "glubean.yaml");
+  let content: string;
+  try {
+    content = await readFile(configPath, "utf-8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new GlubeanConfigError(
+        `glubean.yaml not found at ${configPath}. ` +
+          `Run \`glubean init\` to create one, or pass \`--config <path>\` ` +
+          `to load from a different location.`,
+      );
+    }
+    throw new GlubeanConfigError(
+      `Failed to read glubean.yaml: ${(err as Error).message}`,
+      configPath,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(content);
+  } catch (err) {
+    throw new GlubeanConfigError(
+      `Failed to parse glubean.yaml: ${(err as Error).message}`,
+      configPath,
+    );
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new GlubeanConfigError(
+      `glubean.yaml must contain a top-level mapping (got ${
+        parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed
+      }).`,
+      configPath,
+    );
+  }
+
+  const root = parsed as Record<string, unknown>;
+  assertOnlyKnownKeys(root, V1_TOP_KEYS, "glubean.yaml", configPath);
+
+  if (root.version !== 1) {
+    throw new GlubeanConfigError(
+      `\`version\` must be the integer \`1\` (got ${JSON.stringify(root.version)}). ` +
+        `Add \`version: 1\` to the top of glubean.yaml.`,
+      configPath,
+    );
+  }
+
+  if (root.suites === undefined) {
+    throw new GlubeanConfigError(
+      `Missing required top-level field \`suites\` (map of suite name → suite config).`,
+      configPath,
+    );
+  }
+  assertType(root.suites, "object", "suites", configPath);
+  const suitesIn = root.suites as Record<string, unknown>;
+  const suites: Record<string, SuiteConfig> = {};
+  for (const name of Object.keys(suitesIn)) {
+    suites[name] = validateSuite(name, suitesIn[name], configPath);
+  }
+
+  if (root.profiles === undefined) {
+    throw new GlubeanConfigError(
+      `Missing required top-level field \`profiles\` (map of profile name → profile config).`,
+      configPath,
+    );
+  }
+  assertType(root.profiles, "object", "profiles", configPath);
+  const profilesIn = root.profiles as Record<string, unknown>;
+  const suiteNames = new Set(Object.keys(suites));
+  const profiles: Record<string, ProfileConfig> = {};
+  for (const name of Object.keys(profilesIn)) {
+    profiles[name] = validateProfile(name, profilesIn[name], suiteNames, configPath);
+  }
+
+  const config: GlubeanProjectConfigV1 = {
+    version: 1,
+    defaults: validateDefaults(root.defaults, configPath),
+    suites,
+    profiles,
+  };
+
+  return { config, configPath };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LEGACY (pre-v1) — kept during Phase 1 transition; removed in Phase 6
 // ─────────────────────────────────────────────────────────────────────────────
 
