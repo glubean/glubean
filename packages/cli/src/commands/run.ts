@@ -50,6 +50,10 @@ interface RunOptions {
   pick?: string;
   tags?: string[];
   tagMode?: "or" | "and";
+  /** Per-test timeout ms (Phase 1 sub-task E: profile execution.timeoutMs). */
+  timeoutMs?: number;
+  /** Worker concurrency (Phase 1 sub-task E: profile execution.concurrency). */
+  concurrency?: number;
   /**
    * Tags to EXCLUDE. Any test/case carrying ANY of these tags is dropped
    * from the inventory before execution. excludeTags is always OR-mode
@@ -62,7 +66,13 @@ interface RunOptions {
   pretty?: boolean;
   verbose?: boolean;
   failFast?: boolean;
-  failAfter?: number;
+  /**
+   * Stop after N failures. `null` = explicit "no count limit" (e.g. from a
+   * profile that disables it). Distinct from `undefined` (= "no override,
+   * fall through to underlying config defaults") — mergeRunOptions
+   * preserves the null vs undefined distinction.
+   */
+  failAfter?: number | null;
   resultJson?: boolean | string;
   emitFullTrace?: boolean;
   inferSchema?: boolean;
@@ -544,6 +554,12 @@ export async function runCommand(
     envFile: options.envFile,
     failFast: options.failFast,
     failAfter: options.failAfter,
+    // Phase 1 sub-task E1: forward profile-driven execution settings.
+    // mergeRunOptions handles undefined as "no override" — so non-profile
+    // runs (where options.timeoutMs/concurrency are undefined) keep
+    // legacy GlubeanRunConfig defaults; profile runs get the resolved values.
+    timeoutMs: options.timeoutMs,
+    concurrency: options.concurrency,
   });
 
   if (effectiveRun.logFile && !isMultiFile) {

@@ -659,7 +659,12 @@ function validateDefaults(
 }
 
 /**
- * Load + validate `glubean.yaml` at `rootDir/glubean.yaml`.
+ * Load + validate v1 project config.
+ *
+ * - Default path: `rootDir/glubean.yaml`
+ * - Override: `options.configPath` (CLI `--config` plumbed here) — resolved
+ *   against rootDir if relative. Lets users keep multiple variants on disk
+ *   while still using v1 schema.
  *
  * Hard-errors on:
  * - File missing → `GlubeanConfigError("glubean.yaml not found ...")`
@@ -677,8 +682,11 @@ function validateDefaults(
  */
 export async function loadProjectConfigV1(
   rootDir: string,
+  options: { configPath?: string } = {},
 ): Promise<{ config: GlubeanProjectConfigV1; configPath: string }> {
-  const configPath = resolve(rootDir, "glubean.yaml");
+  const configPath = options.configPath
+    ? resolve(rootDir, options.configPath)
+    : resolve(rootDir, "glubean.yaml");
   let content: string;
   try {
     content = await readFile(configPath, "utf-8");
@@ -1364,6 +1372,21 @@ export function mergeRunOptions(
   }
   if (cliFlags.timeout !== undefined) {
     result.perTestTimeoutMs = Number(cliFlags.timeout);
+  }
+  // Phase 1 sub-task E: profile-driven trace + execution fields. Without
+  // these, profile reporters.inferSchema / truncateArrays + execution.timeoutMs
+  // / concurrency would be silently ignored by the runner.
+  if (cliFlags.inferSchema !== undefined) {
+    result.inferSchema = !!cliFlags.inferSchema;
+  }
+  if (cliFlags.truncateArrays !== undefined) {
+    result.truncateArrays = !!cliFlags.truncateArrays;
+  }
+  if (cliFlags.timeoutMs !== undefined) {
+    result.perTestTimeoutMs = Number(cliFlags.timeoutMs);
+  }
+  if (cliFlags.concurrency !== undefined) {
+    result.concurrency = Number(cliFlags.concurrency);
   }
 
   return result;

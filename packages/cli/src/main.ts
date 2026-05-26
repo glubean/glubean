@@ -11,7 +11,14 @@ if (_cwd) process.chdir(_cwd);
 
 import { Command } from "commander";
 import { CLI_VERSION } from "./version.js";
-import { loadConfig } from "./lib/config.js";
+import {
+  loadConfig,
+  loadProjectConfigV1,
+  resolveRunPlan,
+  GlubeanConfigError,
+  type CliProfileOverrides,
+  type ResolvedRunPlan,
+} from "./lib/config.js";
 import { initCommand } from "./commands/init.js";
 import { runCommand } from "./commands/run.js";
 import { scanCommand } from "./commands/scan.js";
@@ -73,6 +80,7 @@ program
   .description("Run tests from a file, directory, or glob pattern (defaults to testDir)")
   .option("--explore", "Run explore tests (from exploreDir instead of testDir)")
   .option("-f, --filter <pattern>", "Run only tests matching pattern (name or id substring)")
+  .option("--profile <name>", "Use profile from glubean.yaml (Phase 1 first slice). When set, loads glubean.yaml + resolves the named profile; CLI flags still override profile values.")
   .option("-t, --tag <tag>", "Run only tests with matching tag (comma-separated or repeatable)", collect, [])
   .option("--tag-mode <mode>", 'Tag match logic: "or" (any tag) or "and" (all tags)', "or")
   .option("--exclude-tag <tag>", "Exclude tests with matching tag (comma-separated or repeatable; always OR-mode — any match drops the test)", collect, [])
@@ -113,7 +121,7 @@ program
     "--force-standalone",
     "DEBUG: bypass `runnability.requireAttachment` for the filtered case. Emits a runtime warning. Author-debug only.",
   )
-  .action(async (target, options) => {
+  .action(async (target, options, cmd) => {
     // Flatten --config values
     const configFiles = options.config && options.config.length > 0
       ? (options.config as string[]).flatMap((v: string) =>
@@ -121,53 +129,198 @@ program
       )
       : undefined;
 
+    // ── Profile mode (Phase 1 first slice) ──────────────────────────────────
+    // When --profile is given, load glubean.yaml, resolve the profile, then
+    // build CliProfileOverrides from explicit CLI flags so they still beat
+    // profile values. Suite expansion + selection/execution/reporters/upload
+    // come from the plan.
+    //
+    // Multi-suite limitation (E1 scope): only single-suite profiles are
+    // supported here. Multi-suite execution requires discovery alignment
+    // (Phase 2) — the runner currently takes a single test target dir, not
+    // an array. Profiles with len(suites) > 1 are rejected with a clear
+    // error rather than silently running only the first suite.
+    let resolvedPlan: ResolvedRunPlan | undefined;
+    if (options.profile) {
+      try {
+        // Honor --config when combined with --profile (first --config wins;
+        // multi-merge dropped per plan §"是否保留 --config"). Without this,
+        // `--config ./ci/glubean.yaml` is silently ignored for profile mode.
+        const profileConfigPath = configFiles && configFiles.length > 0
+          ? configFiles[0]
+          : undefined;
+        const { config, configPath } = await loadProjectConfigV1(
+          process.cwd(),
+          profileConfigPath ? { configPath: profileConfigPath } : {},
+        );
+        // commander's getOptionValueSource returns "cli" only when user typed
+        // the flag — otherwise "default" or undefined. Use this to detect
+        // explicit overrides for fields where omitted ≠ a meaningful value.
+        const cmdSrc = (name: string) =>
+          (cmd as { getOptionValueSource?: (n: string) => string | undefined })
+            .getOptionValueSource?.(name) === "cli";
+
+        const explicitTags = options.tag && options.tag.length > 0
+          ? (options.tag as string[]).flatMap((t) =>
+              t.split(",").map((s) => s.trim()).filter(Boolean),
+            )
+          : undefined;
+        const explicitExcludeTags = options.excludeTag && options.excludeTag.length > 0
+          ? (options.excludeTag as string[]).flatMap((t) =>
+              t.split(",").map((s) => s.trim()).filter(Boolean),
+            )
+          : undefined;
+        const cliOverrides: CliProfileOverrides = {
+          tags: explicitTags,
+          excludeTags: explicitExcludeTags,
+          tagMode: cmdSrc("tagMode") ? (options.tagMode as "or" | "and") : undefined,
+          filter: options.filter,
+          pick: options.pick,
+          envFile: options.envFile,
+          failFast: cmdSrc("failFast") ? options.failFast : undefined,
+          failAfter: options.failAfter ? parseInt(options.failAfter, 10) : undefined,
+          includeBrowser: cmdSrc("includeBrowser") ? options.includeBrowser : undefined,
+          includeOutOfBand: cmdSrc("includeOutOfBand") ? options.includeOutOfBand : undefined,
+          includeOptIn: cmdSrc("includeOptIn") ? options.includeOptIn : undefined,
+          emitFullTrace: cmdSrc("emitFullTrace") ? options.emitFullTrace : undefined,
+          inferSchema: cmdSrc("inferSchema") ? options.inferSchema : undefined,
+          truncateArrays: cmdSrc("truncateArrays") ? options.truncateArrays : undefined,
+          uploadEnabled: cmdSrc("upload") ? options.upload : undefined,
+        };
+        resolvedPlan = resolveRunPlan(
+          config,
+          configPath,
+          options.profile as string,
+          cliOverrides,
+        );
+        if (resolvedPlan.suites.length !== 1) {
+          if (resolvedPlan.suites.length === 0) {
+            console.error(
+              `\x1b[31mProfile "${resolvedPlan.profile}" has an empty \`suites\` ` +
+                `list. Phase 1 first slice requires exactly one suite per ` +
+                `profile (multi-suite execution lands in Phase 2).\x1b[0m`,
+            );
+          } else {
+            console.error(
+              `\x1b[31mProfile "${resolvedPlan.profile}" includes multiple suites ` +
+                `(${resolvedPlan.suites.map((s) => s.name).join(", ")}). ` +
+                `Multi-suite execution ships in Phase 2 (discovery alignment); ` +
+                `for Phase 1 first slice, profiles must reference exactly one ` +
+                `suite. Split into separate profiles for now.\x1b[0m`,
+            );
+          }
+          process.exit(1);
+        }
+      } catch (err) {
+        if (err instanceof GlubeanConfigError) {
+          console.error(`\x1b[31m${err.message}\x1b[0m`);
+          process.exit(1);
+        }
+        throw err;
+      }
+    }
+
     // Resolve default target from config when not explicitly provided
     let resolvedTarget = target;
     if (!resolvedTarget) {
-      const config = await loadConfig(process.cwd(), configFiles);
-      resolvedTarget = options.explore ? config.run.exploreDir : config.run.testDir;
+      if (resolvedPlan && resolvedPlan.suites.length > 0) {
+        // Profile mode: target = first suite's target. Single-suite is
+        // enforced above (length !== 1 hard-errors), so suites[0] is the
+        // only suite for the profile.
+        //
+        // KNOWN E1 GAP (deferred to Phase 2): `suite.kinds` is NOT enforced
+        // at discovery time here. If the target directory contains mixed
+        // file types (e.g. both `.test.ts` and `.contract.ts`), all are
+        // currently discovered regardless of what `kinds:` declared. Phase 2
+        // (discovery alignment) wires `kinds` through scanner / contract-
+        // extraction. For E1 first slice, callers should organize a suite
+        // to point at a target that only contains the declared kinds.
+        resolvedTarget = resolvedPlan.suites[0].target;
+      } else {
+        const config = await loadConfig(process.cwd(), configFiles);
+        resolvedTarget = options.explore ? config.run.exploreDir : config.run.testDir;
+      }
     }
 
     // --ci implies --fail-fast and --reporter junit
     const isCi = options.ci === true;
-    const failFast = options.failFast || isCi;
+    const failFast = (resolvedPlan?.execution.failFast ?? options.failFast) || isCi;
     let reporter = options.reporter;
     let reporterPath: string | undefined;
-    if (!reporter && isCi) {
+    if (!reporter && (isCi || resolvedPlan?.reporters.junit)) {
       reporter = "junit";
+    }
+    // Plan junit path is honored whether reporter was set by --ci or by plan.
+    if (reporter === "junit" && !reporterPath && resolvedPlan?.reporters.junit) {
+      reporterPath = resolvedPlan.reporters.junit;
     }
     if (reporter && reporter.startsWith("junit:")) {
       reporterPath = reporter.slice("junit:".length);
       reporter = "junit";
     }
 
-    const resultJson = options.resultJson;
+    const resultJson = options.resultJson ?? resolvedPlan?.reporters.resultJson;
+
+    // Helper: only treat CLI-supplied value as override when commander says
+    // the user actually typed the flag. Otherwise plan wins.
+    const cliSrc = (name: string): boolean =>
+      (cmd as { getOptionValueSource?: (n: string) => string | undefined })
+        .getOptionValueSource?.(name) === "cli";
+    const cliTags = options.tag?.flatMap((t: string) =>
+      t.split(",").map((s: string) => s.trim()).filter(Boolean),
+    );
+    const cliExcludeTags = options.excludeTag?.flatMap((t: string) =>
+      t.split(",").map((s: string) => s.trim()).filter(Boolean),
+    );
 
     await runCommand(resolvedTarget, {
-      filter: options.filter,
-      pick: options.pick,
-      tags: options.tag?.flatMap((t: string) => t.split(",").map((s: string) => s.trim()).filter(Boolean)),
-      tagMode: options.tagMode as "or" | "and",
-      excludeTags: options.excludeTag?.flatMap((t: string) => t.split(",").map((s: string) => s.trim()).filter(Boolean)),
-      envFile: options.envFile,
+      filter: options.filter ?? resolvedPlan?.selection.filter,
+      pick: options.pick ?? resolvedPlan?.selection.pick,
+      tags: (cliTags && cliTags.length > 0) ? cliTags : resolvedPlan?.selection.tags,
+      // tagMode: commander always supplies the default "or" so use cli-source
+      // detection to know if user actually typed --tag-mode. Otherwise plan wins.
+      tagMode: cliSrc("tagMode")
+        ? (options.tagMode as "or" | "and")
+        : (resolvedPlan?.selection.tagMode ?? (options.tagMode as "or" | "and")),
+      excludeTags: (cliExcludeTags && cliExcludeTags.length > 0)
+        ? cliExcludeTags
+        : resolvedPlan?.selection.excludeTags,
+      // envFile: only set when CLI explicitly or profile sets non-default
+      // value. runCommand treats any envFile as user-specified and fails
+      // hard if the file doesn't exist; falling back silently to ".env"
+      // (the plan builtin default) would break projects without a .env.
+      envFile: options.envFile ?? (resolvedPlan && resolvedPlan.envFile !== ".env"
+        ? resolvedPlan.envFile
+        : undefined),
       logFile: options.logFile,
       pretty: options.pretty,
       verbose: options.verbose,
       failFast,
-      failAfter: options.failAfter ? parseInt(options.failAfter, 10) : undefined,
+      // failAfter: preserve `null` (= "no count limit") explicitly from
+      // plan as a real null — mergeRunOptions distinguishes null
+      // (override to "off") from undefined (no override, legacy config can
+      // still set a limit). Coercing null→undefined would let legacy
+      // package.json `glubean.run.failAfter` re-introduce a count limit.
+      failAfter: options.failAfter
+        ? parseInt(options.failAfter, 10)
+        : resolvedPlan
+          ? resolvedPlan.execution.failAfter // may be number, null, or 0 (already validated as >=1 or null)
+          : undefined,
+      timeoutMs: resolvedPlan?.execution.timeoutMs,
+      concurrency: resolvedPlan?.execution.concurrency,
       resultJson,
-      emitFullTrace: options.emitFullTrace,
-      inferSchema: options.inferSchema,
-      truncateArrays: options.truncateArrays,
+      emitFullTrace: options.emitFullTrace ?? resolvedPlan?.reporters.emitFullTrace,
+      inferSchema: options.inferSchema ?? resolvedPlan?.reporters.inferSchema,
+      truncateArrays: options.truncateArrays ?? resolvedPlan?.reporters.truncateArrays,
       configFiles,
       inspectBrk: options.inspectBrk,
       reporter,
       reporterPath,
       traceLimit: options.traceLimit ? parseInt(options.traceLimit, 10) : undefined,
-      includeBrowser: options.includeBrowser,
-      includeOutOfBand: options.includeOutOfBand,
-      includeOptIn: options.includeOptIn,
-      noSession: options.noSession,
+      includeBrowser: options.includeBrowser ?? resolvedPlan?.capabilities.browser,
+      includeOutOfBand: options.includeOutOfBand ?? resolvedPlan?.capabilities.outOfBand,
+      includeOptIn: options.includeOptIn ?? resolvedPlan?.capabilities.optIn,
+      noSession: options.noSession ?? resolvedPlan?.execution.noSession,
       meta: options.meta?.length
         ? (options.meta as string[]).reduce((acc: Record<string, string>, item: string) => {
             const eq = item.indexOf("=");
@@ -175,8 +328,12 @@ program
             return acc;
           }, {})
         : undefined,
-      upload: options.upload,
-      project: options.project,
+      upload: options.upload ?? resolvedPlan?.upload?.enabled,
+      // When profile has upload.projectAlias and CLI didn't pass --project,
+      // forward the alias as the project identifier so the upload preflight
+      // doesn't exit with "no project ID found". `resolveProjectId` accepts
+      // either a project ID or an alias.
+      project: options.project ?? resolvedPlan?.upload?.projectAlias,
       token: options.token,
       apiUrl: options.apiUrl,
       inputJson: options.inputJson,
