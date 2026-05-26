@@ -108,6 +108,85 @@ export const getUser = api("users.get", {
   ]);
 });
 
+test("discoverTests propagates flow tags + only + skip (as deferred)", async () => {
+  // Need both a referenced contract (so flow.step() resolves) and the flow.
+  const contractPath = join(contractFixtureDir, "users.contract.ts");
+  await writeFile(contractPath, `
+import { contract } from "@glubean/sdk";
+
+const api = contract.http.with("usersApi", { endpoint: "https://api.example.com" });
+
+export const getUser = api("users.get", {
+  endpoint: "GET /users/:id",
+  cases: {
+    ok: { description: "ok", expect: { status: 200 } },
+  },
+});
+`);
+
+  const flowPath = join(contractFixtureDir, "signup.flow.ts");
+  await writeFile(flowPath, `
+import { contract } from "@glubean/sdk";
+import { getUser } from "./users.contract.js";
+
+export const signup = contract
+  .flow("signup-flow")
+  .meta({
+    tags: ["public-demo", "smoke"],
+    only: true,
+    skip: "manual review pending",
+  })
+  .step(getUser.case("ok"))
+  .build();
+`);
+
+  const tests = await discoverTests(flowPath);
+  expect(tests).toHaveLength(1);
+  expect(tests[0]).toMatchObject({
+    exportName: "signup",
+    meta: {
+      id: "signup-flow",
+      tags: ["public-demo", "smoke"],
+      only: true,
+      deferred: "manual review pending",
+    },
+  });
+});
+
+test("discoverTests omits flow only/deferred when unset", async () => {
+  const contractPath = join(contractFixtureDir, "users.contract.ts");
+  await writeFile(contractPath, `
+import { contract } from "@glubean/sdk";
+
+const api = contract.http.with("usersApi", { endpoint: "https://api.example.com" });
+
+export const getUser = api("users.get", {
+  endpoint: "GET /users/:id",
+  cases: {
+    ok: { description: "ok", expect: { status: 200 } },
+  },
+});
+`);
+
+  const flowPath = join(contractFixtureDir, "bare.flow.ts");
+  await writeFile(flowPath, `
+import { contract } from "@glubean/sdk";
+import { getUser } from "./users.contract.js";
+
+export const bare = contract
+  .flow("bare-flow")
+  .step(getUser.case("ok"))
+  .build();
+`);
+
+  const tests = await discoverTests(flowPath);
+  expect(tests).toHaveLength(1);
+  const m = tests[0].meta;
+  expect(m.tags).toBeUndefined();
+  expect(m.only).toBeUndefined();
+  expect(m.deferred).toBeUndefined();
+});
+
 test("discoverTests omits meta.tags when contract+case have none", async () => {
   const filePath = join(contractFixtureDir, "ping.contract.ts");
   await writeFile(filePath, `

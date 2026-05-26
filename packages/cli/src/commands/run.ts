@@ -324,6 +324,8 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     // Each flow has a single orchestrator Test (setup → steps → teardown).
     // Discover it as one runnable entry with the flow id. Post-Phase 2f
     // flows live as `kind: "flow"` entries inside `result.attachments`.
+    // SDK maps FlowMeta.skip → TestMeta.deferred (string reason); mirror
+    // that here so the runner's deferred-skip path applies uniformly.
     for (const att of result.attachments) {
       if (att.kind !== "flow") continue;
       results.push({
@@ -331,6 +333,9 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         meta: {
           id: att.flow.id,
           description: att.flow.description,
+          tags: att.flow.tags,
+          only: att.flow.only,
+          deferred: att.flow.skip,
         },
       });
     }

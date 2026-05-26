@@ -184,6 +184,10 @@ export interface NormalizedFlowMeta {
   description?: string;
   tags?: string[];
   extensions?: Record<string, unknown>;
+  /** Mirrors `FlowMeta.skip` — skip reason for discoverable flows. */
+  skip?: string;
+  /** Mirrors `FlowMeta.only` — focus filter. */
+  only?: boolean;
   setupDynamic?: true;
   steps: NormalizedFlowStep[];
 }
@@ -380,6 +384,8 @@ export function isFlowContract(val: unknown): val is {
     description?: string;
     tags?: string[];
     extensions?: Record<string, unknown>;
+    skip?: string;
+    only?: boolean;
     setup?: (...args: any[]) => unknown;
     teardown?: (...args: any[]) => unknown;
     steps: Array<any>;
@@ -390,6 +396,8 @@ export function isFlowContract(val: unknown): val is {
     description?: string;
     tags?: string[];
     extensions?: Record<string, unknown>;
+    skip?: string;
+    only?: boolean;
     setupDynamic?: true;
     steps: Array<any>;
   };
@@ -470,6 +478,8 @@ function flowContractToNormalized(
       description: ex.description,
       tags: ex.tags,
       extensions: ex.extensions,
+      ...(ex.skip !== undefined ? { skip: ex.skip } : {}),
+      ...(ex.only !== undefined ? { only: ex.only } : {}),
       setupDynamic: ex.setupDynamic,
       steps: (ex.steps ?? []).map((s: any): NormalizedFlowStep => {
         if (s.kind === "compute") {
@@ -506,6 +516,8 @@ function flowContractToNormalized(
     description: f.description,
     tags: f.tags,
     extensions: f.extensions,
+    ...(f.skip !== undefined ? { skip: f.skip } : {}),
+    ...(f.only !== undefined ? { only: f.only } : {}),
     setupDynamic: f.setup ? true : undefined,
     steps: (f.steps ?? []).map((s: any): NormalizedFlowStep => {
       if (s.kind === "compute") {

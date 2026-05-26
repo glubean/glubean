@@ -813,6 +813,11 @@ export interface RuntimeFlowProjection<State = unknown> {
   tags?: string[];
   extensions?: Extensions;
 
+  /** Mirrors `FlowMeta.skip` — skip reason for discoverable-but-not-runnable flows. */
+  skip?: string;
+  /** Mirrors `FlowMeta.only` — focus filter. */
+  only?: boolean;
+
   /** Live flow-level setup callback (only I/O-capable callback in flow). */
   setup?: (ctx: TestContext) => Promise<State>;
 
@@ -863,6 +868,10 @@ export interface ExtractedFlowProjection {
   description?: string;
   tags?: string[];
   extensions?: Extensions;
+  /** Mirrors `FlowMeta.skip`. */
+  skip?: string;
+  /** Mirrors `FlowMeta.only`. */
+  only?: boolean;
   /** Present when flow has a setup callback (state source is dynamic). */
   setupDynamic?: true;
   steps: ExtractedFlowStep[];

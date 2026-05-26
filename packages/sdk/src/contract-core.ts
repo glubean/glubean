@@ -882,6 +882,8 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
       description: extraMeta.description,
       tags: extraMeta.tags,
       extensions: extraMeta.extensions,
+      ...(extraMeta.skip !== undefined ? { skip: extraMeta.skip } : {}),
+      ...(extraMeta.only !== undefined ? { only: extraMeta.only } : {}),
       setup: setupFn,
       teardown: teardownFn,
       steps,
@@ -1120,6 +1122,8 @@ export function normalizeFlow<State>(
     description: runtime.description,
     tags: runtime.tags,
     extensions: runtime.extensions,
+    ...(runtime.skip !== undefined ? { skip: runtime.skip } : {}),
+    ...(runtime.only !== undefined ? { only: runtime.only } : {}),
     setupDynamic: runtime.setup ? true : undefined,
     steps: runtime.steps.map<ExtractedFlowStep>((s, idx) => {
       const stepLabel = s.name ??
