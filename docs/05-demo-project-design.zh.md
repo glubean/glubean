@@ -130,7 +130,7 @@ mock backend 一旦公开 reachable，**必须**做 rate limit 与最低限度�
 ## 与 04 plan 的对接
 
 - 04 plan §Phase 5（CLI 端 demo template）`glubean init --template demo` 应该生成上面的 demo project 结构。Template 文件可以 hardcode `https://demo-backend.<your-domain>` 作为默认 mock backend URL，用户 fork 后想换自家 mock 改 env 即可。
-- 04 plan §Phase 7（Cloud 端 dashboard）展示 public-demo profile 上传的 result 时，**不要**在 dashboard 上暴露 mock backend 自身的 admin endpoint / token / failure mode 配置——dashboard 是给观众看的，不是 mock backend 的 control panel。
+- 04 plan §Phase 5（端到端 — 含 dashboard 部分）展示 public-demo profile 上传的 result 时，**不要**在 dashboard 上暴露 mock backend 自身的 admin endpoint / token / failure mode 配置——dashboard 是给观众看的，不是 mock backend 的 control panel。
 - Mock backend 本身的代码 + 部署**不在** 04 plan 的 phase 范围内（它是独立 service），但 demo project 真要工作必须它先 deploy。建议作为 04 plan §Phase 5 启动前的 prerequisite。
 
 ## 落地顺序建议（独立于 04 plan phase 编号）
@@ -139,11 +139,16 @@ mock backend 一旦公开 reachable，**必须**做 rate limit 与最低限度�
 2. demo project 雏形（5-10 test、1 contract、1 canary；指向 step 1 的 backend；本地 `npm test` 能跑通）。~0.5-1d。
 3. 跟 04 plan Phase 5（CLI 端 demo template）合并 ship 时机：把 step 2 的成果固化进 `glubean init --template demo` 模板。
 4. mock backend 扩展（latency / contract-drift / auth-required 3 个高级 endpoint）。Phase 5 ship 后 dashboard 上看真实数据时再补，避免一上来就 over-engineer。
-5. 等 04 plan §Phase 7 真正上 dashboard 后，再 audit 一遍 mock backend 暴露面（是否需要 IP allow-list / 更严 rate limit / 切到付费 tier）。
+5. 等 04 plan §Phase 5 dashboard 部分真正上线后，再 audit 一遍 mock backend 暴露面（是否需要 IP allow-list / 更严 rate limit / 切到付费 tier）。
 
-## 开放问题
+## 决定 (2026-05-26 owner consolidation)
 
-1. **Mock backend repo 在哪**：独立 repo (`glubean-demo-backend`) 还是 monorepo 子目录 (`glubean/demo-backend/`)？独立 repo 利于"它跟产品代码无关"边界清；子目录利于跟 demo project 共享 deploy/CI。倾向独立 repo。
-2. **Mock backend 用什么域名**：自家根域子域 vs 完全独立域。子域 narrative 强（"Glubean 监控自家 demo backend"），但暴露主域 surface；独立域更干净但要新买/续费。
-3. **Demo backend 自己要不要被 Glubean 测**（meta-dogfood）：如果 demo backend 本身有 Glubean 测试套件守护它，narrative 更深（"我们用自己的产品测试我们的 demo 后端"）。但增加循环复杂度。建议先不做，第一版稳定后再考虑。
-4. **AI demo-ai-evals 套件用什么 provider**：OpenAI / Anthropic 真 API（要 key + 计费）vs mock LLM provider（fake responses）。mock 更安全但缺真实感。建议第一版用 mock，等 dashboard 验证后再考虑加真 provider 一条 suite（带 spending cap）。
+1. **Mock backend repo**: ✅ **独立 repo `glubean-demo-backend`** — 跟产品代码边界清，跟 demo project 也独立（便于将来 fork 给用户作 reference）。不放 monorepo 子目录。
+2. **Mock backend tech 栈**: ✅ **Hono** — 比 Express 轻，跟 Fly.io free tier 256MB 限制更舒服。
+3. **Deploy 平台**: ✅ **Fly.io free tier** — sleep-on-idle，$0/mo，owner-controlled。备选 Vercel Functions / Cloudflare Workers 如果将来 Hono 上 Fly.io 撞瓶颈再迁。
+4. **Demo backend 自测 (meta-dogfood)**: ⏸️ 第一版**不做** — 增加循环复杂度。第一版稳定 + 真的有用户访问 public dashboard 后再考虑。
+
+## 仍开放 (待 W23 启动时拍)
+
+1. **Mock backend 域名**：自家根域子域 (e.g. `demo-backend.glubean.com`，narrative 强但暴露主域 surface) vs 完全独立域 (干净但要新买/续费)。倾向子域。等 W23 启动 demo backend MVP 时决定。
+2. **AI demo-ai-evals 套件 provider**: OpenAI / Anthropic 真 API（要 key + 计费 + spending cap）vs mock LLM provider（fake responses，第一版安全但缺真实感）。第一版用 mock，dashboard 跑稳后再加 1 条真 provider suite（带 spending cap）作 narrative 强化。
