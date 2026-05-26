@@ -410,6 +410,48 @@ profiles:
     });
   });
 
+  describe("reporters.inferSchema / truncateArrays (codex sub-task D round-3 P2 fix)", () => {
+    it("accepts inferSchema + truncateArrays in profile reporters", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  ci:
+    suites: [tests]
+    reporters:
+      console: summary
+      emitFullTrace: true
+      inferSchema: true
+      truncateArrays: true
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.profiles.ci.reporters?.inferSchema).toBe(true);
+        expect(config.profiles.ci.reporters?.truncateArrays).toBe(true);
+        expect(config.profiles.ci.reporters?.emitFullTrace).toBe(true);
+      });
+    });
+
+    it("rejects non-boolean inferSchema", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  ci:
+    suites: [tests]
+    reporters:
+      inferSchema: "yes"
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /inferSchema.*boolean/,
+        );
+      });
+    });
+  });
+
   describe("defaults.redaction validation (codex round-1 P2 fix)", () => {
     it("rejects sensitiveKeys non-array", async () => {
       const yaml = `

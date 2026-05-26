@@ -79,6 +79,10 @@ export interface ReportersConfig {
   /** Structured JSON results path. */
   resultJson?: string;
   emitFullTrace?: boolean;
+  /** Infer JSON Schema from response bodies in traces (CLI: --infer-schema). */
+  inferSchema?: boolean;
+  /** Always truncate arrays in trace bodies for AI-friendly output (CLI: --truncate-arrays). */
+  truncateArrays?: boolean;
 }
 
 /** Optional cloud upload directive (per-profile). */
@@ -156,6 +160,8 @@ export interface ResolvedRunPlan {
     junit?: string;
     resultJson?: string;
     emitFullTrace: boolean;
+    inferSchema: boolean;
+    truncateArrays: boolean;
   };
   upload?: UploadConfig;
   envFile: string;
@@ -198,6 +204,8 @@ const V1_REPORTERS_KEYS = new Set([
   "junit",
   "resultJson",
   "emitFullTrace",
+  "inferSchema",
+  "truncateArrays",
 ]);
 const V1_UPLOAD_KEYS = new Set(["enabled", "projectAlias"]);
 const V1_DEFAULTS_KEYS = new Set([
@@ -475,6 +483,14 @@ function validateReporters(
     assertType(s.emitFullTrace, "boolean", `${context}.emitFullTrace`, configPath);
     out.emitFullTrace = s.emitFullTrace as boolean;
   }
+  if (s.inferSchema !== undefined) {
+    assertType(s.inferSchema, "boolean", `${context}.inferSchema`, configPath);
+    out.inferSchema = s.inferSchema as boolean;
+  }
+  if (s.truncateArrays !== undefined) {
+    assertType(s.truncateArrays, "boolean", `${context}.truncateArrays`, configPath);
+    out.truncateArrays = s.truncateArrays as boolean;
+  }
   return out;
 }
 
@@ -749,6 +765,247 @@ export async function loadProjectConfigV1(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// V1 RESOLVER (Phase 1 sub-task D — resolveRunPlan)
+// Built-in defaults → config.defaults → profile → CLI overrides
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * CLI-flag-shaped overrides passed to `resolveRunPlan`. A subset of fields —
+ * only the ones the CLI can override. CLI flags take precedence over profile
+ * and defaults. Arrays REPLACE the underlying values (not concat).
+ */
+export interface CliProfileOverrides {
+  tags?: string[];
+  excludeTags?: string[];
+  tagMode?: "or" | "and";
+  filter?: string;
+  pick?: string;
+  envFile?: string;
+  failFast?: boolean;
+  failAfter?: number | null;
+  timeoutMs?: number;
+  concurrency?: number;
+  noSession?: boolean;
+  includeBrowser?: boolean;
+  includeOutOfBand?: boolean;
+  includeOptIn?: boolean;
+  consoleReporter?: "detailed" | "summary";
+  junit?: string;
+  resultJson?: string;
+  emitFullTrace?: boolean;
+  /** CLI --infer-schema */
+  inferSchema?: boolean;
+  /** CLI --truncate-arrays */
+  truncateArrays?: boolean;
+  /** CLI --upload: when true, force-enable upload regardless of profile setting. */
+  uploadEnabled?: boolean;
+}
+
+/** Built-in defaults applied when neither config.defaults nor profile sets a value. */
+export const RESOLVED_PLAN_BUILTIN_DEFAULTS = {
+  envFile: ".env",
+  selection: {
+    tags: [] as string[],
+    excludeTags: [] as string[],
+    tagMode: "or" as "or" | "and",
+  },
+  execution: {
+    failFast: false,
+    failAfter: null as number | null,
+    timeoutMs: 30000,
+    concurrency: 4,
+    noSession: false,
+  },
+  capabilities: {
+    browser: false,
+    outOfBand: false,
+    optIn: false,
+  },
+  reporters: {
+    console: "detailed" as "detailed" | "summary",
+    emitFullTrace: false,
+    inferSchema: false,
+    truncateArrays: false,
+  },
+};
+
+/**
+ * Resolve a profile against a loaded config + optional CLI overrides.
+ *
+ * Throws `GlubeanConfigError` when `profileName` is not in `config.profiles`
+ * (with a list of available profiles, per plan §Phase 1 acceptance).
+ *
+ * Merge order (later layer wins per-field; arrays REPLACE, never concat):
+ *   1. Built-in defaults (RESOLVED_PLAN_BUILTIN_DEFAULTS)
+ *   2. config.defaults (user's `defaults:` block)
+ *   3. config.profiles[profileName] (profile-specific)
+ *   4. cliOverrides (CLI flags)
+ *
+ * `suites` field on the profile is expanded: each name is looked up in
+ * `config.suites` (loader already validated cross-refs) and returned as a
+ * `{name, ...SuiteConfig}` array preserving the order from the profile.
+ */
+export function resolveRunPlan(
+  config: GlubeanProjectConfigV1,
+  configPath: string,
+  profileName: string,
+  cliOverrides: CliProfileOverrides = {},
+): ResolvedRunPlan {
+  const profile = config.profiles[profileName];
+  if (!profile) {
+    const available = Object.keys(config.profiles).sort();
+    throw new GlubeanConfigError(
+      `Profile "${profileName}" not found. Available profiles: ${
+        available.length > 0 ? available.join(", ") : "(none defined)"
+      }.`,
+      configPath,
+    );
+  }
+  const defaults = config.defaults ?? {};
+  const builtin = RESOLVED_PLAN_BUILTIN_DEFAULTS;
+
+  // Suites: expand profile.suites name list to full SuiteConfig+name objects.
+  const suites = profile.suites.map((name) => ({
+    name,
+    ...config.suites[name],
+  }));
+
+  // ── Selection ──────────────────────────────────────────────────────────
+  // Arrays (tags / excludeTags) REPLACE per layer, not concat.
+  const selection = {
+    tags:
+      cliOverrides.tags ??
+      profile.selection?.tags ??
+      defaults.selection?.tags ??
+      builtin.selection.tags,
+    excludeTags:
+      cliOverrides.excludeTags ??
+      profile.selection?.excludeTags ??
+      defaults.selection?.excludeTags ??
+      builtin.selection.excludeTags,
+    tagMode:
+      cliOverrides.tagMode ??
+      profile.selection?.tagMode ??
+      defaults.selection?.tagMode ??
+      builtin.selection.tagMode,
+    filter:
+      cliOverrides.filter ?? profile.selection?.filter ?? defaults.selection?.filter,
+    pick: cliOverrides.pick ?? profile.selection?.pick ?? defaults.selection?.pick,
+  };
+
+  // ── Execution ──────────────────────────────────────────────────────────
+  // failAfter: explicit `null` from any layer means "no limit" (preserved).
+  const execution = {
+    failFast:
+      cliOverrides.failFast ??
+      profile.execution?.failFast ??
+      defaults.execution?.failFast ??
+      builtin.execution.failFast,
+    failAfter:
+      cliOverrides.failAfter !== undefined
+        ? cliOverrides.failAfter
+        : profile.execution?.failAfter !== undefined
+          ? profile.execution.failAfter
+          : defaults.execution?.failAfter !== undefined
+            ? defaults.execution.failAfter
+            : builtin.execution.failAfter,
+    timeoutMs:
+      cliOverrides.timeoutMs ??
+      profile.execution?.timeoutMs ??
+      defaults.execution?.timeoutMs ??
+      builtin.execution.timeoutMs,
+    concurrency:
+      cliOverrides.concurrency ??
+      profile.execution?.concurrency ??
+      defaults.execution?.concurrency ??
+      builtin.execution.concurrency,
+    noSession:
+      cliOverrides.noSession ??
+      profile.execution?.noSession ??
+      defaults.execution?.noSession ??
+      builtin.execution.noSession,
+  };
+
+  // ── Capabilities ───────────────────────────────────────────────────────
+  // CLI overrides use include* naming (--include-browser etc.) which maps
+  // 1:1 to the capability gates here. CLI flag presence means "include"
+  // (true); absence falls through to profile/defaults.
+  const capabilities = {
+    browser:
+      cliOverrides.includeBrowser ??
+      profile.capabilities?.browser ??
+      defaults.capabilities?.browser ??
+      builtin.capabilities.browser,
+    outOfBand:
+      cliOverrides.includeOutOfBand ??
+      profile.capabilities?.outOfBand ??
+      defaults.capabilities?.outOfBand ??
+      builtin.capabilities.outOfBand,
+    optIn:
+      cliOverrides.includeOptIn ??
+      profile.capabilities?.optIn ??
+      defaults.capabilities?.optIn ??
+      builtin.capabilities.optIn,
+  };
+
+  // ── Reporters ──────────────────────────────────────────────────────────
+  // CLI overrides individual channels, not the whole reporters dict
+  // (codex catch from plan: --reporter detailed shouldn't drop a profile's
+  // junit/resultJson outputs).
+  const reporters = {
+    console:
+      cliOverrides.consoleReporter ??
+      profile.reporters?.console ??
+      defaults.reporters?.console ??
+      builtin.reporters.console,
+    junit: cliOverrides.junit ?? profile.reporters?.junit ?? defaults.reporters?.junit,
+    resultJson:
+      cliOverrides.resultJson ??
+      profile.reporters?.resultJson ??
+      defaults.reporters?.resultJson,
+    emitFullTrace:
+      cliOverrides.emitFullTrace ??
+      profile.reporters?.emitFullTrace ??
+      defaults.reporters?.emitFullTrace ??
+      builtin.reporters.emitFullTrace,
+    inferSchema:
+      cliOverrides.inferSchema ??
+      profile.reporters?.inferSchema ??
+      defaults.reporters?.inferSchema ??
+      builtin.reporters.inferSchema,
+    truncateArrays:
+      cliOverrides.truncateArrays ??
+      profile.reporters?.truncateArrays ??
+      defaults.reporters?.truncateArrays ??
+      builtin.reporters.truncateArrays,
+  };
+
+  const envFile = cliOverrides.envFile ?? defaults.envFile ?? builtin.envFile;
+  const redaction = resolveRedactionConfig(defaults.redaction);
+
+  // ── Upload ─────────────────────────────────────────────────────────────
+  // CLI `--upload` flag forces enable regardless of profile. Profile-defined
+  // upload (with projectAlias) takes effect unless CLI overrides enabled.
+  let upload: UploadConfig | undefined = profile.upload;
+  if (cliOverrides.uploadEnabled !== undefined) {
+    upload = { ...(upload ?? {}), enabled: cliOverrides.uploadEnabled };
+  }
+
+  return {
+    profile: profileName,
+    configPath,
+    suites,
+    selection,
+    execution,
+    capabilities,
+    reporters,
+    ...(upload !== undefined && { upload }),
+    envFile,
+    redaction,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LEGACY (pre-v1) — kept during Phase 1 transition; removed in Phase 6
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -973,6 +1230,7 @@ function resolveRedactionConfig(
   }
 
   if (
+    input.replacementFormat === "simple" ||
     input.replacementFormat === "labeled" ||
     input.replacementFormat === "partial"
   ) {
