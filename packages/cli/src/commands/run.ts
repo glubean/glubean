@@ -293,12 +293,25 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     const results: DiscoveredTest[] = [];
 
     for (const ec of result.contracts) {
+      const contractTags = ec.tags ?? [];
       for (const c of ec.cases) {
+        // Mirror SDK dispatchContract: finalTags = contract + case + runtime
+        // synthetic. Without this, pre-spawn excludeTags / --tag filtering
+        // skips contract cases entirely (Phase 1 filter reads meta.tags).
+        const caseTags = c.tags ?? [];
+        const requires = c.requires ?? "headless";
+        const defaultRun =
+          c.defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
+        const runtimeTags: string[] = [];
+        if (requires !== "headless") runtimeTags.push(`requires:${requires}`);
+        if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
+        const finalTags = [...contractTags, ...caseTags, ...runtimeTags];
         results.push({
           exportName: ec.exportName,
           meta: {
             id: `${ec.id}.${c.key}`,
             description: c.description,
+            tags: finalTags.length > 0 ? finalTags : undefined,
             requires: c.requires,
             defaultRun: c.defaultRun,
             deferred: c.deferredReason,

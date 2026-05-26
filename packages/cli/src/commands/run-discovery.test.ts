@@ -1,8 +1,32 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { expect, test } from "vitest";
+import { fileURLToPath } from "node:url";
+import { afterAll, afterEach, beforeEach, expect, test } from "vitest";
 import { discoverTests } from "./run.js";
+
+// Contract fixtures must sit inside the package so dynamic-import in
+// extractContractFromFile can resolve `@glubean/sdk` via the workspace.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const CONTRACT_FIXTURE_ROOT = join(HERE, "..", "..", ".tmp-run-discovery-contract");
+let contractFixtureSeq = 0;
+let contractFixtureDir = "";
+
+beforeEach(async () => {
+  contractFixtureSeq += 1;
+  contractFixtureDir = join(CONTRACT_FIXTURE_ROOT, String(contractFixtureSeq));
+  await mkdir(contractFixtureDir, { recursive: true });
+});
+
+afterEach(async () => {
+  if (contractFixtureDir) {
+    await rm(contractFixtureDir, { recursive: true, force: true });
+  }
+});
+
+afterAll(async () => {
+  await rm(CONTRACT_FIXTURE_ROOT, { recursive: true, force: true });
+});
 
 test("discoverTests keeps one parallel test.each template sentinel with grouping metadata", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-data-driven-"));
@@ -39,6 +63,69 @@ export const cases = test.each([
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("discoverTests emits combined contract+case+runtime tags on contract cases", async () => {
+  const filePath = join(contractFixtureDir, "users.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@glubean/sdk";
+
+const api = contract.http.with("usersApi", { endpoint: "https://api.example.com" });
+
+export const getUser = api("users.get", {
+  endpoint: "GET /users/:id",
+  tags: ["users"],
+  cases: {
+    ok: { description: "200 path", tags: ["smoke"], expect: { status: 200 } },
+    manualOnly: { description: "manual only", tags: ["manual"], expect: { status: 200 } },
+    browserCase: {
+      description: "needs browser",
+      requires: "browser",
+      tags: ["smoke"],
+      expect: { status: 200 },
+    },
+  },
+});
+`);
+
+  const tests = await discoverTests(filePath);
+  const byId = new Map(tests.map((t) => [t.meta.id, t]));
+
+  // Contract-level "users" tag merges with case-level tags.
+  expect(byId.get("users.get.ok")?.meta.tags).toEqual(["users", "smoke"]);
+  expect(byId.get("users.get.manualOnly")?.meta.tags).toEqual([
+    "users",
+    "manual",
+  ]);
+  // requires:browser case picks up the synthetic runtime tags AND the
+  // default-run:opt-in tag (defaultRun derives to "opt-in" when requires
+  // is non-headless and the case doesn't override).
+  expect(byId.get("users.get.browserCase")?.meta.tags).toEqual([
+    "users",
+    "smoke",
+    "requires:browser",
+    "default-run:opt-in",
+  ]);
+});
+
+test("discoverTests omits meta.tags when contract+case have none", async () => {
+  const filePath = join(contractFixtureDir, "ping.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@glubean/sdk";
+
+const api = contract.http.with("pingApi", { endpoint: "https://api.example.com" });
+
+export const ping = api("ping.get", {
+  endpoint: "GET /ping",
+  cases: {
+    ok: { description: "ok", expect: { status: 200 } },
+  },
+});
+`);
+
+  const tests = await discoverTests(filePath);
+  expect(tests).toHaveLength(1);
+  expect(tests[0].meta.tags).toBeUndefined();
 });
 
 test("discoverTests keeps one test.pick template sentinel with grouping metadata", async () => {
