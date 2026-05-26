@@ -50,6 +50,13 @@ interface RunOptions {
   pick?: string;
   tags?: string[];
   tagMode?: "or" | "and";
+  /**
+   * Tags to EXCLUDE. Any test/case carrying ANY of these tags is dropped
+   * from the inventory before execution. excludeTags is always OR-mode
+   * (any match → exclude), independent of `tagMode` which only governs
+   * positive `tags` matching. Phase 1 first slice — see plan §Phase 1 task 8.
+   */
+  excludeTags?: string[];
   envFile?: string;
   logFile?: boolean;
   pretty?: boolean;
@@ -361,6 +368,13 @@ function matchesFilter(testItem: DiscoveredTest, filter: string): boolean {
   return false;
 }
 
+// Exported for testing only. Internal helpers otherwise.
+export const __testing = {
+  matchesTags: (...args: Parameters<typeof matchesTags>) => matchesTags(...args),
+  matchesExcludeTags: (...args: Parameters<typeof matchesExcludeTags>) =>
+    matchesExcludeTags(...args),
+};
+
 function matchesTags(
   testItem: DiscoveredTest,
   tags: string[],
@@ -370,6 +384,21 @@ function matchesTags(
   const lowerTestTags = testItem.meta.tags.map((t) => t.toLowerCase());
   const match = (t: string) => lowerTestTags.includes(t.toLowerCase());
   return mode === "and" ? tags.every(match) : tags.some(match);
+}
+
+/**
+ * Returns true if the test carries ANY tag in excludeTags (case-insensitive).
+ * Always OR-mode — independent of positive-side tagMode. A test with no
+ * tags is never excluded by this filter.
+ */
+function matchesExcludeTags(
+  testItem: DiscoveredTest,
+  excludeTags: string[],
+): boolean {
+  if (!excludeTags.length) return false;
+  if (!testItem.meta.tags?.length) return false;
+  const lowerTestTags = testItem.meta.tags.map((t) => t.toLowerCase());
+  return excludeTags.some((t) => lowerTestTags.includes(t.toLowerCase()));
 }
 
 function getLogFilePath(testFilePath: string): string {
@@ -724,12 +753,14 @@ export async function runCommand(
   }
 
   const hasTags = options.tags && options.tags.length > 0;
+  const hasExcludeTags = options.excludeTags && options.excludeTags.length > 0;
   const testsToRun = allFileTests.filter((ft) => {
     const tc = ft.test;
     if (tc.meta.skip) return false;
     if (hasOnly && !tc.meta.only) return false;
     if (options.filter && !matchesFilter(tc, options.filter)) return false;
     if (hasTags && !matchesTags(tc, options.tags!, options.tagMode)) return false;
+    if (hasExcludeTags && matchesExcludeTags(tc, options.excludeTags!)) return false;
     return true;
   });
 
