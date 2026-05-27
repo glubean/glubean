@@ -14,6 +14,10 @@ export interface ExportMeta {
   name?: string;
   /** Tags for filtering */
   tags?: string[];
+  /** Physical capability the test requires (mirrors TestMeta.requires). */
+  requires?: "headless" | "browser" | "out-of-band";
+  /** Default-run policy (mirrors TestMeta.defaultRun). */
+  defaultRun?: "always" | "opt-in";
   /** Optional per-test timeout from TestMeta.timeout (milliseconds) */
   timeout?: number;
   /** Whether the test is marked as skip (should not run) */

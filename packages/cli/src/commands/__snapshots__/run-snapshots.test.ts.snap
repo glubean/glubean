@@ -173,7 +173,7 @@ Memory: <MEM> peak
 "
 `;
 
-exports[`glubean run — snapshot fixtures (RF-1b Phase A) > test-level-requires: current CLI does not filter test() on requires 1`] = `
+exports[`glubean run — snapshot fixtures (RF-1b Phase A) > test-level-requires: filters test() on requires uniformly with contract cases 1`] = `
 "
 🧪 Glubean Test Runner
 
@@ -183,13 +183,12 @@ Discovering tests...
 
 Running 2 test(s)...
 
-  ● needs-browser
-    ✓ PASSED (<Nms>, 1 checks)
+  ⊘ needs-browser — skipped (requires: browser (use --include-browser to run))
   ● runs-anyway
     ✓ PASSED (<Nms>, 1 checks)
 
 ─────────────────────────────────────
-Tests:  2 passed
+Tests:  1 passed, 1 skipped
 Total:  2
 Memory: <MEM> peak
 

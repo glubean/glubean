@@ -378,19 +378,39 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
   }
 
   const metas = extractFromSource(content);
-  return metas.map((m) => ({
-    exportName: m.exportName,
-    meta: {
-      id: m.id,
-      name: m.name,
-      tags: m.tags,
-      timeout: m.timeout,
-      skip: m.skip,
-      only: m.only,
-      groupId: m.groupId ?? (m.variant === "pick" || m.parallel ? m.id : undefined),
-      parallel: m.parallel,
-    },
-  }));
+  return metas.map((m) => {
+    // Mirror the contract-case path so .test.ts authors who declare
+    // `requires: "browser"` / `defaultRun: "opt-in"` see the same
+    // selection behavior (excludeTags via synthetic tag-names AND
+    // shouldSkipTest via meta.requires/defaultRun).
+    const userTags = m.tags ?? [];
+    const requires = m.requires ?? "headless";
+    // Mirror SDK dispatchContract: non-headless implicitly opt-in unless
+    // the author overrode defaultRun. Same default applied to test() so
+    // tag-based selection (e.g. `--exclude-tag default-run:opt-in`)
+    // treats equivalent test() and contract cases identically.
+    const defaultRun =
+      m.defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
+    const runtimeTags: string[] = [];
+    if (requires !== "headless") runtimeTags.push(`requires:${requires}`);
+    if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
+    const finalTags = [...userTags, ...runtimeTags];
+    return {
+      exportName: m.exportName,
+      meta: {
+        id: m.id,
+        name: m.name,
+        tags: finalTags.length > 0 ? finalTags : undefined,
+        timeout: m.timeout,
+        skip: m.skip,
+        only: m.only,
+        groupId: m.groupId ?? (m.variant === "pick" || m.parallel ? m.id : undefined),
+        parallel: m.parallel,
+        requires: m.requires,
+        defaultRun: m.defaultRun,
+      },
+    };
+  });
 }
 
 function matchesFilter(testItem: DiscoveredTest, filter: string): boolean {
@@ -1244,6 +1264,61 @@ export async function runCommand(
   // gets file:start is a fail-fast skip — handled post run:complete.
   const startedFiles = new Set<string>();
 
+  // Files that are 100% capability-skipped need ⊘ rows emitted manually
+  // because ProjectRunner never starts a file with zero runnable tests
+  // (file:start, which normally renders inline skip rows, won't fire).
+  // We do NOT emit them up-front because that would re-order them ahead of
+  // any earlier runnable files. Instead, we render them lazily — right
+  // before the next runnable file's `file:start` fires (and one final pass
+  // after run:complete for any trailing all-skipped files). This keeps the
+  // visible file order matching `fileGroups` insertion order even in
+  // multi-file fail-fast runs.
+  const fileOrder = Array.from(fileGroups.keys());
+  let nextFileIdx = 0;
+  const emitAllSkippedFilesUpTo = (stopFilePath: string | null): void => {
+    while (nextFileIdx < fileOrder.length) {
+      const filePath = fileOrder[nextFileIdx];
+      if (filePath === stopFilePath) return;
+      nextFileIdx++;
+      if (runnableByFile.has(filePath)) continue;
+      const skips = fileCapabilitySkips.get(filePath);
+      if (!skips || skips.length === 0) continue;
+      if (isMultiFile) {
+        const relPath = relative(process.cwd(), filePath);
+        console.log(`${colors.bold}📁 ${relPath}${colors.reset}`);
+      }
+      for (const { ft, reason } of skips) {
+        skipped++;
+        const name = ft.test.meta.name || ft.test.meta.id;
+        console.log(
+          `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${reason})${colors.reset}`,
+        );
+        collectedRuns.push({
+          testId: ft.test.meta.id,
+          testName: name,
+          tags: ft.test.meta.tags as string[] | undefined,
+          filePath,
+          events: [{ type: "status", status: "skipped", reason } as ExecutionEvent],
+          success: true,
+          durationMs: 0,
+          groupId: ft.test.meta.groupId,
+        });
+      }
+      fileCapabilitySkips.delete(filePath);
+      startedFiles.add(filePath);
+    }
+  };
+
+  // If every selected test was capability-skipped, ProjectRunner has
+  // nothing to do. Running it anyway would still perform session setup,
+  // which on a broken session.ts would mask the skip output behind a
+  // session:setup:failed exit. Drain the skip rows now and short-circuit
+  // to the summary block.
+  const hasRunnable = runnableTests.length > 0;
+  if (!hasRunnable) {
+    emitAllSkippedFilesUpTo(null);
+  }
+
   const runner = new ProjectRunner({
     rootDir,
     sharedConfig: shared,
@@ -1264,7 +1339,10 @@ export async function runCommand(
     metricCollector,
   });
 
-  for await (const ev of runner.run()) {
+  // Only walk the runner stream when there are runnable tests. The empty
+  // case has already emitted all capability skips above and falls
+  // straight through to the summary.
+  for await (const ev of hasRunnable ? runner.run() : []) {
     switch (ev.type) {
       case "bootstrap:start":
       case "bootstrap:done":
@@ -1350,6 +1428,15 @@ export async function runCommand(
       }
 
       case "file:start": {
+        // Flush any 100%-skipped files that come before this one in
+        // fileGroups order, so the user sees them in their natural place.
+        emitAllSkippedFilesUpTo(ev.filePath);
+        if (
+          nextFileIdx < fileOrder.length &&
+          fileOrder[nextFileIdx] === ev.filePath
+        ) {
+          nextFileIdx++;
+        }
         currentGroupFilePath = ev.filePath;
         startedFiles.add(ev.filePath);
         const runnable = runnableByFile.get(ev.filePath) ?? [];
@@ -1692,6 +1779,13 @@ export async function runCommand(
         break;
 
       case "run:complete":
+        // Flush any trailing 100%-skipped files (after the last runnable
+        // file). Under fail-fast, also flush only up to the file that
+        // actually started — files beyond the fail point still belong to
+        // the fail-fast pass below, not to the capability-skip pass.
+        if (failureLimit === undefined || ev.failedCount < failureLimit) {
+          emitAllSkippedFilesUpTo(null);
+        }
         // Fail-fast skip display: any file ProjectRunner never started
         // (because the failure limit kicked in between file groups) gets
         // the old "○ (skipped — fail-fast)" lines here, preserving the

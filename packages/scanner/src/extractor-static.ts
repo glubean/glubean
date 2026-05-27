@@ -225,8 +225,22 @@ function findCloseBrace(source: string, openIndex: number): number {
  */
 function parseMetaObject(
   source: string,
-): { id?: string; name?: string; tags?: string[]; timeout?: number } {
-  const result: { id?: string; name?: string; tags?: string[]; timeout?: number } = {};
+): {
+  id?: string;
+  name?: string;
+  tags?: string[];
+  timeout?: number;
+  requires?: "headless" | "browser" | "out-of-band";
+  defaultRun?: "always" | "opt-in";
+} {
+  const result: {
+    id?: string;
+    name?: string;
+    tags?: string[];
+    timeout?: number;
+    requires?: "headless" | "browser" | "out-of-band";
+    defaultRun?: "always" | "opt-in";
+  } = {};
 
   const idMatch = source.match(/id:\s*(['"])([^'"]+)\1/);
   if (idMatch) result.id = idMatch[2];
@@ -247,6 +261,23 @@ function parseMetaObject(
   const timeoutMatch = source.match(/timeout:\s*(\d+)/);
   if (timeoutMatch) result.timeout = Number(timeoutMatch[1]);
 
+  const requiresMatch = source.match(
+    /requires:\s*(['"])(headless|browser|out-of-band)\1/,
+  );
+  if (requiresMatch) {
+    result.requires = requiresMatch[2] as
+      | "headless"
+      | "browser"
+      | "out-of-band";
+  }
+
+  const defaultRunMatch = source.match(
+    /defaultRun:\s*(['"])(always|opt-in)\1/,
+  );
+  if (defaultRunMatch) {
+    result.defaultRun = defaultRunMatch[2] as "always" | "opt-in";
+  }
+
   return result;
 }
 
@@ -255,8 +286,21 @@ function parseMetaObject(
  */
 function extractBuilderMeta(
   scope: string,
-): { name?: string; tags?: string[]; timeout?: number } {
-  const match = scope.match(/\.meta\(\s*\{/);
+): {
+  name?: string;
+  tags?: string[];
+  timeout?: number;
+  requires?: "headless" | "browser" | "out-of-band";
+  defaultRun?: "always" | "opt-in";
+} {
+  // Caller (parseTestDeclaration) already bounds `scope` to the text
+  // AFTER the test() call's closing paren, so we only see the builder
+  // chain. Anchor on either start-of-scope (so the first chained
+  // `.meta(...)` matches when the test takes no callback, e.g.
+  // `test("id").meta(...)`) or a preceding `)` (e.g.
+  // `test("id").step(...).meta(...)`). This belt-and-suspenders defense
+  // also protects callers that pass a wider scope.
+  const match = scope.match(/(?:^|\))\s*\.\s*meta\s*\(\s*\{/);
   if (!match || match.index === undefined) return {};
   const braceStart = scope.indexOf("{", match.index);
   const braceEnd = findCloseBrace(scope, braceStart);
@@ -317,6 +361,28 @@ function parseTestDeclaration(
   const callMatch = rest.match(/^\s*(?:<[^>]*>)?\s*\(/);
   if (!callMatch) return null;
   const callOpenIndex = rest.indexOf("(", callMatch.index!);
+  // Bound the builder-chain search to text AFTER the test() call closes
+  // AND BEFORE the test statement ends (first depth-0 semicolon). Without
+  // both bounds `scope` runs until the next export and could pick up a
+  // sibling `foo().meta({ requires: "browser" })` between this test and
+  // the next export, mis-attributing capability metadata.
+  const callCloseIndex = findCloseParen(rest, callOpenIndex);
+  let builderChainScope = "";
+  if (callCloseIndex !== -1) {
+    const chainStart = callCloseIndex + 1;
+    let depth = 0;
+    let chainEnd = rest.length;
+    for (let i = chainStart; i < rest.length; i++) {
+      const c = rest[i];
+      if (c === "(" || c === "{" || c === "[") depth++;
+      else if (c === ")" || c === "}" || c === "]") depth--;
+      else if (c === ";" && depth === 0) {
+        chainEnd = i;
+        break;
+      }
+    }
+    builderChainScope = rest.substring(chainStart, chainEnd);
+  }
 
   const afterOpen = rest.substring(callOpenIndex + 1).trimStart();
 
@@ -324,6 +390,8 @@ function parseTestDeclaration(
   let name: string | undefined;
   let tags: string[] | undefined;
   let timeout: number | undefined;
+  let requires: "headless" | "browser" | "out-of-band" | undefined;
+  let defaultRun: "always" | "opt-in" | undefined;
 
   if (afterOpen.startsWith('"') || afterOpen.startsWith("'")) {
     // String ID
@@ -341,16 +409,25 @@ function parseTestDeclaration(
     name = parsed.name;
     tags = parsed.tags;
     timeout = parsed.timeout;
+    requires = parsed.requires;
+    defaultRun = parsed.defaultRun;
   }
 
   if (!id) return null;
 
-  // Extract builder .meta({...}) from the full scope
-  const builderMeta = extractBuilderMeta(scope);
+  // Extract builder .meta({...}) ONLY from the chain after the test()
+  // call closes — not from inside the callback body.
+  const builderMeta = extractBuilderMeta(builderChainScope);
   if (!name && builderMeta.name) name = builderMeta.name;
   if (!tags && builderMeta.tags) tags = builderMeta.tags;
   if (timeout === undefined && builderMeta.timeout !== undefined) {
     timeout = builderMeta.timeout;
+  }
+  if (requires === undefined && builderMeta.requires !== undefined) {
+    requires = builderMeta.requires;
+  }
+  if (defaultRun === undefined && builderMeta.defaultRun !== undefined) {
+    defaultRun = builderMeta.defaultRun;
   }
 
   // Extract .step("name", ...) chains from the full scope
@@ -366,6 +443,8 @@ function parseTestDeclaration(
   if (name) result.name = name;
   if (tags && tags.length > 0) result.tags = tags;
   if (timeout !== undefined) result.timeout = timeout;
+  if (requires !== undefined) result.requires = requires;
+  if (defaultRun !== undefined) result.defaultRun = defaultRun;
   if (variant) result.variant = variant;
   if (steps.length > 0) result.steps = steps;
   if (parallel) result.parallel = true;

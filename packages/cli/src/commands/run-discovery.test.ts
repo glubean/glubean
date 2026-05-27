@@ -115,6 +115,115 @@ export const getUser = api("users.get", {
   );
 });
 
+test("discoverTests propagates requires + defaultRun + synthetic tags on test()", async () => {
+  // .test.ts files don't dynamic-import, so tmpdir is fine here.
+  const dir = await mkdtemp(join(tmpdir(), "cli-test-requires-"));
+  const filePath = join(dir, "browser-only.test.ts");
+  await writeFile(filePath, `
+import { test } from "@glubean/sdk";
+
+export const needsBrowser = test(
+  { id: "needs-browser", requires: "browser" },
+  async () => {},
+);
+
+export const optInOnly = test(
+  { id: "opt-in", defaultRun: "opt-in", tags: ["smoke"] },
+  async () => {},
+);
+
+export const plain = test("plain", async () => {});
+`);
+
+  try {
+    const tests = await discoverTests(filePath);
+    const byId = new Map(tests.map((t) => [t.meta.id, t]));
+
+    const browserTest = byId.get("needs-browser")!;
+    expect(browserTest.meta.requires).toBe("browser");
+    // Non-headless implicitly opt-in (matches contract case derivation):
+    // both synthetic tags should be present, like the contract path emits.
+    expect(browserTest.meta.tags).toEqual([
+      "requires:browser",
+      "default-run:opt-in",
+    ]);
+
+    const optInTest = byId.get("opt-in")!;
+    expect(optInTest.meta.defaultRun).toBe("opt-in");
+    expect(optInTest.meta.tags).toEqual(["smoke", "default-run:opt-in"]);
+
+    // Plain headless/always test: no synthetic tags, no meta.tags.
+    const plainTest = byId.get("plain")!;
+    expect(plainTest.meta.requires).toBeUndefined();
+    expect(plainTest.meta.defaultRun).toBeUndefined();
+    expect(plainTest.meta.tags).toBeUndefined();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverTests ignores .meta() calls inside test callback bodies", async () => {
+  // Static extractor's scope spans from `test` to next export, so a
+  // body-internal `.meta({ requires: "browser" })` could accidentally
+  // be parsed as builder metadata — including the harder case where
+  // the method chains off a function call (`fn().meta(...)`) which
+  // matches a naive `).meta(` anchor.
+  const dir = await mkdtemp(join(tmpdir(), "cli-meta-scope-"));
+  const filePath = join(dir, "scope-leak.test.ts");
+  await writeFile(filePath, `
+import { test } from "@glubean/sdk";
+
+export const headlessTest = test("headless-id", async (_ctx) => {
+  const client = {
+    request: () => ({ meta: (_obj: unknown) => {} }),
+    meta: (_obj: unknown) => {},
+  };
+  client.meta({ requires: "browser" });
+  client.request().meta({ requires: "out-of-band" });
+});
+`);
+
+  try {
+    const tests = await discoverTests(filePath);
+    expect(tests).toHaveLength(1);
+    expect(tests[0].meta.id).toBe("headless-id");
+    // Neither the dotted `client.meta(...)` nor the chained
+    // `client.request().meta(...)` should bleed into builder metadata.
+    expect(tests[0].meta.requires).toBeUndefined();
+    expect(tests[0].meta.tags).toBeUndefined();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverTests ignores .meta() in sibling expressions between exports", async () => {
+  // Previously builderChainScope ran until the next `export`, so a
+  // sibling expression with `().meta({ requires: "browser" })` between
+  // a test() and the next export could mis-attribute browser metadata.
+  // The depth-0-semicolon bound stops scope at the test statement's end.
+  const dir = await mkdtemp(join(tmpdir(), "cli-sibling-meta-"));
+  const filePath = join(dir, "sibling-leak.test.ts");
+  await writeFile(filePath, `
+import { test } from "@glubean/sdk";
+
+export const headless = test("plain-test", async (_ctx) => {});
+
+const _stray = (() => ({ meta: (_o: unknown) => {} }))().meta({ requires: "browser" });
+
+export const another = test("another", async (_ctx) => {});
+`);
+
+  try {
+    const tests = await discoverTests(filePath);
+    expect(tests).toHaveLength(2);
+    const byId = new Map(tests.map((t) => [t.meta.id, t]));
+    expect(byId.get("plain-test")?.meta.requires).toBeUndefined();
+    expect(byId.get("another")?.meta.requires).toBeUndefined();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("discoverTests propagates flow tags + only + skip (as deferred)", async () => {
   // Need both a referenced contract (so flow.step() resolves) and the flow.
   const contractPath = join(contractFixtureDir, "users.contract.ts");

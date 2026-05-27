@@ -296,13 +296,14 @@ export const third = test("third-bad", async (ctx) => {
 
   // -------------------------------------------------------------------------
   // Fixture: test-level-requires — `requires: "browser"` on a `test(...)`
-  // declaration (not a contract case). Current CLI does NOT filter on
-  // test-level requires: both tests run. This snapshot captures that
-  // behavior precisely so Phase B can surface any change (fixing the
-  // filter, or preserving the quirk verbatim).
+  // declaration. Phase 2 task 4 unified test() and contract-case selection
+  // behavior, so `requires: "browser"` is now extracted statically and
+  // shouldSkipTest filters the test the same way it filters contract cases.
+  // (Pre-Phase-2 task 4 this snapshot showed both tests running — captured
+  // there as a documented quirk.)
   // -------------------------------------------------------------------------
 
-  test("test-level-requires: current CLI does not filter test() on requires", async () => {
+  test("test-level-requires: filters test() on requires uniformly with contract cases", async () => {
     const dir = await prepareFixture("skip-requires", {
       "package.json": workspacePackageJson("snapshot-skipreq"),
       "tests/browser-only.test.ts": `
@@ -328,9 +329,11 @@ export const runsAnyway = test("runs-anyway", async (ctx) => {
     const normalized = normalizeOutput(stdout + stderr);
 
     expect(code).toBe(0); // skipped tests don't fail the run
-    // One passes, one skipped with requires reason
+    // runs-anyway runs; needs-browser is filtered with the standard
+    // "requires: browser" skip reason (same path contract cases use).
     expect(normalized).toContain("runs-anyway");
     expect(normalized).toContain("needs-browser");
+    expect(normalized).toContain("requires: browser");
 
     expect(normalized).toMatchSnapshot();
   }, 30_000);
