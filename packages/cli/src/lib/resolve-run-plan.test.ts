@@ -194,6 +194,72 @@ describe("resolveRunPlan", () => {
       expect(plan.reporters.junit).toBe(".glubean/junit.xml");
       expect(plan.reporters.resultJson).toBe(".glubean/results/ci.json");
     });
+
+    it("CLI junit override replaces only the junit path (Phase 3 task 6)", () => {
+      const config = makeConfig({
+        profiles: {
+          ci: {
+            suites: ["tests"],
+            reporters: {
+              console: "summary",
+              junit: ".glubean/junit.xml",
+              resultJson: ".glubean/results/ci.json",
+            },
+          },
+        },
+      });
+      const plan = resolveRunPlan(config, "/p", "ci", {
+        junit: "custom/out.junit.xml",
+      });
+      expect(plan.reporters.junit).toBe("custom/out.junit.xml");
+      expect(plan.reporters.console).toBe("summary");
+      expect(plan.reporters.resultJson).toBe(".glubean/results/ci.json");
+    });
+
+    it("CLI resultJson override replaces only the resultJson path (Phase 3 task 6)", () => {
+      const config = makeConfig({
+        profiles: {
+          ci: {
+            suites: ["tests"],
+            reporters: {
+              console: "summary",
+              junit: ".glubean/junit.xml",
+              resultJson: ".glubean/results/ci.json",
+            },
+          },
+        },
+      });
+      const plan = resolveRunPlan(config, "/p", "ci", {
+        resultJson: "custom/out.result.json",
+      });
+      expect(plan.reporters.resultJson).toBe("custom/out.result.json");
+      expect(plan.reporters.console).toBe("summary");
+      expect(plan.reporters.junit).toBe(".glubean/junit.xml");
+    });
+
+    it("CLI junit + resultJson combined override leaves console untouched", () => {
+      const config = makeConfig({
+        profiles: {
+          ci: {
+            suites: ["tests"],
+            reporters: {
+              console: "summary",
+              junit: ".glubean/junit.xml",
+              resultJson: ".glubean/results/ci.json",
+            },
+          },
+        },
+      });
+      const plan = resolveRunPlan(config, "/p", "ci", {
+        junit: "a.xml",
+        resultJson: "a.json",
+      });
+      expect(plan.reporters).toMatchObject({
+        console: "summary",
+        junit: "a.xml",
+        resultJson: "a.json",
+      });
+    });
   });
 
   describe("trace overrides + upload CLI (codex round-2 P2 fix)", () => {
