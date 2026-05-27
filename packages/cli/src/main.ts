@@ -19,6 +19,7 @@ import {
   type CliProfileOverrides,
   type ResolvedRunPlan,
 } from "./lib/config.js";
+import { formatResolvedPlan } from "./lib/print-plan.js";
 import { initCommand } from "./commands/init.js";
 import { runCommand } from "./commands/run.js";
 import { scanCommand } from "./commands/scan.js";
@@ -272,6 +273,71 @@ program
     const cliExcludeTags = options.excludeTag?.flatMap((t: string) =>
       t.split(",").map((s: string) => s.trim()).filter(Boolean),
     );
+
+    // Phase 3 task 5 — print resolved plan AFTER all CLI overrides have
+    // been merged so the printout is a verbatim record of what runs (and
+    // not stale profile values that --result-json / --reporter / explicit
+    // target overrode below). We build the printed view by overlaying the
+    // post-override fields on top of `resolvedPlan`.
+    //
+    // Default-path placeholders: when the user enables `--reporter junit`
+    // or `--result-json` without a path, runCommand picks a runtime
+    // default (`glubean-run.junit.xml` / `glubean-run.result.json` for
+    // multi-file, or `<testfile>.junit.xml` / `<testfile>.result.json`
+    // for single-file). The exact default depends on test discovery
+    // which hasn't run yet at print time — use a "<default>" hint so the
+    // user sees that an artifact WILL be written.
+    if (resolvedPlan) {
+      const explicitTargetGiven = !!target && target !== resolvedPlan.suites[0]?.target;
+      // junit reporter active iff `reporter === "junit"` after the
+      // resolution above (either from CLI, profile, or implied by --ci).
+      const junitActive = reporter === "junit";
+      const printJunit = junitActive
+        ? reporterPath ?? "<default: glubean-run.junit.xml or <testfile>.junit.xml>"
+        : resolvedPlan.reporters.junit;
+      // resultJson can be undefined / string path / true (flag with no value).
+      const printResultJson =
+        typeof resultJson === "string"
+          ? resultJson
+          : resultJson
+            ? "<default: glubean-run.result.json or <testfile>.result.json>"
+            : undefined;
+      // Upload destination: when `--project <id>` is passed, the upload
+      // routes to that project id, NOT the profile's `projectAlias`.
+      // Reflect that override so the printed plan matches the actual
+      // destination. Same enable-bit override for `--upload`.
+      const overrideUpload = resolvedPlan.upload
+        ? {
+            ...resolvedPlan.upload,
+            ...(options.project ? { projectAlias: options.project as string } : {}),
+            ...(options.upload === true ? { enabled: true } : {}),
+          }
+        : options.upload === true || options.project
+          ? {
+              enabled: options.upload === true,
+              ...(options.project ? { projectAlias: options.project as string } : {}),
+            }
+          : undefined;
+      const printPlan: ResolvedRunPlan = {
+        ...resolvedPlan,
+        // Explicit target overrides the suite entirely — don't inherit
+        // the original suite name or kinds (they'd misrepresent what
+        // discovery actually scans). `kinds` is required by SuiteConfig,
+        // so use [] to signal "no kind filter declared here".
+        suites: explicitTargetGiven
+          ? [{ name: "(override)", target: resolvedTarget, kinds: [] }]
+          : resolvedPlan.suites,
+        execution: { ...resolvedPlan.execution, failFast },
+        reporters: {
+          ...resolvedPlan.reporters,
+          ...(printJunit ? { junit: printJunit } : {}),
+          ...(printResultJson !== undefined ? { resultJson: printResultJson } : {}),
+        },
+        ...(overrideUpload ? { upload: overrideUpload } : {}),
+      };
+      console.log(formatResolvedPlan(printPlan));
+      console.log("");
+    }
 
     await runCommand(resolvedTarget, {
       filter: options.filter ?? resolvedPlan?.selection.filter,
