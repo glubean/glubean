@@ -346,17 +346,38 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
 
     if (results.length > 0) return results;
 
-    // Runtime failed — fall back to static regex (old syntax, contracts only)
+    // Runtime failed — fall back to static regex ONLY for files that
+    // contain ONLY contract.http(...). Stricter than MCP's gate: CLI
+    // emits flows as runnable tests via discoverTests, so silently
+    // dropping `contract.flow(...)` would hide an actual test. Any
+    // non-HTTP usage (including flow) → fail closed and surface the
+    // import error so the user knows discovery is degraded.
     if (result.errors.length > 0) {
-      const contracts = extractContractCases(content);
+      // Allow whitespace/newlines between `contract` and `.method` so the
+      // common fluent style `contract\n  .flow(...)` still trips the gate.
+      const hasHttp = /contract\s*\.\s*http\b/i.test(content);
+      const hasNonHttp = /contract\s*\.\s*(?!http\b)\w+\s*[.(]/i.test(content);
+      const contracts =
+        hasHttp && !hasNonHttp ? extractContractCases(content) : [];
       if (contracts.length > 0) {
         for (const c of contracts) {
           for (const caseItem of c.cases) {
+            const requires = caseItem.requires ?? "headless";
+            const defaultRun =
+              caseItem.defaultRun ??
+              (requires !== "headless" ? "opt-in" : "always");
+            const runtimeTags: string[] = [];
+            if (requires !== "headless") {
+              runtimeTags.push(`requires:${requires}`);
+            }
+            if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
             results.push({
               exportName: c.exportName,
               meta: {
                 id: `${c.contractId}.${caseItem.key}`,
+                name: `${c.contractId} — ${caseItem.key}`,
                 description: caseItem.description,
+                tags: runtimeTags.length > 0 ? runtimeTags : undefined,
                 requires: caseItem.requires,
                 defaultRun: caseItem.defaultRun,
                 deferred: caseItem.deferred,
@@ -367,7 +388,8 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         return results;
       }
 
-      // Both runtime and static failed — surface the import error
+      // Both runtime and static failed (or non-HTTP detected) — surface the
+      // import error so the user knows discovery is degraded.
       for (const err of result.errors) {
         console.error(`\x1b[31m✗ Contract import failed: ${err.file}\x1b[0m`);
         console.error(`\x1b[2m  ${err.error}\x1b[0m`);

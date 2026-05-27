@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, beforeEach, expect, test } from "vitest";
+import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
 import { discoverTests } from "./run.js";
 
 // Contract fixtures must sit inside the package so dynamic-import in
@@ -193,6 +193,92 @@ export const headlessTest = test("headless-id", async (_ctx) => {
     expect(tests[0].meta.tags).toBeUndefined();
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverTests fails closed on non-HTTP contract when runtime import fails", async () => {
+  // Bad import path forces runtime extraction to fail. The static
+  // fallback should NOT fire for non-HTTP protocols because the static
+  // extractor cannot represent them — a partial result would silently
+  // drop contracts. Matches MCP server's policy.
+  const filePath = join(contractFixtureDir, "grpc-broken.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@glubean/sdk";
+import "this-module-does-not-exist";
+
+export const svc = contract.grpc("user.service", {
+  cases: {
+    list: { description: "list users" },
+  },
+});
+`);
+
+  // Silence the expected import-error log so test output stays clean.
+  const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const tests = await discoverTests(filePath);
+    expect(tests).toEqual([]);
+  } finally {
+    errSpy.mockRestore();
+  }
+});
+
+test("discoverTests fails closed when broken file mixes contract.http with contract.flow", async () => {
+  // Static extractor can't represent flows. If runtime fails for a mixed
+  // file, falling back to static would silently drop the flow runnable
+  // — worse than failing closed. CLI gate is stricter than MCP here.
+  // Multi-line fluent `contract\n  .flow(...)` chain is the canonical
+  // style for non-trivial flows in this repo, so the detector must
+  // tolerate whitespace between `contract` and `.flow`.
+  const filePath = join(contractFixtureDir, "http-flow-broken.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@glubean/sdk";
+import "this-module-does-not-exist";
+
+export const ping = contract.http("ping", {
+  endpoint: "GET /ping",
+  cases: { ok: { description: "ok", expect: { status: 200 } } },
+});
+
+export const userFlow = contract
+  .flow("user-flow")
+  .build();
+`);
+
+  const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const tests = await discoverTests(filePath);
+    expect(tests).toEqual([]);
+  } finally {
+    errSpy.mockRestore();
+  }
+});
+
+test("discoverTests static fallback fires for HTTP-only file with broken import", async () => {
+  // Same broken-import scenario but file is pure HTTP — static fallback
+  // IS allowed, since the static extractor faithfully represents HTTP
+  // contracts. Confirms the fail-closed gate doesn't over-fire.
+  const filePath = join(contractFixtureDir, "http-broken.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@glubean/sdk";
+import "this-module-does-not-exist";
+
+export const ping = contract.http("ping", {
+  endpoint: "GET /ping",
+  cases: {
+    ok: { description: "200 path", expect: { status: 200 } },
+  },
+});
+`);
+
+  const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const tests = await discoverTests(filePath);
+    expect(tests).toHaveLength(1);
+    expect(tests[0].meta.id).toBe("ping.ok");
+    expect(tests[0].meta.name).toBe("ping — ok");
+  } finally {
+    errSpy.mockRestore();
   }
 });
 
