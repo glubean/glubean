@@ -515,6 +515,17 @@ async function executeRun(
       // without this the upload would use the legacy defaults regardless
       // of what the project declared.
       redactionConfig: resolvedPlan?.redaction,
+      // Phase 5 5a — pass profile name + suite names so runCommand can
+      // emit `metadata.runPlan` on upload. Cloud server projects these
+      // to top-level RunEntity fields for query indexing.
+      // When the user supplied an explicit positional target, suites
+      // from the profile didn't drive expansion (resolvedTarget is the
+      // raw target string, not the per-suite file list) — omit suites
+      // so `?suite=Y` queries don't incorrectly match runs that didn't
+      // actually execute suite Y. Profile name stays meaningful (its
+      // selection/execution/reporters still applied).
+      profile: resolvedPlan?.profile,
+      suites: target ? undefined : resolvedPlan?.suites.map((s) => s.name),
     });
 }
 

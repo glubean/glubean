@@ -113,6 +113,16 @@ export interface UploadResultPayload {
         deferred?: string;
       }>;
     }>;
+    /**
+     * Phase 5 5a — run plan provenance. Cloud server projects this to
+     * top-level RunEntity.{profile, suites} for index-backed queries.
+     * Nested under `metadata` to clear the server DTO's
+     * `forbidNonWhitelisted` top-level whitelist.
+     */
+    runPlan?: {
+      profile?: string;
+      suites?: string[];
+    };
   };
 }
 

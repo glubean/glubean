@@ -131,6 +131,19 @@ interface RunOptions {
    * in glubean.yaml would silently ship secrets to Cloud uploads.
    */
   redactionConfig?: import("@glubean/redaction").RedactionConfig;
+  /**
+   * Phase 5 5a — profile name from `glubean.yaml` the run executed
+   * against. Threaded through upload payload as `metadata.runPlan.profile`
+   * so cloud server can project to top-level `RunEntity.profile` for
+   * index-backed `GET /open/v1/runs?profile=X` queries.
+   */
+  profile?: string;
+  /**
+   * Phase 5 5a — suite names the run spanned (in declaration order).
+   * Threaded as `metadata.runPlan.suites` for the equivalent
+   * `?suite=Y` membership query.
+   */
+  suites?: string[];
 }
 
 // =============================================================================
@@ -2283,6 +2296,28 @@ export async function runCommand(
         metadata = built;
       } catch {
         // Non-critical: upload results without metadata
+      }
+
+      // Phase 5 5a — attach run-plan provenance to the upload metadata
+      // bucket. Cloud server projects this to top-level RunEntity fields
+      // (see apps/server/src/tasks/helpers/extract-run-plan.ts). Nested
+      // under `metadata` to clear the server DTO's `forbidNonWhitelisted`
+      // top-level gate. Only emitted when:
+      //   1. The run used a profile (no profile → nothing to record).
+      //   2. The scan path produced metadata.
+      // Skipping runPlan in the degraded-scan path is intentional —
+      // synthesizing a runPlan-only shell with `files: {}` would make
+      // the server's upsertTests treat all active tests as "removed"
+      // (authoritative file map = empty). Better to lose runPlan
+      // provenance on degraded scans than to corrupt the test registry.
+      if (metadata && options.profile) {
+        const runPlan: { profile: string; suites?: string[] } = {
+          profile: options.profile,
+        };
+        if (options.suites && options.suites.length > 0) {
+          runPlan.suites = options.suites;
+        }
+        metadata = { ...metadata, runPlan };
       }
 
       const redactedPayload = {
