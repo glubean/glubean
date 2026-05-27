@@ -60,6 +60,9 @@ export const cases = test.each([
         only: undefined,
         groupId: "case-$id",
         parallel: true,
+        requires: undefined,
+        defaultRun: undefined,
+        kind: "test",
       },
     });
   } finally {

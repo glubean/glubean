@@ -21,7 +21,7 @@ import {
 } from "./lib/config.js";
 import { formatResolvedPlan } from "./lib/print-plan.js";
 import { initCommand } from "./commands/init.js";
-import { runCommand } from "./commands/run.js";
+import { runCommand, resolveTestFilesForSuite } from "./commands/run.js";
 import { scanCommand } from "./commands/scan.js";
 import { validateMetadataCommand } from "./commands/validate_metadata.js";
 import { loginCommand } from "./commands/login.js";
@@ -233,22 +233,12 @@ async function executeRun(
           options.profile as string,
           cliOverrides,
         );
-        if (resolvedPlan.suites.length !== 1) {
-          if (resolvedPlan.suites.length === 0) {
-            console.error(
-              `\x1b[31mProfile "${resolvedPlan.profile}" has an empty \`suites\` ` +
-                `list. Phase 1 first slice requires exactly one suite per ` +
-                `profile (multi-suite execution lands in Phase 2).\x1b[0m`,
-            );
-          } else {
-            console.error(
-              `\x1b[31mProfile "${resolvedPlan.profile}" includes multiple suites ` +
-                `(${resolvedPlan.suites.map((s) => s.name).join(", ")}). ` +
-                `Multi-suite execution ships in Phase 2 (discovery alignment); ` +
-                `for Phase 1 first slice, profiles must reference exactly one ` +
-                `suite. Split into separate profiles for now.\x1b[0m`,
-            );
-          }
+        if (resolvedPlan.suites.length === 0) {
+          console.error(
+            `\x1b[31mProfile "${resolvedPlan.profile}" has an empty \`suites\` ` +
+              `list. Add at least one suite name in glubean.yaml ` +
+              `(e.g. \`profiles.${resolvedPlan.profile}.suites: [tests]\`).\x1b[0m`,
+          );
           process.exit(1);
         }
       } catch (err) {
@@ -260,22 +250,76 @@ async function executeRun(
       }
     }
 
-    // Resolve default target from config when not explicitly provided
-    let resolvedTarget = target;
+    // Resolve target from config when not explicitly provided. In profile
+    // mode this iterates each suite, applies its `kinds` filter at the
+    // file level, and passes the concatenated file list as the target.
+    // runCommand accepts `string | string[]` so a multi-suite profile
+    // discovers + runs all suites in a single pass with unified reporter
+    // output. (Phase 4 multi-suite execution + the resolved suite.kinds
+    // filter that was the documented E1 gap from Phase 1 sub-task E1.)
+    let resolvedTarget: string | string[] | undefined = target;
+    // Per-file allow-list of runnable kinds for the multi-suite path.
+    // Built alongside `resolvedTarget` so runCommand can drop runnables
+    // whose kind isn't in any contributing suite's declared kinds —
+    // protects mixed-export files (e.g. `.contract.ts` with an inline
+    // `contract.flow(...)`).
+    let allowedKindsPerFile:
+      | Map<string, Set<"test" | "contract" | "flow">>
+      | undefined;
     if (!resolvedTarget) {
       if (resolvedPlan && resolvedPlan.suites.length > 0) {
-        // Profile mode: target = first suite's target. Single-suite is
-        // enforced above (length !== 1 hard-errors), so suites[0] is the
-        // only suite for the profile.
-        //
-        // KNOWN E1 GAP (deferred to Phase 2): `suite.kinds` is NOT enforced
-        // at discovery time here. If the target directory contains mixed
-        // file types (e.g. both `.test.ts` and `.contract.ts`), all are
-        // currently discovered regardless of what `kinds:` declared. Phase 2
-        // (discovery alignment) wires `kinds` through scanner / contract-
-        // extraction. For E1 first slice, callers should organize a suite
-        // to point at a target that only contains the declared kinds.
-        resolvedTarget = resolvedPlan.suites[0].target;
+        // Preserve profile.suites declaration order — it controls
+        // file:start ordering downstream, which interacts with
+        // failFast / failAfter (early failures in earlier suites
+        // short-circuit later suites). Dedupe while preserving order
+        // when the same path appears across suites.
+        const seen = new Set<string>();
+        const allFiles: string[] = [];
+        allowedKindsPerFile = new Map();
+        for (const suite of resolvedPlan.suites) {
+          const suiteFiles = await resolveTestFilesForSuite(
+            suite.target,
+            suite.kinds,
+          );
+          // A declared suite that resolves to zero files is almost always a
+          // typo (wrong dir, wrong kinds filter). Fail loudly per-suite so
+          // CI surfaces the misconfiguration instead of silently dropping
+          // it into the aggregate.
+          if (suiteFiles.length === 0) {
+            console.error(
+              `\x1b[31mSuite "${suite.name}" (target: ${suite.target}, ` +
+                `kinds: ${suite.kinds.join(", ") || "any"}) resolved to ` +
+                `zero test files. Check the directory exists and contains ` +
+                `*.${suite.kinds.join(".ts / *.")}.ts files matching the ` +
+                `declared kinds.\x1b[0m`,
+            );
+            process.exit(1);
+          }
+          // When a suite has no declared kinds, allow all three. Otherwise
+          // union the declared kinds into the per-file allow-list (a file
+          // shared between suites with different kinds runs the union).
+          const suiteKindSet: Set<"test" | "contract" | "flow"> =
+            suite.kinds.length === 0
+              ? new Set(["test", "contract", "flow"])
+              : new Set(
+                  suite.kinds.filter(
+                    (k): k is "test" | "contract" | "flow" =>
+                      k === "test" || k === "contract" || k === "flow",
+                  ),
+                );
+          for (const f of suiteFiles) {
+            const existing = allowedKindsPerFile.get(f);
+            if (existing) {
+              for (const k of suiteKindSet) existing.add(k);
+            } else {
+              allowedKindsPerFile.set(f, new Set(suiteKindSet));
+            }
+            if (seen.has(f)) continue;
+            seen.add(f);
+            allFiles.push(f);
+          }
+        }
+        resolvedTarget = allFiles;
       } else {
         const config = await loadConfig(process.cwd(), configFiles);
         resolvedTarget = options.explore ? config.run.exploreDir : config.run.testDir;
@@ -327,7 +371,13 @@ async function executeRun(
     // which hasn't run yet at print time — use a "<default>" hint so the
     // user sees that an artifact WILL be written.
     if (resolvedPlan) {
-      const explicitTargetGiven = !!target && target !== resolvedPlan.suites[0]?.target;
+      // Any user-supplied positional target overrides suite expansion —
+      // resolvedTarget becomes that single string instead of the file
+      // array built from per-suite resolution. Comparing to a specific
+      // suite's target as a "did they really override?" heuristic would
+      // misreport the plan when the user passes the same path string
+      // that happens to match the first suite's target.
+      const explicitTargetGiven = !!target;
       // junit reporter active iff `reporter === "junit"` after the
       // resolution above (either from CLI, profile, or implied by --ci).
       const junitActive = reporter === "junit";
@@ -362,9 +412,12 @@ async function executeRun(
         // Explicit target overrides the suite entirely — don't inherit
         // the original suite name or kinds (they'd misrepresent what
         // discovery actually scans). `kinds` is required by SuiteConfig,
-        // so use [] to signal "no kind filter declared here".
+        // so use [] to signal "no kind filter declared here". The
+        // explicit `target` is the user-supplied positional arg (always
+        // a single string) — distinct from `resolvedTarget` which may be
+        // the file array built from per-suite resolution below.
         suites: explicitTargetGiven
-          ? [{ name: "(override)", target: resolvedTarget, kinds: [] }]
+          ? [{ name: "(override)", target: target as string, kinds: [] }]
           : resolvedPlan.suites,
         execution: {
           ...resolvedPlan.execution,
@@ -456,6 +509,7 @@ async function executeRun(
       inputJson: options.inputJson,
       bootstrapJson: options.bootstrapJson,
       forceStandalone: options.forceStandalone,
+      allowedKindsPerFile,
     });
 }
 

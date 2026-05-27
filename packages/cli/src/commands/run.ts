@@ -113,6 +113,15 @@ interface RunOptions {
   inputJson?: string;
   bootstrapJson?: string;
   forceStandalone?: boolean;
+  /**
+   * Per-file allow-list of runnable kinds. When set, each discovered
+   * runnable is filtered: only emit it if its kind is in the file's
+   * allowed set. This enforces `suite.kinds` at the RUNNABLE level —
+   * a `kinds: [contract]` suite running a `.contract.ts` file that
+   * also exports a flow inline still drops the flow. Missing entry
+   * for a file means "no filter" (legacy behavior).
+   */
+  allowedKindsPerFile?: Map<string, Set<"test" | "contract" | "flow">>;
 }
 
 // =============================================================================
@@ -217,7 +226,27 @@ async function walkTestFiles(dir: string, result: string[]): Promise<void> {
   }
 }
 
-async function resolveTestFiles(target: string): Promise<string[]> {
+/**
+ * Map a file path to its Glubean kind by extension.
+ * - `.test.ts` → "test"
+ * - `.contract.ts` → "contract"
+ * - `.flow.ts` → "flow"
+ * - `.bootstrap.ts` → "bootstrap" (overlay registration only; not a runnable kind)
+ *
+ * Returns undefined for non-Glubean files. The suite.kinds filter in
+ * resolveTestFiles uses this to keep only files whose kind matches.
+ */
+export type GlubeanFileKind = "test" | "contract" | "flow" | "bootstrap";
+
+export function classifyGlubeanFile(filePath: string): GlubeanFileKind | undefined {
+  if (filePath.endsWith(".test.ts")) return "test";
+  if (filePath.endsWith(".contract.ts")) return "contract";
+  if (filePath.endsWith(".flow.ts")) return "flow";
+  if (filePath.endsWith(".bootstrap.ts")) return "bootstrap";
+  return undefined;
+}
+
+async function resolveSingleTarget(target: string): Promise<string[]> {
   const abs = resolve(target);
 
   try {
@@ -250,6 +279,81 @@ async function resolveTestFiles(target: string): Promise<string[]> {
   return [abs];
 }
 
+/**
+ * Resolve one or more targets (file / dir / glob) to a deduped list of
+ * test file paths. Phase 4 multi-suite execution passes a per-suite
+ * array here so the runner can sweep all suites in a single pass with
+ * unified discovery, filtering, and reporter output.
+ */
+async function resolveTestFiles(target: string | string[]): Promise<string[]> {
+  const targets = Array.isArray(target) ? target : [target];
+  const all: string[] = [];
+  for (const t of targets) {
+    const files = await resolveSingleTarget(t);
+    all.push(...files);
+  }
+  // Dedupe (suites may share a directory) while preserving the caller-
+  // supplied order. Multi-suite main.ts depends on this — sorting here
+  // would mix files across suites and break failFast/failAfter
+  // short-circuit ordering. resolveSingleTarget still sorts within a
+  // single directory walk for determinism inside one suite.
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const f of all) {
+    if (seen.has(f)) continue;
+    seen.add(f);
+    ordered.push(f);
+  }
+  return ordered;
+}
+
+/**
+ * Per-suite resolution helper exposed for main.ts. Resolves a suite's
+ * `target` (file / dir / glob), then keeps only files whose
+ * `classifyGlubeanFile` result is in `kinds` (.bootstrap.ts files are
+ * always kept regardless of kinds so overlay registration still fires
+ * across the project — they emit no runnable tests on their own).
+ *
+ * `kinds.length === 0` means "no kind filter" (all Glubean files).
+ *
+ * KNOWN LIMITATION (file-level only): the filter operates on the file
+ * EXTENSION, not on individual exports. A `.contract.ts` file CAN
+ * legitimately export a flow inline (and vice versa). For canonical
+ * `tests/` + `contracts/` directory layouts this doesn't matter — each
+ * file kind matches its declared suite kind. For mixed exports inside
+ * a single file (`kinds: [contract]` running a flow exported from the
+ * same .contract.ts), authors should split flows into `.flow.ts`. A
+ * proper export-level kind filter would require threading suite kinds
+ * through discoverTests and is left as a follow-up.
+ */
+export async function resolveTestFilesForSuite(
+  target: string,
+  kinds: string[],
+): Promise<string[]> {
+  const files = await resolveSingleTarget(target);
+  if (kinds.length === 0) return files;
+  const kindSet = new Set(kinds);
+  // Strict per-kind file filter: `.test.ts` ↔ "test", `.contract.ts` ↔
+  // "contract", `.flow.ts` ↔ "flow". This keeps the "zero files for
+  // declared suite" error a reliable signal of misconfiguration.
+  //
+  // KNOWN LIMITATION: a `.contract.ts` file that exports ONLY a flow
+  // (uncommon — flows usually live in `.flow.ts`) won't match a
+  // `kinds: [flow]` suite at the file-level filter. To run such a flow
+  // from a strict flow-only suite, either move the export into a
+  // `.flow.ts` file (recommended canonical layout) or declare the
+  // suite as `kinds: [contract, flow]` so both candidate file types
+  // are scanned and the runnable-level filter sorts them out.
+  return files.filter((f) => {
+    const k = classifyGlubeanFile(f);
+    if (k === undefined) return false;
+    // Bootstrap files: always retain so contract.bootstrap() side-effects
+    // fire on import (per attachment-model §7.4 eager loading).
+    if (k === "bootstrap") return true;
+    return kindSet.has(k);
+  });
+}
+
 interface DiscoveredTestMeta {
   id: string;
   name?: string;
@@ -264,6 +368,15 @@ interface DiscoveredTestMeta {
   defaultRun?: string;
   deferred?: string;
   deprecated?: string;
+  /**
+   * Runnable kind — used by Phase 4's suite.kinds filter to drop
+   * runnables whose kind isn't in the declared kinds for the suite
+   * that contributed the file. Set by discoverTests at emit time:
+   * - "test"     — plain `test(...)` exports
+   * - "contract" — contract case (any protocol)
+   * - "flow"     — `contract.flow(...).build()` orchestrator
+   */
+  kind?: "test" | "contract" | "flow";
 }
 
 interface DiscoveredTest {
@@ -320,6 +433,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
             defaultRun: c.defaultRun,
             deferred: c.deferredReason,
             deprecated: c.deprecatedReason,
+            kind: "contract",
           },
         });
       }
@@ -340,6 +454,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
           tags: att.flow.tags,
           only: att.flow.only,
           deferred: att.flow.skip,
+          kind: "flow",
         },
       });
     }
@@ -381,6 +496,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
                 requires: caseItem.requires,
                 defaultRun: caseItem.defaultRun,
                 deferred: caseItem.deferred,
+                kind: "contract",
               },
             });
           }
@@ -430,6 +546,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         parallel: m.parallel,
         requires: m.requires,
         defaultRun: m.defaultRun,
+        kind: "test",
       },
     };
   });
@@ -513,9 +630,9 @@ function resolveOutputPath(userPath: string, cwd: string): string {
   return resolved;
 }
 
-async function writeEmptyResult(target: string, runAt: string): Promise<void> {
+async function writeEmptyResult(target: string | string[], runAt: string): Promise<void> {
   const payload = {
-    target,
+    target: Array.isArray(target) ? target.join(", ") : target,
     files: [],
     runAt,
     summary: { total: 0, passed: 0, failed: 0, skipped: 0, durationMs: 0, stats: {} },
@@ -535,7 +652,7 @@ async function writeEmptyResult(target: string, runAt: string): Promise<void> {
 }
 
 export async function runCommand(
-  target: string,
+  target: string | string[],
   options: RunOptions = {},
 ): Promise<void> {
   const logEntries: LogEntry[] = [];
@@ -580,10 +697,16 @@ export async function runCommand(
 
   const testFiles = await resolveTestFiles(target);
   const isMultiFile = testFiles.length > 1;
+  // Single string view of target for serialization / display paths
+  // (result.json, junit, traces). Multi-suite passes an array; join with
+  // ", " so downstream consumers still see a printable target field.
+  const targetDisplay = Array.isArray(target) ? target.join(", ") : target;
 
   if (testFiles.length === 0) {
     console.error(
-      `\n${colors.red}❌ No test files found for target: ${target}${colors.reset}`,
+      `\n${colors.red}❌ No test files found for target: ${
+        Array.isArray(target) ? target.join(", ") : target
+      }${colors.reset}`,
     );
     console.error(
       `${colors.dim}Glubean looks for files matching *.test.ts, *.contract.ts, or *.flow.ts in the target directory.${colors.reset}`,
@@ -596,7 +719,10 @@ export async function runCommand(
   }
 
   if (isMultiFile) {
-    console.log(`${colors.dim}Target: ${resolve(target)}${colors.reset}`);
+    const targetDisplay = Array.isArray(target)
+      ? target.map((t) => resolve(t)).join(", ")
+      : resolve(target);
+    console.log(`${colors.dim}Target: ${targetDisplay}${colors.reset}`);
     console.log(
       `${colors.dim}Files:  ${testFiles.length} test file(s)${colors.reset}\n`,
     );
@@ -778,10 +904,24 @@ export async function runCommand(
   for (const filePath of testFiles) {
     try {
       const tests = await discoverTests(filePath);
-      for (const test of tests) {
+      // Phase 4 multi-suite: enforce suite.kinds at the runnable level
+      // (not just file-level). A `.contract.ts` exporting an inline
+      // `contract.flow(...)` produces a flow runnable; if the contributing
+      // suite declared `kinds: [contract]`, drop the flow here.
+      const allowedKinds = options.allowedKindsPerFile?.get(filePath);
+      const filteredTests = allowedKinds
+        ? tests.filter((t) => {
+            const k = t.meta.kind;
+            // Treat missing kind as "always allowed" — legacy / static-
+            // fallback paths populate kind, but the safety net keeps
+            // unknown shapes runnable rather than silently dropped.
+            return k === undefined || allowedKinds.has(k);
+          })
+        : tests;
+      for (const test of filteredTests) {
         allFileTests.push({ filePath, exportName: test.exportName, test });
       }
-      totalDiscovered += tests.length;
+      totalDiscovered += filteredTests.length;
     } catch (error) {
       if (isMultiFile) {
         const relPath = relative(process.cwd(), filePath);
@@ -1908,7 +2048,13 @@ export async function runCommand(
 
     const logContent = [
       `# Glubean Test Log`,
-      `# Target: ${isMultiFile ? resolve(target) : testFiles[0]}`,
+      `# Target: ${
+        isMultiFile
+          ? Array.isArray(target)
+            ? target.map((t) => resolve(t)).join(", ")
+            : resolve(target)
+          : testFiles[0]
+      }`,
       `# Run at: ${runStartTime}`,
       `# Tests: ${passed} passed, ${failed} failed`,
       ``,
@@ -1958,7 +2104,7 @@ export async function runCommand(
       const tracesPath = resolve(glubeanDir, "traces.json");
       const traceSummary = {
         runAt: runStartTime,
-        target,
+        target: targetDisplay,
         files: testFiles.map((f) => relative(process.cwd(), f)),
         traces: traceCollector,
       };
@@ -1978,7 +2124,7 @@ export async function runCommand(
 
   const resultPayload = {
     context: runContext,
-    target,
+    target: targetDisplay,
     files: testFiles.map((f) => relative(process.cwd(), f)),
     runAt: runStartLocal,
     summary: {
@@ -2038,7 +2184,7 @@ export async function runCommand(
       skipped,
       durationMs: totalDurationMs,
     };
-    const xml = toJunitXml(collectedRuns, target, summaryData);
+    const xml = toJunitXml(collectedRuns, targetDisplay, summaryData);
     await mkdir(dirname(junitPath), { recursive: true });
     await writeFile(junitPath, xml, "utf-8");
     console.log(
