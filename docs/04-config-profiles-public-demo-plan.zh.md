@@ -4,6 +4,24 @@
 
 ## Revisions
 
+**2026-05-27 (post-first-slice ship — re-sliced Phase 5+6 by audience/coupling)**:
+
+First slice (Phase 1+2+3+4 + multi-suite execution + `--ci` removal) shipped 2026-05-27 (14 atomic commits, 266 cli vitest, dogfood zero-delta). 之后重新审视 Phase 5/6 边界，按"受益人 + 配对依赖"重切，原 plan §Phase 5 的 4 块拆开:
+
+- **Phase 5 (新分块)**: `5a` CLI emit metadata + cloud server persist + `5b` query endpoint + `5c` dashboard UI。受益人 = **任何走 `--upload` 的项目**（agent 用 5b 工具，人浏览 5c）。**不依赖 demo backend**。跨 cli + cloud 2 repo 一个 sprint。`5a` 仍然 cross-repo 一个 PR（server 现状只持久化 `metadata.files` — 单独 ship CLI 等于丢数据）。`5b`/`5c` 在 5a 之后可独立。
+- **Phase 6 (新分块)**: Nx2 demo backend (独立 repo `glubean-demo-backend`, Hono + Fly.io) + 原 5d `glubean init --template demo` 配对 ship。受益人 = **新用户体验 / 演示故事**。两者强配对 — backend 没起 template init 出来 connection refused; template 没 ship 没人能 clone+run。
+- **原 plan §Phase 6 (cleanup) 残余 3 条** 排为独立 housekeeping row (backlog Nx5), 不再编入 product phase 编号。Phase 4 已经做掉 ci-config 模板删除 + README `--ci` 示例。剩下: legacy `loadConfig` flat-shape 删除 + AI-INSTRUCTIONS.md 旧命令清理 + 全仓库 `--ci` 残留扫。
+
+切完后:
+
+| Phase | 内容 | 受益人 | 跨 repo? | 配对 |
+|---|---|---|---|---|
+| 5 | cloud-side metadata 端到端 (5a+5b+5c) | 所有 profile 上传项目 | cli + cloud | 5a 内部强配对 |
+| 6 | demo 故事 (Nx2 demo backend + Nx4 demo init template) | 新用户 / 演示 | cli + glubean-demo-backend (新 repo) | 强配对 |
+| — | legacy cleanup (housekeeping, backlog Nx5) | 维护者 | cli only | 不依赖 |
+
+**5+7 合并旧规则**: 仅约束 5a 本身（CLI emit + server persist 必须同 PR）。其余拆。
+
 **2026-05-26 (post-W22 owner consolidation, ready-to-implement state)**:
 
 - **Phase 5 + Phase 7 合并** 成单一 "Phase 5: Demo/Public end-to-end (CLI + cloud server + dashboard)"，一个 sprint ship。原 Phase 7 拆分被 codex round-5 catch 证明不安全（server 只持久化 `metadata.files`，其余 silently dropped，Phase 5 单独 ship 等于丢数据）。合并后 sequencing 问题消失。
@@ -568,13 +586,15 @@ glubean project create --alias glubean-public-demo --public
 
 ## 推荐落地顺序
 
-1. **First slice (~9-10d): Phase 1+2+3+4 一起 ship**:
-   - Phase 1: `glubean.yaml` schema + `resolveRunPlan` + `excludeTags` runtime filter 完整实施 (resolver + runner filter 同 phase)
-   - Phase 2: contract/test discovery 对齐 — 含 contract case tags 透传 (excludeTags filter 才能对 contract 生效)。**启动前** dogfood 整 fixture 跑一遍存 `runResult.tests` 列表作 inventory baseline，Phase 2 后再跑一遍 diff verify (见 §Phase 2 验收)
-   - Phase 3: `glubean ci run` + resolved plan printout
-   - Phase 4: init 模板迁移到新 config — Phase 3+4 必须同 PR ship 否则新 init 项目立刻断
-4. demo backend 独立 repo (`glubean-demo-backend`, Hono + Fly.io) deploy 起来 — 不在 plan phase 范围, 但是 Phase 5 的前提。
-5. 再做 demo/public project 端到端（Phase 5: CLI emit + Cloud server 持久化 + dashboard 展示, 一个 sprint cross-repo 一起 ship）。
-6. 全程结束后清理旧模式（Phase 6 — 也可以并入 Phase 4 顺手做掉）。
+**说明**: First slice 已 ship (2026-05-27)。下方顺序反映 2026-05-27 Revisions 重切后的 Phase 5/6 边界。
 
-这条顺序能先解决当前最伤产品可信度的问题：用户从配置和 CI log 看不到真实运行计划。
+1. ✅ **First slice (~9-10d): Phase 1+2+3+4 + multi-suite + `--ci` removal** — shipped 2026-05-27 (14 commits, 266 vitest, dogfood zero-delta):
+   - Phase 1: `glubean.yaml` schema + `resolveRunPlan` + `excludeTags` runtime filter
+   - Phase 2: contract/test discovery 对齐 (contract case + flow tags 透传)
+   - Phase 3: `glubean ci run` + resolved plan printout + `--suite` override
+   - Phase 4: init 模板迁移 + `--ci` flag 删除 + multi-suite execution foundation
+2. **Phase 5 (新分块, ~3-5d cross-repo, backlog Nx3)**: cloud-side metadata 端到端 (5a CLI emit + server persist 必须同 PR; 5b query endpoint + 5c dashboard UI 5a 之后可独立)。受益人 = 任何 profile-driven 上传项目。**不依赖 demo backend**。
+3. **Phase 6 (新分块, ~2-2.5d, backlog Nx2 + Nx4)**: demo 故事 (Nx2 demo backend 独立 repo deploy + Nx4 `glubean init --template demo` 模板) 配对 ship。受益人 = 新用户体验 / 演示故事。强配对 — 任一缺位另一边没意义。
+4. **legacy cleanup (housekeeping, backlog Nx5, ~1d)**: 原 plan §Phase 6 残余 3 条 (legacy `loadConfig` flat-shape 删除 / AI-INSTRUCTIONS.md 旧命令 / 全仓库 `--ci` 残留扫). 跟 Phase 5/6 不冲突，独立可做。
+
+这条顺序能先解决当前最伤产品可信度的问题：用户从配置和 CI log 看不到真实运行计划 — first slice 已解决。Phase 5 解决"上传完看不到 capability 维度数据"；Phase 6 解决"新用户没有上手故事"。
