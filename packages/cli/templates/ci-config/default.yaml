@@ -1,9 +1,0 @@
-# Default run config — used by: npm test
-run:
-  testDir: ./tests
-  exploreDir: ./explore
-  verbose: false
-  pretty: true
-
-redaction:
-  replacementFormat: simple

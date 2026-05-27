@@ -196,7 +196,7 @@ test("init --no-interactive --github-actions creates workflow files", async () =
 
     const testsContent = await readFile(testsPath, "utf-8");
     expect(testsContent).toContain("Glubean Tests");
-    expect(testsContent).toContain("glubean run --ci");
+    expect(testsContent).toContain("glubean ci run");
     expect(testsContent).toContain("upload-artifact");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -309,13 +309,25 @@ test("init --contract-first creates contract-first project", async () => {
     expect(await fileExists(join(dir, "contracts/health.contract.ts"))).toBe(true);
     expect(await fileExists(join(dir, "types/README.md"))).toBe(true);
     expect(await fileExists(join(dir, "schemas/README.md"))).toBe(true);
-    expect(await fileExists(join(dir, "ci-config/default.yaml"))).toBe(true);
-    expect(await fileExists(join(dir, "ci-config/ci.yaml"))).toBe(true);
+    // Phase 4: canonical glubean.yaml replaces ci-config/*.yaml.
+    expect(await fileExists(join(dir, "glubean.yaml"))).toBe(true);
+    expect(await fileExists(join(dir, "ci-config/default.yaml"))).toBe(false);
+    expect(await fileExists(join(dir, "ci-config/ci.yaml"))).toBe(false);
+    // Starter test so multi-suite CI has a file to discover in tests/.
+    expect(await fileExists(join(dir, "tests/sample.test.ts"))).toBe(true);
     expect(await fileExists(join(dir, "GLUBEAN.md"))).toBe(true);
 
-    // Verify package.json has contract scripts
+    // Verify glubean.yaml declares both contracts + tests suites
+    const yamlContent = await readFile(join(dir, "glubean.yaml"), "utf-8");
+    expect(yamlContent).toContain("contracts:");
+    expect(yamlContent).toContain("tests:");
+    expect(yamlContent).toMatch(/suites:\s*\[contracts,\s*tests\]/);
+
+    // Verify package.json scripts use new profile-driven invocations
     const pkgJson = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
     expect(pkgJson.scripts?.["contract:run"]).toBe("glubean run contracts/");
+    expect(pkgJson.scripts?.test).toBe("glubean run --profile local");
+    expect(pkgJson.scripts?.["test:ci"]).toBe("glubean ci run");
     expect(pkgJson.dependencies?.zod).toBeDefined();
   } finally {
     await rm(dir, { recursive: true, force: true });

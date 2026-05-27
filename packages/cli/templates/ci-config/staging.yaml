@@ -1,9 +1,0 @@
-# Staging run config — used by: npm run test:staging
-run:
-  testDir: ./tests
-  envFile: .env.staging
-  verbose: false
-  pretty: true
-
-redaction:
-  replacementFormat: simple

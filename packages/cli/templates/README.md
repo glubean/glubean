@@ -55,10 +55,9 @@ npm install
 3. Run tests:
 
 ```bash
-npm test                     # run all tests in tests/
-npm run test:verbose         # with detailed output
-npm run test:staging         # run against staging environment
-npm run explore              # run explore/ tests
+npm test                     # run the `local` profile from glubean.yaml
+npm run test:ci              # run the `ci` profile (failFast + junit + result.json)
+npm run explore              # run the `explore` profile (./explore tests)
 ```
 
 Or run a specific file:
@@ -69,18 +68,13 @@ npx glubean run tests/demo.test.ts --verbose
 
 ## Environment switching
 
-The same tests can run against different environments by switching env files:
-
-| Env file       | Secrets file           | Script shortcut          |
-| -------------- | ---------------------- | ------------------------ |
-| `.env`         | `.env.secrets`         | `npm test`               |
-| `.env.staging` | `.env.staging.secrets` | `npm run test:staging`   |
-
-To add more environments (e.g. production), create `.env.production` and `.env.production.secrets`, then run:
+Add a staging environment by creating `.env.staging` + `.env.staging.secrets`, then run:
 
 ```bash
-npx glubean run --env-file .env.production
+npx glubean run --env-file .env.staging
 ```
+
+To make staging the default for a run, switch the project's `defaults.envFile` in `glubean.yaml` (the loader only accepts `envFile` under `defaults`, not under a profile). For repeated use of the `--env-file` CLI flag, alias it in an npm script.
 
 All `*.secrets` files are gitignored by default. The non-secret `.env.*` files can be committed safely.
 

@@ -122,6 +122,15 @@ interface RunOptions {
    * for a file means "no filter" (legacy behavior).
    */
   allowedKindsPerFile?: Map<string, Set<"test" | "contract" | "flow">>;
+  /**
+   * Full redaction config from the v1 resolved plan
+   * (`defaults.redaction`). When present, runCommand uses this instead
+   * of `glubeanConfig.redaction` loaded via the legacy `loadConfig`
+   * path — which doesn't read glubean.yaml. Without this, projects
+   * that declare custom `globalRules` / `sensitiveKeys` / `customPatterns`
+   * in glubean.yaml would silently ship secrets to Cloud uploads.
+   */
+  redactionConfig?: import("@glubean/redaction").RedactionConfig;
 }
 
 // =============================================================================
@@ -2247,10 +2256,18 @@ export async function runCommand(
       process.exit(1);
     } else {
       const { compileScopes, redactEvent, BUILTIN_SCOPES } = await import("@glubean/redaction");
+      // Prefer the v1 plan's full redaction config when supplied
+      // (Phase 4 init scaffolds `defaults.redaction` in glubean.yaml,
+      // including any custom globalRules / sensitiveKeys / customPatterns).
+      // The legacy loadConfig path doesn't read glubean.yaml — without
+      // this, custom rules would be silently ignored and matching
+      // secrets could be sent to Cloud.
+      const effectiveRedaction =
+        options.redactionConfig ?? glubeanConfig.redaction;
       const compiledScopes = compileScopes({
         builtinScopes: BUILTIN_SCOPES,
-        globalRules: glubeanConfig.redaction.globalRules,
-        replacementFormat: glubeanConfig.redaction.replacementFormat,
+        globalRules: effectiveRedaction.globalRules,
+        replacementFormat: effectiveRedaction.replacementFormat,
       });
 
       // Generate metadata for test registry
@@ -2273,7 +2290,7 @@ export async function runCommand(
         metadata,
         tests: resultPayload.tests.map((t) => ({
           ...t,
-          events: t.events.map((e) => redactEvent(e, compiledScopes, glubeanConfig.redaction.replacementFormat)),
+          events: t.events.map((e) => redactEvent(e, compiledScopes, effectiveRedaction.replacementFormat)),
         })),
       };
 

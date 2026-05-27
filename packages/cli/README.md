@@ -21,7 +21,7 @@ glubean init                    # interactive wizard
 glubean run                     # run all tests in testDir
 glubean run path/to/file.test.ts
 glubean run --filter checkout --tag smoke
-glubean run --ci --upload       # CI mode + push results to Cloud
+glubean ci run --upload         # CI profile + push results to Cloud
 glubean migrate                 # preview v0.1.x -> v10 contract changes
 ```
 
@@ -57,7 +57,7 @@ glubean run --pick happyPath               # specific test.pick example
 glubean run --fail-fast                    # stop on first failure
 glubean run --result-json                  # write .result.json
 glubean run --reporter junit               # JUnit XML
-glubean run --ci                           # shorthand: --fail-fast + JUnit
+glubean ci run                             # use the `ci` profile from glubean.yaml
 glubean run --upload --project <id>        # push to Glubean Cloud
 glubean run --inspect-brk                  # attach a debugger
 ```

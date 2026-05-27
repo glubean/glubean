@@ -104,12 +104,10 @@ program
   .option("--inspect-brk [port]", "Enable V8 Inspector for debugging (pauses until debugger attaches)")
   .option("--reporter <format>", 'Output format: "junit" or "junit:/path/to/output.xml"')
   .option("--trace-limit <count>", "Max trace files to keep per test (default: 20)")
-  // `--ci` is the legacy preset (implies --fail-fast + --reporter junit).
-  // Deprecated as of Phase 3 in favor of `glubean ci run` — kept alive
-  // here so init-generated GitHub Actions templates (which still emit
-  // `glubean run --ci`) keep working until Phase 4 rewrites the init
-  // scaffold + glubean.yaml flow.
-  .option("--ci", "[DEPRECATED] CI mode preset — prefer `glubean ci run` instead.")
+  // `--ci` was a legacy preset (implies --fail-fast + --reporter junit).
+  // Removed in Phase 4 once init templates migrated to `glubean ci run`
+  // + `glubean.yaml profiles.ci`. The explicit profile is the new
+  // contract — no hidden preset.
   .option("--include-browser", "Include cases that require a browser (e.g., OAuth login)")
   .option("--include-out-of-band", "Include cases that require out-of-band channels (email, SMS)")
   .option("--include-opt-in", "Include opt-in cases (expensive, slow, or side-effect-producing)")
@@ -326,13 +324,12 @@ async function executeRun(
       }
     }
 
-    // Legacy --ci: implies fail-fast + junit reporter. Deprecated; kept
-    // alive for init-generated workflows until Phase 4 ships.
-    const isCi = options.ci === true;
-    const failFast = (resolvedPlan?.execution.failFast ?? options.failFast) || isCi;
+    const failFast = resolvedPlan?.execution.failFast ?? options.failFast;
     let reporter = options.reporter;
     let reporterPath: string | undefined;
-    if (!reporter && (isCi || resolvedPlan?.reporters.junit)) {
+    // Profile's `reporters.junit` implies `--reporter junit` (with the
+    // profile-supplied path) when the user didn't pass --reporter on the CLI.
+    if (!reporter && resolvedPlan?.reporters.junit) {
       reporter = "junit";
     }
     if (reporter === "junit" && !reporterPath && resolvedPlan?.reporters.junit) {
@@ -510,6 +507,14 @@ async function executeRun(
       bootstrapJson: options.bootstrapJson,
       forceStandalone: options.forceStandalone,
       allowedKindsPerFile,
+      // Phase 4: thread the v1 plan's full redaction config (replacement
+      // format + globalRules + custom patterns) into runCommand so newly
+      // init'd projects (which scaffold `defaults.redaction` in
+      // glubean.yaml) keep their declared security posture for upload
+      // events. The legacy loadConfig path doesn't read glubean.yaml, so
+      // without this the upload would use the legacy defaults regardless
+      // of what the project declared.
+      redactionConfig: resolvedPlan?.redaction,
     });
 }
 
