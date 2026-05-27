@@ -82,6 +82,10 @@ program
   .option("--explore", "Run explore tests (from exploreDir instead of testDir)")
   .option("-f, --filter <pattern>", "Run only tests matching pattern (name or id substring)")
   .option("--profile <name>", "Use profile from glubean.yaml (Phase 1 first slice). When set, loads glubean.yaml + resolves the named profile; CLI flags still override profile values.")
+  .option(
+    "--suite <name>",
+    "Run only the named suite from the profile. The name must already appear in `profile.suites`. (Single value only; multi-suite execution lands in a follow-up.)",
+  )
   .option("-t, --tag <tag>", "Run only tests with matching tag (comma-separated or repeatable)", collect, [])
   .option("--tag-mode <mode>", 'Tag match logic: "or" (any tag) or "and" (all tags)', "or")
   .option("--exclude-tag <tag>", "Exclude tests with matching tag (comma-separated or repeatable; always OR-mode — any match drops the test)", collect, [])
@@ -130,6 +134,17 @@ program
       )
       : undefined;
 
+    // --suite is a profile-mode-only override. Reject it without --profile
+    // so the user sees the broader-than-expected run before it starts,
+    // instead of silently ignoring the flag.
+    if (options.suite && !options.profile) {
+      console.error(
+        `\x1b[31m--suite requires --profile (the suite name is looked up in ` +
+          `the profile's \`suites:\` list).\x1b[0m`,
+      );
+      process.exit(1);
+    }
+
     // ── Profile mode (Phase 1 first slice) ──────────────────────────────────
     // When --profile is given, load glubean.yaml, resolve the profile, then
     // build CliProfileOverrides from explicit CLI flags so they still beat
@@ -171,7 +186,15 @@ program
               t.split(",").map((s) => s.trim()).filter(Boolean),
             )
           : undefined;
+        // --suite override (Phase 3 task 2): single value. Multi-suite
+        // execution isn't wired in yet, so accepting a list and then
+        // hard-erroring on the multi-suite gate below would be a confusing
+        // UX. Restrict to a single suite name and document it in --help.
+        const explicitSuites = options.suite
+          ? [(options.suite as string).trim()].filter(Boolean)
+          : undefined;
         const cliOverrides: CliProfileOverrides = {
+          suites: explicitSuites,
           tags: explicitTags,
           excludeTags: explicitExcludeTags,
           tagMode: cmdSrc("tagMode") ? (options.tagMode as "or" | "and") : undefined,

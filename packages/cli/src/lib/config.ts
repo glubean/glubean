@@ -783,6 +783,12 @@ export async function loadProjectConfigV1(
  * and defaults. Arrays REPLACE the underlying values (not concat).
  */
 export interface CliProfileOverrides {
+  /**
+   * CLI `--suite <name>` (repeatable). Filters the profile's `suites:` list
+   * to only the named subset. Each name MUST appear in `profile.suites`
+   * (not just `config.suites`); unknown names raise GlubeanConfigError.
+   */
+  suites?: string[];
   tags?: string[];
   excludeTags?: string[];
   tagMode?: "or" | "and";
@@ -873,7 +879,26 @@ export function resolveRunPlan(
   const builtin = RESOLVED_PLAN_BUILTIN_DEFAULTS;
 
   // Suites: expand profile.suites name list to full SuiteConfig+name objects.
-  const suites = profile.suites.map((name) => ({
+  // CLI `--suite <name>` (cliOverrides.suites) filters the profile's list
+  // to a subset. Each override name MUST appear in profile.suites — running
+  // a suite the profile didn't include would change the run semantics
+  // beyond a temporary override; the user is asked to either edit the
+  // profile or pick a different profile.
+  let effectiveSuiteNames = profile.suites;
+  if (cliOverrides.suites && cliOverrides.suites.length > 0) {
+    const profileSuiteSet = new Set(profile.suites);
+    const unknown = cliOverrides.suites.filter((n) => !profileSuiteSet.has(n));
+    if (unknown.length > 0) {
+      throw new GlubeanConfigError(
+        `--suite ${unknown.join(", ")} not declared in profile "${profileName}". ` +
+          `Profile suites: ${profile.suites.join(", ") || "(none)"}.`,
+        configPath,
+      );
+    }
+    // Preserve override order so user-given order controls execution sequence.
+    effectiveSuiteNames = cliOverrides.suites;
+  }
+  const suites = effectiveSuiteNames.map((name) => ({
     name,
     ...config.suites[name],
   }));

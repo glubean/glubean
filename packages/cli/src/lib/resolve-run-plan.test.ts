@@ -299,4 +299,48 @@ describe("resolveRunPlan", () => {
       expect(plan.upload).toBeUndefined();
     });
   });
+
+  describe("CLI --suite override (Phase 3 task 2)", () => {
+    it("filters profile suites to a subset when override is given", () => {
+      const config = makeConfig();
+      const overrides: CliProfileOverrides = { suites: ["contracts"] };
+      const plan = resolveRunPlan(config, "/p", "ci", overrides);
+      expect(plan.suites.map((s) => s.name)).toEqual(["contracts"]);
+    });
+
+    it("preserves CLI-given order (not profile.suites order)", () => {
+      const config = makeConfig();
+      const overrides: CliProfileOverrides = { suites: ["tests", "contracts"] };
+      const plan = resolveRunPlan(config, "/p", "ci", overrides);
+      expect(plan.suites.map((s) => s.name)).toEqual(["tests", "contracts"]);
+    });
+
+    it("falls back to profile.suites when override list is empty", () => {
+      const config = makeConfig();
+      const overrides: CliProfileOverrides = { suites: [] };
+      const plan = resolveRunPlan(config, "/p", "ci", overrides);
+      expect(plan.suites.map((s) => s.name)).toEqual(["contracts", "tests"]);
+    });
+
+    it("throws when override names a suite NOT in profile.suites", () => {
+      const config = makeConfig();
+      const overrides: CliProfileOverrides = { suites: ["explore"] };
+      expect(() => resolveRunPlan(config, "/p", "ci", overrides)).toThrow(
+        GlubeanConfigError,
+      );
+    });
+
+    it("throws with all unknown names enumerated", () => {
+      const config = makeConfig();
+      const overrides: CliProfileOverrides = {
+        suites: ["contracts", "explore", "phantom"],
+      };
+      try {
+        resolveRunPlan(config, "/p", "ci", overrides);
+        expect.fail("expected throw");
+      } catch (err) {
+        expect((err as Error).message).toMatch(/explore, phantom/);
+      }
+    });
+  });
 });
