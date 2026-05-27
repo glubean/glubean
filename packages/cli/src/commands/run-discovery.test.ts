@@ -3,7 +3,9 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
-import { discoverTests } from "./run.js";
+import { __testing, discoverTests } from "./run.js";
+
+const { matchesTags } = __testing;
 
 // Contract fixtures must sit inside the package so dynamic-import in
 // extractContractFromFile can resolve `@glubean/sdk` via the workspace.
@@ -308,6 +310,60 @@ export const another = test("another", async (_ctx) => {});
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("--tag selects test() + contract case + flow uniformly when all share a tag", async () => {
+  // Phase 2 task 6: positive --tag matching must hit all three discovery
+  // kinds. Composed regression — earlier tests cover each kind in
+  // isolation; this one wires them together so a single matchesTags
+  // call sees the full set.
+  const testPath = join(contractFixtureDir, "thing.test.ts");
+  await writeFile(testPath, `
+import { test } from "@glubean/sdk";
+export const smokeTest = test(
+  { id: "smoke-test", tags: ["smoke"] },
+  async () => {},
+);
+`);
+
+  const contractPath = join(contractFixtureDir, "users.contract.ts");
+  await writeFile(contractPath, `
+import { contract } from "@glubean/sdk";
+
+const api = contract.http.with("usersApi", { endpoint: "https://api.example.com" });
+
+export const getUser = api("users.get", {
+  endpoint: "GET /users/:id",
+  cases: {
+    ok: { description: "ok", tags: ["smoke"], expect: { status: 200 } },
+    cold: { description: "cold path", expect: { status: 200 } },
+  },
+});
+`);
+
+  const flowPath = join(contractFixtureDir, "signup.flow.ts");
+  await writeFile(flowPath, `
+import { contract } from "@glubean/sdk";
+import { getUser } from "./users.contract.js";
+
+export const signup = contract
+  .flow("signup-flow")
+  .meta({ tags: ["smoke", "public-demo"] })
+  .step(getUser.case("ok"))
+  .build();
+`);
+
+  const testResults = await discoverTests(testPath);
+  const contractResults = await discoverTests(contractPath);
+  const flowResults = await discoverTests(flowPath);
+
+  const all = [...testResults, ...contractResults, ...flowResults];
+  const selected = all.filter((t) => matchesTags(t, ["smoke"]));
+  const selectedIds = selected.map((t) => t.meta.id).sort();
+  expect(selectedIds).toEqual(["signup-flow", "smoke-test", "users.get.ok"]);
+
+  const notSmoke = all.filter((t) => !matchesTags(t, ["smoke"]));
+  expect(notSmoke.map((t) => t.meta.id)).toEqual(["users.get.cold"]);
 });
 
 test("discoverTests propagates flow tags + only + skip (as deferred)", async () => {
