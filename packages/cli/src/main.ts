@@ -104,7 +104,12 @@ program
   .option("--inspect-brk [port]", "Enable V8 Inspector for debugging (pauses until debugger attaches)")
   .option("--reporter <format>", 'Output format: "junit" or "junit:/path/to/output.xml"')
   .option("--trace-limit <count>", "Max trace files to keep per test (default: 20)")
-  .option("--ci", "CI mode: enables --fail-fast and --reporter junit")
+  // `--ci` is the legacy preset (implies --fail-fast + --reporter junit).
+  // Deprecated as of Phase 3 in favor of `glubean ci run` — kept alive
+  // here so init-generated GitHub Actions templates (which still emit
+  // `glubean run --ci`) keep working until Phase 4 rewrites the init
+  // scaffold + glubean.yaml flow.
+  .option("--ci", "[DEPRECATED] CI mode preset — prefer `glubean ci run` instead.")
   .option("--include-browser", "Include cases that require a browser (e.g., OAuth login)")
   .option("--include-out-of-band", "Include cases that require out-of-band channels (email, SMS)")
   .option("--include-opt-in", "Include opt-in cases (expensive, slow, or side-effect-producing)")
@@ -127,6 +132,17 @@ program
     "DEBUG: bypass `runnability.requireAttachment` for the filtered case. Emits a runtime warning. Author-debug only.",
   )
   .action(async (target, options, cmd) => {
+    await executeRun(target, options, cmd);
+  });
+
+// Extracted run handler so both `glubean run` and `glubean ci run` can
+// share it. The CI subcommand is just `run` with `--profile ci` baked
+// in as the default.
+async function executeRun(
+  target: string | undefined,
+  options: Record<string, unknown> & Record<string, any>,
+  cmd: Command,
+): Promise<void> {
     // Flatten --config values
     const configFiles = options.config && options.config.length > 0
       ? (options.config as string[]).flatMap((v: string) =>
@@ -266,7 +282,8 @@ program
       }
     }
 
-    // --ci implies --fail-fast and --reporter junit
+    // Legacy --ci: implies fail-fast + junit reporter. Deprecated; kept
+    // alive for init-generated workflows until Phase 4 ships.
     const isCi = options.ci === true;
     const failFast = (resolvedPlan?.execution.failFast ?? options.failFast) || isCi;
     let reporter = options.reporter;
@@ -274,7 +291,6 @@ program
     if (!reporter && (isCi || resolvedPlan?.reporters.junit)) {
       reporter = "junit";
     }
-    // Plan junit path is honored whether reporter was set by --ci or by plan.
     if (reporter === "junit" && !reporterPath && resolvedPlan?.reporters.junit) {
       reporterPath = resolvedPlan.reporters.junit;
     }
@@ -350,7 +366,13 @@ program
         suites: explicitTargetGiven
           ? [{ name: "(override)", target: resolvedTarget, kinds: [] }]
           : resolvedPlan.suites,
-        execution: { ...resolvedPlan.execution, failFast },
+        execution: {
+          ...resolvedPlan.execution,
+          failFast,
+          // Reflect --no-session in the printed plan so the visible
+          // record matches the actual run.
+          ...(options.session === false ? { noSession: true } : {}),
+        },
         reporters: {
           ...resolvedPlan.reporters,
           ...(printJunit ? { junit: printJunit } : {}),
@@ -409,7 +431,13 @@ program
       includeBrowser: options.includeBrowser ?? resolvedPlan?.capabilities.browser,
       includeOutOfBand: options.includeOutOfBand ?? resolvedPlan?.capabilities.outOfBand,
       includeOptIn: options.includeOptIn ?? resolvedPlan?.capabilities.optIn,
-      noSession: options.noSession ?? resolvedPlan?.execution.noSession,
+      // Commander stores `--no-session` as `options.session === false`
+      // (NOT `options.noSession`). Treat either form as the negation
+      // signal so the long-standing CLI bug doesn't bite ci run users.
+      noSession:
+        options.noSession === true || options.session === false
+          ? true
+          : resolvedPlan?.execution.noSession,
       meta: options.meta?.length
         ? (options.meta as string[]).reduce((acc: Record<string, string>, item: string) => {
             const eq = item.indexOf("=");
@@ -429,6 +457,85 @@ program
       bootstrapJson: options.bootstrapJson,
       forceStandalone: options.forceStandalone,
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ci subcommand — Phase 3 tasks 3+4
+//
+// `glubean ci run` is the explicit CI entry point. It's equivalent to
+// `glubean run --profile ci`, but it makes the CI dependency on
+// `profiles.ci` visible at the command surface (instead of via a hidden
+// `--ci` preset that no longer exists). When the project has no
+// `profiles.ci`, the underlying profile resolution fails closed with a
+// list of available profiles — no silent fallback.
+// ─────────────────────────────────────────────────────────────────────────────
+const ciCmd = program
+  .command("ci")
+  .description("CI-mode subcommands (entry point: `glubean ci run`).");
+
+ciCmd
+  .command("run [target]")
+  .description(
+    "Run tests with the `ci` profile from glubean.yaml. Equivalent to " +
+      "`glubean run --profile ci`. NOTE: `profiles.ci` must currently " +
+      "reference a single suite — multi-suite execution lands in a " +
+      "follow-up. Use `--suite <name>` to narrow a multi-suite profile " +
+      "in the meantime.",
+  )
+  // `--explore` deliberately omitted on ci run: the explore-vs-test
+  // distinction lives in legacy `ci-config/explore.yaml`. In the v1
+  // config model that gets surfaced as a dedicated profile (e.g.
+  // `glubean run --profile explore`), not a flag on the CI entry point.
+  .option("-f, --filter <pattern>", "Run only tests matching pattern (name or id substring)")
+  .option(
+    "--suite <name>",
+    "Run only the named suite from the `ci` profile. The name must already appear in `profile.suites`. (Single value only; multi-suite execution lands in a follow-up.)",
+  )
+  .option("-t, --tag <tag>", "Run only tests with matching tag (comma-separated or repeatable)", collect, [])
+  .option("--tag-mode <mode>", 'Tag match logic: "or" (any tag) or "and" (all tags)', "or")
+  .option("--exclude-tag <tag>", "Exclude tests with matching tag (comma-separated or repeatable; always OR-mode — any match drops the test)", collect, [])
+  .option("--env-file <path>", "Path to .env file (default: .env if it exists)")
+  .option("-l, --log-file", "Write logs to file (<testfile>.log)")
+  .option("--pretty", "Pretty-print JSON in log file (2-space indent)")
+  .option("--verbose", "Show all output (traces, assertions) in console")
+  .option("--fail-fast", "Stop on first test failure")
+  .option("--fail-after <count>", "Stop after N test failures")
+  .option("--result-json [path]", "Write structured results to .result.json (or custom path)")
+  .option("--emit-full-trace", "Include full request/response headers and bodies in HTTP traces")
+  .option("--infer-schema", "Infer JSON Schema from response bodies in traces")
+  .option("--truncate-arrays", "Always truncate arrays in trace bodies for AI-friendly output")
+  .option("--config <paths>", "Config file(s), comma-separated or repeatable", collect, [])
+  .option("--pick <keys>", "Select specific test.pick example(s) by key (comma-separated)")
+  .option("--inspect-brk [port]", "Enable V8 Inspector for debugging (pauses until debugger attaches)")
+  .option("--reporter <format>", 'Output format: "junit" or "junit:/path/to/output.xml"')
+  .option("--trace-limit <count>", "Max trace files to keep per test (default: 20)")
+  .option("--include-browser", "Include cases that require a browser (e.g., OAuth login)")
+  .option("--include-out-of-band", "Include cases that require out-of-band channels (email, SMS)")
+  .option("--include-opt-in", "Include opt-in cases (expensive, slow, or side-effect-producing)")
+  .option("--no-session", "Skip session setup/teardown")
+  .option("-M, --meta <key=value>", "Custom run metadata (repeatable)", collect, [])
+  .option("--upload", "Upload run results and artifacts to Glubean Cloud")
+  .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
+  .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
+  .option("--api-url <url>", "Glubean API server URL")
+  .option(
+    "--input-json <value>",
+    "Explicit case input as JSON literal or @path/to.json. Validated against the case's `needs` schema; runs raw (overlay skipped). Requires --filter to match exactly one testId.",
+  )
+  .option(
+    "--bootstrap-json <value>",
+    "Bootstrap params as JSON literal or @path/to.json. Validated against the overlay's `params` schema and passed to overlay's run(ctx, params). Requires --filter to match exactly one testId.",
+  )
+  .option(
+    "--force-standalone",
+    "DEBUG: bypass `runnability.requireAttachment` for the filtered case. Emits a runtime warning. Author-debug only.",
+  )
+  .action(async (target, options, cmd) => {
+    // Bake in the `ci` profile so executeRun's profile-mode branch fires.
+    // The user can't override this — that would defeat the point of the
+    // subcommand. To run a different profile they'd use `glubean run --profile <X>`.
+    (options as Record<string, unknown>).profile = "ci";
+    await executeRun(target, options as Record<string, unknown> & Record<string, any>, cmd);
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
