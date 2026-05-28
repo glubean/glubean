@@ -244,8 +244,8 @@ const GLUBEAN_YAML_DEFAULT = `version: 1
 
 defaults:
   redaction:
-    # Full redaction (no prefix/suffix exposed). Matches the security
-    # posture the legacy ci-config/*.yaml templates established.
+    # Full redaction: secrets are replaced with a fixed marker, no
+    # prefix/suffix characters revealed.
     replacementFormat: simple
 
 suites:
@@ -284,8 +284,8 @@ const GLUBEAN_YAML_CONTRACT_FIRST = `version: 1
 
 defaults:
   redaction:
-    # Full redaction (no prefix/suffix exposed). Matches the security
-    # posture the legacy ci-config/*.yaml templates established.
+    # Full redaction: secrets are replaced with a fixed marker, no
+    # prefix/suffix characters revealed.
     replacementFormat: simple
 
 suites:

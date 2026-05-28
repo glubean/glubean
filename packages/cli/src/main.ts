@@ -86,7 +86,7 @@ program
   .option("--profile <name>", "Use profile from glubean.yaml (Phase 1 first slice). When set, loads glubean.yaml + resolves the named profile; CLI flags still override profile values.")
   .option(
     "--suite <name>",
-    "Run only the named suite from the profile. The name must already appear in `profile.suites`. (Single value only; multi-suite execution lands in a follow-up.)",
+    "Run only the named suite from the profile. The name must already appear in `profile.suites`. (Single value — narrows a multi-suite profile to one suite.)",
   )
   .option("-t, --tag <tag>", "Run only tests with matching tag (comma-separated or repeatable)", collect, [])
   .option("--tag-mode <mode>", 'Tag match logic: "or" (any tag) or "and" (all tags)', "or")
@@ -106,10 +106,6 @@ program
   .option("--inspect-brk [port]", "Enable V8 Inspector for debugging (pauses until debugger attaches)")
   .option("--reporter <format>", 'Output format: "junit" or "junit:/path/to/output.xml"')
   .option("--trace-limit <count>", "Max trace files to keep per test (default: 20)")
-  // `--ci` was a legacy preset (implies --fail-fast + --reporter junit).
-  // Removed in Phase 4 once init templates migrated to `glubean ci run`
-  // + `glubean.yaml profiles.ci`. The explicit profile is the new
-  // contract — no hidden preset.
   .option("--include-browser", "Include cases that require a browser (e.g., OAuth login)")
   .option("--include-out-of-band", "Include cases that require out-of-band channels (email, SMS)")
   .option("--include-opt-in", "Include opt-in cases (expensive, slow, or side-effect-producing)")
@@ -167,11 +163,11 @@ async function executeRun(
     // profile values. Suite expansion + selection/execution/reporters/upload
     // come from the plan.
     //
-    // Multi-suite limitation (E1 scope): only single-suite profiles are
-    // supported here. Multi-suite execution requires discovery alignment
-    // (Phase 2) — the runner currently takes a single test target dir, not
-    // an array. Profiles with len(suites) > 1 are rejected with a clear
-    // error rather than silently running only the first suite.
+    // Multi-suite profiles are fully supported: every declared suite is
+    // expanded into a concatenated file list with a per-file kind
+    // allow-list, in suite declaration order (see the resolvedTarget block
+    // below). runCommand accepts `string | string[]` and runs them in a
+    // single pass with unified reporter output.
     let resolvedPlan: ResolvedRunPlan | undefined;
     if (options.profile) {
       try {
@@ -202,10 +198,10 @@ async function executeRun(
               t.split(",").map((s) => s.trim()).filter(Boolean),
             )
           : undefined;
-        // --suite override (Phase 3 task 2): single value. Multi-suite
-        // execution isn't wired in yet, so accepting a list and then
-        // hard-erroring on the multi-suite gate below would be a confusing
-        // UX. Restrict to a single suite name and document it in --help.
+        // --suite is a single-value narrowing override: it restricts the
+        // resolved profile to one of its already-declared suites. To run
+        // several suites, declare them in the profile — multi-suite
+        // expansion is handled by the resolvedTarget block below.
         const explicitSuites = options.suite
           ? [(options.suite as string).trim()].filter(Boolean)
           : undefined;
@@ -378,7 +374,7 @@ async function executeRun(
       // that happens to match the first suite's target.
       const explicitTargetGiven = !!target;
       // junit reporter active iff `reporter === "junit"` after the
-      // resolution above (either from CLI, profile, or implied by --ci).
+      // resolution above (from CLI or profile).
       const junitActive = reporter === "junit";
       const printJunit = junitActive
         ? reporterPath ?? "<default: glubean-run.junit.xml or <testfile>.junit.xml>"
@@ -537,9 +533,9 @@ async function executeRun(
 // `glubean ci run` is the explicit CI entry point. It's equivalent to
 // `glubean run --profile ci`, but it makes the CI dependency on
 // `profiles.ci` visible at the command surface (instead of via a hidden
-// `--ci` preset that no longer exists). When the project has no
-// `profiles.ci`, the underlying profile resolution fails closed with a
-// list of available profiles — no silent fallback.
+// flag). When the project has no `profiles.ci`, the underlying profile
+// resolution fails closed with a list of available profiles — no silent
+// fallback.
 // ─────────────────────────────────────────────────────────────────────────────
 const ciCmd = program
   .command("ci")
@@ -549,19 +545,16 @@ ciCmd
   .command("run [target]")
   .description(
     "Run tests with the `ci` profile from glubean.yaml. Equivalent to " +
-      "`glubean run --profile ci`. NOTE: `profiles.ci` must currently " +
-      "reference a single suite — multi-suite execution lands in a " +
-      "follow-up. Use `--suite <name>` to narrow a multi-suite profile " +
-      "in the meantime.",
+      "`glubean run --profile ci`. A multi-suite `profiles.ci` runs all " +
+      "its declared suites; use `--suite <name>` to narrow to one.",
   )
-  // `--explore` deliberately omitted on ci run: the explore-vs-test
-  // distinction lives in legacy `ci-config/explore.yaml`. In the v1
-  // config model that gets surfaced as a dedicated profile (e.g.
+  // `--explore` deliberately omitted on ci run: in the v1 config model the
+  // explore-vs-test distinction is a dedicated profile (e.g.
   // `glubean run --profile explore`), not a flag on the CI entry point.
   .option("-f, --filter <pattern>", "Run only tests matching pattern (name or id substring)")
   .option(
     "--suite <name>",
-    "Run only the named suite from the `ci` profile. The name must already appear in `profile.suites`. (Single value only; multi-suite execution lands in a follow-up.)",
+    "Run only the named suite from the `ci` profile. The name must already appear in `profile.suites`. (Single value — narrows a multi-suite profile to one suite.)",
   )
   .option("-t, --tag <tag>", "Run only tests with matching tag (comma-separated or repeatable)", collect, [])
   .option("--tag-mode <mode>", 'Tag match logic: "or" (any tag) or "and" (all tags)', "or")
