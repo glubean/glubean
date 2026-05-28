@@ -840,6 +840,14 @@ function resetTestCounters() {
 
 const kyInstance = ky.create({
   throwHttpErrors: false,
+  // Default to NO retry. Glubean is a verification tool: a test must
+  // report the response the server actually returned, not one that ky
+  // silently retried into existence. ky's built-in default retries 5xx
+  // (and 408/413/429) up to 2× on idempotent methods — that masks
+  // flaky/degrading endpoints, which is exactly what users run Glubean
+  // to catch. Authors who genuinely want resilience can opt back in
+  // per-request via `http.get(url, { retry: 2 })`.
+  retry: 0,
   hooks: {
     beforeRequest: [
       
