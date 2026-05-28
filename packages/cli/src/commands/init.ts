@@ -1107,9 +1107,9 @@ const DEMO_PACKAGE_JSON = (sdkVersion: string) =>
       scripts: {
         // `local` profile only — deterministic suites, always green.
         test: "glubean run --profile local",
-        // Full narrative incl. flaky + canary, uploads to the public
-        // project. Exit code is intermittently non-zero BY DESIGN.
-        "test:public-demo": "glubean run --profile public-demo --upload",
+        // Full narrative incl. flaky + canary. Runs fully local (no
+        // upload). Exit code is intermittently non-zero BY DESIGN.
+        "test:full": "glubean run --profile full",
         scan: "glubean scan",
       },
       dependencies: {
@@ -1136,7 +1136,12 @@ async function initDemo(overwrite: boolean): Promise<void> {
     {
       path: "package.json",
       content: DEMO_PACKAGE_JSON(SDK_VERSION),
-      description: "Package config with local + public-demo scripts",
+      description: "Package config with local + full scripts",
+    },
+    {
+      path: "README.md",
+      content: () => readCliTemplate("demo/README.md"),
+      description: "Demo narrative explainer",
     },
     {
       path: "glubean.yaml",
@@ -1144,14 +1149,23 @@ async function initDemo(overwrite: boolean): Promise<void> {
       description: "Demo config — stable / flaky / contract / canary suites",
     },
     {
+      // Enables allowImportingTsExtensions so the `.ts` relative imports
+      // (skill convention + required for contract discovery) typecheck
+      // cleanly in editors / tsc. The project runs via tsx (`glubean
+      // run`), so noEmit is fine.
+      path: "tsconfig.json",
+      content: () => readCliTemplate("demo/tsconfig.json"),
+      description: "TS config (allowImportingTsExtensions for .ts imports)",
+    },
+    {
       path: ".env.example",
       content: () => readCliTemplate("demo/.env.example"),
-      description: "Env vars template (MOCK_BACKEND_URL + project id)",
+      description: "Env vars template (MOCK_BACKEND_URL)",
     },
     {
       path: ".env.secrets.example",
       content: () => readCliTemplate("demo/.env.secrets.example"),
-      description: "Secrets template (caller key + upload token)",
+      description: "Secrets template (upload token — opt-in only)",
     },
     {
       // Sourced from gitignore.tpl, not .gitignore — npm pack omits
@@ -1168,14 +1182,9 @@ async function initDemo(overwrite: boolean): Promise<void> {
       description: "Plugin bootstrap entry",
     },
     {
-      path: "demo/lib/mock-backend-client.ts",
-      content: () => readCliTemplate("demo/demo/lib/mock-backend-client.ts"),
-      description: "Shared mock-backend HTTP client (injects caller key)",
-    },
-    {
-      path: "demo/README.md",
-      content: () => readCliTemplate("demo/demo/README.md"),
-      description: "Demo narrative explainer",
+      path: "config/api.ts",
+      content: () => readCliTemplate("demo/config/api.ts"),
+      description: "Shared HTTP client (configure() once, imported everywhere)",
     },
     {
       path: "tests/api-stable/get-users.test.ts",
@@ -1185,13 +1194,13 @@ async function initDemo(overwrite: boolean): Promise<void> {
     {
       path: "tests/api-flaky/search-flaky.test.ts",
       content: () => readCliTemplate("demo/tests/api-flaky/search-flaky.test.ts"),
-      description: "Flaky suite — ~30% 503 (public-demo only)",
+      description: "Flaky suite — ~30% 503 (full profile only)",
     },
     {
       path: "tests/canary/synthetic-50pct-flaky.test.ts",
       content: () =>
         readCliTemplate("demo/tests/canary/synthetic-50pct-flaky.test.ts"),
-      description: "In-process synthetic canary (public-demo only)",
+      description: "In-process synthetic canary (full profile only)",
     },
     {
       path: "tests/contracts/stable/users-contract.contract.ts",
@@ -1236,12 +1245,11 @@ async function initDemo(overwrite: boolean): Promise<void> {
       `(${created} created${overwritten ? `, ${overwritten} overwritten` : ""}${skipped ? `, ${skipped} skipped` : ""}).\n`,
   );
   console.log(`${colors.dim}Next steps:${colors.reset}`);
-  console.log(`  1. cp .env.example .env && cp .env.secrets.example .env.secrets`);
+  console.log(`  1. cp .env.example .env`);
   console.log(`  2. Set MOCK_BACKEND_URL (.env) to your deployed glubean-demo-backend`);
-  console.log(`  3. Set DEMO_BACKEND_CALLER_KEY (.env.secrets) to match the backend`);
-  console.log(`  4. npm install && npm test    ${colors.dim}# local profile — green${colors.reset}`);
+  console.log(`  3. npm install && npm test     ${colors.dim}# local profile — green${colors.reset}`);
   console.log(
-    `  5. npm run test:public-demo   ${colors.dim}# full narrative + upload${colors.reset}\n`,
+    `  4. npm run test:full           ${colors.dim}# full narrative (flaky + canary), runs local${colors.reset}\n`,
   );
 }
 

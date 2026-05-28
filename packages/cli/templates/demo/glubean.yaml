@@ -29,22 +29,20 @@ profiles:
   local:
     suites: [api-stable, contracts-stable]
 
-  # `npm run test:public-demo` — includes flaky + canary. Exit code is
-  # intermittently non-zero BY DESIGN. Uploads to the public project so
-  # the dashboard has real flaky/transition data to show.
-  public-demo:
+  # `npm run test:full` — the complete suite incl. flaky + canary. Exit
+  # code is intermittently non-zero BY DESIGN (that's the point — you
+  # SEE Glubean catch flaky/degrading behavior). Runs fully local; no
+  # upload, no cloud account needed.
+  #
+  # To publish results to a Glubean project dashboard, run
+  # `glubean login` once, then `glubean run --profile full --upload
+  # --project <your-project>` (or add an `upload:` block here with your
+  # projectAlias). Kept opt-in so a fresh scaffold runs with zero config.
+  full:
     suites: [api-stable, api-flaky, contracts-stable, canary]
     execution:
       failFast: false
       concurrency: 3
     reporters:
       console: summary
-      resultJson: .glubean/results/public-demo.result.json
-    upload:
-      enabled: true
-      # This is the canonical public demo's project. The alias takes
-      # precedence over a GLUBEAN_PROJECT_ID env var, so if you FORKED
-      # this demo to upload to your OWN Glubean project, change the alias
-      # here (or delete this `upload` block and pass --project / set
-      # GLUBEAN_PROJECT_ID instead).
-      projectAlias: glubean-public-demo
+      resultJson: .glubean/results/full.result.json

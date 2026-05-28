@@ -1,5 +1,6 @@
-import { contract, configure } from "@glubean/sdk";
+import { contract } from "@glubean/sdk";
 import type { SchemaLike } from "@glubean/sdk";
+import { http } from "../../../config/api.ts";
 
 /**
  * Stable contract — guards the shape of the mock backend's
@@ -7,28 +8,12 @@ import type { SchemaLike } from "@glubean/sdk";
  * changes this shape (drops/renames `users` or `total`), the contract
  * fails and the dashboard shows a contract violation.
  *
- * Uses {{MOCK_BACKEND_URL}} (resolved from env at run time) as the
- * prefix so it points at the same backend as the api-stable suite.
+ * Reuses the shared client from config/api.ts — same backend as the
+ * api-stable suite, configured once.
  */
 
-const { http: api } = configure({
-  http: { prefixUrl: "{{MOCK_BACKEND_URL}}" },
-});
-
-// NOTE: this contract intentionally does NOT send the X-Demo-Caller-Key
-// header. `configure()` resolves `{{...}}` via resolveTemplate, which
-// THROWS on a missing or empty value — and the scaffold explicitly
-// allows an empty DEMO_BACKEND_CALLER_KEY (backends without a caller
-// key configured). Templating the header would break `npm test` for
-// those users. The contract therefore hits the backend's anonymous
-// rate tier (10 req/min) — fine for normal run volume (a single run
-// makes ~3-5 stable-endpoint calls). If you run this contract at high
-// frequency from one IP and hit 429s, set a caller key on the backend
-// AND switch this client to a verified flow (e.g. a bootstrap that
-// reads ctx.secrets), rather than templating a possibly-empty value.
-
 const stableApi = contract.http.with("demo-stable", {
-  client: api,
+  client: http,
   security: null,
 });
 

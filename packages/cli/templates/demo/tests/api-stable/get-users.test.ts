@@ -1,37 +1,30 @@
 import { test } from "@glubean/sdk";
-import { mockGet } from "../../demo/lib/mock-backend-client.js";
+import { http } from "../../config/api.ts";
 
 /**
  * Stable suite — hits the mock backend's deterministic /api/stable
- * endpoints. These should always pass; they're the "everything's
- * working" baseline in the public dashboard narrative.
+ * endpoints. Always passes; the "everything's working" baseline.
+ * Uses the shared client from config/api.ts (auto-traced).
  */
 
 export const listUsers = test(
   { id: "stable-list-users", tags: ["stable", "public-demo"] },
-  async (ctx) => {
-    const res = await mockGet<{ users: unknown[]; total: number }>(
-      ctx,
-      "/api/stable/users",
-    );
-    ctx.assert(res.status === 200, "GET /api/stable/users returns 200");
-    ctx.assert(Array.isArray(res.body.users), "response has users array");
-    ctx.assert(res.body.total === 3, "response reports 3 users");
+  async ({ expect }) => {
+    const res = await http.get("api/stable/users");
+    expect(res).toHaveStatus(200);
+    const body = await res.json<{ users: unknown[]; total: number }>();
+    expect(Array.isArray(body.users)).toBe(true);
+    expect(body.total).toBe(3);
   },
 );
 
 export const getOneUser = test(
   { id: "stable-get-user", tags: ["stable", "public-demo"] },
-  async (ctx) => {
-    const res = await mockGet<{ id: string; name: string; email: string }>(
-      ctx,
-      "/api/stable/users/u_001",
-    );
-    ctx.assert(res.status === 200, "GET /api/stable/users/u_001 returns 200");
-    ctx.assert(res.body.id === "u_001", "returns the requested user id");
-    ctx.assert(
-      typeof res.body.email === "string" && res.body.email.includes("@"),
-      "user has an email",
-    );
+  async ({ expect }) => {
+    const res = await http.get("api/stable/users/u_001");
+    expect(res).toHaveStatus(200);
+    const body = await res.json<{ id: string; name: string; email: string }>();
+    expect(body.id).toBe("u_001");
+    expect(body.email).toContain("@");
   },
 );
