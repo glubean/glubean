@@ -144,6 +144,13 @@ interface RunOptions {
    * `?suite=Y` membership query.
    */
   suites?: string[];
+  /**
+   * Metric thresholds from the v1 resolved plan (defaults.thresholds ∪
+   * profile.thresholds). When non-empty, takes precedence over the legacy
+   * `glubeanConfig.thresholds` (package.json) — v1 profiles can declare
+   * per-profile gates that the legacy flat-shape path can't express.
+   */
+  thresholds?: import("@glubean/sdk").ThresholdConfig;
 }
 
 // =============================================================================
@@ -2037,9 +2044,16 @@ export async function runCommand(
   }
 
   // ── Threshold evaluation ──────────────────────────────────────────────────
+  // Prefer the v1 plan's resolved thresholds when present (profile mode);
+  // fall back to the legacy package.json `thresholds` otherwise. (P2 removes
+  // the legacy source — see docs/06 config consolidation.)
+  const effectiveThresholds =
+    options.thresholds && Object.keys(options.thresholds).length > 0
+      ? options.thresholds
+      : glubeanConfig.thresholds;
   let thresholdSummary: import("@glubean/sdk").ThresholdSummary | undefined;
-  if (glubeanConfig.thresholds && Object.keys(glubeanConfig.thresholds).length > 0) {
-    thresholdSummary = evaluateThresholds(glubeanConfig.thresholds, metricCollector);
+  if (effectiveThresholds && Object.keys(effectiveThresholds).length > 0) {
+    thresholdSummary = evaluateThresholds(effectiveThresholds, metricCollector);
     const { results: thresholdResults, pass: allPass } = thresholdSummary;
 
     if (thresholdResults.length > 0) {

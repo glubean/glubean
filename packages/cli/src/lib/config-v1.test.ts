@@ -94,6 +94,63 @@ profiles:
         expect(config.defaults?.execution?.timeoutMs).toBe(60000);
       });
     });
+
+    it("accepts thresholds in defaults + profile (object rules + shorthand string)", async () => {
+      const yaml = `
+version: 1
+defaults:
+  thresholds:
+    error_rate: "<0.05"
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  ci:
+    suites: [tests]
+    thresholds:
+      http_duration_ms: { p95: "<200", avg: "<100" }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.defaults?.thresholds).toEqual({ error_rate: "<0.05" });
+        expect(config.profiles.ci.thresholds).toEqual({
+          http_duration_ms: { p95: "<200", avg: "<100" },
+        });
+      });
+    });
+  });
+
+  describe("thresholds validation (plan 06 P1)", () => {
+    it("hard-errors on an unknown aggregation key", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  ci:
+    suites: [tests]
+    thresholds:
+      http_duration_ms: { pXX: "<200" }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/Unknown key.*pXX/);
+      });
+    });
+
+    it("hard-errors when an expression is not a string", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  ci:
+    suites: [tests]
+    thresholds:
+      http_duration_ms: { p95: 200 }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/p95.*expression string/);
+      });
+    });
   });
 
   describe("file-level errors", () => {

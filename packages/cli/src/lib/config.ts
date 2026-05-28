@@ -101,6 +101,8 @@ export interface ProfileConfig {
   capabilities?: CapabilitiesConfig;
   reporters?: ReportersConfig;
   upload?: UploadConfig;
+  /** Metric thresholds (e.g. stricter latency gates on `ci` than `local`). */
+  thresholds?: ThresholdConfig;
 }
 
 /** Top-level `defaults:` — merged into every profile before profile-specific values. */
@@ -111,6 +113,8 @@ export interface DefaultsConfig {
   capabilities?: CapabilitiesConfig;
   reporters?: ReportersConfig;
   redaction?: GlubeanRedactionConfigInput;
+  /** Baseline metric thresholds; per-profile `thresholds` overrides per metric. */
+  thresholds?: ThresholdConfig;
 }
 
 /** Canonical v1 project config — the entire `glubean.yaml` content. */
@@ -166,6 +170,11 @@ export interface ResolvedRunPlan {
   upload?: UploadConfig;
   envFile: string;
   redaction: RedactionConfig;
+  /**
+   * Resolved metric thresholds (defaults.thresholds ∪ profile.thresholds,
+   * profile wins per metric key). Always present — `{}` when none declared.
+   */
+  thresholds: ThresholdConfig;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,6 +224,7 @@ const V1_DEFAULTS_KEYS = new Set([
   "capabilities",
   "reporters",
   "redaction",
+  "thresholds",
 ]);
 const V1_PROFILE_KEYS = new Set([
   "suites",
@@ -223,6 +233,17 @@ const V1_PROFILE_KEYS = new Set([
   "capabilities",
   "reporters",
   "upload",
+  "thresholds",
+]);
+const V1_THRESHOLD_AGGREGATIONS = new Set([
+  "avg",
+  "min",
+  "max",
+  "p50",
+  "p90",
+  "p95",
+  "p99",
+  "count",
 ]);
 const V1_REDACTION_KEYS = new Set([
   "sensitiveKeys",
@@ -583,6 +604,42 @@ function validateRedaction(
   return out;
 }
 
+function validateThresholds(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): ThresholdConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", context, configPath);
+  const t = raw as Record<string, unknown>;
+  const out: ThresholdConfig = {};
+  for (const metric of Object.keys(t)) {
+    const value = t[metric];
+    const ctx = `${context}.${metric}`;
+    // Shorthand: a bare string is the expression for the `avg` aggregation.
+    if (typeof value === "string") {
+      out[metric] = value;
+      continue;
+    }
+    // Otherwise: a map of aggregation → expression string.
+    assertType(value, "object", ctx, configPath);
+    assertOnlyKnownKeys(value, V1_THRESHOLD_AGGREGATIONS, ctx, configPath);
+    const rules = value as Record<string, unknown>;
+    const metricRules: Record<string, string> = {};
+    for (const agg of Object.keys(rules)) {
+      if (typeof rules[agg] !== "string") {
+        throw new GlubeanConfigError(
+          `\`${ctx}.${agg}\` must be a threshold expression string (e.g. "<200"), got ${typeof rules[agg]}.`,
+          configPath,
+        );
+      }
+      metricRules[agg] = rules[agg] as string;
+    }
+    out[metric] = metricRules as ThresholdConfig[string];
+  }
+  return out;
+}
+
 function validateProfile(
   name: string,
   raw: unknown,
@@ -629,6 +686,9 @@ function validateProfile(
     ...(p.upload !== undefined && {
       upload: validateUpload(p.upload, `profiles.${name}.upload`, configPath),
     }),
+    ...(p.thresholds !== undefined && {
+      thresholds: validateThresholds(p.thresholds, `profiles.${name}.thresholds`, configPath),
+    }),
   };
 }
 
@@ -655,6 +715,9 @@ function validateDefaults(
   ) as CapabilitiesConfig;
   out.reporters = validateReporters(d.reporters, "defaults.reporters", configPath);
   out.redaction = validateRedaction(d.redaction, "defaults.redaction", configPath);
+  if (d.thresholds !== undefined) {
+    out.thresholds = validateThresholds(d.thresholds, "defaults.thresholds", configPath);
+  }
   return out;
 }
 
@@ -1016,6 +1079,15 @@ export function resolveRunPlan(
   const envFile = cliOverrides.envFile ?? defaults.envFile ?? builtin.envFile;
   const redaction = resolveRedactionConfig(defaults.redaction);
 
+  // ── Thresholds ─────────────────────────────────────────────────────────
+  // Shallow per-metric merge: profile overrides defaults on metric-key
+  // collision (a profile can tighten or replace a baseline metric's rules,
+  // but doesn't deep-merge individual aggregations).
+  const thresholds: ThresholdConfig = {
+    ...(defaults.thresholds ?? {}),
+    ...(profile.thresholds ?? {}),
+  };
+
   // ── Upload ─────────────────────────────────────────────────────────────
   // CLI `--upload` flag forces enable regardless of profile. Profile-defined
   // upload (with projectAlias) takes effect unless CLI overrides enabled.
@@ -1035,6 +1107,7 @@ export function resolveRunPlan(
     ...(upload !== undefined && { upload }),
     envFile,
     redaction,
+    thresholds,
   };
 }
 

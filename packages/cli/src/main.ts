@@ -513,6 +513,10 @@ async function executeRun(
       // without this the upload would use the legacy defaults regardless
       // of what the project declared.
       redactionConfig: resolvedPlan?.redaction,
+      // Plan 06 P1 — v1 profile thresholds (defaults.thresholds ∪
+      // profile.thresholds). runCommand prefers these over legacy
+      // package.json thresholds when non-empty.
+      thresholds: resolvedPlan?.thresholds,
       // Phase 5 5a — pass profile name + suite names so runCommand can
       // emit `metadata.runPlan` on upload. Cloud server projects these
       // to top-level RunEntity fields for query indexing.

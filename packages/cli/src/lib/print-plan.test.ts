@@ -35,6 +35,7 @@ function makePlan(over: Partial<ResolvedRunPlan> = {}): ResolvedRunPlan {
     },
     envFile: ".env",
     redaction: { replacementFormat: "simple" },
+    thresholds: {},
     ...over,
   };
 }
@@ -130,6 +131,23 @@ describe("formatResolvedPlan", () => {
     expect(formatResolvedPlan(makePlan(), "/repo")).not.toContain("Upload:");
     const plan = makePlan({ upload: { enabled: false } });
     expect(formatResolvedPlan(plan, "/repo")).not.toContain("Upload:");
+  });
+
+  test("renders thresholds section: per-aggregation rules + shorthand string", () => {
+    const plan = makePlan({
+      thresholds: {
+        http_duration_ms: { p95: "<200", avg: "<100" },
+        error_rate: "<0.01",
+      },
+    });
+    const out = formatResolvedPlan(plan, "/repo");
+    expect(out).toContain("Thresholds:");
+    expect(out).toContain("http_duration_ms: p95 <200, avg <100");
+    expect(out).toContain("error_rate: <0.01");
+  });
+
+  test("omits thresholds section when none declared", () => {
+    expect(formatResolvedPlan(makePlan(), "/repo")).not.toContain("Thresholds:");
   });
 
   test("absolute configPath outside cwd falls back to the absolute path", () => {

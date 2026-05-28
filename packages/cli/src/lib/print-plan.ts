@@ -94,6 +94,22 @@ export function formatResolvedPlan(
     lines.push(`  truncateArrays: true`);
   }
 
+  const thresholdMetrics = Object.keys(plan.thresholds);
+  if (thresholdMetrics.length > 0) {
+    lines.push("");
+    lines.push("Thresholds:");
+    for (const metric of thresholdMetrics) {
+      const rules = plan.thresholds[metric];
+      const display =
+        typeof rules === "string"
+          ? rules
+          : Object.entries(rules)
+              .map(([agg, expr]) => `${agg} ${expr}`)
+              .join(", ");
+      lines.push(`  ${metric}: ${display}`);
+    }
+  }
+
   if (plan.upload?.enabled) {
     lines.push("");
     lines.push("Upload:");

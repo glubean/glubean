@@ -343,6 +343,57 @@ describe("resolveRunPlan", () => {
       const plan = resolveRunPlan(config, "/p", "local");
       expect(plan.redaction.replacementFormat).toBe("partial");
     });
+
+    it("resolves defaults.redaction extras (sensitiveKeys / customPatterns) into the plan", () => {
+      const config = makeConfig({
+        defaults: {
+          redaction: {
+            sensitiveKeys: ["x-internal-token"],
+            customPatterns: [{ name: "ssn", regex: "\\d{3}-\\d{2}-\\d{4}" }],
+          },
+        },
+      });
+      const plan = resolveRunPlan(config, "/p", "local");
+      expect(plan.redaction.globalRules.sensitiveKeys).toContain("x-internal-token");
+      expect(plan.redaction.globalRules.customPatterns).toEqual(
+        expect.arrayContaining([{ name: "ssn", regex: "\\d{3}-\\d{2}-\\d{4}" }]),
+      );
+    });
+  });
+
+  describe("thresholds (plan 06 P1 — defaults ∪ profile, profile wins per metric)", () => {
+    it("defaults to {} when none declared", () => {
+      const plan = resolveRunPlan(makeConfig(), "/p", "local");
+      expect(plan.thresholds).toEqual({});
+    });
+
+    it("passes through defaults.thresholds", () => {
+      const config = makeConfig({
+        defaults: { thresholds: { http_duration_ms: { p95: "<200" } } },
+      });
+      const plan = resolveRunPlan(config, "/p", "local");
+      expect(plan.thresholds).toEqual({ http_duration_ms: { p95: "<200" } });
+    });
+
+    it("merges defaults + profile, profile overrides on metric-key collision", () => {
+      const config = makeConfig({
+        defaults: {
+          thresholds: { http_duration_ms: { p95: "<500" }, error_rate: "<0.05" },
+        },
+        profiles: {
+          local: { suites: ["tests"] },
+          ci: {
+            suites: ["tests"],
+            thresholds: { http_duration_ms: { p95: "<200", avg: "<100" } },
+          },
+        },
+      });
+      const plan = resolveRunPlan(config, "/p", "ci");
+      // http_duration_ms fully replaced by profile (no deep-merge of avg into defaults)
+      expect(plan.thresholds.http_duration_ms).toEqual({ p95: "<200", avg: "<100" });
+      // error_rate inherited from defaults (profile didn't touch it)
+      expect(plan.thresholds.error_rate).toBe("<0.05");
+    });
   });
 
   describe("upload (per-profile)", () => {
