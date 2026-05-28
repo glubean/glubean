@@ -51,6 +51,7 @@ program
   .command("init")
   .description("Initialize a new Glubean project (interactive wizard)")
   .option("--contract-first", "Scaffold contract-first project (product/, contracts/, tests/)")
+  .option("--template <name>", "Scaffold a named template (currently: demo — the public demo project)")
   .option("--ai-tools", "Configure MCP server + AI skill for your editor")
   .option("--hooks", "Install git hooks (pre-commit, pre-push)")
   .option("--github-actions", "Scaffold GitHub Actions workflow")
@@ -62,6 +63,7 @@ program
   .action(async (options) => {
     await initCommand({
       contractFirst: options.contractFirst,
+      template: options.template,
       aiTools: options.aiTools,
       hooks: options.hooks,
       githubActions: options.githubActions,

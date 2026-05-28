@@ -1,0 +1,50 @@
+version: 1
+
+defaults:
+  redaction:
+    replacementFormat: simple
+
+suites:
+  # Deterministic — always green. Backs the "stable stays green" story.
+  api-stable:
+    target: ./tests/api-stable
+    kinds: [test]
+  # Probabilistic 503 from the mock backend. Backs the "Glubean detects
+  # flaky" story — intentionally non-deterministic.
+  api-flaky:
+    target: ./tests/api-flaky
+    kinds: [test]
+  # Contract guarding the stable API shape. Always green.
+  contracts-stable:
+    target: ./tests/contracts/stable
+    kinds: [contract]
+  # 100% in-process Math.random() canary — proves the run/reduce
+  # pipeline itself is alive, independent of any backend.
+  canary:
+    target: ./tests/canary
+    kinds: [test]
+
+profiles:
+  # `npm test` — only deterministic suites, so a fresh clone runs green.
+  local:
+    suites: [api-stable, contracts-stable]
+
+  # `npm run test:public-demo` — includes flaky + canary. Exit code is
+  # intermittently non-zero BY DESIGN. Uploads to the public project so
+  # the dashboard has real flaky/transition data to show.
+  public-demo:
+    suites: [api-stable, api-flaky, contracts-stable, canary]
+    execution:
+      failFast: false
+      concurrency: 3
+    reporters:
+      console: summary
+      resultJson: .glubean/results/public-demo.result.json
+    upload:
+      enabled: true
+      # This is the canonical public demo's project. The alias takes
+      # precedence over a GLUBEAN_PROJECT_ID env var, so if you FORKED
+      # this demo to upload to your OWN Glubean project, change the alias
+      # here (or delete this `upload` block and pass --project / set
+      # GLUBEAN_PROJECT_ID instead).
+      projectAlias: glubean-public-demo

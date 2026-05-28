@@ -569,6 +569,8 @@ export interface InitOptions {
   overwriteHooks?: boolean;
   overwriteActions?: boolean;
   baseUrl?: string;
+  /** Named scaffold template. Currently: "demo" (public demo project). */
+  template?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +581,21 @@ const DEFAULT_BASE_URL = "https://dummyjson.com";
 
 export async function initCommand(options: InitOptions = {}): Promise<void> {
   console.log(`\n${colors.bold}${colors.cyan}🫘 Glubean Init${colors.reset}\n`);
+
+  // `--template demo` is a non-interactive named scaffold — short-circuit
+  // before the TTY check + workflow prompt. Validate the name so a typo
+  // (e.g. `--template demoo`) fails loudly instead of silently falling
+  // through to the default workflow.
+  if (options.template !== undefined) {
+    if (options.template !== "demo") {
+      console.error(
+        `Unknown --template "${options.template}". Supported: demo.`,
+      );
+      process.exit(1);
+    }
+    await initDemo(options.overwrite ?? false);
+    return;
+  }
 
   const interactive = options.interactive ?? true;
   const forceInteractive = process.env["GLUBEAN_FORCE_INTERACTIVE"] === "1";
@@ -1080,6 +1097,153 @@ const CONTRACT_FIRST_PACKAGE_JSON = (sdkVersion: string) =>
     null,
     2,
   ) + "\n";
+
+const DEMO_PACKAGE_JSON = (sdkVersion: string) =>
+  JSON.stringify(
+    {
+      name: "glubean-public-demo",
+      version: "0.1.0",
+      type: "module",
+      scripts: {
+        // `local` profile only — deterministic suites, always green.
+        test: "glubean run --profile local",
+        // Full narrative incl. flaky + canary, uploads to the public
+        // project. Exit code is intermittently non-zero BY DESIGN.
+        "test:public-demo": "glubean run --profile public-demo --upload",
+        scan: "glubean scan",
+      },
+      dependencies: {
+        "@glubean/sdk": sdkVersion,
+      },
+    },
+    null,
+    2,
+  ) + "\n";
+
+/**
+ * `glubean init --template demo` — scaffolds the public demo project
+ * (Phase 6). Pairs with the standalone `glubean-demo-backend` service
+ * (see glubean/docs/05-demo-project-design.zh.md). Static template
+ * files live in packages/cli/templates/demo/**; only package.json
+ * needs SDK-version injection.
+ */
+async function initDemo(overwrite: boolean): Promise<void> {
+  console.log(
+    `${colors.dim}  Demo — runnable public demo project (pairs with glubean-demo-backend)${colors.reset}\n`,
+  );
+
+  const files: FileEntry[] = [
+    {
+      path: "package.json",
+      content: DEMO_PACKAGE_JSON(SDK_VERSION),
+      description: "Package config with local + public-demo scripts",
+    },
+    {
+      path: "glubean.yaml",
+      content: () => readCliTemplate("demo/glubean.yaml"),
+      description: "Demo config — stable / flaky / contract / canary suites",
+    },
+    {
+      path: ".env.example",
+      content: () => readCliTemplate("demo/.env.example"),
+      description: "Env vars template (MOCK_BACKEND_URL + project id)",
+    },
+    {
+      path: ".env.secrets.example",
+      content: () => readCliTemplate("demo/.env.secrets.example"),
+      description: "Secrets template (caller key + upload token)",
+    },
+    {
+      // Sourced from gitignore.tpl, not .gitignore — npm pack omits
+      // files literally named `.gitignore` from the published package,
+      // so the template must use a non-ignored name. Written out to
+      // the real `.gitignore` in the scaffolded project.
+      path: ".gitignore",
+      content: () => readCliTemplate("demo/gitignore.tpl"),
+      description: "Git ignore rules",
+    },
+    {
+      path: "glubean.setup.ts",
+      content: GLUBEAN_SETUP_TEMPLATE,
+      description: "Plugin bootstrap entry",
+    },
+    {
+      path: "demo/lib/mock-backend-client.ts",
+      content: () => readCliTemplate("demo/demo/lib/mock-backend-client.ts"),
+      description: "Shared mock-backend HTTP client (injects caller key)",
+    },
+    {
+      path: "demo/README.md",
+      content: () => readCliTemplate("demo/demo/README.md"),
+      description: "Demo narrative explainer",
+    },
+    {
+      path: "tests/api-stable/get-users.test.ts",
+      content: () => readCliTemplate("demo/tests/api-stable/get-users.test.ts"),
+      description: "Stable suite — deterministic 200 tests",
+    },
+    {
+      path: "tests/api-flaky/search-flaky.test.ts",
+      content: () => readCliTemplate("demo/tests/api-flaky/search-flaky.test.ts"),
+      description: "Flaky suite — ~30% 503 (public-demo only)",
+    },
+    {
+      path: "tests/canary/synthetic-50pct-flaky.test.ts",
+      content: () =>
+        readCliTemplate("demo/tests/canary/synthetic-50pct-flaky.test.ts"),
+      description: "In-process synthetic canary (public-demo only)",
+    },
+    {
+      path: "tests/contracts/stable/users-contract.contract.ts",
+      content: () =>
+        readCliTemplate("demo/tests/contracts/stable/users-contract.contract.ts"),
+      description: "Stable contract guarding the API shape",
+    },
+  ];
+
+  let created = 0;
+  let skipped = 0;
+  let overwritten = 0;
+
+  for (const file of files) {
+    const existedBefore = await fileExists(file.path);
+    if (existedBefore && !overwrite) {
+      console.log(
+        `  ${colors.dim}skip${colors.reset}  ${file.path} (already exists)`,
+      );
+      skipped++;
+      continue;
+    }
+    const parentDir = file.path.substring(0, file.path.lastIndexOf("/"));
+    if (parentDir) await mkdir(parentDir, { recursive: true });
+    const content = await resolveContent(file.content);
+    await writeFile(file.path, content, "utf-8");
+    if (existedBefore) {
+      console.log(
+        `  ${colors.yellow}overwrite${colors.reset} ${file.path} - ${file.description}`,
+      );
+      overwritten++;
+    } else {
+      console.log(
+        `  ${colors.green}create${colors.reset} ${file.path} - ${file.description}`,
+      );
+      created++;
+    }
+  }
+
+  console.log(
+    `\n${colors.green}✓${colors.reset} Demo project scaffolded ` +
+      `(${created} created${overwritten ? `, ${overwritten} overwritten` : ""}${skipped ? `, ${skipped} skipped` : ""}).\n`,
+  );
+  console.log(`${colors.dim}Next steps:${colors.reset}`);
+  console.log(`  1. cp .env.example .env && cp .env.secrets.example .env.secrets`);
+  console.log(`  2. Set MOCK_BACKEND_URL (.env) to your deployed glubean-demo-backend`);
+  console.log(`  3. Set DEMO_BACKEND_CALLER_KEY (.env.secrets) to match the backend`);
+  console.log(`  4. npm install && npm test    ${colors.dim}# local profile — green${colors.reset}`);
+  console.log(
+    `  5. npm run test:public-demo   ${colors.dim}# full narrative + upload${colors.reset}\n`,
+  );
+}
 
 async function initContractFirst(overwrite: boolean): Promise<void> {
   console.log(
