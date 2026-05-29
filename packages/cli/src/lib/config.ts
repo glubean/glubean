@@ -1302,7 +1302,7 @@ export function mergeConfigInputs(
  * Apply a GlubeanConfigInput on top of the mandatory DEFAULT_CONFIG baseline
  * to produce a fully resolved RedactionConfig.
  */
-function resolveRedactionConfig(
+export function resolveRedactionConfig(
   input?: GlubeanRedactionConfigInput,
 ): RedactionConfig {
   const merged: RedactionConfig = structuredClone(DEFAULT_CONFIG);

@@ -5,9 +5,13 @@
  * and writes the redacted version to stdout or a file.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { loadConfig } from "../lib/config.js";
+import {
+  GlubeanConfigError,
+  loadProjectConfigV1,
+  resolveRedactionConfig,
+} from "../lib/config.js";
 
 const colors = {
   red: "\x1b[31m",
@@ -54,15 +58,39 @@ export async function redactCommand(options: RedactCommandOptions): Promise<void
     process.exit(1);
   }
 
-  // Load config (includes redaction settings)
-  const glubeanConfig = await loadConfig(cwd, options.config);
+  // Resolve redaction from glubean.yaml `defaults.redaction` (config
+  // consolidation — docs/06). Only a genuinely-absent config falls back to
+  // the safe full-redaction default. An explicit `--config` or a
+  // present-but-malformed glubean.yaml is FATAL: silently using default
+  // rules could leave declared secrets (sensitiveKeys / customPatterns)
+  // un-redacted in the output.
+  const explicitConfig = options.config?.[0];
+  const hasConfig = explicitConfig
+    ? true
+    : await stat(resolve(cwd, "glubean.yaml")).then(() => true).catch(() => false);
+  let redaction;
+  if (!hasConfig) {
+    redaction = resolveRedactionConfig(undefined);
+  } else {
+    try {
+      const { config } = await loadProjectConfigV1(
+        cwd,
+        explicitConfig ? { configPath: explicitConfig } : {},
+      );
+      redaction = resolveRedactionConfig(config.defaults?.redaction);
+    } catch (err) {
+      if (!(err instanceof GlubeanConfigError)) throw err;
+      console.error(`${colors.red}${err.message}${colors.reset}`);
+      process.exit(1);
+    }
+  }
 
   // Apply redaction
   const { compileScopes, redactEvent, BUILTIN_SCOPES } = await import("@glubean/redaction");
   const compiledScopes = compileScopes({
     builtinScopes: BUILTIN_SCOPES,
-    globalRules: glubeanConfig.redaction.globalRules,
-    replacementFormat: glubeanConfig.redaction.replacementFormat,
+    globalRules: redaction.globalRules,
+    replacementFormat: redaction.replacementFormat,
   });
 
   let redactionCount = 0;
@@ -72,7 +100,7 @@ export async function redactCommand(options: RedactCommandOptions): Promise<void
     tests: payload.tests.map((t: any) => ({
       ...t,
       events: t.events.map((e: any) => {
-        const redacted = redactEvent(e, compiledScopes, glubeanConfig.redaction.replacementFormat);
+        const redacted = redactEvent(e, compiledScopes, redaction.replacementFormat);
         if (JSON.stringify(redacted) !== JSON.stringify(e)) {
           redactionCount++;
         }
@@ -99,7 +127,7 @@ export async function redactCommand(options: RedactCommandOptions): Promise<void
   console.log();
   console.log(`${colors.dim}Input:  ${inputPath}${colors.reset}`);
   console.log(`${colors.dim}Output: ${outputPath}${colors.reset}`);
-  console.log(`${colors.dim}Config: ${glubeanConfig.redaction.replacementFormat} format${colors.reset}`);
+  console.log(`${colors.dim}Config: ${redaction.replacementFormat} format${colors.reset}`);
   console.log();
   console.log(
     `${colors.green}✓ ${redactionCount} event(s) redacted across ${payload.tests.length} test(s)${colors.reset}`,

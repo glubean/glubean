@@ -10,7 +10,7 @@ import type { ProjectRunnerTest } from "@glubean/runner";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { stat, readdir, readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { glob } from "node:fs/promises";
-import { loadConfig, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
+import { CONFIG_DEFAULTS, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
 import { loadProjectEnv } from "@glubean/runner";
 import { resolveEnvFileName } from "../lib/active_env.js";
 import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
@@ -212,6 +212,24 @@ async function findProjectConfig(
   }
   // No glubean project found — use the starting directory (scratch mode)
   return { rootDir: startDir };
+}
+
+// Config consolidation (docs/06): the package.json `glubean` field is no
+// longer a config source. Warn (don't error) when one lingers so users
+// migrate it into glubean.yaml instead of wondering why it stopped working.
+async function warnIfLegacyPackageJsonConfig(rootDir: string): Promise<void> {
+  try {
+    const pkg = JSON.parse(await readFile(resolve(rootDir, "package.json"), "utf-8"));
+    if (pkg.glubean && typeof pkg.glubean === "object") {
+      console.warn(
+        `\x1b[33mWarning: the package.json \`glubean\` field is no longer read ` +
+          `(config consolidation — see docs/06). Move run/redaction/thresholds ` +
+          `settings into glubean.yaml; the field is currently inert.\x1b[0m`,
+      );
+    }
+  } catch {
+    // No package.json or parse error — nothing to warn about.
+  }
 }
 
 const DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build"];
@@ -760,9 +778,15 @@ export async function runCommand(
   }
 
   const startDir = testFiles[0].substring(0, testFiles[0].lastIndexOf("/"));
-  const { rootDir, configPath } = await findProjectConfig(startDir);
+  const { rootDir } = await findProjectConfig(startDir);
 
-  const glubeanConfig = await loadConfig(rootDir, options.configFiles);
+  // Config consolidation (docs/06 P2): the legacy package.json `glubean`
+  // flat-shape is no longer read. Profile runs get run/redaction/thresholds
+  // from the resolved plan (threaded via `options`); non-profile target runs
+  // fall back to built-in defaults + CLI flags + env. Warn once if a stale
+  // `glubean` field lingers in package.json so users know it's inert now.
+  await warnIfLegacyPackageJsonConfig(rootDir);
+  const glubeanConfig = structuredClone(CONFIG_DEFAULTS);
   const effectiveRun = mergeRunOptions(glubeanConfig.run, {
     verbose: options.verbose,
     pretty: options.pretty,

@@ -12,7 +12,6 @@ if (_cwd) process.chdir(_cwd);
 import { Command } from "commander";
 import { CLI_VERSION } from "./version.js";
 import {
-  loadConfig,
   loadProjectConfigV1,
   resolveRunPlan,
   GlubeanConfigError,
@@ -146,9 +145,27 @@ async function executeRun(
       )
       : undefined;
 
+    // Config consolidation (docs/06 P2): a bare `glubean run` (no target, no
+    // profile) defaults to the `local` profile — there's no global
+    // testDir/exploreDir config outside glubean.yaml anymore. The deprecated
+    // `--explore` flag maps to the `explore` profile. This MUST run before
+    // the --suite guard below so `glubean run --suite X` (no target) narrows
+    // the defaulted local profile instead of erroring "requires --profile".
+    if (options.explore) {
+      console.warn(
+        `\x1b[33m--explore is deprecated; use \`glubean run --profile explore\` ` +
+          `(define an \`explore\` profile in glubean.yaml).\x1b[0m`,
+      );
+    }
+    if (!target && !options.profile) {
+      options.profile = options.explore ? "explore" : "local";
+    }
+
     // --suite is a profile-mode-only override. Reject it without --profile
     // so the user sees the broader-than-expected run before it starts,
-    // instead of silently ignoring the flag.
+    // instead of silently ignoring the flag. (No-target runs already have a
+    // profile from the defaulting above, so this only fires for ad-hoc
+    // `glubean run <target> --suite X` with no profile.)
     if (options.suite && !options.profile) {
       console.error(
         `\x1b[31m--suite requires --profile (the suite name is looked up in ` +
@@ -317,8 +334,14 @@ async function executeRun(
         }
         resolvedTarget = allFiles;
       } else {
-        const config = await loadConfig(process.cwd(), configFiles);
-        resolvedTarget = options.explore ? config.run.exploreDir : config.run.testDir;
+        // Unreachable: a missing target with no profile is normalized to the
+        // `local`/`explore` profile above, so resolvedPlan (with ≥1 suite) is
+        // always present on this branch. Guard the type + invariant.
+        console.error(
+          `\x1b[31mNo run target resolved. Pass a path, or define a ` +
+            `\`local\` profile in glubean.yaml.\x1b[0m`,
+        );
+        process.exit(1);
       }
     }
 
