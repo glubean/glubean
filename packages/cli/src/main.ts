@@ -111,6 +111,7 @@ program
   .option("--no-session", "Skip session setup/teardown")
   .option("-M, --meta <key=value>", "Custom run metadata (repeatable)", collect, [])
   .option("--upload", "Upload run results and artifacts to Glubean Cloud")
+  .option("--upload-receipt-json <path>", "Write Cloud upload receipt JSON after --upload")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
   .option("--api-url <url>", "Glubean API server URL")
@@ -517,6 +518,7 @@ async function executeRun(
           }, {})
         : undefined,
       upload: options.upload ?? resolvedPlan?.upload?.enabled,
+      uploadReceiptJson: options.uploadReceiptJson,
       // When profile has upload.projectAlias and CLI didn't pass --project,
       // forward the alias as the project identifier so the upload preflight
       // doesn't exit with "no project ID found". `resolveProjectId` accepts
@@ -607,6 +609,7 @@ ciCmd
   .option("--no-session", "Skip session setup/teardown")
   .option("-M, --meta <key=value>", "Custom run metadata (repeatable)", collect, [])
   .option("--upload", "Upload run results and artifacts to Glubean Cloud")
+  .option("--upload-receipt-json <path>", "Write Cloud upload receipt JSON after --upload")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
   .option("--api-url <url>", "Glubean API server URL")

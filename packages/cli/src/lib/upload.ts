@@ -134,6 +134,32 @@ export interface UploadOptions {
   rootDir: string;
 }
 
+export interface UploadReceipt {
+  schemaVersion: "glubean.upload-receipt.v1";
+  uploadedAt: string;
+  apiUrl: string;
+  projectId: string;
+  runId?: string;
+  url?: string;
+  resultUpload: {
+    status: "uploaded" | "failed";
+    runId?: string;
+    url?: string;
+    statusCode?: number;
+    error?: string;
+  };
+  artifactUpload: {
+    status: "skipped" | "uploaded" | "failed";
+    attempted: boolean;
+    count: number;
+    sizeBytes?: number;
+    archiveBytes?: number;
+    mode?: "inline" | "presigned";
+    statusCode?: number;
+    error?: string;
+  };
+}
+
 interface ManifestEntry {
   name: string;
   artifactType: string;
@@ -141,6 +167,28 @@ interface ManifestEntry {
   sizeBytes: number;
   stepIndex?: number;
   testId?: string;
+}
+
+interface ArtifactUploadOutcome {
+  ok: boolean;
+  mode: "inline" | "presigned";
+  statusCode?: number;
+  error?: string;
+}
+
+function createUploadReceipt(options: UploadOptions): UploadReceipt {
+  return {
+    schemaVersion: "glubean.upload-receipt.v1",
+    uploadedAt: new Date().toISOString(),
+    apiUrl: options.apiUrl,
+    projectId: options.projectId,
+    resultUpload: { status: "failed" },
+    artifactUpload: { status: "skipped", attempted: false, count: 0 },
+  };
+}
+
+function toErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function extToMime(ext: string): string {
@@ -207,8 +255,9 @@ async function walkDir(dir: string): Promise<string[]> {
 export async function uploadToCloud(
   resultPayload: UploadResultPayload,
   options: UploadOptions,
-): Promise<void> {
+): Promise<UploadReceipt> {
   const { apiUrl, token, projectId, rootDir } = options;
+  const receipt = createUploadReceipt(options);
 
   const ci = detectCiContext();
 
@@ -251,24 +300,51 @@ export async function uploadToCloud(
       console.log(
         `${colors.yellow}Upload failed (${resp.status}): ${errText}${colors.reset}`,
       );
-      return;
+      receipt.resultUpload = {
+        status: "failed",
+        statusCode: resp.status,
+        error: errText,
+      };
+      return receipt;
     }
 
-    const result = await resp.json();
-    runId = result.runId;
-    runUrl = result.url;
+    const result = await resp.json() as { runId?: unknown; url?: unknown };
+    runId = typeof result.runId === "string" ? result.runId : "";
+    runUrl = typeof result.url === "string" ? result.url : "";
+    if (!runId || !runUrl) {
+      const error = "Cloud upload response was missing runId or url.";
+      console.log(`${colors.yellow}Upload failed: ${error}${colors.reset}`);
+      receipt.resultUpload = {
+        status: "failed",
+        statusCode: resp.status,
+        error,
+      };
+      return receipt;
+    }
+    receipt.runId = runId;
+    receipt.url = runUrl;
+    receipt.resultUpload = {
+      status: "uploaded",
+      runId,
+      url: runUrl,
+      statusCode: resp.status,
+    };
     console.log(
       `${colors.green}Results uploaded${colors.reset} ${colors.dim}→ ${runUrl}${colors.reset}`,
     );
   } catch (err) {
+    let error: string;
     if (err instanceof DOMException && err.name === "AbortError") {
+      error = "Upload timed out";
       console.log(`${colors.yellow}Upload timed out${colors.reset}`);
     } else {
+      error = toErrorMessage(err);
       console.log(
-        `${colors.yellow}Upload failed: ${err instanceof Error ? err.message : err}${colors.reset}`,
+        `${colors.yellow}Upload failed: ${error}${colors.reset}`,
       );
     }
-    return;
+    receipt.resultUpload = { status: "failed", error };
+    return receipt;
   }
 
   // ── Step 2: Upload artifacts (if any) ──
@@ -289,7 +365,7 @@ export async function uploadToCloud(
     }
   }
 
-  if (files.length === 0) return;
+  if (files.length === 0) return receipt;
 
   let tmpDir: string | undefined;
   try {
@@ -305,6 +381,7 @@ export async function uploadToCloud(
         sizeBytes: s.size,
       });
     }
+    const totalSize = manifest.reduce((sum, e) => sum + e.sizeBytes, 0);
 
     // Stage files + manifest into temp dir, then zip
     tmpDir = await mkdtemp(join(tmpdir(), "glubean-artifacts-"));
@@ -332,35 +409,62 @@ export async function uploadToCloud(
       console.log(
         `${colors.yellow}Failed to create artifact archive${colors.reset}`,
       );
-      return;
+      receipt.artifactUpload = {
+        status: "failed",
+        attempted: true,
+        count: files.length,
+        sizeBytes: totalSize,
+        error: "Failed to create artifact archive",
+      };
+      return receipt;
     }
 
     const zipData = await readFile(zipPath);
     const zipSize = zipData.byteLength;
 
-    if (zipSize < INLINE_THRESHOLD) {
-      await uploadArtifactsInline(apiUrl, token, runId, zipData);
-    } else {
-      await uploadArtifactsPresigned(apiUrl, token, runId, zipData, zipSize);
-    }
+    const outcome = zipSize < INLINE_THRESHOLD
+      ? await uploadArtifactsInline(apiUrl, token, runId, zipData)
+      : await uploadArtifactsPresigned(apiUrl, token, runId, zipData, zipSize);
 
-    const totalSize = manifest.reduce((sum, e) => sum + e.sizeBytes, 0);
+    receipt.artifactUpload = {
+      status: outcome.ok ? "uploaded" : "failed",
+      attempted: true,
+      count: files.length,
+      sizeBytes: totalSize,
+      archiveBytes: zipSize,
+      mode: outcome.mode,
+      ...(outcome.statusCode !== undefined ? { statusCode: outcome.statusCode } : {}),
+      ...(outcome.error ? { error: outcome.error } : {}),
+    };
+    if (!outcome.ok) return receipt;
+
     const sizeStr = totalSize > 1024 * 1024
       ? `${(totalSize / 1024 / 1024).toFixed(1)} MB`
       : `${(totalSize / 1024).toFixed(1)} KB`;
     console.log(
       `${colors.green}Artifacts uploaded${colors.reset} ${colors.dim}(${files.length} files, ${sizeStr})${colors.reset}`,
     );
+    return receipt;
   } catch (err) {
+    let error: string;
     if (err instanceof DOMException && err.name === "AbortError") {
+      error = "Artifact upload timed out";
       console.log(
         `${colors.yellow}Artifact upload timed out${colors.reset}`,
       );
     } else {
+      error = toErrorMessage(err);
       console.log(
-        `${colors.yellow}Artifact upload failed: ${err instanceof Error ? err.message : err}${colors.reset}`,
+        `${colors.yellow}Artifact upload failed: ${error}${colors.reset}`,
       );
     }
+    receipt.artifactUpload = {
+      status: "failed",
+      attempted: true,
+      count: files.length,
+      error,
+    };
+    return receipt;
   } finally {
     if (tmpDir) {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -373,7 +477,7 @@ async function uploadArtifactsInline(
   token: string,
   runId: string,
   zipData: Buffer,
-): Promise<void> {
+): Promise<ArtifactUploadOutcome> {
   const form = new FormData();
   form.append(
     "archive",
@@ -396,7 +500,15 @@ async function uploadArtifactsInline(
     console.log(
       `${colors.yellow}Artifact upload failed (${resp.status}): ${errText}${colors.reset}`,
     );
+    return {
+      ok: false,
+      mode: "inline",
+      statusCode: resp.status,
+      error: errText,
+    };
   }
+
+  return { ok: true, mode: "inline", statusCode: resp.status };
 }
 
 async function uploadArtifactsPresigned(
@@ -405,7 +517,7 @@ async function uploadArtifactsPresigned(
   runId: string,
   zipData: Buffer,
   zipSize: number,
-): Promise<void> {
+): Promise<ArtifactUploadOutcome> {
   const form = new FormData();
   form.append("size", String(zipSize));
 
@@ -424,10 +536,28 @@ async function uploadArtifactsPresigned(
     console.log(
       `${colors.yellow}Artifact upload URL request failed (${urlResp.status}): ${errText}${colors.reset}`,
     );
-    return;
+    return {
+      ok: false,
+      mode: "presigned",
+      statusCode: urlResp.status,
+      error: errText,
+    };
   }
 
-  const { signedUrl, archiveKey } = await urlResp.json();
+  const { signedUrl, archiveKey } = await urlResp.json() as {
+    signedUrl?: unknown;
+    archiveKey?: unknown;
+  };
+  if (typeof signedUrl !== "string" || typeof archiveKey !== "string") {
+    const error = "Artifact upload URL response was missing signedUrl or archiveKey.";
+    console.log(`${colors.yellow}${error}${colors.reset}`);
+    return {
+      ok: false,
+      mode: "presigned",
+      statusCode: urlResp.status,
+      error,
+    };
+  }
 
   const putResp = await fetchWithRetry(signedUrl, {
     method: "PUT",
@@ -437,13 +567,19 @@ async function uploadArtifactsPresigned(
   });
 
   if (!putResp.ok) {
+    const errText = await putResp.text().catch(() => "");
     console.log(
-      `${colors.yellow}Artifact upload failed (${putResp.status})${colors.reset}`,
+      `${colors.yellow}Artifact upload failed (${putResp.status})${errText ? `: ${errText}` : ""}${colors.reset}`,
     );
-    return;
+    return {
+      ok: false,
+      mode: "presigned",
+      statusCode: putResp.status,
+      error: errText || `HTTP ${putResp.status}`,
+    };
   }
 
-  await fetchWithRetry(
+  const completeResp = await fetchWithRetry(
     `${apiUrl}/open/v1/cli-runs/${runId}/artifacts/upload/complete`,
     {
       method: "POST",
@@ -455,4 +591,18 @@ async function uploadArtifactsPresigned(
       timeoutMs: RESULTS_TIMEOUT_MS,
     },
   );
+  if (!completeResp.ok) {
+    const errText = await completeResp.text();
+    console.log(
+      `${colors.yellow}Artifact upload completion failed (${completeResp.status}): ${errText}${colors.reset}`,
+    );
+    return {
+      ok: false,
+      mode: "presigned",
+      statusCode: completeResp.status,
+      error: errText,
+    };
+  }
+
+  return { ok: true, mode: "presigned", statusCode: completeResp.status };
 }

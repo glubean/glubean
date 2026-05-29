@@ -89,6 +89,7 @@ interface RunOptions {
   /** Include cases with defaultRun: "opt-in" (headless but expensive/slow) */
   includeOptIn?: boolean;
   upload?: boolean;
+  uploadReceiptJson?: string;
   project?: string;
   token?: string;
   apiUrl?: string;
@@ -706,6 +707,13 @@ export async function runCommand(
   const runStartDate = new Date();
   const runStartTime = runStartDate.toISOString();
   const runStartLocal = localTimeString(runStartDate);
+
+  if (options.uploadReceiptJson && !options.upload) {
+    console.error(
+      `${colors.red}Error: --upload-receipt-json requires --upload or an upload-enabled profile.${colors.reset}`,
+    );
+    process.exit(1);
+  }
 
   // ── Capability profile ──────────────────────────────────────────────────
   const isCiEnv = process.env.CI === "true" || process.env.GLUBEAN_CI === "true";
@@ -2367,13 +2375,19 @@ export async function runCommand(
         })),
       };
 
-      await uploadToCloud(redactedPayload, {
+      const uploadReceipt = await uploadToCloud(redactedPayload, {
         apiUrl,
         token,
         projectId,
         envFile: effectiveRun.envFile,
         rootDir,
       });
+      if (options.uploadReceiptJson) {
+        const receiptPath = resolveOutputPath(options.uploadReceiptJson, process.cwd());
+        await mkdir(dirname(receiptPath), { recursive: true });
+        await writeFile(receiptPath, JSON.stringify(uploadReceipt, null, 2) + "\n", "utf-8");
+        console.log(`${colors.dim}Upload receipt written to: ${receiptPath}${colors.reset}`);
+      }
     }
   }
 
