@@ -13,7 +13,7 @@
  * is extracted. All other files are treated as plain glubean config JSON.
  */
 
-import { resolve, extname } from "node:path";
+import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { DEFAULT_CONFIG, BUILTIN_SCOPES } from "@glubean/redaction";
@@ -23,13 +23,14 @@ import type { SharedRunConfig } from "@glubean/runner";
 import type { ThresholdConfig } from "@glubean/sdk";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// V1 PROFILE-BASED CONFIG (Phase 1 sub-task B — new shape, not yet wired)
+// V1 PROFILE-BASED CONFIG — the canonical (and only) project config model
 // ─────────────────────────────────────────────────────────────────────────────
 // These types model the canonical `glubean.yaml` v1 schema (plan §"新配置文件").
-// Loading + resolution arrive in sub-task C (loadProjectConfigV1) and sub-task D
-// (resolveRunPlan). runCommand starts consuming ResolvedRunPlan in sub-task E.
-// The legacy GlubeanConfig + loadConfig() below stay in place during Phase 1
-// transition; Phase 6 cleans them up.
+// `loadProjectConfigV1` loads it; `resolveRunPlan` resolves a profile into a
+// ResolvedRunPlan that runCommand consumes. The legacy package.json
+// `glubean` flat-shape loader was removed in the config consolidation
+// (docs/06); only the resolved `GlubeanConfig` baseline + `mergeRunOptions`
+// + `resolveRedactionConfig` helpers remain below.
 
 /** Suite = where the runner finds runnable items. */
 export interface SuiteConfig {
@@ -1137,23 +1138,6 @@ export interface GlubeanRunConfig {
   concurrency: number;
 }
 
-/** Partial run config as read from a file (all fields optional). */
-export interface GlubeanRunConfigInput {
-  verbose?: boolean;
-  pretty?: boolean;
-  logFile?: boolean;
-  emitFullTrace?: boolean;
-  inferSchema?: boolean;
-  truncateArrays?: boolean;
-  envFile?: string;
-  failFast?: boolean;
-  failAfter?: number | null;
-  testDir?: string;
-  exploreDir?: string;
-  perTestTimeoutMs?: number;
-  concurrency?: number;
-}
-
 /** Redaction config input from user files (additive fields only). */
 export interface GlubeanRedactionConfigInput {
   /** Additional global sensitive keys. */
@@ -1175,14 +1159,6 @@ export interface GlubeanCloudConfigInput {
 export interface GlubeanConfig {
   run: GlubeanRunConfig;
   redaction: RedactionConfig;
-  cloud?: GlubeanCloudConfigInput;
-  thresholds?: ThresholdConfig;
-}
-
-/** Partial top-level config as read from a file. */
-export interface GlubeanConfigInput {
-  run?: GlubeanRunConfigInput;
-  redaction?: GlubeanRedactionConfigInput;
   cloud?: GlubeanCloudConfigInput;
   thresholds?: ThresholdConfig;
 }
@@ -1210,97 +1186,10 @@ export const CONFIG_DEFAULTS: GlubeanConfig = {
   redaction: structuredClone(DEFAULT_CONFIG),
 };
 
-// ── Internal helpers ─────────────────────────────────────────────────────────
-
-/** Check if a filename should be treated as a package config file. */
-function isPackageConfig(filePath: string): boolean {
-  const name = filePath.split("/").pop() ?? "";
-  return name === "package.json";
-}
-
 /**
- * Read a single config source from disk.
- *
- * If the file is a package.json, extract the "glubean" field.
- * Otherwise treat the entire file as a glubean config object.
- */
-export async function readSingleConfig(
-  filePath: string,
-): Promise<GlubeanConfigInput> {
-  const content = await readFile(filePath, "utf-8");
-  const ext = extname(filePath).toLowerCase();
-  const parsed = (ext === ".yaml" || ext === ".yml")
-    ? parseYaml(content)
-    : JSON.parse(content);
-
-  if (isPackageConfig(filePath)) {
-    return (parsed.glubean as GlubeanConfigInput) ?? {};
-  }
-  return parsed as GlubeanConfigInput;
-}
-
-/**
- * Merge two config inputs. Later (overlay) values take precedence.
- *
- * - Scalar fields: right wins.
- * - Array fields (sensitiveKeys.additional, sensitiveKeys.excluded,
- *   patterns.custom): concatenated (additive by nature).
- */
-export function mergeConfigInputs(
-  base: GlubeanConfigInput,
-  overlay: GlubeanConfigInput,
-): GlubeanConfigInput {
-  const merged: GlubeanConfigInput = {};
-
-  // ── Run section (shallow merge, scalars override) ──────────────────────
-  if (base.run || overlay.run) {
-    merged.run = { ...base.run, ...overlay.run };
-  }
-
-  // ── Redaction section ──────────────────────────────────────────────────
-  if (base.redaction || overlay.redaction) {
-    const br = base.redaction ?? {};
-    const or = overlay.redaction ?? {};
-
-    merged.redaction = {};
-
-    if (or.replacementFormat !== undefined) {
-      merged.redaction.replacementFormat = or.replacementFormat;
-    } else if (br.replacementFormat !== undefined) {
-      merged.redaction.replacementFormat = br.replacementFormat;
-    }
-
-    if (br.sensitiveKeys || or.sensitiveKeys) {
-      merged.redaction.sensitiveKeys = [
-        ...(br.sensitiveKeys ?? []),
-        ...(or.sensitiveKeys ?? []),
-      ];
-    }
-
-    if (br.customPatterns || or.customPatterns) {
-      merged.redaction.customPatterns = [
-        ...(br.customPatterns ?? []),
-        ...(or.customPatterns ?? []),
-      ];
-    }
-  }
-
-  // ── Cloud section (shallow merge, scalars override) ─────────────────────
-  if (base.cloud || overlay.cloud) {
-    merged.cloud = { ...base.cloud, ...overlay.cloud };
-  }
-
-  // ── Thresholds section (shallow merge, later rules win per metric key) ──
-  if (base.thresholds || overlay.thresholds) {
-    merged.thresholds = { ...base.thresholds, ...overlay.thresholds };
-  }
-
-  return merged;
-}
-
-/**
- * Apply a GlubeanConfigInput on top of the mandatory DEFAULT_CONFIG baseline
- * to produce a fully resolved RedactionConfig.
+ * Apply a `GlubeanRedactionConfigInput` (glubean.yaml `defaults.redaction`)
+ * on top of the mandatory DEFAULT_CONFIG baseline to produce a fully
+ * resolved RedactionConfig.
  */
 export function resolveRedactionConfig(
   input?: GlubeanRedactionConfigInput,
@@ -1344,104 +1233,6 @@ export function resolveRedactionConfig(
   }
 
   return merged;
-}
-
-// ── Validation ───────────────────────────────────────────────────────────────
-
-const KNOWN_TOP_KEYS = new Set(["run", "redaction", "cloud", "thresholds"]);
-const KNOWN_RUN_KEYS = new Set(Object.keys(RUN_DEFAULTS));
-const KNOWN_REDACTION_KEYS = new Set([
-  "sensitiveKeys",
-  "customPatterns",
-  "replacementFormat",
-]);
-const KNOWN_CLOUD_KEYS = new Set(["projectId", "apiUrl", "token"]);
-
-function warnUnknownKeys(
-  obj: Record<string, unknown>,
-  known: Set<string>,
-  path: string,
-): void {
-  for (const key of Object.keys(obj)) {
-    if (!known.has(key)) {
-      console.error(
-        `\x1b[33mWarning: unknown config key "${path}.${key}" — typo?\x1b[0m`,
-      );
-    }
-  }
-}
-
-function validateConfigInput(input: GlubeanConfigInput): void {
-  warnUnknownKeys(input as Record<string, unknown>, KNOWN_TOP_KEYS, "glubean");
-  if (input.run) {
-    warnUnknownKeys(input.run as Record<string, unknown>, KNOWN_RUN_KEYS, "glubean.run");
-  }
-  if (input.redaction) {
-    warnUnknownKeys(
-      input.redaction as Record<string, unknown>,
-      KNOWN_REDACTION_KEYS,
-      "glubean.redaction",
-    );
-  }
-  if (input.cloud) {
-    warnUnknownKeys(
-      input.cloud as Record<string, unknown>,
-      KNOWN_CLOUD_KEYS,
-      "glubean.cloud",
-    );
-  }
-}
-
-// ── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * Load the resolved GlubeanConfig.
- *
- * - If `configPaths` is undefined or empty: auto-read package.json in `rootDir`.
- * - If `configPaths` has entries: merge left-to-right, skip auto-read.
- */
-export async function loadConfig(
-  rootDir: string,
-  configPaths?: string[],
-): Promise<GlubeanConfig> {
-  let accumulated: GlubeanConfigInput = {};
-
-  if (configPaths && configPaths.length > 0) {
-    for (const configPath of configPaths) {
-      const absPath = resolve(rootDir, configPath);
-      try {
-        const single = await readSingleConfig(absPath);
-        validateConfigInput(single);
-        accumulated = mergeConfigInputs(accumulated, single);
-      } catch {
-        console.error(`Warning: Could not read config file: ${absPath}`);
-      }
-    }
-  } else {
-    // No --config: auto-read package.json in rootDir
-    const pkgPath = resolve(rootDir, "package.json");
-    try {
-      const single = await readSingleConfig(pkgPath);
-      validateConfigInput(single);
-      accumulated = mergeConfigInputs(accumulated, single);
-    } catch {
-      // Not found, use defaults
-    }
-  }
-
-  const resolvedRun: GlubeanRunConfig = {
-    ...RUN_DEFAULTS,
-    ...accumulated.run,
-  };
-
-  const resolvedRedaction = resolveRedactionConfig(accumulated.redaction);
-
-  return {
-    run: resolvedRun,
-    redaction: resolvedRedaction,
-    cloud: accumulated.cloud,
-    thresholds: accumulated.thresholds,
-  };
 }
 
 /**
