@@ -15,6 +15,7 @@ import { z } from "zod";
 
 import { basename, dirname, resolve } from "node:path";
 import { readFile, stat } from "node:fs/promises";
+import { parse as parseYaml } from "yaml";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
@@ -225,16 +226,29 @@ const DEFAULT_MCP_TRACE_CONFIG: McpTraceConfig = {
 
 let _mcpTraceConfig: McpTraceConfig | undefined;
 
+// Accept a header allow-list only if it's an array of strings. Anything else
+// (a bare string, a non-string element) falls back to the default — the MCP
+// server must not crash `filterHeaders` on a malformed glubean.yaml. The CLI's
+// `loadProjectConfigV1` hard-errors on the same input, so the config mistake
+// still surfaces on `glubean run`.
+function asHeaderList(value: unknown, fallback: string[]): string[] {
+  return Array.isArray(value) && value.every((h) => typeof h === "string")
+    ? (value as string[])
+    : fallback;
+}
+
 async function loadMcpTraceConfig(projectRoot: string): Promise<McpTraceConfig> {
   if (_mcpTraceConfig) return _mcpTraceConfig;
   try {
-    const pkgPath = resolve(projectRoot, "package.json");
-    const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
-    const userConfig = pkg.glubean?.mcp?.trace;
+    const yamlPath = resolve(projectRoot, "glubean.yaml");
+    const parsed = parseYaml(await readFile(yamlPath, "utf-8")) as
+      | { mcp?: { trace?: { keepRequestHeaders?: unknown; keepResponseHeaders?: unknown } } }
+      | null;
+    const userConfig = parsed?.mcp?.trace;
     if (userConfig) {
       _mcpTraceConfig = {
-        keepRequestHeaders: userConfig.keepRequestHeaders ?? DEFAULT_MCP_TRACE_CONFIG.keepRequestHeaders,
-        keepResponseHeaders: userConfig.keepResponseHeaders ?? DEFAULT_MCP_TRACE_CONFIG.keepResponseHeaders,
+        keepRequestHeaders: asHeaderList(userConfig.keepRequestHeaders, DEFAULT_MCP_TRACE_CONFIG.keepRequestHeaders),
+        keepResponseHeaders: asHeaderList(userConfig.keepResponseHeaders, DEFAULT_MCP_TRACE_CONFIG.keepResponseHeaders),
       };
     } else {
       _mcpTraceConfig = DEFAULT_MCP_TRACE_CONFIG;

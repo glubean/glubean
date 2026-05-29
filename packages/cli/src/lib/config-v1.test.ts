@@ -153,6 +153,43 @@ profiles:
     });
   });
 
+  describe("mcp config (plan 06 P3 — MCP trace settings)", () => {
+    it("accepts a top-level mcp.trace block", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  local: { suites: [tests] }
+mcp:
+  trace:
+    keepResponseHeaders: [content-type, x-request-id]
+    keepRequestHeaders: [authorization]
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.mcp?.trace?.keepResponseHeaders).toEqual(["content-type", "x-request-id"]);
+        expect(config.mcp?.trace?.keepRequestHeaders).toEqual(["authorization"]);
+      });
+    });
+
+    it("hard-errors on an unknown key under mcp.trace", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  local: { suites: [tests] }
+mcp:
+  trace:
+    keepEverything: true
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/Unknown key.*keepEverything/);
+      });
+    });
+  });
+
   describe("file-level errors", () => {
     it("hard-errors when glubean.yaml is missing", async () => {
       await withTempDir({}, async (dir) => {

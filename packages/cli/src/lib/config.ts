@@ -118,6 +118,17 @@ export interface DefaultsConfig {
   thresholds?: ThresholdConfig;
 }
 
+/** MCP trace header allow-lists — which headers the MCP server surfaces to agents. */
+export interface McpTraceConfig {
+  keepRequestHeaders?: string[];
+  keepResponseHeaders?: string[];
+}
+
+/** Top-level `mcp:` — config consumed by the @glubean/mcp server (not the run path). */
+export interface McpConfig {
+  trace?: McpTraceConfig;
+}
+
 /** Canonical v1 project config — the entire `glubean.yaml` content. */
 export interface GlubeanProjectConfigV1 {
   version: 1;
@@ -126,6 +137,8 @@ export interface GlubeanProjectConfigV1 {
   suites: Record<string, SuiteConfig>;
   /** Named profiles. `glubean run --profile <name>` selects one. */
   profiles: Record<string, ProfileConfig>;
+  /** MCP-server settings (trace header allow-lists). Read by @glubean/mcp. */
+  mcp?: McpConfig;
 }
 
 /**
@@ -191,7 +204,9 @@ export class GlubeanConfigError extends Error {
   }
 }
 
-const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles"]);
+const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles", "mcp"]);
+const V1_MCP_KEYS = new Set(["trace"]);
+const V1_MCP_TRACE_KEYS = new Set(["keepRequestHeaders", "keepResponseHeaders"]);
 const V1_SUITE_KEYS = new Set(["target", "kinds", "data"]);
 const V1_SUITE_KINDS = new Set(["test", "contract", "flow"]);
 const V1_SELECTION_KEYS = new Set([
@@ -722,6 +737,36 @@ function validateDefaults(
   return out;
 }
 
+function validateMcp(raw: unknown, configPath: string): McpConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", "mcp", configPath);
+  assertOnlyKnownKeys(raw, V1_MCP_KEYS, "mcp", configPath);
+  const m = raw as Record<string, unknown>;
+  const out: McpConfig = {};
+  if (m.trace !== undefined) {
+    assertType(m.trace, "object", "mcp.trace", configPath);
+    assertOnlyKnownKeys(m.trace, V1_MCP_TRACE_KEYS, "mcp.trace", configPath);
+    const t = m.trace as Record<string, unknown>;
+    const trace: McpTraceConfig = {};
+    for (const key of ["keepRequestHeaders", "keepResponseHeaders"] as const) {
+      if (t[key] !== undefined) {
+        assertType(t[key], "array", `mcp.trace.${key}`, configPath);
+        trace[key] = (t[key] as unknown[]).map((h, i) => {
+          if (typeof h !== "string") {
+            throw new GlubeanConfigError(
+              `\`mcp.trace.${key}[${i}]\` must be a string, got ${typeof h}.`,
+              configPath,
+            );
+          }
+          return h;
+        });
+      }
+    }
+    out.trace = trace;
+  }
+  return out;
+}
+
 /**
  * Load + validate v1 project config.
  *
@@ -831,6 +876,7 @@ export async function loadProjectConfigV1(
     defaults: validateDefaults(root.defaults, configPath),
     suites,
     profiles,
+    ...(root.mcp !== undefined && { mcp: validateMcp(root.mcp, configPath) }),
   };
 
   return { config, configPath };

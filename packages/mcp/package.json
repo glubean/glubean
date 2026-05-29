@@ -28,6 +28,7 @@
     "@glubean/runner": "workspace:*",
     "@glubean/scanner": "workspace:*",
     "@glubean/sdk": "workspace:*",
+    "yaml": "^2.7.0",
     "@modelcontextprotocol/sdk": "^1.18.0",
     "dotenv": "^16.4.0",
     "zod": "^4.3.6"
