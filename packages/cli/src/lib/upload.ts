@@ -191,6 +191,24 @@ function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function envLabelFromEnvFile(envFile?: string): string {
+  const fileName = basename(envFile || ".env");
+
+  if (fileName === ".env") return "default";
+  if (fileName.startsWith(".env.")) {
+    return fileName.slice(".env.".length) || "default";
+  }
+
+  const ext = extname(fileName);
+  const stem = ext ? basename(fileName, ext) : fileName;
+  return stem || "default";
+}
+
+function resolveUploadEnvironment(envFile?: string): string {
+  const explicit = process.env.GLUBEAN_ENV?.trim();
+  return explicit || envLabelFromEnvFile(envFile);
+}
+
 function extToMime(ext: string): string {
   const map: Record<string, string> = {
     ".png": "image/png",
@@ -267,7 +285,7 @@ export async function uploadToCloud(
     projectId,
     source: ci.source,
     clientVersion: CLI_VERSION,
-    environment: options.envFile ? basename(options.envFile, extname(options.envFile)) : undefined,
+    environment: resolveUploadEnvironment(options.envFile),
     gitRef: ci.gitRef,
     commitSha: ci.commitSha,
     runUrl: ci.runUrl,
