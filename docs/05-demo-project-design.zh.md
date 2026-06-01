@@ -44,7 +44,7 @@ demo-projects/glubean-public-demo/        # 或长成 glubean/templates/demo/ re
 │       suites: [api-stable, api-flaky, contracts-stable, contracts-drift, canary]
 │       upload:
 │         enabled: true
-│         projectAlias: glubean-public-demo
+│         projectId: prj_xxxxxxxx        # 覆盖 .env GLUBEAN_PROJECT_ID；省略才走 env
 │   # package.json scripts:
 │   #   "test": "glubean run --profile local"            ← 永远绿 (clone 后能 npm test 跑通)
 │   #   "test:public-demo": "glubean run --profile public-demo --upload"
@@ -143,9 +143,11 @@ mock backend 一旦公开 reachable，**必须**做 rate limit 与最低限度�
 
 ## 决定 (2026-05-26 owner consolidation)
 
-1. **Mock backend repo**: ✅ **独立 repo `glubean-demo-backend`** — 跟产品代码边界清，跟 demo project 也独立（便于将来 fork 给用户作 reference）。不放 monorepo 子目录。
-2. **Mock backend tech 栈**: ✅ **Hono** — 比 Express 轻，跟 Fly.io free tier 256MB 限制更舒服。
-3. **Deploy 平台**: ✅ **Fly.io free tier** — sleep-on-idle，$0/mo，owner-controlled。备选 Vercel Functions / Cloudflare Workers 如果将来 Hono 上 Fly.io 撞瓶颈再迁。
+1. **Mock backend repo**: ✅ 跟 glubean **core** monorepo 边界清——backend 代码**不**进 `~/glubean/glubean` 那个产品 monorepo 的子目录。但 backend + demo project **两者自己合成一个 pnpm workspace monorepo** `glubean-public-demo`（`packages/backend` + `packages/demo`）：它俩永远配对、分两 repo 维护成本高。各 package 仍可单独 fork 给用户作 reference——code 层互不 import，只走 HTTP（`MOCK_BACKEND_URL`）。
+   > **2026-06-01 修正**：原文"独立 repo `glubean-demo-backend` … 不放 monorepo 子目录"被误读成"backend 与 demo 不能同一 monorepo"。owner 本意只是"不混进 glubean **core** monorepo"。已据此把两者合进 `glubean-public-demo` workspace。
+2. **Mock backend tech 栈**: ✅ **Hono** — 比 Express 轻，且是 Cloudflare Workers 的原生 target（无 cold start / 无 Docker）。
+3. **Deploy 平台**: ✅ **Cloudflare Workers** — Hono 原生 target，无 cold start（vs Fly.io sleep-on-idle）、无 Docker，free tier 100k req/day，`wrangler deploy` 即可。Rate limit 用 Workers Rate Limiting binding（跨 isolate hold，不像 in-memory Map）。
+   > **2026-06-01 修正**：原定 **Fly.io free tier**，实际 2026-05-28 改 **Cloudflare Workers** 上线——owner Fly.io 打不开 + Hono 原生 target；且 Fly.io 设计里的 in-memory rate-limit Map 在 Workers isolate 模型下也不成立。见 backlog Nx2 + `packages/backend/README.md` §"Why Cloudflare Workers"。
 4. **Demo backend 自测 (meta-dogfood)**: ⏸️ 第一版**不做** — 增加循环复杂度。第一版稳定 + 真的有用户访问 public dashboard 后再考虑。
 
 ## 仍开放 (待 W23 启动时拍)

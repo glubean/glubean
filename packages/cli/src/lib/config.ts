@@ -89,8 +89,25 @@ export interface ReportersConfig {
 /** Optional cloud upload directive (per-profile). */
 export interface UploadConfig {
   enabled?: boolean;
-  /** Project alias on cloud (resolves to projectId via cloud lookup). */
-  projectAlias?: string;
+  /**
+   * Cloud project THIS profile uploads to. Accepts a project id (`prj_…`)
+   * or a cloud alias (resolved server-side). Per-profile, so different
+   * profiles can target different projects. When omitted, falls back to
+   * `--project` / `GLUBEAN_PROJECT_ID`. Takes precedence over
+   * `GLUBEAN_PROJECT_ID` when both are set (and is shown in the printed
+   * plan, so the destination isn't hidden).
+   */
+  projectId?: string;
+  /**
+   * Name of the env var (in `.env.secrets` / environment) holding the
+   * auth token for THIS profile's upload — a *reference*, never the token
+   * value itself (secrets never live in committed yaml). Lets different
+   * profiles authenticate to different projects. When set, the token is
+   * resolved exclusively from this var (after an explicit `--token`); it
+   * does NOT silently fall back to `GLUBEAN_TOKEN`. Omit to use the
+   * default `GLUBEAN_TOKEN` resolution chain.
+   */
+  tokenEnv?: string;
 }
 
 /** Profile = one named run plan. References suites by name. */
@@ -232,7 +249,7 @@ const V1_REPORTERS_KEYS = new Set([
   "inferSchema",
   "truncateArrays",
 ]);
-const V1_UPLOAD_KEYS = new Set(["enabled", "projectAlias"]);
+const V1_UPLOAD_KEYS = new Set(["enabled", "projectId", "tokenEnv", "projectAlias"]);
 const V1_DEFAULTS_KEYS = new Set([
   "envFile",
   "selection",
@@ -312,6 +329,13 @@ function assertType(
       `Expected \`${context}\` to be ${expected}, got ${got}.`,
       configPath,
     );
+  }
+}
+
+/** Reject a present-but-blank string value (whitespace-only counts as blank). */
+function assertNonEmpty(value: string, context: string, configPath: string): void {
+  if (value.trim() === "") {
+    throw new GlubeanConfigError(`\`${context}\` must be a non-empty string.`, configPath);
   }
 }
 
@@ -544,9 +568,26 @@ function validateUpload(
     assertType(s.enabled, "boolean", `${context}.enabled`, configPath);
     out.enabled = s.enabled as boolean;
   }
+  if (s.projectId !== undefined) {
+    assertType(s.projectId, "string", `${context}.projectId`, configPath);
+    assertNonEmpty(s.projectId as string, `${context}.projectId`, configPath);
+    out.projectId = s.projectId as string;
+  }
   if (s.projectAlias !== undefined) {
+    // Deprecated synonym for projectId (renamed because per-profile project
+    // targeting is the real model — "alias" misleadingly implied otherwise).
     assertType(s.projectAlias, "string", `${context}.projectAlias`, configPath);
-    out.projectAlias = s.projectAlias as string;
+    assertNonEmpty(s.projectAlias as string, `${context}.projectAlias`, configPath);
+    if (out.projectId === undefined) out.projectId = s.projectAlias as string;
+    console.warn(`Warning: ${context}.projectAlias is deprecated — rename to projectId.`);
+  }
+  if (s.tokenEnv !== undefined) {
+    assertType(s.tokenEnv, "string", `${context}.tokenEnv`, configPath);
+    // A blank tokenEnv would make the exclusive-token-resolution path fall
+    // through to GLUBEAN_TOKEN — the silent wrong-token fallback this
+    // feature exists to prevent. Reject it at load instead.
+    assertNonEmpty(s.tokenEnv as string, `${context}.tokenEnv`, configPath);
+    out.tokenEnv = s.tokenEnv as string;
   }
   return out;
 }
@@ -1137,7 +1178,7 @@ export function resolveRunPlan(
 
   // ── Upload ─────────────────────────────────────────────────────────────
   // CLI `--upload` flag forces enable regardless of profile. Profile-defined
-  // upload (with projectAlias) takes effect unless CLI overrides enabled.
+  // upload (projectId + tokenEnv) takes effect unless CLI overrides enabled.
   let upload: UploadConfig | undefined = profile.upload;
   if (cliOverrides.uploadEnabled !== undefined) {
     upload = { ...(upload ?? {}), enabled: cliOverrides.uploadEnabled };

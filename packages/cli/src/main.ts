@@ -411,19 +411,19 @@ async function executeRun(
             ? "<default: glubean-run.result.json or <testfile>.result.json>"
             : undefined;
       // Upload destination: when `--project <id>` is passed, the upload
-      // routes to that project id, NOT the profile's `projectAlias`.
+      // routes to that project id, overriding the profile's `projectId`.
       // Reflect that override so the printed plan matches the actual
       // destination. Same enable-bit override for `--upload`.
       const overrideUpload = resolvedPlan.upload
         ? {
             ...resolvedPlan.upload,
-            ...(options.project ? { projectAlias: options.project as string } : {}),
+            ...(options.project ? { projectId: options.project as string } : {}),
             ...(options.upload === true ? { enabled: true } : {}),
           }
         : options.upload === true || options.project
           ? {
               enabled: options.upload === true,
-              ...(options.project ? { projectAlias: options.project as string } : {}),
+              ...(options.project ? { projectId: options.project as string } : {}),
             }
           : undefined;
       const printPlan: ResolvedRunPlan = {
@@ -519,11 +519,15 @@ async function executeRun(
         : undefined,
       upload: options.upload ?? resolvedPlan?.upload?.enabled,
       uploadReceiptJson: options.uploadReceiptJson,
-      // When profile has upload.projectAlias and CLI didn't pass --project,
-      // forward the alias as the project identifier so the upload preflight
-      // doesn't exit with "no project ID found". `resolveProjectId` accepts
-      // either a project ID or an alias.
-      project: options.project ?? resolvedPlan?.upload?.projectAlias,
+      // When the profile declares upload.projectId and CLI didn't pass
+      // --project, forward it as the project identifier so the upload
+      // preflight doesn't exit with "no project ID found". The value may be
+      // a project id or a cloud alias (resolved server-side).
+      project: options.project ?? resolvedPlan?.upload?.projectId,
+      // Per-profile token reference: which env var holds THIS profile's
+      // upload token. resolveToken reads it exclusively (no GLUBEAN_TOKEN
+      // fallback) so profiles can target different projects safely.
+      tokenEnv: resolvedPlan?.upload?.tokenEnv,
       token: options.token,
       apiUrl: options.apiUrl,
       inputJson: options.inputJson,

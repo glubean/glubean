@@ -171,7 +171,7 @@ profiles:
       resultJson: .glubean/results/public-demo.result.json
     upload:
       enabled: true
-      projectAlias: glubean-public-demo
+      projectId: prj_xxxxxxxx   # 显式目标；会覆盖 .env 的 GLUBEAN_PROJECT_ID。省略此行才走 env
 ```
 
 ## 配置语义
@@ -337,7 +337,7 @@ profiles:
     suites: [demo-evals]
     upload:
       enabled: true
-      projectAlias: glubean-public-demo
+      projectId: prj_xxxxxxxx   # 显式目标；会覆盖 .env 的 GLUBEAN_PROJECT_ID。省略此行才走 env
 ```
 
 后续再补 Cloud 命令：

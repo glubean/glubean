@@ -114,8 +114,11 @@ export function formatResolvedPlan(
     lines.push("");
     lines.push("Upload:");
     lines.push(`  enabled: true`);
-    if (plan.upload.projectAlias) {
-      lines.push(`  projectAlias: ${plan.upload.projectAlias}`);
+    if (plan.upload.projectId) {
+      lines.push(`  projectId: ${plan.upload.projectId}`);
+    }
+    if (plan.upload.tokenEnv) {
+      lines.push(`  tokenEnv: ${plan.upload.tokenEnv}`);
     }
   }
 

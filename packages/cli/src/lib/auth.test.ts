@@ -114,6 +114,58 @@ test("resolveToken: returns null when nothing available", async () => {
   });
 });
 
+test("resolveToken: tokenEnv resolves the per-profile token from envFileVars", async () => {
+  await withTempHome(async () => {
+    const sources = { envFileVars: { TOKEN_PROFILE_A: "gb_a" } };
+    const token = await resolveToken({}, sources, "TOKEN_PROFILE_A");
+    expect(token).toBe("gb_a");
+  });
+});
+
+test("resolveToken: tokenEnv does NOT fall back to GLUBEAN_TOKEN when its var is empty", async () => {
+  await withTempHome(async () => {
+    // A default GLUBEAN_TOKEN exists, but the profile points at a different,
+    // unset var — must NOT silently use the default (wrong-token-to-wrong-project).
+    process.env["GLUBEAN_TOKEN"] = "gb_default";
+    const token = await resolveToken({}, { envFileVars: {} }, "TOKEN_PROFILE_A");
+    expect(token).toBe(null);
+  });
+});
+
+test("resolveToken: explicit --token still wins over tokenEnv", async () => {
+  await withTempHome(async () => {
+    const sources = { envFileVars: { TOKEN_PROFILE_A: "gb_a" } };
+    const token = await resolveToken({ token: "gb_flag" }, sources, "TOKEN_PROFILE_A");
+    expect(token).toBe("gb_flag");
+  });
+});
+
+test("resolveToken: tokenEnv prefers system env over envFileVars", async () => {
+  await withTempHome(async () => {
+    process.env["TOKEN_PROFILE_A"] = "gb_sys";
+    try {
+      const sources = { envFileVars: { TOKEN_PROFILE_A: "gb_file" } };
+      const token = await resolveToken({}, sources, "TOKEN_PROFILE_A");
+      expect(token).toBe("gb_sys");
+    } finally {
+      delete process.env["TOKEN_PROFILE_A"];
+    }
+  });
+});
+
+test("resolveToken: an empty tokenEnv system var is treated as absent, so .env.secrets wins", async () => {
+  await withTempHome(async () => {
+    process.env["TOKEN_PROFILE_A"] = ""; // present but empty
+    try {
+      const sources = { envFileVars: { TOKEN_PROFILE_A: "gb_secret" } };
+      const token = await resolveToken({}, sources, "TOKEN_PROFILE_A");
+      expect(token).toBe("gb_secret");
+    } finally {
+      delete process.env["TOKEN_PROFILE_A"];
+    }
+  });
+});
+
 // ── resolveProjectId ──
 
 test("resolveProjectId: flag takes priority", async () => {

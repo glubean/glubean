@@ -63,8 +63,18 @@ export async function writeCredentials(creds: Credentials): Promise<string> {
 export async function resolveToken(
   options: AuthOptions,
   sources?: ProjectAuthSources,
+  tokenEnv?: string,
 ): Promise<string | null> {
   if (options.token) return options.token;
+  // A profile that declares `upload.tokenEnv` authenticates EXCLUSIVELY
+  // from that env var (after an explicit --token). No silent fallback to
+  // GLUBEAN_TOKEN — otherwise a misconfigured profile could upload to its
+  // project with the *default* token. Unresolved → null → loud preflight.
+  // `||` (not `??`) so an empty process var is treated as absent and the
+  // real value from .env.secrets still wins, matching the GLUBEAN_TOKEN path.
+  if (tokenEnv) {
+    return process.env[tokenEnv] || sources?.envFileVars?.[tokenEnv] || null;
+  }
   const env = process.env.GLUBEAN_TOKEN;
   if (env) return env;
   const fileVar = sources?.envFileVars?.["GLUBEAN_TOKEN"];

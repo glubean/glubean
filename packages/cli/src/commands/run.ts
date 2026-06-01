@@ -92,6 +92,8 @@ interface RunOptions {
   uploadReceiptJson?: string;
   project?: string;
   token?: string;
+  /** Env var name holding this profile's upload token (from upload.tokenEnv). */
+  tokenEnv?: string;
   apiUrl?: string;
   noSession?: boolean;
   meta?: Record<string, string>;
@@ -877,16 +879,22 @@ export async function runCommand(
       envFileVars: { ...envVars, ...secrets },
       cloudConfig: glubeanConfig.cloud,
     };
-    const preToken = await resolveToken(authOpts, sources);
+    const preToken = await resolveToken(authOpts, sources, options.tokenEnv);
     const preProject = await resolveProjectId(authOpts, sources);
     const preApiUrl = await resolveApiUrl(authOpts, sources);
     if (!preToken) {
       console.error(
         `${colors.red}Error: --upload requires authentication but no token found.${colors.reset}`,
       );
-      console.error(
-        `${colors.dim}Run 'glubean login', set GLUBEAN_TOKEN, or add token to .env.secrets or package.json glubean.cloud.${colors.reset}`,
-      );
+      if (options.tokenEnv) {
+        console.error(
+          `${colors.dim}This profile's upload.tokenEnv points at '${options.tokenEnv}', but it's empty/unset. Set it in .env.secrets or the environment.${colors.reset}`,
+        );
+      } else {
+        console.error(
+          `${colors.dim}Run 'glubean login', set GLUBEAN_TOKEN, or add token to .env.secrets or package.json glubean.cloud.${colors.reset}`,
+        );
+      }
       process.exit(1);
     }
     if (!preProject) {
@@ -2303,7 +2311,7 @@ export async function runCommand(
       envFileVars: { ...envVars, ...secrets },
       cloudConfig: glubeanConfig.cloud,
     };
-    const token = await resolveToken(authOpts, sources);
+    const token = await resolveToken(authOpts, sources, options.tokenEnv);
     const projectId = await resolveProjectId(authOpts, sources);
     const apiUrl = await resolveApiUrl(authOpts, sources);
 

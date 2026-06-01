@@ -287,19 +287,19 @@ describe("resolveRunPlan", () => {
       expect(plan.upload).toEqual({ enabled: true });
     });
 
-    it("CLI uploadEnabled = true preserves profile.projectAlias", () => {
+    it("CLI uploadEnabled = true preserves profile.projectId + tokenEnv", () => {
       const config = makeConfig({
         profiles: {
           "public-demo": {
             suites: ["tests"],
-            upload: { enabled: false, projectAlias: "alias-x" },
+            upload: { enabled: false, projectId: "prj_x", tokenEnv: "TOKEN_X" },
           },
         },
       });
       const plan = resolveRunPlan(config, "/p", "public-demo", {
         uploadEnabled: true,
       });
-      expect(plan.upload).toEqual({ enabled: true, projectAlias: "alias-x" });
+      expect(plan.upload).toEqual({ enabled: true, projectId: "prj_x", tokenEnv: "TOKEN_X" });
     });
 
     it("CLI uploadEnabled = false force-disables a profile that had upload enabled", () => {
@@ -307,7 +307,7 @@ describe("resolveRunPlan", () => {
         profiles: {
           "public-demo": {
             suites: ["tests"],
-            upload: { enabled: true, projectAlias: "alias-x" },
+            upload: { enabled: true, projectId: "prj_x" },
           },
         },
       });
@@ -315,7 +315,7 @@ describe("resolveRunPlan", () => {
         uploadEnabled: false,
       });
       expect(plan.upload?.enabled).toBe(false);
-      expect(plan.upload?.projectAlias).toBe("alias-x");
+      expect(plan.upload?.projectId).toBe("prj_x");
     });
   });
 
@@ -402,12 +402,12 @@ describe("resolveRunPlan", () => {
         profiles: {
           "public-demo": {
             suites: ["tests"],
-            upload: { enabled: true, projectAlias: "demo-alias" },
+            upload: { enabled: true, projectId: "prj_demo", tokenEnv: "TOKEN_DEMO" },
           },
         },
       });
       const plan = resolveRunPlan(config, "/p", "public-demo");
-      expect(plan.upload).toEqual({ enabled: true, projectAlias: "demo-alias" });
+      expect(plan.upload).toEqual({ enabled: true, projectId: "prj_demo", tokenEnv: "TOKEN_DEMO" });
     });
 
     it("omits upload when profile has none", () => {

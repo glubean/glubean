@@ -35,9 +35,13 @@ profiles:
   # upload, no cloud account needed.
   #
   # To publish results to a Glubean project dashboard, run
-  # `glubean login` once, then `glubean run --profile full --upload
-  # --project <your-project>` (or add an `upload:` block here with your
-  # projectAlias). Kept opt-in so a fresh scaffold runs with zero config.
+  # `glubean login` once, then `glubean run --profile full --upload`.
+  # Set the target via GLUBEAN_PROJECT_ID (.env) + GLUBEAN_TOKEN
+  # (.env.secrets), or give a profile its own `upload:` block:
+  #   upload: { enabled: true }   # project+token from env (one per repo)
+  # Per-profile `projectId` + `tokenEnv` (a ref to an .env.secrets var)
+  # let different profiles upload to different projects. Kept opt-in so a
+  # fresh scaffold runs with zero config.
   full:
     suites: [api-stable, api-flaky, contracts-stable, canary]
     execution:

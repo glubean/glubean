@@ -23,7 +23,9 @@
 > **glubean.yaml 只放声明式配置；凭证只在 env / `.env.secrets` / `glubean login`。**
 
 - 把 secret/config 边界钉死：`cloud.token`、`apiUrl` 这类**绝不进** commit 进 git 的 yaml。
-- glubean.yaml 承载：suites、profiles、selection、execution、reporters、redaction（含扩展规则）、thresholds、`upload.projectAlias`。
+- glubean.yaml 承载：suites、profiles、selection、execution、reporters、redaction（含扩展规则）、thresholds、`upload.projectId`（+ 可选 `upload.tokenEnv`，per-profile token 引用，值在 `.env.secrets`）。
+
+> **2026-06-01 修正**：原定用 `upload.projectAlias` 承载 cloud project，已改为 `upload.projectId`（+ `tokenEnv`）。原因：per-profile alias 暗示"一个 repo 多 project 上传"但又只能换 project 不能换 token、且静默盖过 `GLUBEAN_PROJECT_ID`。现模型：`upload.projectId`（id 或 alias，可选；缺省回落 `GLUBEAN_PROJECT_ID`/`--project`）+ `upload.tokenEnv`（指向 `.env.secrets` 的 var 名，secret 不进 yaml）。`projectAlias` 留作 deprecated 同义词（warn）。已实现于 `packages/cli`（config/auth/main/print-plan）。
 
 ## 现状矩阵：四个 section 各自归属
 
@@ -33,7 +35,7 @@
 | **run** | **testDir / exploreDir** | ❌ 无（v1 用 per-suite `suites.target`） | 见决策 D3（无参数 run 去向） |
 | **redaction** | replacementFormat | ✅ `defaults.redaction.replacementFormat` | 已覆盖 |
 | **redaction** | **sensitiveKeys / customPatterns** | ❌ schema 无 | **新增**到 `defaults.redaction`（见 D1） |
-| **cloud** | projectId | `upload.projectAlias` | 用 alias，下线 package.json |
+| **cloud** | projectId | `upload.projectId`（+`tokenEnv` 多 project）/ `GLUBEAN_PROJECT_ID` | 用 projectId（2026-06-01 改：原定 alias，见上注）；下线 package.json |
 | **cloud** | **token / apiUrl** | ❌（且不该有） | **不迁** → env/login（红线） |
 | **thresholds** | metric 阈值（ThresholdConfig） | ❌ 完全无 | **新增** v1 schema（见 D2） |
 

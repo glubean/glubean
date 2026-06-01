@@ -95,6 +95,81 @@ profiles:
       });
     });
 
+    it("accepts upload block with projectId + tokenEnv", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  public-demo:
+    suites: [tests]
+    upload:
+      enabled: true
+      projectId: prj_abc123
+      tokenEnv: GLUBEAN_TOKEN_DEMO
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.profiles["public-demo"].upload).toEqual({
+          enabled: true,
+          projectId: "prj_abc123",
+          tokenEnv: "GLUBEAN_TOKEN_DEMO",
+        });
+      });
+    });
+
+    it("maps deprecated upload.projectAlias to projectId", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  public-demo:
+    suites: [tests]
+    upload:
+      enabled: true
+      projectAlias: legacy-alias
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.profiles["public-demo"].upload?.projectId).toBe("legacy-alias");
+      });
+    });
+
+    it("rejects an unknown key in the upload block", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  public-demo:
+    suites: [tests]
+    upload:
+      enabled: true
+      bogusKey: x
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/Unknown key.*bogusKey/);
+      });
+    });
+
+    it("rejects a blank upload.tokenEnv (would silently fall back to GLUBEAN_TOKEN)", async () => {
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  public-demo:
+    suites: [tests]
+    upload:
+      enabled: true
+      tokenEnv: ""
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/tokenEnv.*non-empty/);
+      });
+    });
+
     it("accepts thresholds in defaults + profile (object rules + shorthand string)", async () => {
       const yaml = `
 version: 1

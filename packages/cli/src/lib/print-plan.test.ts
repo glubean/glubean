@@ -119,12 +119,13 @@ describe("formatResolvedPlan", () => {
 
   test("renders upload section when enabled", () => {
     const plan = makePlan({
-      upload: { enabled: true, projectAlias: "glubean-public-demo" },
+      upload: { enabled: true, projectId: "prj_demo", tokenEnv: "GLUBEAN_TOKEN_DEMO" },
     });
     const out = formatResolvedPlan(plan, "/repo");
     expect(out).toContain("Upload:");
     expect(out).toContain("enabled: true");
-    expect(out).toContain("projectAlias: glubean-public-demo");
+    expect(out).toContain("projectId: prj_demo");
+    expect(out).toContain("tokenEnv: GLUBEAN_TOKEN_DEMO");
   });
 
   test("omits upload section when disabled or absent", () => {
