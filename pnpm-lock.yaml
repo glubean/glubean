@@ -217,6 +217,9 @@ importers:
 
   packages/sdk:
     dependencies:
+      ky:
+        specifier: ^1.14.0
+        version: 1.14.3
       yaml:
         specifier: ^2.7.0
         version: 2.8.2

@@ -1,3 +1,9 @@
+// `import type` is erased at compile time — the SDK gains no runtime ky load,
+// only a type-level reference. ky is a real dependency because the entire
+// `ctx.http` contract (prefixUrl, searchParams, hooks, ResponsePromise,
+// .extend(), retry) is ky's shape; the types follow the implementation.
+import type { RetryOptions } from "ky";
+
 // =============================================================================
 // Error Types
 // =============================================================================
@@ -1316,25 +1322,31 @@ export interface HttpResponsePromise extends Promise<HttpResponse> {
 }
 
 /**
- * Retry configuration for HTTP requests.
+ * Retry configuration for HTTP requests — the full ky `RetryOptions` surface,
+ * passed through to the underlying ky client untransformed. Every ky retry
+ * capability is available:
+ * - `limit` — number of retry attempts (default: 2)
+ * - `methods` — HTTP methods to retry (default: GET, PUT, HEAD, DELETE, OPTIONS, TRACE)
+ * - `statusCodes` — status codes that trigger a retry (default: 408, 413, 429, 500, 502, 503, 504)
+ * - `afterStatusCodes` — codes that honor the `Retry-After` header
+ * - `maxRetryAfter` — cap (ms) on `Retry-After` waits
+ * - `backoffLimit` — upper bound (ms) on exponential backoff delay
+ * - `delay` — custom `(attemptCount) => ms` backoff function
+ * - `jitter` — randomize delays to avoid thundering herd
+ * - `retryOnTimeout` — retry on timeout (OFF by default; Glubean reports what
+ *   the server actually returned, so a timeout is real signal unless you opt in)
+ *
+ * Aliased to ky's type directly rather than hand-mirrored, so it never drifts
+ * from what the runtime actually accepts.
  *
  * @example
  * ```ts
  * const res = await ctx.http.get(url, {
- *   retry: { limit: 3, statusCodes: [429, 503] },
+ *   retry: { limit: 3, statusCodes: [429, 503], retryOnTimeout: true },
  * });
  * ```
  */
-export interface HttpRetryOptions {
-  /** Number of retry attempts (default: 2) */
-  limit?: number;
-  /** HTTP methods to retry (default: GET, PUT, HEAD, DELETE, OPTIONS, TRACE) */
-  methods?: string[];
-  /** HTTP status codes that trigger a retry (default: 408, 413, 429, 500, 502, 503, 504) */
-  statusCodes?: number[];
-  /** Maximum delay (ms) to wait based on Retry-After header */
-  maxRetryAfter?: number;
-}
+export type HttpRetryOptions = RetryOptions;
 
 /**
  * Options for HTTP requests.

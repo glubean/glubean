@@ -1,6 +1,6 @@
 {
   "name": "@glubean/sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "exports": {
     ".": {
@@ -37,6 +37,7 @@
     "access": "public"
   },
   "dependencies": {
+    "ky": "^1.14.0",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
