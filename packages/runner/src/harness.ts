@@ -32,10 +32,13 @@ import type {
   SchemaEntry,
   SchemaIssue,
   SchemaLike,
+  StepDefinition,
   Test,
+  TestBranchData,
   TestContext,
   ValidateOptions,
 } from "@glubean/sdk";
+import { isTestBranchStep } from "@glubean/sdk";
 import { Expectation } from "@glubean/sdk/expect";
 
 // Global error handlers for async errors that escape try/catch
@@ -700,6 +703,10 @@ const ctx = {
       passed: false,
       message,
     });
+    // Also bump the step-failed-assertion counter (like ctx.assert) so the
+    // failure is recorded even if the FailError is caught — e.g. inside a branch
+    // predicate that swallows it; the step/branch must still fail.
+    incrAssertions(false);
     throw new FailError(message);
   },
 
@@ -1772,6 +1779,11 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
       } else {
         let state: unknown = undefined;
         let stepFailed = false;
+        // First branch-decision failure message (predicate/lens threw or failed
+        // an assertion). A branch decision has no `step_end`, so result
+        // renderers that surface step/status errors would otherwise lose it;
+        // we promote it into the final status error below.
+        let branchDecisionError: string | undefined;
         // Set when a step calls ctx.skip(): skips the remaining steps and
         // marks the whole test as skipped (not failed) after teardown runs.
         let skipRequest: SkipError | undefined;
@@ -1784,23 +1796,79 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
             state = await test.setup(effectiveCtx);
           }
           if (test.steps) {
-            for (let i = 0; i < test.steps.length; i++) {
-              const step = test.steps[i];
+            // Monotonic step index across the (possibly branching) execution.
+            // For a branchless test this counts 0,1,2,… == array position, so
+            // non-branch behavior is identical to before. Counts ONLY leaf steps
+            // (step_start/step_end), NOT branch decisions — so these indices line
+            // up 1:1 with the leaves-only registry metadata, and consumers can
+            // join runtime step events to discovered steps by index.
+            let stepSeq = 0;
+            // Separate ordinal for branch decision events (kept out of the leaf
+            // step-index space so it can't desync leaf indices from metadata).
+            let branchSeq = 0;
 
+            // "step N of TOTAL" denominator: every LEAF step in the whole tree
+            // (branch decisions are not steps). A leaf emits exactly once on any
+            // path, so `stepSeq` indices are 0..leafTotal-1 and `index < total`
+            // always holds. Branchless → test.steps.length (unchanged).
+            const leafTotal = (list: StepDefinition<unknown>[]): number => {
+              let n = 0;
+              for (const s of list) {
+                if (isTestBranchStep(s)) {
+                  for (const c of s.branch.cases) n += leafTotal(c.steps);
+                  n += leafTotal(s.branch.default);
+                } else {
+                  n += 1;
+                }
+              }
+              return n;
+            };
+            const stepTotal = leafTotal(test.steps);
+
+            // Emit a skipped step_end for every leaf step in a list, recursing
+            // into branch sub-steps. Used by the skip-cascade and for the
+            // non-taken cases/default of a branch.
+            const emitSkippedTree = (list: StepDefinition<unknown>[]): void => {
+              for (const s of list) {
+                if (isTestBranchStep(s)) {
+                  for (const c of s.branch.cases) emitSkippedTree(c.steps);
+                  emitSkippedTree(s.branch.default);
+                } else {
+                  emitEvent({
+                    type: "step_end",
+                    index: stepSeq++,
+                    name: s.meta.name,
+                    status: "skipped",
+                    durationMs: 0,
+                    assertions: 0,
+                    failedAssertions: 0,
+                  });
+                }
+              }
+            };
+
+            // Recursive step-list runner. Branch sub-steps run through the same
+            // path (first-class steps, incremental state commit), mirroring the
+            // flow-side `runSteps` so teardown always sees the last committed state.
+            const runStepList = async (
+              list: StepDefinition<unknown>[],
+            ): Promise<void> => {
+            for (const step of list) {
               // If a previous step failed (or a step called ctx.skip()),
-              // skip the remaining steps.
+              // skip the remaining steps (and all their branch descendants).
               if (stepFailed || skipRequest) {
-                emitEvent({
-                  type: "step_end",
-                  index: i,
-                  name: step.meta.name,
-                  status: "skipped",
-                  durationMs: 0,
-                  assertions: 0,
-                  failedAssertions: 0,
-                });
+                emitSkippedTree([step]);
                 continue;
               }
+
+              // Branch step (condition / switchOn / switchCond): evaluate the
+              // decision, run the taken case's sub-steps, skip the rest.
+              if (isTestBranchStep(step)) {
+                await runBranchStep(step);
+                continue;
+              }
+
+              const i = stepSeq++;
 
               // Reset per-step assertion counters and set step scope
               { const trc = currentTestCtx()!; trc.stepFailedAssertions = 0; trc.stepAssertionTotal = 0; trc.currentStepIndex = i; }
@@ -1810,7 +1878,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 type: "step_start",
                 index: i,
                 name: step.meta.name,
-                total: test.steps.length,
+                total: stepTotal,
               });
 
               let stepError: string | undefined;
@@ -1980,6 +2048,167 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 // Don't throw here — let the loop continue to emit skip events
               }
             }
+            };
+
+            // Execute a branch step: evaluate the decision (value-switch subject
+            // once, or first-match predicate), emit a `branch` decision event,
+            // run the taken case's sub-steps as first-class steps, and emit
+            // skipped for every non-taken case + (if a case matched) the default.
+            const runBranchStep = async (
+              step: StepDefinition<unknown> & { branch: TestBranchData<unknown> },
+            ): Promise<void> => {
+              const branch = step.branch;
+              const ctxNow = currentTestCtx();
+              if (ctxNow) {
+                ctxNow.currentStepIndex = null;
+                // Reset the assertion counters so we can detect ctx.assert /
+                // ctx.validate failures made DURING the decision (predicates get
+                // the full ctx) and fail the branch instead of silently deciding.
+                ctxNow.stepFailedAssertions = 0;
+                ctxNow.stepAssertionTotal = 0;
+              }
+              let takenIndex: number | "default" = "default";
+              let takenValue: string | number | boolean | null | undefined;
+
+              try {
+                if (branch.mode === "value") {
+                  // Subject lens evaluated EXACTLY ONCE (test lenses may be impure).
+                  // `await` so an async lens resolves to its scalar before
+                  // matching (and a rejection is caught below as a decision
+                  // failure) — a bare Promise would never === a case value.
+                  const subject = branch.subject
+                    ? await branch.subject(effectiveCtx, state)
+                    : undefined;
+                  for (let ci = 0; ci < branch.cases.length; ci++) {
+                    if (subject === branch.cases[ci].value) {
+                      takenIndex = ci;
+                      takenValue = branch.cases[ci].value;
+                      break;
+                    }
+                  }
+                } else {
+                  for (let ci = 0; ci < branch.cases.length; ci++) {
+                    const pred = branch.cases[ci].predicate;
+                    if (!pred) continue;
+                    const result = await pred(effectiveCtx, state);
+                    // Predicate contract is boolean. A JS / `as any` caller could
+                    // return a truthy non-boolean ("false", an object); fail fast
+                    // instead of coercing (mirrors the flow-side guarantee).
+                    if (typeof result !== "boolean") {
+                      throw new Error(
+                        `condition / switchCond predicate must return a boolean; ` +
+                          `got ${result === null ? "null" : typeof result}`,
+                      );
+                    }
+                    if (result) {
+                      takenIndex = ci;
+                      break;
+                    }
+                  }
+                }
+              } catch (err) {
+                // ctx.skip() inside a predicate/lens skips the WHOLE test (like
+                // inside a step) — UNLESS a failed assertion was already recorded
+                // during the decision, in which case the failure wins over the
+                // skip (mirrors the step loop's d675fc9 semantics: a skip must
+                // not mask a real failure).
+                if (err instanceof SkipError && getStepFailedAssertions() === 0) {
+                  skipRequest = err;
+                  emitEvent({
+                    type: "branch",
+                    index: branchSeq++,
+                    name: step.meta.name,
+                    takenIndex: "default",
+                    ...(branch.message ? { message: branch.message } : {}),
+                    total: branch.cases.length,
+                  });
+                  for (const c of branch.cases) emitSkippedTree(c.steps);
+                  emitSkippedTree(branch.default);
+                  return;
+                }
+                // Branch decision failure (§7.4): the test fails; do not silently
+                // take a branch. Emit a failed branch event + skip all sub-steps.
+                // A skip that reaches here was preceded by a failed assertion.
+                const failedDuring = getStepFailedAssertions();
+                const errMessage =
+                  err instanceof SkipError
+                    ? `${failedDuring} failed assertion(s) before ctx.skip() in branch decision`
+                    : err instanceof Error
+                      ? err.message
+                      : String(err);
+                emitEvent({
+                  type: "branch",
+                  index: branchSeq++,
+                  name: step.meta.name,
+                  takenIndex: "default",
+                  ...(branch.message ? { message: branch.message } : {}),
+                  total: branch.cases.length,
+                  error: errMessage,
+                });
+                stepFailed = true;
+                if (branchDecisionError === undefined) {
+                  branchDecisionError = `branch "${step.meta.name}": ${errMessage}`;
+                }
+                for (const c of branch.cases) emitSkippedTree(c.steps);
+                emitSkippedTree(branch.default);
+                return;
+              }
+
+              // A ctx.assert(false) / ctx.validate(...) failure recorded while
+              // evaluating the decision fails the branch (the assertion event is
+              // outside any step, so step-authoritative success would miss it).
+              const decisionFailedAssertions = getStepFailedAssertions();
+              if (decisionFailedAssertions > 0) {
+                const assertErr = `${decisionFailedAssertions} failed assertion(s) during branch decision`;
+                emitEvent({
+                  type: "branch",
+                  index: branchSeq++,
+                  name: step.meta.name,
+                  takenIndex: "default",
+                  ...(branch.message ? { message: branch.message } : {}),
+                  total: branch.cases.length,
+                  error: assertErr,
+                });
+                stepFailed = true;
+                if (branchDecisionError === undefined) {
+                  branchDecisionError = `branch "${step.meta.name}": ${assertErr}`;
+                }
+                for (const c of branch.cases) emitSkippedTree(c.steps);
+                emitSkippedTree(branch.default);
+                return;
+              }
+
+              emitEvent({
+                type: "branch",
+                index: branchSeq++,
+                name: step.meta.name,
+                takenIndex,
+                ...(takenValue !== undefined ? { takenValue } : {}),
+                ...(branch.message ? { message: branch.message } : {}),
+                total: branch.cases.length,
+              });
+
+              // Emit/run leaves in REGISTRY (source) order — cases 0..N then
+              // default — running the taken one as first-class steps and
+              // skipping the rest IN PLACE. This keeps the monotonic leaf
+              // `stepSeq` aligned with `flattenStepsForRegistry` order, so
+              // consumers join runtime events to discovered steps by index even
+              // when a later case (or the default) is taken.
+              for (let ci = 0; ci < branch.cases.length; ci++) {
+                if (ci === takenIndex) {
+                  await runStepList(branch.cases[ci].steps);
+                } else {
+                  emitSkippedTree(branch.cases[ci].steps);
+                }
+              }
+              if (takenIndex === "default") {
+                await runStepList(branch.default);
+              } else {
+                emitSkippedTree(branch.default);
+              }
+            };
+
+            await runStepList(test.steps);
           }
         } finally {
           if (test.teardown) {
@@ -2008,7 +2237,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
         // If any step failed (assertion or throw), mark overall test as failed
         if (stepFailed) {
-          throw new Error("One or more steps failed");
+          throw new Error(branchDecisionError ?? "One or more steps failed");
         }
       }
     };

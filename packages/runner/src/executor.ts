@@ -345,6 +345,21 @@ export type ExecutionEvent = { testId?: string } & (
     attempts?: number;
     retriesUsed?: number;
   }
+  | {
+    type: "branch";
+    index: number;
+    name: string;
+    /** Which case was taken (0-based), or "default" if no case matched. */
+    takenIndex: number | "default";
+    /** value-switch only: the scalar the subject matched. */
+    takenValue?: string | number | boolean | null;
+    /** Optional display label. */
+    message?: string;
+    /** Number of cases (excluding default). */
+    total: number;
+    /** Set when the branch decision itself failed (predicate threw). */
+    error?: string;
+  }
   | { type: "timeout_update"; timeout: number }
   | { type: "session:set"; key: string; value: unknown; ts: number }
   | {
@@ -398,6 +413,7 @@ export type TimelineEvent =
   | { type: "metric"; ts: number; testId?: string; stepIndex?: number; name: string; value: number; unit?: string; tags?: Record<string, string> }
   | { type: "step_start"; ts: number; testId?: string; index: number; name: string; total: number }
   | { type: "step_end"; ts: number; testId?: string; index: number; name: string; status: "passed" | "failed" | "skipped"; durationMs: number; assertions: number; failedAssertions: number; error?: string; returnState?: unknown; attempts?: number; retriesUsed?: number }
+  | { type: "branch"; ts: number; testId?: string; index: number; name: string; takenIndex: number | "default"; takenValue?: string | number | boolean | null; message?: string; total: number; error?: string }
   | { type: "summary"; ts: number; testId?: string; data: { httpRequestTotal: number; httpErrorTotal: number; httpErrorRate: number; assertionTotal: number; assertionFailed: number; warningTotal: number; warningTriggered: number; schemaValidationTotal: number; schemaValidationFailed: number; schemaValidationWarnings: number; stepTotal: number; stepPassed: number; stepFailed: number; stepSkipped: number } };
 
 export type EventHandler = (event: TimelineEvent) => void | Promise<void>;
@@ -1178,6 +1194,9 @@ export class TestExecutor {
           break;
         case "step_end":
           timelineEvent = { type: "step_end", ts, ...(includeTestId && { testId }), index: event.index, name: event.name, status: event.status, durationMs: event.durationMs, assertions: event.assertions, failedAssertions: event.failedAssertions, error: event.error, attempts: event.attempts, retriesUsed: event.retriesUsed, ...(event.returnState !== undefined && { returnState: event.returnState }) };
+          break;
+        case "branch":
+          timelineEvent = { type: "branch", ts, ...(includeTestId && { testId }), index: event.index, name: event.name, takenIndex: event.takenIndex, ...(event.takenValue !== undefined && { takenValue: event.takenValue }), ...(event.message !== undefined && { message: event.message }), total: event.total, ...(event.error !== undefined && { error: event.error }) };
           break;
         case "timeout_update":
           break;

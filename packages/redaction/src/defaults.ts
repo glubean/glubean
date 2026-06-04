@@ -172,6 +172,39 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "returnState",
     handler: "json",
   },
+  {
+    id: "branch.error",
+    name: "Branch decision error",
+    event: "branch",
+    target: "error",
+    handler: "raw-string",
+  },
+  {
+    id: "branch.takenValue",
+    name: "Branch matched value",
+    event: "branch",
+    target: "takenValue",
+    // raw-string scans string values for secret patterns; non-string scalars
+    // (number/boolean/null) pass through untouched.
+    handler: "raw-string",
+  },
+  {
+    // The branch label (author-provided `message`, also copied into `name`)
+    // could embed a secret; scan it like other free text. Normal labels are
+    // left intact (raw-string only masks matching secret patterns).
+    id: "branch.message",
+    name: "Branch label",
+    event: "branch",
+    target: "message",
+    handler: "raw-string",
+  },
+  {
+    id: "branch.name",
+    name: "Branch name label",
+    event: "branch",
+    target: "name",
+    handler: "raw-string",
+  },
 ];
 
 // ── Built-in pattern source strings ──────────────────────────────────────────

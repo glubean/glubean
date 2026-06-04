@@ -2293,12 +2293,132 @@ export type TeardownFunction<S = unknown> = (
   state: S,
 ) => Promise<void>;
 
+/** JSON scalar — value-switch case keys (test-side branch). */
+export type StepJsonScalar = string | number | boolean | null;
+
 /**
- * Internal step definition (stored in builder).
+ * Runtime branch data attached to a `StepDefinition` via its optional `branch`
+ * field (condition / switchOn / switchCond). The harness executes it as a
+ * runtime decision point whose taken case's sub-steps are first-class steps
+ * (step_start/step_end), with non-taken sub-steps emitted as `skipped`. `mode`
+ * discriminates a value-switch (subject lens evaluated once + scalar match)
+ * from a predicate-branch (condition = single case + default; cond-switch = N
+ * cases). test-side predicates/lenses are arbitrary functions (may be async /
+ * impure / read ctx) — there is no projection, so no purity gate.
+ */
+export interface TestBranchData<S = unknown> {
+  mode: "predicate" | "value";
+  /** Display label shown on the branch decision event (optional). */
+  message?: string;
+  /** value-mode only: subject lens, evaluated exactly once against committed state. */
+  subject?: (ctx: TestContext, state: S) => unknown;
+  cases: Array<{
+    /** predicate-mode: arbitrary boolean predicate (first-match). */
+    predicate?: (ctx: TestContext, state: S) => boolean | Promise<boolean>;
+    /** value-mode: scalar compared (===) against the subject. */
+    value?: StepJsonScalar;
+    /** per-case display label (optional). */
+    message?: string;
+    steps: StepDefinition<S>[];
+  }>;
+  default: StepDefinition<S>[];
+}
+
+/**
+ * Internal step definition (stored in builder). A normal step has a callable
+ * `fn`; a branch step (condition/switch) additionally carries `branch` and the
+ * harness dispatches on it before ever calling `fn` (which is a throwing stub).
  */
 export interface StepDefinition<S = unknown> {
   meta: StepMeta;
   fn: StepFunction<S>;
+  /** Present iff this is a branch step. */
+  branch?: TestBranchData<S>;
+}
+
+/** Narrow a StepDefinition to a branch step. */
+export function isTestBranchStep<S>(
+  step: StepDefinition<S>,
+): step is StepDefinition<S> & { branch: TestBranchData<S> } {
+  return step.branch !== undefined;
+}
+
+/** No-else branch shape guard (same intent as the flow side): forbids added keys. */
+export type StepNoExtraKeys<R, S> = { [K in Exclude<keyof R, keyof S>]: never };
+
+/** `test().condition` spec — arbitrary runtime predicate (may be async / impure / read ctx). */
+export interface TestConditionSpec<S, Ctx extends TestContext = TestContext> {
+  predicate: (ctx: Ctx, state: S) => boolean | Promise<boolean>;
+  /** Display label shown on the branch decision event. */
+  message?: string;
+}
+
+/** Module-private phantom brand making TestFragmentBuilder invariant in State. */
+declare const TEST_FRAGMENT_STATE: unique symbol;
+
+/**
+ * Restricted builder for a `test()` branch body (condition then/else, switch
+ * case/default). Exposes step / use / condition / switchOn / switchCond and
+ * accumulates them into the branch node; it deliberately does NOT expose
+ * setup / teardown / meta / only / skip / build. Invariant in `State` via the
+ * phantom brand (same convergence guarantee as FlowFragmentBuilder).
+ */
+export interface TestFragmentBuilder<S = unknown, Ctx extends TestContext = TestContext> {
+  readonly [TEST_FRAGMENT_STATE]: (s: S) => S;
+
+  // Void-preserving optionless overload FIRST (mirrors TestBuilder.step): a
+  // step that returns nothing keeps the State type, so the common
+  // assertion-only `b.step("check", async (ctx, s) => { ... })` form doesn't
+  // erase state to `void` (the runtime also preserves state on undefined return).
+  step(
+    name: string,
+    fn: (ctx: Ctx, state: S) => Promise<void>,
+  ): TestFragmentBuilder<S, Ctx>;
+  step<NewS>(
+    name: string,
+    fn: (ctx: Ctx, state: S) => Promise<NewS>,
+  ): TestFragmentBuilder<NewS, Ctx>;
+  step(
+    name: string,
+    options: Omit<StepMeta, "name">,
+    fn: (ctx: Ctx, state: S) => Promise<void>,
+  ): TestFragmentBuilder<S, Ctx>;
+  step<NewS>(
+    name: string,
+    options: Omit<StepMeta, "name">,
+    fn: (ctx: Ctx, state: S) => Promise<NewS>,
+  ): TestFragmentBuilder<NewS, Ctx>;
+
+  use<NewS>(
+    fn: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<NewS, Ctx>,
+  ): TestFragmentBuilder<NewS, Ctx>;
+
+  condition<R extends S = S>(
+    spec: TestConditionSpec<S, Ctx>,
+    thenBranch: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<R & StepNoExtraKeys<R, S>, Ctx>,
+  ): TestFragmentBuilder<S, Ctx>;
+  condition<T>(
+    spec: TestConditionSpec<S, Ctx>,
+    thenBranch: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<T, Ctx>,
+    elseBranch: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<NoInfer<T>, Ctx>,
+  ): TestFragmentBuilder<T, Ctx>;
+
+  switchOn<V>(lens: (ctx: Ctx, state: S) => V): <T>(
+    // `Awaited<V>` unwraps async subject lenses (the harness awaits them).
+    cases: ReadonlyArray<{
+      value: [Exclude<Awaited<V>, undefined>] extends [StepJsonScalar] ? Exclude<Awaited<V>, undefined> : never;
+      then: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<NoInfer<T>, Ctx>;
+    }>,
+    deflt: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<T, Ctx>,
+  ) => TestFragmentBuilder<T, Ctx>;
+
+  switchCond<T>(
+    cases: ReadonlyArray<{
+      when: (ctx: Ctx, state: S) => boolean | Promise<boolean>;
+      then: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<NoInfer<T>, Ctx>;
+    }>,
+    deflt: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<T, Ctx>,
+  ): TestFragmentBuilder<T, Ctx>;
 }
 
 /**
@@ -2316,7 +2436,7 @@ export interface Test<S = unknown> {
   setup?: SetupFunction<S>;
   /** Teardown function (for step-based tests) */
   teardown?: TeardownFunction<S>;
-  /** Steps (for step-based tests) */
+  /** Steps (for step-based tests). A step may carry `branch` (condition/switch). */
   steps?: StepDefinition<S>[];
   /**
    * Fixture definitions provided by `test.extend()`.

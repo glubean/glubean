@@ -1929,6 +1929,25 @@ export async function runCommand(
             );
             break;
 
+          case "branch": {
+            const label = event.message ? ` ${colors.dim}(${event.message})${colors.reset}` : "";
+            if (event.error !== undefined) {
+              console.log(
+                `    ${colors.cyan}◇${colors.reset} ${colors.bold}branch${colors.reset}${label} ${colors.red}✗ ${event.error}${colors.reset}`,
+              );
+            } else {
+              const taken = event.takenIndex === "default"
+                ? "default"
+                : `case ${event.takenIndex}${
+                    event.takenValue !== undefined ? ` = ${JSON.stringify(event.takenValue)}` : ""
+                  }`;
+              console.log(
+                `    ${colors.cyan}◇${colors.reset} ${colors.bold}branch${colors.reset}${label} ${colors.dim}→ ${taken}${colors.reset}`,
+              );
+            }
+            break;
+          }
+
           case "step_end": {
             const stepIcon = event.status === "passed"
               ? `${colors.green}✓${colors.reset}`

@@ -571,6 +571,64 @@ describe("redactEvent", () => {
     expect(headers.authorization).toBe("[REDACTED]");
   });
 
+  test("redacts secrets in branch decision error (mirrors status.error)", () => {
+    const scopes = compileDefaults();
+    const errStr = "predicate threw: Authorization Bearer abc123secretToken";
+    const branchOut = redactEvent(
+      { type: "branch", index: 0, name: "<predicate-branch>", takenIndex: "default", total: 1, error: errStr },
+      scopes,
+      "simple",
+    );
+    // The bearer token must be masked, just like status.error.
+    expect(branchOut.error).not.toContain("abc123secretToken");
+    // And branch.error is now wired identically to status.error.
+    const statusOut = redactEvent({ type: "status", status: "failed", error: errStr }, scopes, "simple");
+    expect(branchOut.error).toBe(statusOut.error);
+  });
+
+  test("redacts secrets in branch takenValue; passes non-string scalars through", () => {
+    const scopes = compileDefaults();
+    // String value-switch key carrying a secret → masked.
+    const strOut = redactEvent(
+      { type: "branch", index: 0, name: "x", takenIndex: 0, takenValue: "Bearer abc123secretToken", total: 1 },
+      scopes,
+      "simple",
+    );
+    expect(strOut.takenValue).not.toContain("abc123secretToken");
+    // Numeric value-switch key (e.g. HTTP status) is untouched.
+    const numOut = redactEvent(
+      { type: "branch", index: 0, name: "x", takenIndex: 0, takenValue: 404, total: 1 },
+      scopes,
+      "simple",
+    );
+    expect(numOut.takenValue).toBe(404);
+  });
+
+  test("redacts secrets in branch label (message + name), leaves normal labels", () => {
+    const scopes = compileDefaults();
+    const out = redactEvent(
+      {
+        type: "branch",
+        index: 0,
+        name: "gate Bearer abc123secretToken",
+        takenIndex: "default",
+        message: "gate Bearer abc123secretToken",
+        total: 1,
+      },
+      scopes,
+      "simple",
+    );
+    expect(out.message).not.toContain("abc123secretToken");
+    expect(out.name).not.toContain("abc123secretToken");
+    // A normal label with no secret pattern is left intact.
+    const plain = redactEvent(
+      { type: "branch", index: 0, name: "is admin", takenIndex: 0, message: "is admin", total: 1 },
+      scopes,
+      "simple",
+    );
+    expect(plain.message).toBe("is admin");
+  });
+
   test("redacts trace URL query params", () => {
     const scopes = compileDefaults();
     const event = {

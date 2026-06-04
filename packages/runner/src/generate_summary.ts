@@ -61,6 +61,7 @@ export function generateSummary(events: TimelineEvent[]): Summary {
         else if (e.status === "skipped") stepSkipped++;
         break;
 
+
       case "warning":
         warningTotal++;
         if (!e.condition) warningTriggered++;
@@ -99,6 +100,11 @@ export function generateSummary(events: TimelineEvent[]): Summary {
       const s = (e as { status?: string }).status;
       return s !== "completed" && s !== "skipped";
     }
+    // A branch decision that threw (predicate/lens error) is a failure even if
+    // no leaf step ran, so a summary recomputed from events agrees with
+    // result.success. Check PRESENCE (an empty-string error message is still a
+    // failure), not truthiness.
+    if (t === "branch") return (e as { error?: string }).error !== undefined;
     return false;
   });
   if (hasHardFailure) {
