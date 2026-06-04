@@ -1204,6 +1204,32 @@ export function extractMappings(fn: (state: any) => any): FieldMapping[] {
 }
 
 /**
+ * Run a single-selector lens `fn: (state) => state.a.b.c` through the strict
+ * tracing Proxy and return the read path (root segment dropped), e.g.
+ * `s => s.lookup.status` → `["lookup", "status"]`.
+ *
+ * Used by the condition/switch predicate builders (contract-flow-condition.ts)
+ * to capture a predicate's read path at construction time. The strict Proxy
+ * enforces purity (method calls / `new` / arithmetic-via-coercion throw
+ * `LensPurityError`); callers add a source-level single-selector gate on top
+ * to also reject ternaries / free-variable reads the Proxy can't see.
+ *
+ * Throws `LensPurityError` if the lens does not resolve to a single traced
+ * value (e.g. returns an object literal, a constant, or `undefined`).
+ */
+export function extractSelectorPath(fn: (state: any) => any): string[] {
+  const result = fn(makeLensProxy("state"));
+  if (!isTracedValue(result)) {
+    throw new LensPurityError(
+      "state",
+      "selector must read a single state path (e.g. s => s.a.b), not compute or repack a value",
+    );
+  }
+  const full = (result as any)[TRACE_MARKER] as string; // "state.lookup.status"
+  return full.split(".").slice(1); // drop "state" root
+}
+
+/**
  * Extract FieldMappings from `out: (state, response) => newState`.
  * Same purity contract as `extractMappings`.
  */
