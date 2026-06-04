@@ -295,6 +295,86 @@ const sampleFlow: NormalizedFlowMeta = {
   ],
 };
 
+const branchFlow: NormalizedFlowMeta = {
+  id: "branch-flow",
+  exportName: "branchFlow",
+  protocol: "flow",
+  steps: [
+    {
+      kind: "branch",
+      mode: "value",
+      name: "route-by-role",
+      subjectPath: ["role"],
+      cases: [
+        {
+          value: "admin",
+          steps: [{ kind: "compute", name: "to-panel", reads: ["role"], writes: ["panel"] }],
+        },
+      ],
+      default: [{ kind: "compute", name: "to-home", reads: [], writes: [] }],
+    },
+    {
+      kind: "branch",
+      mode: "predicate",
+      cases: [
+        {
+          message: "server error",
+          predicate: { kind: "compare", op: "gte", path: ["status"], value: 500 },
+          steps: [
+            {
+              kind: "contract-call",
+              name: "alert",
+              contractId: "ops.alert",
+              caseKey: "fire",
+              protocol: "http",
+              target: "POST /alert",
+            },
+          ],
+        },
+      ],
+      default: [],
+    },
+  ],
+};
+
+describe("formatFlowsMdSection — branch", () => {
+  test("renders value + predicate branches with nested steps", () => {
+    const md = formatFlowsMdSection([branchFlow]);
+    expect(md).toContain("1. **<branch:value>** — route-by-role (on: role)");
+    expect(md).toContain('- case "admin":');
+    expect(md).toContain("to-panel");
+    expect(md).toContain("- default:");
+    expect(md).toContain("to-home");
+    expect(md).toContain("2. **<branch:predicate>**");
+    // predicate rendered compactly + message shown
+    expect(md).toContain('case "server error" [status gte 500]');
+    expect(md).toContain("ops.alert#fire");
+  });
+});
+
+describe("flowToJson — branch", () => {
+  test("serializes branch recursively + JSON round-trips", () => {
+    const obj = flowToJson(branchFlow);
+    const steps = obj.steps as any[];
+    expect(steps[0].kind).toBe("branch");
+    expect(steps[0].mode).toBe("value");
+    expect(steps[0].subjectPath).toEqual(["role"]);
+    expect(steps[0].cases[0].value).toBe("admin");
+    expect(steps[0].cases[0].steps[0]).toMatchObject({ kind: "compute", name: "to-panel" });
+    expect(steps[0].default[0]).toMatchObject({ kind: "compute", name: "to-home" });
+    expect(steps[1].mode).toBe("predicate");
+    expect(steps[1].cases[0].predicate).toEqual({
+      kind: "compare",
+      op: "gte",
+      path: ["status"],
+      value: 500,
+    });
+    expect(steps[1].cases[0].steps[0]).toMatchObject({ kind: "contract-call", contractId: "ops.alert" });
+    const cloned = JSON.parse(JSON.stringify(obj));
+    expect(cloned).toEqual(obj);
+  });
+});
+
 describe("formatFlowsMdSection", () => {
   test("renders flow with contract-call + compute steps and field mappings", () => {
     const md = formatFlowsMdSection([sampleFlow]);

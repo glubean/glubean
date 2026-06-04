@@ -1880,7 +1880,11 @@ export function injectFlowSequenceExtensions(
   flows: Array<{
     id: string;
     steps: Array<{
-      kind: "contract-call" | "compute";
+      // `branch` steps are intentionally accepted but never match the
+      // all-HTTP gate below (a branch is not a `contract-call`), so any flow
+      // containing one is skipped — correct, since the path-keyed extension
+      // only makes sense for linear all-HTTP flows.
+      kind: "contract-call" | "compute" | "branch";
       name?: string;
       protocol?: string;
       target?: string;

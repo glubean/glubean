@@ -2460,18 +2460,7 @@ export interface RegisteredTestMeta {
     id: string;
     description?: string;
     tags?: string[];
-    steps: Array<{
-      kind: "contract-call" | "compute";
-      name?: string;
-      contractId?: string;
-      caseKey?: string;
-      protocol?: string;
-      target?: string;
-      inputs?: import("./contract-types.js").FieldMapping[];
-      outputs?: import("./contract-types.js").FieldMapping[];
-      reads?: string[];
-      writes?: string[];
-    }>;
+    steps: import("./contract-types.js").FlowRegistryStep[];
     setupDynamic?: true;
   };
 }

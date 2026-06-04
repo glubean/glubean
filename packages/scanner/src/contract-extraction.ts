@@ -148,6 +148,20 @@ export type ExtractedContract = NormalizedContractMeta;
 /**
  * Single step in a flow projection. Discriminated by `kind`.
  */
+/**
+ * JSON-safe predicate descriptor for a predicate-mode branch case.
+ * Mirrors the SDK's `ExtractedPredicate` (scanner is dep-free, so the shape is
+ * duplicated structurally rather than imported).
+ */
+export type NormalizedPredicate =
+  | { kind: "compare"; op: string; path: string[]; value: string | number | boolean | null }
+  | { kind: "in"; path: string[]; values: Array<string | number | boolean | null> }
+  | { kind: "presence"; op: string; path: string[] }
+  | { kind: "matches"; path: string[]; pattern: string; flags?: string }
+  | { kind: "and" | "or"; clauses: NormalizedPredicate[] }
+  | { kind: "not"; clause: NormalizedPredicate }
+  | { kind: "opaque"; strictness: "L1" | "L0"; mayDoAsyncIO: boolean };
+
 export type NormalizedFlowStep =
   | {
       kind: "contract-call";
@@ -164,6 +178,28 @@ export type NormalizedFlowStep =
       name?: string;
       reads: string[];
       writes: string[];
+    }
+  | {
+      /**
+       * Branch (condition / switch). `mode` discriminates value-switch vs
+       * predicate-branch. Sub-steps (cases + default) nest recursively so
+       * downstream consumers can render/inspect the full tree.
+       */
+      kind: "branch";
+      mode: "value" | "predicate";
+      name?: string;
+      /** value-mode only: the traced subject lens path. */
+      subjectPath?: string[];
+      cases: Array<{
+        /** value-mode: scalar matched against the subject. */
+        value?: string | number | boolean | null;
+        /** predicate-mode: human-facing fallback message for the branch. */
+        message?: string;
+        /** predicate-mode: JSON-safe predicate (absent in the duck-typed fallback path). */
+        predicate?: NormalizedPredicate;
+        steps: NormalizedFlowStep[];
+      }>;
+      default: NormalizedFlowStep[];
     };
 
 export interface NormalizedFieldMapping {
@@ -461,7 +497,7 @@ export function protocolContractToNormalized(
   };
 }
 
-function flowContractToNormalized(
+export function flowContractToNormalized(
   value: { _flow: any; _extracted?: any },
   exportName: string,
 ): NormalizedFlowMeta {
@@ -481,26 +517,7 @@ function flowContractToNormalized(
       ...(ex.skip !== undefined ? { skip: ex.skip } : {}),
       ...(ex.only !== undefined ? { only: ex.only } : {}),
       setupDynamic: ex.setupDynamic,
-      steps: (ex.steps ?? []).map((s: any): NormalizedFlowStep => {
-        if (s.kind === "compute") {
-          return {
-            kind: "compute",
-            name: s.name,
-            reads: s.reads ?? [],
-            writes: s.writes ?? [],
-          };
-        }
-        return {
-          kind: "contract-call",
-          name: s.name,
-          contractId: s.contractId ?? "",
-          caseKey: s.caseKey ?? "",
-          protocol: s.protocol ?? "",
-          target: s.target ?? "",
-          inputs: s.inputs,
-          outputs: s.outputs,
-        };
-      }),
+      steps: (ex.steps ?? []).map(mapExtractedStep),
     };
   }
 
@@ -519,19 +536,77 @@ function flowContractToNormalized(
     ...(f.skip !== undefined ? { skip: f.skip } : {}),
     ...(f.only !== undefined ? { only: f.only } : {}),
     setupDynamic: f.setup ? true : undefined,
-    steps: (f.steps ?? []).map((s: any): NormalizedFlowStep => {
-      if (s.kind === "compute") {
-        return { kind: "compute", name: s.name, reads: [], writes: [] };
-      }
-      return {
-        kind: "contract-call",
-        name: s.name,
-        contractId: s.contract?._projection?.id ?? s.ref?.contractId ?? "",
-        caseKey: s.caseKey ?? s.ref?.caseKey ?? "",
-        protocol: s.ref?.protocol ?? "",
-        target: s.ref?.target ?? "",
-      };
-    }),
+    steps: (f.steps ?? []).map(mapRuntimeFlowStep),
+  };
+}
+
+/**
+ * Recursively normalize a step from the pre-computed `_extracted` projection
+ * (JSON-safe). Branch cases + default nest through the same mapper so nested
+ * branches and their leaf steps are preserved rather than collapsed into an
+ * empty contract-call.
+ */
+function mapExtractedStep(s: any): NormalizedFlowStep {
+  if (s.kind === "compute") {
+    return { kind: "compute", name: s.name, reads: s.reads ?? [], writes: s.writes ?? [] };
+  }
+  if (s.kind === "branch") {
+    return {
+      kind: "branch",
+      mode: s.mode,
+      ...(s.name !== undefined ? { name: s.name } : {}),
+      ...(s.subjectPath !== undefined ? { subjectPath: s.subjectPath } : {}),
+      cases: (s.cases ?? []).map((c: any) => ({
+        ...(c.value !== undefined ? { value: c.value } : {}),
+        ...(c.message !== undefined ? { message: c.message } : {}),
+        ...(c.predicate !== undefined ? { predicate: c.predicate as NormalizedPredicate } : {}),
+        steps: (c.steps ?? []).map(mapExtractedStep),
+      })),
+      default: (s.default ?? []).map(mapExtractedStep),
+    };
+  }
+  return {
+    kind: "contract-call",
+    name: s.name,
+    contractId: s.contractId ?? "",
+    caseKey: s.caseKey ?? "",
+    protocol: s.protocol ?? "",
+    target: s.target ?? "",
+    inputs: s.inputs,
+    outputs: s.outputs,
+  };
+}
+
+/**
+ * Recursively normalize a step from a duck-typed runtime `_flow`. The runtime
+ * predicate is not JSON-safe (branded builder object), so the predicate is
+ * omitted in this fallback path; sub-steps are still preserved.
+ */
+function mapRuntimeFlowStep(s: any): NormalizedFlowStep {
+  if (s.kind === "compute") {
+    return { kind: "compute", name: s.name, reads: [], writes: [] };
+  }
+  if (s.kind === "branch") {
+    return {
+      kind: "branch",
+      mode: s.mode,
+      ...(s.name !== undefined ? { name: s.name } : {}),
+      ...(s.subject?.path !== undefined ? { subjectPath: [...s.subject.path] } : {}),
+      cases: (s.cases ?? []).map((c: any) => ({
+        ...(c.value !== undefined ? { value: c.value } : {}),
+        ...(c.message !== undefined ? { message: c.message } : {}),
+        steps: (c.steps ?? []).map(mapRuntimeFlowStep),
+      })),
+      default: (s.default ?? []).map(mapRuntimeFlowStep),
+    };
+  }
+  return {
+    kind: "contract-call",
+    name: s.name,
+    contractId: s.contract?._projection?.id ?? s.ref?.contractId ?? "",
+    caseKey: s.caseKey ?? s.ref?.caseKey ?? "",
+    protocol: s.ref?.protocol ?? "",
+    target: s.ref?.target ?? "",
   };
 }
 

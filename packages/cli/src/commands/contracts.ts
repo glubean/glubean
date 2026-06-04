@@ -11,6 +11,7 @@ import { extractContractsFromProject } from "@glubean/scanner";
 import type {
   NormalizedFlowMeta,
   NormalizedFlowStep,
+  NormalizedPredicate,
   NormalizedFieldMapping,
 } from "@glubean/scanner";
 import type { ContractStaticMeta, ContractCaseStaticMeta } from "@glubean/scanner/static";
@@ -260,6 +261,28 @@ function formatMappingArrow(m: NormalizedFieldMapping): string {
   return `${m.target} ← (pass-through)`;
 }
 
+/** Compact, human-readable rendering of a branch predicate for CLI output. */
+function formatPredicate(p: NormalizedPredicate): string {
+  switch (p.kind) {
+    case "compare":
+      return `${p.path.join(".")} ${p.op} ${JSON.stringify(p.value)}`;
+    case "in":
+      return `${p.path.join(".")} in [${p.values.map((v) => JSON.stringify(v)).join(", ")}]`;
+    case "presence":
+      return `${p.path.join(".")} ${p.op}`;
+    case "matches":
+      return `${p.path.join(".")} matches /${p.pattern}/${p.flags ?? ""}`;
+    case "and":
+      return p.clauses.map(formatPredicate).join(" AND ");
+    case "or":
+      return p.clauses.map(formatPredicate).join(" OR ");
+    case "not":
+      return `NOT (${formatPredicate(p.clause)})`;
+    case "opaque":
+      return `<opaque ${p.strictness}${p.mayDoAsyncIO ? " async/IO" : ""}>`;
+  }
+}
+
 function formatFlowStep(step: NormalizedFlowStep, index: number): string[] {
   const lines: string[] = [];
   if (step.kind === "compute") {
@@ -271,6 +294,30 @@ function formatFlowStep(step: NormalizedFlowStep, index: number): string[] {
       if (step.writes.length > 0) lines.push(`   - writes: ${step.writes.join(", ")}`);
     } else {
       lines.push("   - *(mappings not available)*");
+    }
+    return lines;
+  }
+  if (step.kind === "branch") {
+    const name = step.name ? ` — ${step.name}` : "";
+    const subj =
+      step.mode === "value" && step.subjectPath ? ` (on: ${step.subjectPath.join(".")})` : "";
+    lines.push(`${index + 1}. **<branch:${step.mode}>**${name}${subj}`);
+    const emitSub = (sub: NormalizedFlowStep, i: number) => {
+      for (const l of formatFlowStep(sub, i)) lines.push(`     ${l}`);
+    };
+    for (const c of step.cases) {
+      const label =
+        step.mode === "value"
+          ? `case ${JSON.stringify(c.value)}`
+          : `case${c.message ? ` "${c.message}"` : ""}${
+              c.predicate ? ` [${formatPredicate(c.predicate)}]` : ""
+            }`;
+      lines.push(`   - ${label}:`);
+      c.steps.forEach(emitSub);
+    }
+    if (step.default.length > 0) {
+      lines.push("   - default:");
+      step.default.forEach(emitSub);
     }
     return lines;
   }
@@ -315,32 +362,45 @@ export function formatFlowsMdSection(flows: NormalizedFlowMeta[]): string {
   return lines.join("\n");
 }
 
+/** Recursively serialize a flow step to JSON (branch cases + default nest). */
+function flowStepToJson(s: NormalizedFlowStep): Record<string, unknown> {
+  if (s.kind === "compute") {
+    return { kind: "compute", name: s.name, reads: s.reads, writes: s.writes };
+  }
+  if (s.kind === "branch") {
+    return {
+      kind: "branch",
+      mode: s.mode,
+      name: s.name,
+      ...(s.subjectPath !== undefined ? { subjectPath: s.subjectPath } : {}),
+      cases: s.cases.map((c) => ({
+        ...(c.value !== undefined ? { value: c.value } : {}),
+        ...(c.message !== undefined ? { message: c.message } : {}),
+        ...(c.predicate !== undefined ? { predicate: c.predicate } : {}),
+        steps: c.steps.map(flowStepToJson),
+      })),
+      default: s.default.map(flowStepToJson),
+    };
+  }
+  return {
+    kind: "contract-call",
+    name: s.name,
+    contractId: s.contractId,
+    caseKey: s.caseKey,
+    protocol: s.protocol,
+    target: s.target,
+    inputs: s.inputs,
+    outputs: s.outputs,
+  };
+}
+
 export function flowToJson(f: NormalizedFlowMeta): Record<string, unknown> {
   return {
     id: f.id,
     description: f.description,
     tags: f.tags,
     setupDynamic: f.setupDynamic,
-    steps: f.steps.map((s) => {
-      if (s.kind === "compute") {
-        return {
-          kind: "compute",
-          name: s.name,
-          reads: s.reads,
-          writes: s.writes,
-        };
-      }
-      return {
-        kind: "contract-call",
-        name: s.name,
-        contractId: s.contractId,
-        caseKey: s.caseKey,
-        protocol: s.protocol,
-        target: s.target,
-        inputs: s.inputs,
-        outputs: s.outputs,
-      };
-    }),
+    steps: f.steps.map(flowStepToJson),
   };
 }
 

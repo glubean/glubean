@@ -36,6 +36,7 @@ import type {
   FlowContract,
   FlowMeta,
   FlowRegistryMeta,
+  FlowRegistryStep,
   ProtocolContract,
   RuntimeComputeStep,
   RuntimeContractCallStep,
@@ -43,6 +44,7 @@ import type {
   RuntimeFlowStep,
 } from "./contract-types.js";
 import { registerTest } from "./internal.js";
+import { selectBranchSteps, extractBranchStep } from "./contract-flow-condition.js";
 import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
 import {
   getExplicitInput,
@@ -953,13 +955,39 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
 
 function stepProjectionToRegistry(
   step: ExtractedFlowStep,
-): FlowRegistryMeta["steps"][number] {
+): FlowRegistryStep {
   if (step.kind === "compute") {
     return {
       kind: "compute",
       name: step.name,
       reads: step.reads,
       writes: step.writes,
+    };
+  }
+  if (step.kind === "branch") {
+    if (step.mode === "value") {
+      return {
+        kind: "branch",
+        mode: "value",
+        name: step.name,
+        subjectPath: step.subjectPath,
+        cases: step.cases.map((c) => ({
+          value: c.value,
+          steps: c.steps.map(stepProjectionToRegistry),
+        })),
+        default: step.default.map(stepProjectionToRegistry),
+      };
+    }
+    return {
+      kind: "branch",
+      mode: "predicate",
+      name: step.name,
+      cases: step.cases.map((c) => ({
+        message: c.message,
+        predicate: c.predicate,
+        steps: c.steps.map(stepProjectionToRegistry),
+      })),
+      default: step.default.map(stepProjectionToRegistry),
     };
   }
   return {
@@ -990,7 +1018,19 @@ export async function runFlow<State>(
     : (undefined as State);
 
   try {
-    for (const step of runtime.steps) {
+    // Recursive step executor. `state` is the closure-level committed cell —
+    // branch sub-steps read and write the same `state`, so a taken branch can
+    // observe and mutate flow state exactly like a top-level step. Non-taken
+    // branches never run (and so never touch state). Branches nest via recursion.
+    const runSteps = async (steps: RuntimeFlowStep[]): Promise<void> => {
+    for (const step of steps) {
+      if (step.kind === "branch") {
+        // Evaluate selector/predicates against the current committed state,
+        // then execute only the matched case's sub-steps (or default).
+        const taken = await selectBranchSteps(step, state, ctx);
+        await runSteps(taken);
+        continue;
+      }
       if (step.kind === "compute") {
         // Compute: synchronous pure function. Enforce both syntactic and
         // value-level async rejection.
@@ -1088,6 +1128,8 @@ export async function runFlow<State>(
         state = step.bindings.out(state, response) as State;
       }
     }
+    };
+    await runSteps(runtime.steps);
   } finally {
     if (runtime.teardown) {
       // flow.teardown runs in Rule 2 outer-finally. Its errors are logged
@@ -1116,6 +1158,75 @@ export async function runFlow<State>(
 export function normalizeFlow<State>(
   runtime: RuntimeFlowProjection<State> & { id: string },
 ): ExtractedFlowProjection {
+  // Recursive single-step normalizer. Branch sub-steps (cases + default) are
+  // normalized through the same helper, so nested branches and any lens-purity
+  // diagnostics inside them are handled identically at every depth.
+  const normalizeStep = (s: RuntimeFlowStep, idx: number): ExtractedFlowStep => {
+    const stepLabel = s.name ??
+      (s.kind === "contract-call" ? `${s.contract._projection.id}#${s.caseKey}` : `step-${idx + 1}`);
+
+    if (s.kind === "branch") {
+      // Recurse over each case/default sub-step list. We re-index from 0 within
+      // the branch for labeling; the branch name (if any) carries outer context.
+      return extractBranchStep(s, (steps) => steps.map((sub, i) => normalizeStep(sub, i)));
+    }
+
+    if (s.kind === "compute") {
+      try {
+        const { reads, writes } = traceComputeFn(s.fn);
+        return { kind: "compute", name: s.name, reads, writes };
+      } catch (err) {
+        // Wrap compute-tracer failures with the same step-context format
+        // used for lens errors, so authoring mistakes are equally easy
+        // to localize regardless of which tracer caught them.
+        throw new Error(
+          `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (compute): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    let inputs: FieldMapping[] | undefined;
+    if (s.bindings?.in) {
+      try {
+        inputs = extractMappings(s.bindings.in);
+      } catch (err) {
+        if (err instanceof LensPurityError) {
+          throw new Error(
+            `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (in lens): ${err.message}`,
+          );
+        }
+        throw err;
+      }
+    }
+
+    let outputs: FieldMapping[] | undefined;
+    if (s.bindings?.out) {
+      try {
+        outputs = extractMappingsOut(s.bindings.out);
+      } catch (err) {
+        if (err instanceof LensPurityError) {
+          throw new Error(
+            `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (out lens): ${err.message}`,
+          );
+        }
+        throw err;
+      }
+    }
+
+    return {
+      kind: "contract-call",
+      name: s.name,
+      contractId: s.contract._projection.id,
+      caseKey: s.caseKey,
+      protocol: s.ref.protocol,
+      target: s.ref.target,
+      inputs,
+      outputs,
+    };
+  };
+
   return {
     id: runtime.id,
     protocol: "flow",
@@ -1125,65 +1236,7 @@ export function normalizeFlow<State>(
     ...(runtime.skip !== undefined ? { skip: runtime.skip } : {}),
     ...(runtime.only !== undefined ? { only: runtime.only } : {}),
     setupDynamic: runtime.setup ? true : undefined,
-    steps: runtime.steps.map<ExtractedFlowStep>((s, idx) => {
-      const stepLabel = s.name ??
-        (s.kind === "contract-call" ? `${s.contract._projection.id}#${s.caseKey}` : `step-${idx + 1}`);
-
-      if (s.kind === "compute") {
-        try {
-          const { reads, writes } = traceComputeFn(s.fn);
-          return { kind: "compute", name: s.name, reads, writes };
-        } catch (err) {
-          // Wrap compute-tracer failures with the same step-context format
-          // used for lens errors, so authoring mistakes are equally easy
-          // to localize regardless of which tracer caught them.
-          throw new Error(
-            `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (compute): ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      }
-
-      let inputs: FieldMapping[] | undefined;
-      if (s.bindings?.in) {
-        try {
-          inputs = extractMappings(s.bindings.in);
-        } catch (err) {
-          if (err instanceof LensPurityError) {
-            throw new Error(
-              `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (in lens): ${err.message}`,
-            );
-          }
-          throw err;
-        }
-      }
-
-      let outputs: FieldMapping[] | undefined;
-      if (s.bindings?.out) {
-        try {
-          outputs = extractMappingsOut(s.bindings.out);
-        } catch (err) {
-          if (err instanceof LensPurityError) {
-            throw new Error(
-              `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (out lens): ${err.message}`,
-            );
-          }
-          throw err;
-        }
-      }
-
-      return {
-        kind: "contract-call",
-        name: s.name,
-        contractId: s.contract._projection.id,
-        caseKey: s.caseKey,
-        protocol: s.ref.protocol,
-        target: s.ref.target,
-        inputs,
-        outputs,
-      };
-    }),
+    steps: runtime.steps.map(normalizeStep),
   };
 }
 

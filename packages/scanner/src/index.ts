@@ -74,6 +74,7 @@ export type {
   NormalizedParamMeta,
   NormalizedFlowMeta,
   NormalizedFlowStep,
+  NormalizedPredicate,
   NormalizedFieldMapping,
   NormalizedAttachmentMeta,
   NormalizedRawAttachment,

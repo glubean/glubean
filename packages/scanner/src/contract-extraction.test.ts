@@ -14,6 +14,7 @@
 import { test, expect } from "vitest";
 import {
   bootstrapAttachmentToNormalized,
+  flowContractToNormalized,
   isBootstrapAttachment,
   protocolContractToNormalized,
   synthesizeAttachments,
@@ -112,6 +113,135 @@ test("protocolContractToNormalized reads _extracted when available", () => {
   const normalized = protocolContractToNormalized(fakeCarrier, "exportName");
   expect(normalized.schemas).toEqual({ fromExtracted: true });
   expect(normalized.cases[0].schemas).toEqual({ fromExtracted: true });
+});
+
+// ---------------------------------------------------------------------------
+// Branch flow steps survive normalization (regression: branch must NOT be
+// collapsed into an empty contract-call; nested sub-steps must be preserved).
+// ---------------------------------------------------------------------------
+
+test("flowContractToNormalized preserves branch steps recursively (_extracted)", () => {
+  const carrier = {
+    _flow: { id: "f1" },
+    _extracted: {
+      id: "f1",
+      protocol: "flow",
+      steps: [
+        {
+          kind: "branch",
+          mode: "value",
+          name: "route-by-role",
+          subjectPath: ["role"],
+          cases: [
+            {
+              value: "admin",
+              steps: [
+                { kind: "compute", name: "mark", reads: ["role"], writes: ["panel"] },
+                // nested predicate branch inside the value-branch case
+                {
+                  kind: "branch",
+                  mode: "predicate",
+                  cases: [
+                    {
+                      message: "server error",
+                      predicate: { kind: "compare", op: "gte", path: ["status"], value: 500 },
+                      steps: [
+                        {
+                          kind: "contract-call",
+                          name: "alert",
+                          contractId: "ops.alert",
+                          caseKey: "fire",
+                          protocol: "http",
+                          target: "POST /alert",
+                        },
+                      ],
+                    },
+                  ],
+                  default: [],
+                },
+              ],
+            },
+          ],
+          default: [{ kind: "compute", name: "guest", reads: [], writes: [] }],
+        },
+      ],
+    },
+  };
+
+  const out = flowContractToNormalized(carrier, "f1");
+  expect(out.steps).toHaveLength(1);
+  const branch = out.steps[0];
+  expect(branch.kind).toBe("branch");
+  if (branch.kind !== "branch") throw new Error("expected branch");
+  expect(branch.mode).toBe("value");
+  expect(branch.subjectPath).toEqual(["role"]);
+  expect(branch.name).toBe("route-by-role");
+
+  // Case sub-steps preserved (NOT collapsed to an empty contract-call).
+  const adminSteps = branch.cases[0].steps;
+  expect(adminSteps[0]).toMatchObject({ kind: "compute", name: "mark" });
+  // Nested predicate branch preserved.
+  const nested = adminSteps[1];
+  expect(nested.kind).toBe("branch");
+  if (nested.kind !== "branch") throw new Error("expected nested branch");
+  expect(nested.mode).toBe("predicate");
+  expect(nested.cases[0].message).toBe("server error");
+  expect(nested.cases[0].predicate).toEqual({
+    kind: "compare",
+    op: "gte",
+    path: ["status"],
+    value: 500,
+  });
+  expect(nested.cases[0].steps[0]).toMatchObject({
+    kind: "contract-call",
+    contractId: "ops.alert",
+    caseKey: "fire",
+  });
+
+  // default preserved.
+  expect(branch.default[0]).toMatchObject({ kind: "compute", name: "guest" });
+});
+
+test("flowContractToNormalized preserves branch in duck-typed fallback (_flow only)", () => {
+  // No `_extracted` → fallback path. Predicate is omitted (runtime predicate is
+  // not JSON-safe), but sub-steps + structure must survive.
+  const carrier = {
+    _flow: {
+      id: "f2",
+      steps: [
+        {
+          kind: "branch",
+          mode: "value",
+          subject: { path: ["tier"] },
+          cases: [
+            {
+              value: "gold",
+              steps: [
+                {
+                  kind: "contract-call",
+                  ref: { contractId: "perks.grant", caseKey: "lounge", protocol: "http", target: "POST /perk" },
+                  caseKey: "lounge",
+                },
+              ],
+            },
+          ],
+          default: [],
+        },
+      ],
+    },
+  };
+
+  const out = flowContractToNormalized(carrier, "f2");
+  const branch = out.steps[0];
+  expect(branch.kind).toBe("branch");
+  if (branch.kind !== "branch") throw new Error("expected branch");
+  expect(branch.subjectPath).toEqual(["tier"]);
+  expect(branch.cases[0].value).toBe("gold");
+  expect(branch.cases[0].steps[0]).toMatchObject({
+    kind: "contract-call",
+    contractId: "perks.grant",
+    caseKey: "lounge",
+  });
 });
 
 // ---------------------------------------------------------------------------
