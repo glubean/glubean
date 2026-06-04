@@ -217,6 +217,27 @@ async function findProjectConfig(
   return { rootDir: startDir };
 }
 
+/**
+ * True if a flow's extracted step tree contains a branch (condition / switch).
+ * Recurses into branch cases/default (a nested branch would itself be caught by
+ * the top-level `kind === "branch"`, but recursing is cheap belt-and-suspenders).
+ *
+ * Used to gate `--upload`: Glubean Cloud cannot render `kind:"branch"` flows yet,
+ * and uploading would silently drop the branches (local run view ≠ Cloud view),
+ * so we refuse rather than mislead. See contract-flow-condition.md §12 / Spike 6.
+ */
+function flowStepsHaveBranch(
+  steps: ReadonlyArray<{ kind?: string; cases?: ReadonlyArray<{ steps?: any[] }>; default?: any[] }> | undefined,
+): boolean {
+  if (!steps) return false;
+  for (const s of steps) {
+    if (s.kind === "branch") return true;
+    if (s.cases && s.cases.some((c) => flowStepsHaveBranch(c.steps))) return true;
+    if (s.default && flowStepsHaveBranch(s.default)) return true;
+  }
+  return false;
+}
+
 // Config consolidation (docs/06): the package.json `glubean` field is no
 // longer a config source. Warn (don't error) when one lingers so users
 // migrate it into glubean.yaml instead of wondering why it stopped working.
@@ -614,6 +635,8 @@ export const __testing = {
   matchesTags: (...args: Parameters<typeof matchesTags>) => matchesTags(...args),
   matchesExcludeTags: (...args: Parameters<typeof matchesExcludeTags>) =>
     matchesExcludeTags(...args),
+  flowStepsHaveBranch: (...args: Parameters<typeof flowStepsHaveBranch>) =>
+    flowStepsHaveBranch(...args),
 };
 
 function matchesTags(
@@ -1082,6 +1105,59 @@ export async function runCommand(
     console.log(
       `${colors.dim}${parts.join(" + ")} (${testsToRun.length}/${totalDiscovered} tests)${colors.reset}`,
     );
+  }
+
+  // ── Gate: Cloud cannot yet render branch (condition/switch) flows ──────
+  // Operate on the POST-FILTER selected runnables (`testsToRun`) so a branch
+  // flow that was filtered out (--filter / tags / .only / suite kinds) does not
+  // block an otherwise-branchless upload. Uploading a branch flow would
+  // silently drop its branches server-side (Cloud run view ≠ local), so refuse
+  // before running and name the offending flows. Bootstrap already ran, so
+  // plugin-backed files re-extract from Node's cache cleanly.
+  // (contract-flow-condition.md §12 / Spike 6.)
+  if (options.upload) {
+    // Exclude deferred (FlowMeta.skip → meta.deferred) flows: they don't
+    // execute — only a skipped row is uploaded — so their branches never reach
+    // Cloud and they must not block the upload.
+    const selectedFlows = testsToRun.filter(
+      (ft) => ft.test.meta.kind === "flow" && !ft.test.meta.deferred,
+    );
+    if (selectedFlows.length > 0) {
+      // Map each selected flow's source file → the set of its branch flow ids.
+      const branchIdsByFile = new Map<string, Set<string>>();
+      for (const filePath of new Set(selectedFlows.map((ft) => ft.filePath))) {
+        try {
+          const extracted = await extractContractFromFile(filePath);
+          const ids = new Set<string>();
+          for (const att of extracted.attachments ?? []) {
+            if (att.kind === "flow" && flowStepsHaveBranch(att.flow.steps)) ids.add(att.flow.id);
+          }
+          branchIdsByFile.set(filePath, ids);
+        } catch {
+          // Real import/extraction errors are surfaced by discovery above.
+        }
+      }
+      const branchFlows = selectedFlows.filter((ft) =>
+        branchIdsByFile.get(ft.filePath)?.has(ft.test.meta.id),
+      );
+      if (branchFlows.length > 0) {
+        console.error(
+          `${colors.red}Error: --upload does not yet support branch (condition/switch) flows.${colors.reset}`,
+        );
+        console.error(
+          `${colors.dim}Glubean Cloud can't render these flows yet, and uploading would silently drop their branches:${colors.reset}`,
+        );
+        for (const ft of branchFlows) {
+          console.error(
+            `${colors.dim}  - ${ft.test.meta.id} (${ft.exportName}) [${relative(process.cwd(), ft.filePath)}]${colors.reset}`,
+          );
+        }
+        console.error(
+          `${colors.dim}Run without --upload, or remove condition/switchOn/switchCond from these flows, until Cloud branch support lands.${colors.reset}`,
+        );
+        process.exit(1);
+      }
+    }
   }
 
   console.log(
