@@ -34,6 +34,7 @@ import type {
   FieldMapping,
   FlowBuilder,
   FlowContract,
+  FlowFragmentBuilder,
   FlowMeta,
   FlowRegistryMeta,
   FlowRegistryStep,
@@ -43,8 +44,22 @@ import type {
   RuntimeFlowProjection,
   RuntimeFlowStep,
 } from "./contract-types.js";
+import type {
+  BranchPredicate,
+  JsonScalar,
+  OpaquePredicate,
+  PredicateScope,
+  RuntimeBranchStep,
+} from "./contract-flow-condition.js";
 import { registerTest } from "./internal.js";
-import { selectBranchSteps, extractBranchStep } from "./contract-flow-condition.js";
+import {
+  selectBranchSteps,
+  extractBranchStep,
+  predicateScope,
+  assertSelectorSource,
+  assertSwitchCaseValues,
+  assertL2Predicate,
+} from "./contract-flow-condition.js";
 import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
 import {
   getExplicitInput,
@@ -781,6 +796,208 @@ export const contract: ContractNamespace = {
 /**
  * Protocol-agnostic flow builder. See contract-flow.md v9 §4.1.
  */
+// =============================================================================
+// Branch desugar helpers (condition / switchOn / switchCond → one "branch" step)
+//
+// Shared by both FlowBuilder (top-level steps) and FlowFragmentBuilder (branch
+// sub-steps). Each `then`/`else`/`default`/case callback is run against a fresh
+// step sink whose accumulated RuntimeFlowStep[] becomes that branch's steps.
+// =============================================================================
+
+/** Build a contract-call runtime step (adapter lookup + flow-safety validation). */
+function buildContractCallStep(
+  flowId: string,
+  ref: ContractCaseRef<any, any>,
+  bindings?: {
+    in?: (state: any) => any;
+    out?: (state: any, response: any) => any;
+    name?: string;
+  },
+): RuntimeContractCallStep {
+  const adapter = _adapters.get(ref.protocol);
+  if (!adapter) {
+    throw new Error(
+      `contract.flow(${JSON.stringify(flowId)}).step: unknown protocol "${ref.protocol}". ` +
+        `Did you forget to import a contract plugin package (e.g. "@glubean/grpc")?`,
+    );
+  }
+  if (!adapter.executeCaseInFlow) {
+    throw new Error(
+      `contract.flow(${JSON.stringify(flowId)}).step: adapter for "${ref.protocol}" ` +
+        `does not implement executeCaseInFlow — this protocol cannot appear in a flow.`,
+    );
+  }
+  // v10: flow-safety validation fires at step-declaration time (not .case()).
+  const contractRef = ref.contract as ProtocolContract<unknown, unknown, unknown>;
+  adapter.validateCaseForFlow?.(
+    (contractRef as { _spec?: unknown })._spec,
+    ref.caseKey,
+    ref.contractId,
+  );
+  return {
+    kind: "contract-call",
+    name: bindings?.name,
+    ref,
+    caseKey: ref.caseKey,
+    contract: ref.contract,
+    bindings: bindings ? { in: bindings.in, out: bindings.out as any } : undefined,
+  };
+}
+
+/** Module-private key holding a fragment sink's accumulated step list. */
+const FRAGMENT_STEPS = Symbol("glubean.fragment-steps");
+
+/**
+ * Run a branch-body callback and return the steps of the fragment it RETURNS
+ * (not a closure-shared array). Because the sink is persistent/immutable (each
+ * method returns a NEW sink carrying `[...prev, step]`), the executed steps are
+ * exactly the chain that produced the returned, type-checked fragment. A block
+ * body that mutates then returns an earlier sink — e.g.
+ * `(b) => { b.compute(reshape); return b; }` — yields that earlier sink's
+ * (shorter) step list, so runtime matches what the type system saw. This keeps
+ * the `NoExtraKeys` / invariant convergence guarantees honest.
+ */
+function collectFragmentSteps(
+  flowId: string,
+  fn: (b: FlowFragmentBuilder<any>) => FlowFragmentBuilder<any>,
+): RuntimeFlowStep[] {
+  const result = fn(makeStepSink(flowId, [])) as unknown as Record<symbol, unknown>;
+  const out = result?.[FRAGMENT_STEPS];
+  if (!Array.isArray(out)) {
+    throw new Error(
+      `flow "${flowId}": a branch body must return the fragment builder ` +
+        `(e.g. \`(b) => b.compute(...)\` or \`(b) => b\`); it returned a non-builder value`,
+    );
+  }
+  return out as RuntimeFlowStep[];
+}
+
+/**
+ * A persistent (immutable) FlowFragmentBuilder over a steps array. Every method
+ * returns a NEW sink carrying `[...steps, newStep]` — it never mutates `steps`.
+ * The accumulated list is read back (by `collectFragmentSteps`) via the
+ * module-private `FRAGMENT_STEPS` key, so only the RETURNED fragment's steps
+ * run. The phantom invariant brand exists only in the type.
+ */
+function makeStepSink(flowId: string, steps: readonly RuntimeFlowStep[]): FlowFragmentBuilder<any> {
+  const extend = (step: RuntimeFlowStep) => makeStepSink(flowId, [...steps, step]);
+  // Typed `any` so methods can return sinks; the public type is the cast below.
+  const sink: any = {
+    step(ref: ContractCaseRef<any, any>, bindings?: any) {
+      return extend(buildContractCallStep(flowId, ref, bindings));
+    },
+    compute(fn: (s: any) => any) {
+      return extend({ kind: "compute", fn });
+    },
+    condition(spec: any, thenB: any, elseB?: any) {
+      return extend(buildConditionStep(flowId, "L2", spec, thenB, elseB));
+    },
+    conditionFn(spec: any, thenB: any, elseB?: any) {
+      return extend(buildConditionStep(flowId, "L1", spec, thenB, elseB));
+    },
+    conditionAsync(spec: any, thenB: any, elseB?: any) {
+      return extend(buildConditionStep(flowId, "L0", spec, thenB, elseB));
+    },
+    switchOn(lens: (s: any) => any) {
+      return (cases: any, deflt: any) => extend(buildSwitchOnStep(flowId, lens, cases, deflt));
+    },
+    switchCond(cases: any, deflt: any) {
+      return extend(buildSwitchCondStep(flowId, cases, deflt));
+    },
+  };
+  // Non-enumerable, frozen step list snapshot for this sink.
+  Object.defineProperty(sink, FRAGMENT_STEPS, {
+    value: Object.freeze(steps),
+    enumerable: false,
+  });
+  return sink as FlowFragmentBuilder<any>;
+}
+
+/**
+ * condition / conditionFn / conditionAsync → predicate-mode branch (1 case +
+ * default). L2 builds a declarative `BranchPredicate` via `predicateScope`;
+ * L1/L0 wrap the opaque fn and REQUIRE a message (type-level + this runtime
+ * guard, so `as any` / JS callers can't produce an unlabeled opaque gate).
+ */
+function buildConditionStep(
+  flowId: string,
+  tier: "L2" | "L1" | "L0",
+  spec: { predicate: any; message?: string },
+  thenB: (b: any) => any,
+  elseB?: (b: any) => any,
+): RuntimeBranchStep {
+  const thenSteps = collectFragmentSteps(flowId, thenB);
+  const elseSteps = elseB ? collectFragmentSteps(flowId, elseB) : [];
+
+  let predicate: BranchPredicate<any> | OpaquePredicate;
+  let message: string | undefined;
+  if (tier === "L2") {
+    predicate = spec.predicate(predicateScope<any>());
+    assertL2Predicate(predicate, "condition"); // runtime brand: reject forged/opaque/non-JSON trees
+    message = spec.message;
+  } else {
+    if (typeof spec.message !== "string" || spec.message.length === 0) {
+      throw new LensPurityError(
+        tier === "L1" ? "conditionFn" : "conditionAsync",
+        `opaque (${tier}) predicate requires a non-empty \`message\` — the projection marks ` +
+          `this branch as an opaque/dynamic gate and the message is its only human-facing label`,
+      );
+    }
+    message = spec.message;
+    predicate = { kind: "opaque", sync: tier === "L1", fn: spec.predicate };
+  }
+
+  return {
+    kind: "branch",
+    mode: "predicate",
+    cases: [{ ...(message ? { message } : {}), predicate, steps: thenSteps }],
+    default: elseSteps,
+  };
+}
+
+/** switchCond → predicate-mode branch (N cases + default), each case a declarative predicate. */
+function buildSwitchCondStep(
+  flowId: string,
+  cases: ReadonlyArray<{ when: (w: PredicateScope<any>) => BranchPredicate<any>; then: (b: any) => any }>,
+  deflt: (b: any) => any,
+): RuntimeBranchStep {
+  return {
+    kind: "branch",
+    mode: "predicate",
+    cases: cases.map((c) => {
+      const predicate = c.when(predicateScope<any>());
+      assertL2Predicate(predicate, "switchCond"); // switch is always L2 — reject forged/opaque trees
+      return { predicate, steps: collectFragmentSteps(flowId, c.then) };
+    }),
+    default: collectFragmentSteps(flowId, deflt),
+  };
+}
+
+/**
+ * switchOn → value-mode branch. The subject lens runs the same P0 source gate +
+ * strict-Proxy path extraction as `w.when` (so the decision-table projection
+ * can't lie), values must be unique + finite, and the lens is normalized to
+ * `(ctx, s)` for uniform runtime evaluation (it is evaluated exactly once).
+ */
+function buildSwitchOnStep(
+  flowId: string,
+  lens: (s: any) => any,
+  cases: ReadonlyArray<{ value: JsonScalar; then: (b: any) => any }>,
+  deflt: (b: any) => any,
+): RuntimeBranchStep {
+  void flowId;
+  assertSelectorSource(lens);
+  const path = extractSelectorPath(lens);
+  assertSwitchCaseValues(cases.map((c) => c.value));
+  return {
+    kind: "branch",
+    mode: "value",
+    subject: { lens: (_ctx, s) => lens(s), path },
+    cases: cases.map((c) => ({ value: c.value, steps: collectFragmentSteps(flowId, c.then) })),
+    default: collectFragmentSteps(flowId, deflt),
+  };
+}
+
 export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
   const meta: FlowMeta = typeof idOrMeta === "string"
     ? { id: idOrMeta }
@@ -817,42 +1034,7 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
         name?: string;
       },
     ): FlowBuilder<any> {
-      const adapter = _adapters.get(ref.protocol);
-      if (!adapter) {
-        throw new Error(
-          `contract.flow(${JSON.stringify(meta.id)}).step: unknown protocol "${ref.protocol}". ` +
-            `Did you forget to import a contract plugin package (e.g. "@glubean/grpc")?`,
-        );
-      }
-      if (!adapter.executeCaseInFlow) {
-        throw new Error(
-          `contract.flow(${JSON.stringify(meta.id)}).step: adapter for "${ref.protocol}" ` +
-            `does not implement executeCaseInFlow — this protocol cannot appear in a flow.`,
-        );
-      }
-      // v10: flow-safety validation fires here (at step-declaration time),
-      // not at .case() time. The ref itself is pure; only when it enters a
-      // flow do we enforce adapter-specific rules like HTTP's "function-
-      // valued body/params/headers can't resolve in flow mode". This lets
-      // contract.bootstrap(ref) attach to the same ref (where function-
-      // valued fields legitimately receive resolvedInput).
-      const contractRef = ref.contract as ProtocolContract<unknown, unknown, unknown>;
-      adapter.validateCaseForFlow?.(
-        (contractRef as { _spec?: unknown })._spec,
-        ref.caseKey,
-        ref.contractId,
-      );
-      const step: RuntimeContractCallStep = {
-        kind: "contract-call",
-        name: bindings?.name,
-        ref,
-        caseKey: ref.caseKey,
-        contract: ref.contract,
-        bindings: bindings
-          ? { in: bindings.in, out: bindings.out as any }
-          : undefined,
-      };
-      steps.push(step);
+      steps.push(buildContractCallStep(meta.id, ref, bindings));
       return builder;
     },
 
@@ -862,6 +1044,33 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
         fn: fn as (state: any) => any,
       };
       steps.push(step);
+      return builder;
+    },
+
+    condition(spec: any, thenB: any, elseB?: any): FlowBuilder<any> {
+      steps.push(buildConditionStep(meta.id, "L2", spec, thenB, elseB));
+      return builder;
+    },
+
+    conditionFn(spec: any, thenB: any, elseB?: any): FlowBuilder<any> {
+      steps.push(buildConditionStep(meta.id, "L1", spec, thenB, elseB));
+      return builder;
+    },
+
+    conditionAsync(spec: any, thenB: any, elseB?: any): FlowBuilder<any> {
+      steps.push(buildConditionStep(meta.id, "L0", spec, thenB, elseB));
+      return builder;
+    },
+
+    switchOn(lens: (s: any) => any) {
+      return (cases: any, deflt: any): FlowBuilder<any> => {
+        steps.push(buildSwitchOnStep(meta.id, lens, cases, deflt));
+        return builder;
+      };
+    },
+
+    switchCond(cases: any, deflt: any): FlowBuilder<any> {
+      steps.push(buildSwitchCondStep(meta.id, cases, deflt));
       return builder;
     },
 

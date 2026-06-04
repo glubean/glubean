@@ -73,7 +73,9 @@ describe("P0 single-selector gate (rejects non-selectors)", () => {
   ];
   for (const [name, fn] of bad) {
     test(`rejects ${name}`, () => {
-      expect(() => w.when(fn as any).eq(1 as any)).toThrow(LensPurityError);
+      // The throw fires at `when()` (source gate), before `.eq` runs; cast the
+      // clause to sidestep the `never` operand the `any` lens would otherwise infer.
+      expect(() => (w.when(fn as any) as any).eq(1)).toThrow(LensPurityError);
     });
   }
 

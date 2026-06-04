@@ -32,6 +32,8 @@ import type {
   ExtractedBranchStep,
   ExtractedPredicate,
   JsonScalar,
+  BranchPredicate,
+  PredicateScope,
 } from "./contract-flow-condition.js";
 
 // =============================================================================
@@ -961,8 +963,170 @@ export interface FlowBuilder<State = unknown> {
     fn: (ctx: TestContext, state: State) => Promise<void>,
   ): FlowBuilder<State>;
 
+  // ── Branching: condition (2-way) + switch (N-way). All desugar to ONE
+  //    runtime "branch" step. Three condition methods = three strictness tiers
+  //    (L2 declarative / L1 opaque-sync / L0 opaque-async). Splitting into
+  //    methods (not a union `predicate` field) is REQUIRED: a union of
+  //    single-param lambdas loses contextual typing under --strict (the lens
+  //    param degrades to implicit any), and "switch to an opaque method" is a
+  //    visible opt-in. Both branches converge to one output state via
+  //    `NoInfer<T>` + the fragment builder's invariant brand (see
+  //    FlowFragmentBuilder). Proven in Spike 0.
+
+  /** L2 — declarative predicate (precisely projectable). No else → then keeps State's shape (values may narrow). */
+  condition<R extends State = State>(
+    spec: { predicate: (w: PredicateScope<State>) => BranchPredicate<State>; message?: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<R & NoExtraKeys<R, State>>,
+  ): FlowBuilder<State>;
+  /** L2 with else — `T` is inferred from `then`; `else` is checked against it (`NoInfer`). */
+  condition<T>(
+    spec: { predicate: (w: PredicateScope<State>) => BranchPredicate<State>; message?: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+    elseBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>,
+  ): FlowBuilder<T>;
+
+  /** L1 — opaque sync predicate. `message` is required (projection marks ⚠ opaque-gate). */
+  conditionFn<R extends State = State>(
+    spec: { predicate: (ctx: TestContext, s: State) => boolean; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<R & NoExtraKeys<R, State>>,
+  ): FlowBuilder<State>;
+  conditionFn<T>(
+    spec: { predicate: (ctx: TestContext, s: State) => boolean; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+    elseBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>,
+  ): FlowBuilder<T>;
+
+  /** L0 — opaque async predicate (may do out-of-contract I/O). `message` required (⚠ dynamic-gate). */
+  conditionAsync<R extends State = State>(
+    spec: { predicate: (ctx: TestContext, s: State) => Promise<boolean>; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<R & NoExtraKeys<R, State>>,
+  ): FlowBuilder<State>;
+  conditionAsync<T>(
+    spec: { predicate: (ctx: TestContext, s: State) => Promise<boolean>; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+    elseBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>,
+  ): FlowBuilder<T>;
+
+  /**
+   * value-switch (single lens × N scalar values). Curried so `V` infers from
+   * the lens alone (Spike 0): first call fixes `V`, second checks each `value`
+   * against it. `default` is required (anchors `T`; the no-match path). switch
+   * is always L2 — a clean decision table.
+   */
+  switchOn<V>(lens: (s: State) => V): <T>(
+    cases: ReadonlyArray<{
+      value: [Exclude<V, undefined>] extends [JsonScalar] ? Exclude<V, undefined> : never;
+      then: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>;
+    }>,
+    deflt: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+  ) => FlowBuilder<T>;
+
+  /** cond-switch (ordered, possibly-overlapping declarative predicates; first-match). */
+  switchCond<T>(
+    cases: ReadonlyArray<{
+      when: (w: PredicateScope<State>) => BranchPredicate<State>;
+      then: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>;
+    }>,
+    deflt: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+  ): FlowBuilder<T>;
+
   build(): FlowContract<State>;
 }
+
+/**
+ * Restricted builder for a branch body (condition then/else, switch case/default).
+ * Accumulates step / compute / nested branch into the branch node's
+ * `cases[].steps` / `default`; it deliberately does NOT expose flow-level
+ * setup / teardown / meta / build.
+ *
+ * INVARIANT BRAND (Spike 0 / §8.1): `State` appears in both covariant (return)
+ * and contravariant (parameter) position via the phantom `[FRAGMENT_STATE]`
+ * field, making `FlowFragmentBuilder` *invariant* in `State`. Without this,
+ * TS structural width-subtyping would let `FlowFragmentBuilder<{...State, x}>`
+ * be assignable to `FlowFragmentBuilder<State>`, so a no-else branch could
+ * silently add fields (or an else could return a `T` supertype) and bypass
+ * convergence. The phantom is type-only — never read at runtime.
+ */
+export interface FlowFragmentBuilder<State = unknown> {
+  readonly [FRAGMENT_STATE]: (s: State) => State;
+
+  step<CaseInputs, CaseOutput, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput>,
+    ...args: [CaseInputs] extends [void]
+      ? [bindings?: {
+          out?: (state: State, response: CaseOutput) => NewState;
+          name?: string;
+        }]
+      : [bindings: {
+          in: (state: State) => CaseInputs;
+          out?: (state: State, response: CaseOutput) => NewState;
+          name?: string;
+        }]
+  ): FlowFragmentBuilder<NewState>;
+
+  compute<NewState>(fn: (state: State) => NewState): FlowFragmentBuilder<NewState>;
+
+  condition<R extends State = State>(
+    spec: { predicate: (w: PredicateScope<State>) => BranchPredicate<State>; message?: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<R & NoExtraKeys<R, State>>,
+  ): FlowFragmentBuilder<State>;
+  condition<T>(
+    spec: { predicate: (w: PredicateScope<State>) => BranchPredicate<State>; message?: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+    elseBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>,
+  ): FlowFragmentBuilder<T>;
+
+  conditionFn<R extends State = State>(
+    spec: { predicate: (ctx: TestContext, s: State) => boolean; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<R & NoExtraKeys<R, State>>,
+  ): FlowFragmentBuilder<State>;
+  conditionFn<T>(
+    spec: { predicate: (ctx: TestContext, s: State) => boolean; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+    elseBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>,
+  ): FlowFragmentBuilder<T>;
+
+  conditionAsync<R extends State = State>(
+    spec: { predicate: (ctx: TestContext, s: State) => Promise<boolean>; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<R & NoExtraKeys<R, State>>,
+  ): FlowFragmentBuilder<State>;
+  conditionAsync<T>(
+    spec: { predicate: (ctx: TestContext, s: State) => Promise<boolean>; message: string },
+    thenBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+    elseBranch: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>,
+  ): FlowFragmentBuilder<T>;
+
+  switchOn<V>(lens: (s: State) => V): <T>(
+    cases: ReadonlyArray<{
+      value: [Exclude<V, undefined>] extends [JsonScalar] ? Exclude<V, undefined> : never;
+      then: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>;
+    }>,
+    deflt: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+  ) => FlowFragmentBuilder<T>;
+
+  switchCond<T>(
+    cases: ReadonlyArray<{
+      when: (w: PredicateScope<State>) => BranchPredicate<State>;
+      then: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<NoInfer<T>>;
+    }>,
+    deflt: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
+  ): FlowFragmentBuilder<T>;
+}
+
+/** Module-private phantom brand making FlowFragmentBuilder invariant in State. */
+declare const FRAGMENT_STATE: unique symbol;
+
+/**
+ * No-else branch shape guard. A no-else `then` must NOT add/remove state keys
+ * (when the predicate is false the branch is skipped, so downstream state stays
+ * `State`), but it MAY narrow an existing key's value (e.g. flip `ok: boolean`
+ * to `ok: true`). Encoded as `R extends State` (no removed keys, values only
+ * narrow) intersected with `NoExtraKeys<R, State>` (any extra key collapses to
+ * `never`, so adding a field fails to type-check). This is the ergonomic
+ * counterpart to the invariant brand: it blocks shape drift without rejecting
+ * safe literal narrowing.
+ */
+export type NoExtraKeys<R, State> = { [K in Exclude<keyof R, keyof State>]: never };
 
 /**
  * Runtime flow contract. Extends Array<Test> so runner iterates directly.

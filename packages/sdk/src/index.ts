@@ -493,6 +493,8 @@ export type {
   InferInputs,
   InferOutput,
   FlowBuilder,
+  FlowFragmentBuilder,
+  NoExtraKeys,
   FlowContract,
   FlowMeta,
   FlowRegistryMeta,
@@ -506,6 +508,19 @@ export type {
   ExtractedComputeStep,
   FieldMapping,
 } from "./contract-types.js";
+
+// Branch (condition / switch) helper types — exported so consumers can write
+// reusable branch-body helpers (`(b: FlowFragmentBuilder<S>) => ...`) and
+// predicate helpers (`(w: PredicateScope<S>) => ...`) against the public API.
+export type {
+  PredicateScope,
+  BranchPredicate,
+  WhenClause,
+  JsonScalar,
+  RuntimeBranchStep,
+  ExtractedBranchStep,
+  ExtractedPredicate,
+} from "./contract-flow-condition.js";
 
 // HTTP adapter — built-in, registers itself at SDK load time
 import { contract as _contract } from "./contract-core.js";

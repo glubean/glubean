@@ -25,9 +25,12 @@ import type { RuntimeFlowStep, ExtractedFlowStep } from "./contract-types.js";
 /** JSON-safe scalar — the only thing a predicate may compare against. */
 export type JsonScalar = string | number | boolean | null;
 
-// Unforgeable brand: module-private symbol. Users cannot construct a value
-// carrying it, so a `BranchPredicate` can only come from `when`/`all`/`any`/`not`.
-declare const PREDICATE_BRAND: unique symbol;
+// Unforgeable brand: a module-private symbol attached (non-enumerable) to every
+// node produced by `when`/`all`/`any`/`not`. It is a REAL runtime symbol (not a
+// type-only `declare const`), so `assertL2Predicate` can reject a hand-authored
+// declarative object — which never went through the selector source / strict
+// Proxy gate — even from JS / `as any` callers. Not exported, so unforgeable.
+const PREDICATE_BRAND: unique symbol = Symbol("glubean.branch-predicate");
 
 /**
  * Declarative (L2) predicate AST. Deeply readonly; every node is frozen at
@@ -153,10 +156,87 @@ function assertFiniteScalar(value: unknown, op: string): void {
   }
 }
 
+const RELATIONAL_OPS: ReadonlySet<string> = new Set(["gt", "gte", "lt", "lte"]);
+
+/**
+ * Relational ops (gt/gte/lt/lte) require a numeric operand. The type layer
+ * already enforces this, but JS / `as any` callers could pass a string / null /
+ * boolean, and runtime comparison would then rely on JS coercion (e.g.
+ * `5 > null` is `true`) — silently wrong. Reject at construction + validation.
+ */
+function assertRelationalOperand(op: string, value: unknown): void {
+  if (RELATIONAL_OPS.has(op) && typeof value !== "number") {
+    throw new LensPurityError(
+      `predicate.${op}`,
+      `relational operand for "${op}" must be a number; got ${value === null ? "null" : typeof value}`,
+    );
+  }
+}
+
+/**
+ * Reject anything that isn't a JSON scalar (string / number / boolean / null).
+ * The type layer already enforces this for typed callers, but JS / `as any`
+ * callers can smuggle in `undefined` (dropped by JSON.stringify), `bigint`
+ * (JSON.stringify throws), symbols, objects, or functions — all of which would
+ * make the extracted projection non-JSON-safe and break scanner/Cloud.
+ */
+function assertJsonScalar(value: unknown, op: string): void {
+  if (value === null) return;
+  const t = typeof value;
+  if (t === "string" || t === "number" || t === "boolean") return;
+  throw new LensPurityError(
+    `${op}`,
+    `case value must be a JSON scalar (string / number / boolean / null); got ${t}`,
+  );
+}
+
+/**
+ * Validate value-switch case values (build-time). A value-switch is an exact
+ * match-set, so values must be:
+ *   1. JSON scalars — non-scalars (undefined/bigint/symbol/object/function) are
+ *      not projection-safe (see assertJsonScalar);
+ *   2. unique — a duplicate makes the second case unreachable (first-match) and
+ *      turns the switch order-dependent, violating "order doesn't matter";
+ *   3. finite (numbers) — NaN/Infinity become `null` under JSON.stringify (not
+ *      projection-safe) and `=== NaN` never matches.
+ */
+export function assertSwitchCaseValues(values: readonly JsonScalar[]): void {
+  const seen = new Set<JsonScalar>();
+  for (const v of values) {
+    assertJsonScalar(v, "switchOn");
+    assertFiniteScalar(v, "switchOn");
+    if (seen.has(v)) {
+      throw new LensPurityError(
+        "switchOn",
+        `duplicate case value ${JSON.stringify(v)} — value-switch values must be unique ` +
+          `(a duplicate is unreachable under first-match and makes the switch order-dependent)`,
+      );
+    }
+    seen.add(v);
+  }
+}
+
 // --- predicate construction (the only way to make a BranchPredicate) ---------
 
 function brandFreeze<S>(node: object): BranchPredicate<S> {
+  // Real runtime brand (non-enumerable so it never leaks into spreads / JSON /
+  // the extracted projection), then deep-freeze. Only this function sets it.
+  Object.defineProperty(node, PREDICATE_BRAND, {
+    value: true,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
   return Object.freeze(node) as BranchPredicate<S>;
+}
+
+/** Runtime brand check — true only for nodes produced by `predicateScope`. */
+function isBrandedPredicate(node: unknown): boolean {
+  return (
+    typeof node === "object" &&
+    node !== null &&
+    (node as Record<symbol, unknown>)[PREDICATE_BRAND] === true
+  );
 }
 
 function selectorPath(lens: (s: any) => unknown): readonly string[] {
@@ -172,7 +252,9 @@ export function predicateScope<S>(): PredicateScope<S> {
   const when = (lens: (s: any) => unknown): any => {
     const path = selectorPath(lens);
     const compare = (op: "eq" | "ne" | "gt" | "gte" | "lt" | "lte", value: JsonScalar) => {
+      assertJsonScalar(value, `predicate.${op}`);
       assertFiniteScalar(value, op);
+      assertRelationalOperand(op, value);
       return brandFreeze({ kind: "compare", op, lens, path, value });
     };
     return {
@@ -183,7 +265,10 @@ export function predicateScope<S>(): PredicateScope<S> {
       lt: (value: number) => compare("lt", value),
       lte: (value: number) => compare("lte", value),
       in: (values: JsonScalar[]) => {
-        values.forEach((v) => assertFiniteScalar(v, "in"));
+        values.forEach((v) => {
+          assertJsonScalar(v, "predicate.in");
+          assertFiniteScalar(v, "in");
+        });
         return brandFreeze({ kind: "in", lens, path, values: Object.freeze([...values]) });
       },
       exists: () => brandFreeze({ kind: "presence", op: "exists", lens, path }),
@@ -280,6 +365,110 @@ export function evalPredicate<S>(pred: BranchPredicate<S>, state: S): boolean {
   }
 }
 
+// --- L2 predicate tree validation (second line of defense) -------------------
+
+const COMPARE_OPS: ReadonlySet<string> = new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
+const PRESENCE_OPS: ReadonlySet<string> = new Set(["exists", "absent", "truthy", "falsy"]);
+
+function assertPath(path: unknown, op: string): void {
+  if (!Array.isArray(path) || !path.every((seg) => typeof seg === "string")) {
+    throw new LensPurityError(op, `predicate path must be a string[]`);
+  }
+}
+
+/**
+ * Recursively validate a declarative (L2) predicate tree before it is stored
+ * by `condition` / `switchCond`. The `BranchPredicate` brand is type-only
+ * (erased at runtime), so a JS / `as any` caller could return a hand-forged
+ * object from the predicate callback — e.g. `{ kind: "opaque", ... }` (which
+ * would bypass the `conditionFn`/`conditionAsync` message requirement and emit
+ * an unlabeled opaque gate) or a node with a non-JSON `value`. This is the
+ * runtime counterpart to the (type-only) brand: it guarantees every stored L2
+ * predicate is a well-formed, JSON-safe declarative tree.
+ */
+export function assertL2Predicate(node: unknown, op = "condition"): void {
+  // Brand gate (primary): only nodes built by `predicateScope` carry the
+  // module-private brand, so a hand-authored object — which bypassed the
+  // selector source / strict-Proxy gate (its `path` could reference anything) —
+  // is rejected here even from JS / `as any`. The structural checks below are
+  // belt-and-suspenders for the (already-validated) branded shape.
+  if (!isBrandedPredicate(node)) {
+    throw new LensPurityError(
+      op,
+      `${op}() requires a declarative predicate built via the predicate scope ` +
+        `(w.when / all / any / not). The value did not come from the scope — ` +
+        `forged / hand-authored predicate objects are rejected (they bypass the ` +
+        `selector source + purity gate). For opaque logic use conditionFn / conditionAsync.`,
+    );
+  }
+  const n = node as { kind?: unknown };
+  switch (n.kind) {
+    case "compare": {
+      const c = node as { op?: unknown; path?: unknown; value?: unknown };
+      if (typeof c.op !== "string" || !COMPARE_OPS.has(c.op)) {
+        throw new LensPurityError(op, `invalid compare op ${JSON.stringify(c.op)}`);
+      }
+      assertPath(c.path, op);
+      assertJsonScalar(c.value, op);
+      assertFiniteScalar(c.value, op);
+      assertRelationalOperand(c.op, c.value);
+      return;
+    }
+    case "in": {
+      const c = node as { path?: unknown; values?: unknown };
+      assertPath(c.path, op);
+      if (!Array.isArray(c.values)) {
+        throw new LensPurityError(op, `in.values must be an array`);
+      }
+      c.values.forEach((v) => {
+        assertJsonScalar(v, op);
+        assertFiniteScalar(v, op);
+      });
+      return;
+    }
+    case "presence": {
+      const c = node as { op?: unknown; path?: unknown };
+      if (typeof c.op !== "string" || !PRESENCE_OPS.has(c.op)) {
+        throw new LensPurityError(op, `invalid presence op ${JSON.stringify(c.op)}`);
+      }
+      assertPath(c.path, op);
+      return;
+    }
+    case "matches": {
+      const c = node as { path?: unknown; pattern?: unknown; flags?: unknown };
+      assertPath(c.path, op);
+      if (typeof c.pattern !== "string") {
+        throw new LensPurityError(op, `matches.pattern must be a string`);
+      }
+      if (c.flags !== undefined && typeof c.flags !== "string") {
+        throw new LensPurityError(op, `matches.flags must be a string`);
+      }
+      return;
+    }
+    case "and":
+    case "or": {
+      const c = node as { clauses?: unknown };
+      if (!Array.isArray(c.clauses) || c.clauses.length === 0) {
+        throw new LensPurityError(op, `${n.kind}.clauses must be a non-empty array`);
+      }
+      c.clauses.forEach((cl) => assertL2Predicate(cl, op));
+      return;
+    }
+    case "not": {
+      const c = node as { clause?: unknown };
+      assertL2Predicate(c.clause, op);
+      return;
+    }
+    default:
+      throw new LensPurityError(
+        op,
+        `${op}() requires a declarative (L2) predicate from the predicate scope; ` +
+          `got kind ${JSON.stringify(n.kind)}. For opaque / async logic use ` +
+          `conditionFn / conditionAsync (which require a \`message\`).`,
+      );
+  }
+}
+
 // =============================================================================
 // Runtime branch node + execution + projection (Phase 2)
 //
@@ -340,7 +529,18 @@ async function evalCasePredicate(
         "conditionFn (L1) predicate must be synchronous — it returned a thenable. Use conditionAsync for async/I-O predicates.",
       );
     }
-    return await out;
+    const result = await out;
+    // The API types the predicate as `boolean`, but JS / `as any` callers can
+    // return a truthy non-boolean (e.g. the string "false", an object). Fail
+    // fast instead of letting `selectBranchSteps`' `if` silently take a branch
+    // on a coerced value.
+    if (typeof result !== "boolean") {
+      throw new Error(
+        `${pred.sync ? "conditionFn (L1)" : "conditionAsync (L0)"} predicate must return a boolean; ` +
+          `got ${result === null ? "null" : typeof result}`,
+      );
+    }
+    return result;
   }
   return evalPredicate(pred, state as any);
 }
