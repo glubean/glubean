@@ -698,6 +698,31 @@ export const stepRetryBackoff = test("step-retry-backoff")
     ctx.assert(state.attempts >= 3, "pass on 3rd attempt");
     return state;
   });
+
+export const skipInStep = test("skip-in-step")
+  .step("before skip", async (ctx) => {
+    ctx.assert(true, "runs normally");
+  })
+  .step("decide", async (ctx) => {
+    ctx.skip("not applicable in this environment");
+  })
+  .step("after skip", async (ctx) => {
+    ctx.log("must not run");
+  });
+
+export const skipInStepWithRetries = test("skip-in-step-with-retries")
+  .setup(async () => ({ calls: 0 }))
+  .step("skip is terminal", { retries: 3 }, async (ctx, state) => {
+    state.calls += 1;
+    ctx.skip("terminal — should not retry");
+    return state;
+  });
+
+export const skipAfterFailedAssertion = test("skip-after-failed-assertion")
+  .step("fail then skip", async (ctx) => {
+    ctx.assert(false, "real failure recorded before skip");
+    ctx.skip("must not mask the failure above");
+  });
 `;
 
 test("builder without .build() is auto-resolved by runner", async () => {
@@ -876,6 +901,89 @@ test("step retries - backoff delays between retries", async () => {
   expect(logs.some((l) => l.message.includes("waiting 200ms"))).toBe(true);
   expect(logs.some((l) => l.message.includes("waiting 400ms"))).toBe(true);
 }, 10_000);
+
+test("ctx.skip() inside a step skips the test (not failed)", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-in-step",
+    { vars: {}, secrets: {} },
+  );
+
+  // A skipped test is NOT a failure.
+  expect(result.success).toBe(true);
+  expect(result.error).toBeUndefined();
+
+  const ends = getStepEnds(result.events);
+  expect(ends.length).toBe(3);
+  // Step before the skip ran normally.
+  expect(ends[0].name).toBe("before skip");
+  expect(ends[0].status).toBe("passed");
+  // The skipping step is reported as skipped, NOT failed, with no error.
+  expect(ends[1].name).toBe("decide");
+  expect(ends[1].status).toBe("skipped");
+  expect(ends[1].error).toBeUndefined();
+  // Steps after the skip do not run and are marked skipped.
+  expect(ends[2].name).toBe("after skip");
+  expect(ends[2].status).toBe("skipped");
+
+  // The body of the post-skip step never executed.
+  const logs = result.events.filter(
+    (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
+  );
+  expect(logs.some((l) => l.message === "must not run")).toBe(false);
+});
+
+test("ctx.skip() is terminal — a skipped step is never retried", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-in-step-with-retries",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(true);
+
+  const ends = getStepEnds(result.events);
+  expect(ends.length).toBe(1);
+  expect(ends[0].name).toBe("skip is terminal");
+  expect(ends[0].status).toBe("skipped");
+  // Despite retries: 3, the step ran exactly once — skip does not retry.
+  expect(ends[0].attempts).toBe(1);
+  expect(ends[0].retriesUsed).toBe(0);
+
+  const logs = result.events.filter(
+    (e): e is Extract<TimelineEvent, { type: "log" }> => e.type === "log",
+  );
+  expect(logs.some((l) => l.message.includes("Retrying step"))).toBe(false);
+});
+
+test("ctx.skip() does not mask a failed assertion recorded earlier in the same step", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-after-failed-assertion",
+    { vars: {}, secrets: {} },
+  );
+
+  // The prior failed assertion wins — skip must not flip this to success.
+  expect(result.success).toBe(false);
+
+  const ends = getStepEnds(result.events);
+  expect(ends.length).toBe(1);
+  expect(ends[0].name).toBe("fail then skip");
+  expect(ends[0].status).toBe("failed");
+  expect(ends[0].failedAssertions).toBe(1);
+
+  const failedAssertions = getAssertions(result.events).filter((a) => !a.passed);
+  expect(failedAssertions.length).toBe(1);
+});
 
 // =============================================================================
 // Step event tests — duration, pass/fail/skip, assertion counting

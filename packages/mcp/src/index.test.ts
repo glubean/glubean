@@ -257,6 +257,62 @@ export const simple = test("simple-test", (ctx) => {
   expect(result.summary.passed).toBe(1);
 }, 15_000);
 
+test("runLocalTestsFromFile counts ctx.skip() as skipped, not failed", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+
+  await writeFile(
+    join(dir, "tests", "skip.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const skipMe = test("skip-me")
+  .step("decide", async (ctx) => { ctx.skip("not applicable"); });`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "skip.test.ts"),
+    includeLogs: true,
+  });
+
+  expect(result.error).toBeUndefined();
+  expect(result.summary.total).toBe(1);
+  expect(result.summary.passed).toBe(0);
+  expect(result.summary.failed).toBe(0);
+  expect(result.summary.skipped).toBe(1);
+
+  const r = result.results[0];
+  expect(r.skipped).toBe(true);
+  // A skipped test is not a failure.
+  expect(r.success).toBe(true);
+}, 15_000);
+
+test("runLocalTestsFromFile: ctx.skip() does not mask a prior failed assertion", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+
+  await writeFile(
+    join(dir, "tests", "skip-after-fail.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const skipAfterFail = test("skip-after-fail", async (ctx) => {
+  ctx.assert(false, "real failure before skip");
+  ctx.skip("must not hide the failure");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "skip-after-fail.test.ts"),
+    includeLogs: true,
+  });
+
+  // The failed assertion is authoritative — this is a failure, not a skip.
+  expect(result.summary.failed).toBe(1);
+  expect(result.summary.skipped).toBe(0);
+  expect(result.summary.passed).toBe(0);
+
+  const r = result.results[0];
+  expect(r.success).toBe(false);
+  expect(r.skipped).toBeUndefined();
+}, 15_000);
+
 test("runLocalTestsFromFile strips trace headers, keeping only content-type/set-cookie/location/authorization", async () => {
   const dir = await makeSessionTempDir();
   await mkdir(join(dir, "tests"), { recursive: true });

@@ -1772,6 +1772,9 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
       } else {
         let state: unknown = undefined;
         let stepFailed = false;
+        // Set when a step calls ctx.skip(): skips the remaining steps and
+        // marks the whole test as skipped (not failed) after teardown runs.
+        let skipRequest: SkipError | undefined;
         try {
           if (test.setup) {
             emitEvent({
@@ -1784,8 +1787,9 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
             for (let i = 0; i < test.steps.length; i++) {
               const step = test.steps[i];
 
-              // If a previous step failed, skip remaining steps
-              if (stepFailed) {
+              // If a previous step failed (or a step called ctx.skip()),
+              // skip the remaining steps.
+              if (stepFailed || skipRequest) {
                 emitEvent({
                   type: "step_end",
                   index: i,
@@ -1860,8 +1864,14 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                     stepReturnState = result;
                   }
                 } catch (err) {
-                  stepError = err instanceof Error ? err.message : String(err);
-                  timeoutFailure = err instanceof StepTimeoutError;
+                  if (err instanceof SkipError) {
+                    // ctx.skip() inside a step skips the WHOLE test. It is
+                    // not a step failure and must not be retried.
+                    skipRequest = err;
+                  } else {
+                    stepError = err instanceof Error ? err.message : String(err);
+                    timeoutFailure = err instanceof StepTimeoutError;
+                  }
                 } finally {
                   if (stepTimeoutId !== undefined) {
                     clearTimeout(stepTimeoutId);
@@ -1870,6 +1880,11 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
 
                 lastFailedAssertions = getStepFailedAssertions();
                 lastAssertions = getStepAssertionTotal();
+
+                // Skip is terminal — stop attempting, never retry a skip.
+                if (skipRequest) {
+                  break;
+                }
 
                 const attemptFailed = !!stepError || getStepFailedAssertions() > 0;
                 if (!attemptFailed) {
@@ -1897,6 +1912,32 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                   }
                 }
               }
+
+              // ctx.skip() called in this step. If the step already recorded a
+              // failed assertion BEFORE skipping, the failure wins — a skip must
+              // not mask a real failure (consistent with simple-mode tests,
+              // where generateSummary fails on a failed assertion regardless of
+              // a later skip). Otherwise emit a skipped step_end and stop running
+              // steps; the test is reported as skipped after teardown via the
+              // throw below the loop.
+              if (skipRequest && lastFailedAssertions === 0) {
+                emitEvent({
+                  type: "step_end",
+                  index: i,
+                  name: step.meta.name,
+                  status: "skipped",
+                  durationMs: Math.round(performance.now() - stepStart),
+                  assertions: lastAssertions,
+                  failedAssertions: 0,
+                  attempts: attemptsUsed,
+                  retriesUsed: Math.max(0, attemptsUsed - 1),
+                });
+                currentTestCtx()!.currentStepIndex = null;
+                continue;
+              }
+              // Prior failure overrides the skip — fall through and report this
+              // step (and the test) as failed.
+              skipRequest = undefined;
 
               const durationMs = Math.round(performance.now() - stepStart);
               const failed = !!stepError || lastFailedAssertions > 0;
@@ -1957,6 +1998,12 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
               });
             }
           }
+        }
+
+        // A step called ctx.skip() → propagate so the test is reported as
+        // skipped (teardown has already run in the finally above).
+        if (skipRequest) {
+          throw skipRequest;
         }
 
         // If any step failed (assertion or throw), mark overall test as failed

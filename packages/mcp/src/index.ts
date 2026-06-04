@@ -549,6 +549,8 @@ export interface LocalRunResult {
   id: string;
   name?: string;
   success: boolean;
+  /** True when the test called ctx.skip() at runtime. Not a pass or a fail. */
+  skipped?: boolean;
   durationMs: number;
   assertions: Array<{
     passed: boolean;
@@ -580,7 +582,7 @@ export interface LocalRunSnapshot {
   createdAt: string;
   fileUrl: string;
   projectRoot: string;
-  summary: { total: number; passed: number; failed: number };
+  summary: { total: number; passed: number; failed: number; skipped: number };
   results: LocalRunResult[];
   includeLogs: boolean;
   includeTraces: boolean;
@@ -792,7 +794,7 @@ export async function runLocalTestsFromFile(args: {
   vars: Vars;
   secrets: Vars;
   results: LocalRunResult[];
-  summary: { total: number; passed: number; failed: number };
+  summary: { total: number; passed: number; failed: number; skipped: number };
   error?: string;
   /** Runner-fallback or protocol warnings emitted by the executor. (Plan 1 AC6) */
   warnings?: string[];
@@ -825,7 +827,7 @@ export async function runLocalTestsFromFile(args: {
       vars: {},
       secrets: {},
       results: [],
-      summary: { total: 0, passed: 0, failed: 0 },
+      summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
       // Failure class differentiates the two `ok: false` paths in checkSdkCompat:
       //   - "sdk_version_skew" — recoverable; user installs @glubean/runner
       //   - "mcp_packaging_bug" — MCP itself broken; file an issue
@@ -866,7 +868,7 @@ export async function runLocalTestsFromFile(args: {
       vars,
       secrets,
       results: [],
-      summary: { total: 0, passed: 0, failed: 0 },
+      summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
       error: tests.length === 0
         ? "No tests discovered in file. Check that exports use test() or contract.http.with() from @glubean/sdk."
         : `No tests matched filter "${args.filter}". Available: ${tests.map((t) => t.id).join(", ")}`,
@@ -929,7 +931,7 @@ export async function runLocalTestsFromFile(args: {
         vars,
         secrets,
         results: [],
-        summary: { total: 0, passed: 0, failed: 0 },
+        summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
         error:
           "inputJson and bootstrapInput are mutually exclusive. " +
           "Per attachment-model §5.1: explicit input bypasses the overlay, so bootstrap params would be ignored. Pick one channel per run.",
@@ -943,7 +945,7 @@ export async function runLocalTestsFromFile(args: {
         vars,
         secrets,
         results: [],
-        summary: { total: 0, passed: 0, failed: 0 },
+        summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
         error:
           `inputJson / bootstrapInput / forceStandalone require \`filter\` ` +
           `to match exactly one testId. Matched ${selected.length} tests` +
@@ -1088,13 +1090,21 @@ export async function runLocalTestsFromFile(args: {
 
         // Finalize this test's result.
         const allAssertionsPassed = acc.assertions.every((a) => a.passed);
-        const success = acc.statusSuccess && allAssertionsPassed && !acc.errorMessage;
+        // A skip only counts as skipped when nothing failed before it. A failed
+        // assertion (or error) is authoritative — skip must not mask it (matches
+        // the executor summary and the step-path rule in the harness).
+        const cleanSkip =
+          event.status === "skipped" && allAssertionsPassed && !acc.errorMessage;
+        const success = cleanSkip
+          ? true
+          : acc.statusSuccess && allAssertionsPassed && !acc.errorMessage;
         const testMeta = selected.find((t) => matchesTemplateId(t.id, currentTestId!));
         const result: LocalRunResult = {
           exportName: testMeta?.exportName ?? "",
           id: currentTestId,
           name: testMeta?.name ?? currentTestId,
           success,
+          ...(cleanSkip && { skipped: true }),
           durationMs: Date.now() - acc.start,
           assertions: acc.assertions,
           logs: acc.logs,
@@ -1148,7 +1158,8 @@ export async function runLocalTestsFromFile(args: {
     }
   }
 
-  const passed = results.filter((r) => r.success).length;
+  const skippedCount = results.filter((r) => r.skipped).length;
+  const passed = results.filter((r) => r.success && !r.skipped).length;
   const failed = results.filter((r) => !r.success).length;
 
   const warningsArr = [...warningSet];
@@ -1159,7 +1170,7 @@ export async function runLocalTestsFromFile(args: {
     vars,
     secrets,
     results,
-    summary: { total: results.length, passed, failed },
+    summary: { total: results.length, passed, failed, skipped: skippedCount },
     ...(orchestrationError !== undefined && { error: orchestrationError }),
     ...(warningsArr.length > 0 && { warnings: warningsArr }),
     versionInfo,

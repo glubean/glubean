@@ -1305,6 +1305,10 @@ export async function runCommand(
     expected?: unknown;
   }> = [];
   let success = false;
+  // Runtime skip (ctx.skip() in setup/step/quick-mode → status: "skipped").
+  // Routed to the skipped bucket, not counted as pass or fail.
+  let testSkipped = false;
+  let skipReason: string | undefined;
   let errorMsg: string | undefined;
   let errorStack: string | undefined;
   let errorReason: string | undefined;
@@ -1341,6 +1345,22 @@ export async function runCommand(
     const duration = Date.now() - startTime;
     const allAssertionsPassed = assertions.every((a) => a.passed);
     const finalSuccess = success && allAssertionsPassed;
+    // A skip only counts as skipped when nothing failed before it. A failed
+    // assertion is authoritative — skip must not mask it (matches the executor
+    // summary and the step-path rule in the harness).
+    const skippedClean = testSkipped && allAssertionsPassed;
+
+    // The status:"skipped" event was consumed before the event loop appended it
+    // to testEvents, so re-add it here. This keeps a runtime skip detectable in
+    // per-test consumers (result-json, upload) and mirrors capability-skip rows,
+    // whose events array also carries a status:"skipped" entry.
+    if (skippedClean) {
+      testEvents.push({
+        type: "status",
+        status: "skipped",
+        ...(skipReason && { reason: skipReason }),
+      } as ExecutionEvent);
+    }
 
     collectedRuns.push({
       testId,
@@ -1348,16 +1368,21 @@ export async function runCommand(
       tags: testItem?.meta.tags,
       filePath: currentGroupFilePath,
       events: testEvents,
-      success: finalSuccess,
+      // A cleanly-skipped test is not a failure (mirrors capability-skip rows).
+      success: skippedClean ? true : finalSuccess,
       durationMs: duration,
       groupId: testItem?.meta.groupId,
     });
 
-    addLogEntry("result", finalSuccess ? "PASSED" : "FAILED", {
-      duration,
-      success: finalSuccess,
-      peakMemoryMB,
-    });
+    addLogEntry(
+      "result",
+      skippedClean ? "SKIPPED" : finalSuccess ? "PASSED" : "FAILED",
+      {
+        duration,
+        success: skippedClean ? true : finalSuccess,
+        peakMemoryMB,
+      },
+    );
 
     const peakMB = peakMemoryMB ? parseFloat(peakMemoryMB) : 0;
     if (peakMB > overallPeakMemoryMB) {
@@ -1372,7 +1397,13 @@ export async function runCommand(
     if (assertions.length > 0) miniStats.push(`${assertions.length} checks`);
     if (testSteps > 0) miniStats.push(`${testSteps} steps`);
 
-    if (finalSuccess) {
+    if (skippedClean) {
+      const reasonSuffix = skipReason ? ` — ${skipReason}` : "";
+      console.log(
+        `    ${colors.yellow}⊘ SKIPPED${colors.reset} ${colors.dim}(${miniStats.join(", ")})${reasonSuffix}${colors.reset}`,
+      );
+      skipped++;
+    } else if (finalSuccess) {
       console.log(
         `    ${colors.green}✓ PASSED${colors.reset} ${colors.dim}(${miniStats.join(", ")})${colors.reset}`,
       );
@@ -1719,6 +1750,8 @@ export async function runCommand(
             testEvents = [];
             assertions = [];
             success = false;
+            testSkipped = false;
+            skipReason = undefined;
             errorMsg = undefined;
             errorStack = undefined;
             errorReason = undefined;
@@ -1745,6 +1778,8 @@ export async function runCommand(
 
           case "status":
             success = event.status === "completed";
+            testSkipped = event.status === "skipped";
+            if (testSkipped) skipReason = event.reason;
             if (event.error) {
               errorMsg = event.error;
               errorStack = event.stack;
