@@ -172,6 +172,8 @@ export type NormalizedFlowStep =
       target: string;
       inputs?: NormalizedFieldMapping[];
       outputs?: NormalizedFieldMapping[];
+      /** Accepted alternate outcome keys (HTTP: status numbers) when the step declared `accept`. */
+      accept?: ReadonlyArray<string | number>;
     }
   | {
       kind: "compute";
@@ -574,6 +576,7 @@ function mapExtractedStep(s: any): NormalizedFlowStep {
     target: s.target ?? "",
     inputs: s.inputs,
     outputs: s.outputs,
+    ...(Array.isArray(s.accept) ? { accept: s.accept } : {}),
   };
 }
 
@@ -607,6 +610,7 @@ function mapRuntimeFlowStep(s: any): NormalizedFlowStep {
     caseKey: s.caseKey ?? s.ref?.caseKey ?? "",
     protocol: s.ref?.protocol ?? "",
     target: s.ref?.target ?? "",
+    ...(Array.isArray(s.bindings?.accept) ? { accept: s.bindings.accept } : {}),
   };
 }
 

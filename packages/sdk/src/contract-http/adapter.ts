@@ -598,6 +598,7 @@ async function executeCaseInFlowHttp(input: {
   contract: ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
   caseKey: string;
   resolvedInputs: unknown;
+  accept?: readonly unknown[];
 }): Promise<HttpFlowCaseOutput> {
   const { ctx, contract, caseKey, resolvedInputs } = input;
   const spec = contract._spec;
@@ -676,6 +677,25 @@ async function executeCaseInFlowHttp(input: {
       throw new Error(`${err.message} (timeout: ${timeoutMs}ms)`);
     }
     throw err;
+  }
+
+  // `accept` (multi-status outcome): if the actual status is an accepted
+  // alternate (in `accept` AND not the case's primary expected status), this is
+  // a legal-but-non-primary outcome. The case's expect.schema / headers / verify
+  // describe ONLY the primary status, so running them here would fail before the
+  // response reaches `out`. Skip them and hand the RAW {status, headers, body}
+  // to the flow so a condition can branch on the status. The primary status
+  // (even if also listed in `accept`) always gets full validation below.
+  const acceptList = (input.accept ?? []) as readonly number[];
+  if (acceptList.includes(res.status) && res.status !== caseSpec.expect.status) {
+    const altHeaders = normalizeResponseHeaders(res.headers);
+    let altBody: unknown;
+    try {
+      altBody = await res.json();
+    } catch {
+      altBody = undefined;
+    }
+    return { status: res.status, headers: altHeaders, body: altBody };
   }
 
   ctx.expect(res).toHaveStatus(caseSpec.expect.status);

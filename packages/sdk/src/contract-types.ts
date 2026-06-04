@@ -576,6 +576,16 @@ export interface ContractProtocolAdapter<
     contract: ProtocolContract<Spec, SafeSchemas, SafeMeta>;
     caseKey: string;
     resolvedInputs: unknown;
+    /**
+     * Accepted alternate outcome keys for this flow step (protocol-agnostic;
+     * HTTP interprets as status numbers). When the actual outcome key is in
+     * this list AND differs from the case's primary expected outcome, the
+     * adapter MUST skip the case's primary result validation (schema / headers
+     * / verify — they only describe the primary outcome) and return the RAW
+     * outcome so the flow can branch on it. Absent / empty = current behavior
+     * (validate against the single primary outcome).
+     */
+    accept?: readonly unknown[];
   }) => Promise<unknown>;
 
   /**
@@ -672,7 +682,9 @@ export interface ProtocolContract<
     key: K,
   ): ContractCaseRef<
     InferCaseInput<Cases[K]>,
-    InferOutput<PayloadSchemas>
+    InferOutput<PayloadSchemas>,
+    InferAcceptKey<PayloadSchemas>,
+    InferRawOutcome<PayloadSchemas, InferOutput<PayloadSchemas>>
   >;
 }
 
@@ -714,6 +726,35 @@ export type InferCaseInput<C> = C extends {
 /** Adapter-defined helper: extract the "case output" shape from PayloadSchemas. */
 export type InferOutput<_PayloadSchemas> = unknown;
 
+/**
+ * Adapter-defined helper: the element type of a step's `accept` list (the
+ * "accepted alternate outcome key"). HTTP = `number` (status); other protocols
+ * = their own code type. Adapters opt in by carrying an optional type-only
+ * `__acceptKey` marker on their `PayloadSchemas` (never set at runtime); core
+ * stays protocol-agnostic and falls back to `string | number`.
+ */
+export type InferAcceptKey<P> = P extends { readonly __acceptKey?: infer K }
+  ? [unknown] extends [K]
+    ? never
+    : NonNullable<K>
+  : never;
+
+/**
+ * Adapter-defined helper: the type of `out`'s `res` when a step declares
+ * `accept` — the adapter's RAW multi-status outcome (HTTP =
+ * `{ status, headers, body: unknown }`), which forces the author to narrow
+ * `res.status` before touching `body`. Without `accept`, `res` stays the
+ * primary `CaseOutput`. Adapters opt in via an optional `__rawOutcome` marker
+ * on `PayloadSchemas`; core falls back to `Fallback` (the primary CaseOutput).
+ */
+export type InferRawOutcome<P, Fallback = unknown> = P extends {
+  readonly __rawOutcome?: infer R;
+}
+  ? [unknown] extends [R]
+    ? Fallback
+    : NonNullable<R>
+  : Fallback;
+
 // =============================================================================
 // Flow types
 // =============================================================================
@@ -728,6 +769,13 @@ export type InferOutput<_PayloadSchemas> = unknown;
 export interface ContractCaseRef<
   CaseInputs = unknown,
   CaseOutput = unknown,
+  // Permissive default so bare 2-arg annotations (e.g. `contract.bootstrap`'s
+  // `ContractCaseRef<Needs, unknown>`) accept any adapter's ref. The opt-out
+  // for multi-status `accept` lives in `InferAcceptKey` (the `.case()` return),
+  // which resolves to `never` for adapters without an `__acceptKey` marker and
+  // to `number` for HTTP — NOT in this default.
+  AcceptKey = unknown,
+  RawOutcome = CaseOutput,
 > {
   readonly __glubean_type: "contract-case-ref";
   readonly contractId: string;
@@ -741,6 +789,10 @@ export interface ContractCaseRef<
   /** Phantom fields — do not populate at runtime. TS-only. */
   readonly __phantom_inputs?: CaseInputs;
   readonly __phantom_output?: CaseOutput;
+  /** Phantom — element type of a step's `accept` list (adapter-specific). */
+  readonly __phantom_accept_key?: AcceptKey;
+  /** Phantom — `out`'s `res` type when `accept` is present (adapter raw outcome). */
+  readonly __phantom_raw_outcome?: RawOutcome;
 }
 
 /** Contract-level metadata for a flow (set via `.meta()`). */
@@ -795,13 +847,22 @@ export type RuntimeFlowStep =
 export interface RuntimeContractCallStep {
   kind: "contract-call";
   name?: string;
-  ref: ContractCaseRef;
+  ref: ContractCaseRef<any, any, any, any>;
   caseKey: string;
   /** Live contract instance (mirrors ref.contract, kept for direct access). */
   contract: ProtocolContract<any, any, any>;
   bindings?: {
     in?: (state: any) => any;
     out?: (state: any, response: any) => any;
+    /**
+     * Accepted alternate outcome keys (HTTP: status numbers). When the actual
+     * outcome key is in this list AND differs from the case's primary expected
+     * outcome, the adapter treats it as a legal outcome: it skips the case's
+     * primary result validation (schema / headers / verify) and hands the RAW
+     * outcome to `out`, so a condition can branch on it. Protocol-agnostic in
+     * core; the adapter interprets the element type.
+     */
+    accept?: readonly unknown[];
   };
 }
 
@@ -862,6 +923,13 @@ export interface ExtractedContractCallStep {
   inputs?: FieldMapping[];
   /** Proxy dry-run output — state update mappings. */
   outputs?: FieldMapping[];
+  /**
+   * Accepted alternate outcome keys (HTTP: status numbers) — present when the
+   * step declared `accept`. Surfaces the multi-status contract to downstream
+   * consumers (scanner / MCP / CLI / Cloud) so a status-gated step is not
+   * indistinguishable from a single-primary-status one.
+   */
+  accept?: ReadonlyArray<string | number>;
 }
 
 export interface ExtractedComputeStep {
@@ -932,16 +1000,37 @@ export interface FlowBuilder<State = unknown> {
    * function-valued body/headers/params/query with this logical input
    * (same mechanism as standalone `executeStandaloneCase`).
    */
-  step<CaseInputs, CaseOutput, NewState = State>(
-    ref: ContractCaseRef<CaseInputs, CaseOutput>,
+  // `Accept` is inferred from the `accept` value (defaults to `never` when the
+  // step omits it). It drives a conditional `res` type: no `accept` →
+  // `CaseOutput` (primary outcome, unchanged); `accept` present → `RawOutcome`
+  // (the adapter's raw multi-status outcome, body typically `unknown`, forcing
+  // a `res.status` narrow). This is the single conditional-tuple signature — no
+  // extra overloads — so the void-input `in`-rejection hole stays closed.
+  step<
+    CaseInputs,
+    CaseOutput,
+    AcceptKey,
+    RawOutcome,
+    Accept extends readonly AcceptKey[] = never,
+    NewState = State,
+  >(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
     ...args: [CaseInputs] extends [void]
       ? [bindings?: {
-          out?: (state: State, response: CaseOutput) => NewState;
+          accept?: Accept;
+          out?: (
+            state: State,
+            response: [Accept] extends [never] ? CaseOutput : RawOutcome,
+          ) => NewState;
           name?: string;
         }]
       : [bindings: {
           in: (state: State) => CaseInputs;
-          out?: (state: State, response: CaseOutput) => NewState;
+          accept?: Accept;
+          out?: (
+            state: State,
+            response: [Accept] extends [never] ? CaseOutput : RawOutcome,
+          ) => NewState;
           name?: string;
         }]
   ): FlowBuilder<NewState>;
@@ -1050,16 +1139,31 @@ export interface FlowBuilder<State = unknown> {
 export interface FlowFragmentBuilder<State = unknown> {
   readonly [FRAGMENT_STATE]: (s: State) => State;
 
-  step<CaseInputs, CaseOutput, NewState = State>(
-    ref: ContractCaseRef<CaseInputs, CaseOutput>,
+  step<
+    CaseInputs,
+    CaseOutput,
+    AcceptKey,
+    RawOutcome,
+    Accept extends readonly AcceptKey[] = never,
+    NewState = State,
+  >(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
     ...args: [CaseInputs] extends [void]
       ? [bindings?: {
-          out?: (state: State, response: CaseOutput) => NewState;
+          accept?: Accept;
+          out?: (
+            state: State,
+            response: [Accept] extends [never] ? CaseOutput : RawOutcome,
+          ) => NewState;
           name?: string;
         }]
       : [bindings: {
           in: (state: State) => CaseInputs;
-          out?: (state: State, response: CaseOutput) => NewState;
+          accept?: Accept;
+          out?: (
+            state: State,
+            response: [Accept] extends [never] ? CaseOutput : RawOutcome,
+          ) => NewState;
           name?: string;
         }]
   ): FlowFragmentBuilder<NewState>;
@@ -1187,6 +1291,7 @@ export type FlowRegistryStep =
       outputs?: FieldMapping[];
       reads?: string[];
       writes?: string[];
+      accept?: ReadonlyArray<string | number>;
     }
   | {
       kind: "branch";

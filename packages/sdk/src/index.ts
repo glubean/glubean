@@ -492,6 +492,8 @@ export type {
   ContractCaseRef,
   InferInputs,
   InferOutput,
+  InferAcceptKey,
+  InferRawOutcome,
   FlowBuilder,
   FlowFragmentBuilder,
   NoExtraKeys,

@@ -325,6 +325,9 @@ function formatFlowStep(step: NormalizedFlowStep, index: number): string[] {
   const name = step.name ? ` — ${step.name}` : "";
   const target = step.target ? ` (${step.protocol} · ${step.target})` : "";
   lines.push(`${index + 1}. **${step.contractId}#${step.caseKey}**${name}${target}`);
+  if (step.accept && step.accept.length > 0) {
+    lines.push(`   - accepts: ${step.accept.join(", ")}`);
+  }
   if (step.inputs && step.inputs.length > 0) {
     lines.push("   - inputs:");
     for (const m of step.inputs) lines.push(`     - ${formatMappingArrow(m)}`);
@@ -391,6 +394,7 @@ function flowStepToJson(s: NormalizedFlowStep): Record<string, unknown> {
     target: s.target,
     inputs: s.inputs,
     outputs: s.outputs,
+    ...(s.accept ? { accept: s.accept } : {}),
   };
 }
 

@@ -289,6 +289,16 @@ export interface HttpPayloadSchemas {
   params?: Record<string, HttpParamSchema>;
   query?: Record<string, HttpParamSchema>;
   security?: HttpSecurityScheme;
+
+  /**
+   * Type-only markers read by core's `InferAcceptKey` / `InferRawOutcome` hooks
+   * so a flow step's `accept` is typed as `number` (status) and, when present,
+   * `out`'s `res` becomes the raw `HttpFlowCaseOutput`. NEVER set at runtime —
+   * they exist purely so core stays protocol-agnostic while HTTP supplies the
+   * concrete types.
+   */
+  readonly __acceptKey?: number;
+  readonly __rawOutcome?: HttpFlowCaseOutput;
 }
 
 /**

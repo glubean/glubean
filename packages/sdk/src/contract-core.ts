@@ -807,11 +807,12 @@ export const contract: ContractNamespace = {
 /** Build a contract-call runtime step (adapter lookup + flow-safety validation). */
 function buildContractCallStep(
   flowId: string,
-  ref: ContractCaseRef<any, any>,
+  ref: ContractCaseRef<any, any, any, any>,
   bindings?: {
     in?: (state: any) => any;
     out?: (state: any, response: any) => any;
     name?: string;
+    accept?: readonly unknown[];
   },
 ): RuntimeContractCallStep {
   const adapter = _adapters.get(ref.protocol);
@@ -840,7 +841,13 @@ function buildContractCallStep(
     ref,
     caseKey: ref.caseKey,
     contract: ref.contract,
-    bindings: bindings ? { in: bindings.in, out: bindings.out as any } : undefined,
+    bindings: bindings
+      ? {
+          in: bindings.in,
+          out: bindings.out as any,
+          ...(bindings.accept ? { accept: bindings.accept } : {}),
+        }
+      : undefined,
   };
 }
 
@@ -883,7 +890,7 @@ function makeStepSink(flowId: string, steps: readonly RuntimeFlowStep[]): FlowFr
   const extend = (step: RuntimeFlowStep) => makeStepSink(flowId, [...steps, step]);
   // Typed `any` so methods can return sinks; the public type is the cast below.
   const sink: any = {
-    step(ref: ContractCaseRef<any, any>, bindings?: any) {
+    step(ref: ContractCaseRef<any, any, any, any>, bindings?: any) {
       return extend(buildContractCallStep(flowId, ref, bindings));
     },
     compute(fn: (s: any) => any) {
@@ -1027,7 +1034,7 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
     },
 
     step(
-      ref: ContractCaseRef<any, any>,
+      ref: ContractCaseRef<any, any, any, any>,
       bindings?: {
         in?: (state: any) => any;
         out?: (state: any, response: any) => any;
@@ -1208,6 +1215,7 @@ function stepProjectionToRegistry(
     target: step.target,
     inputs: step.inputs,
     outputs: step.outputs,
+    ...(step.accept ? { accept: step.accept } : {}),
   };
 }
 
@@ -1331,6 +1339,7 @@ export async function runFlow<State>(
         contract: step.contract as any,
         caseKey: step.caseKey,
         resolvedInputs,
+        ...(step.bindings?.accept ? { accept: step.bindings.accept } : {}),
       });
 
       if (step.bindings?.out) {
@@ -1433,6 +1442,9 @@ export function normalizeFlow<State>(
       target: s.ref.target,
       inputs,
       outputs,
+      ...(s.bindings?.accept
+        ? { accept: [...s.bindings.accept] as Array<string | number> }
+        : {}),
     };
   };
 
