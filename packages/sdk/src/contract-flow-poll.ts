@@ -142,11 +142,13 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
     if (!passed) failed = true;
   };
 
-  const q = {
-    // Pass through accessors + observability (vars/secrets/session/http/log/warn/
-    // trace/action/event/metric) — see the doc above. Only the pass/fail APIs
-    // below are isolated.
-    ...real,
+  // `Object.create(real)` (not a spread) so PROTOTYPE-inherited APIs survive —
+  // a fixture-augmented ctx (test.extend) carries vars/http/log/etc. on its
+  // prototype chain, which `{ ...real }` would drop. Accessors + observability
+  // resolve through the prototype; only the pass/fail APIs below are overridden.
+  // `skip` is intentionally NOT overridden — it inherits real.skip (throws a
+  // SkipError, emits nothing → safe to delegate).
+  const q = Object.assign(Object.create(real) as TestContext, {
     assert: (
       a: boolean | { passed: boolean; actual?: unknown; expected?: unknown },
       message?: string,
@@ -206,10 +208,6 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
       }
       return value;
     },
-    // skip is pure control flow — the real `skip` only THROWS a SkipError (it
-    // emits no event), so delegating is safe: an in-budget skip skips the test;
-    // a timed-out orphan's skip rejects the abandoned promise (no leak).
-    skip: (reason?: string): never => real.skip(reason),
     // fail emits a failed assertion AND bumps the counter in the real ctx, so it
     // must NOT delegate (a timed-out orphan would mutate the abandoned run).
     // Buffer the failure event + throw locally; the poll loop flushes this ctx
@@ -220,7 +218,7 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
       buffer.push((t) => (t.assert as (...args: unknown[]) => void)({ passed: false }, message));
       throw new Error(message);
     },
-  } as unknown as QuarantinedContext;
+  }) as unknown as QuarantinedContext;
 
   q.flushTo = (target: TestContext): void => {
     for (const replay of buffer) replay(target);

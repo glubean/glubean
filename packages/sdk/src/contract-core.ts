@@ -65,6 +65,7 @@ import {
   raceBudget,
   evalPollExit,
   extractPollStep,
+  validatePollBounds,
   PollExhaustedError,
   BACKOFF_CAP_MS,
   type RuntimePollStep,
@@ -1316,6 +1317,20 @@ async function runPollStep(
 ): Promise<unknown> {
   const label =
     step.name ?? `${(step.contract as { _projection: { id: string } })._projection.id}#${step.caseKey}`;
+  // Runtime bound guard — the builder validates at construction, but `as any` /
+  // JS callers can reach runFlow with an unbounded poll step. Re-validate so a
+  // missing stop condition / per-attempt budget fails fast instead of looping
+  // forever (mirrors the runtime `needs` guard for contract-call steps).
+  validatePollBounds(
+    {
+      timeout: step.timeoutMs,
+      maxAttempts: step.maxAttempts,
+      perAttemptTimeout: step.perAttemptTimeoutMs,
+      every: step.every,
+      backoff: step.backoff,
+    },
+    label,
+  );
   const now = (): number => performance.now();
   const start = now();
   const deadline = step.timeoutMs !== undefined ? start + step.timeoutMs : Infinity;

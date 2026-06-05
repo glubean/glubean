@@ -177,6 +177,15 @@ describe("runtime — exhaustion fails the flow", () => {
     await expect(runFlow(flow, ctx)).rejects.toThrow(/exhausted/);
   });
 
+  test("runtime guard: an unbounded poll step (bypassing the builder) fails fast", async () => {
+    mockAdapter([{ status: 202, body: {} }]); // always pending — would loop forever if unbounded
+    const box = { value: undefined as any };
+    const until = predicateScope<{ status: number }>().when((r) => r.status).eq(200);
+    // No timeoutMs / maxAttempts / perAttemptTimeoutMs — validatePollBounds must reject.
+    const flow = pollFlow({ until }, {}, box);
+    await expect(runFlow(flow, ctx)).rejects.toThrow(/stop condition/);
+  });
+
   test("in-budget predicate ctx.fail fails the poll and the failure assertion lands", async () => {
     mockAdapter([{ status: 200, body: {} }]);
     const asserts: Array<{ passed: boolean; msg?: string }> = [];
@@ -327,6 +336,18 @@ describe("quarantinedCtx", () => {
     expect(q.hasFailure()).toBe(true);
     q.flushTo(real);
     expect(seen).toEqual([{ passed: false, msg: "boom" }]);
+  });
+
+  test("prototype-inherited ctx APIs survive quarantine (test.extend fixture ctx)", () => {
+    const base = {
+      vars: { get: () => "v" },
+      log: () => {},
+      assert: () => {},
+    } as unknown as TestContext;
+    const fixtureCtx = Object.create(base) as TestContext; // prototype-linked, like test.extend
+    const q = quarantinedCtx(fixtureCtx);
+    expect((q as any).vars.get()).toBe("v"); // inherited via prototype chain, not dropped
+    expect(typeof (q as any).log).toBe("function");
   });
 
   test("validate with severity:fatal throws on failure (control flow preserved)", () => {
