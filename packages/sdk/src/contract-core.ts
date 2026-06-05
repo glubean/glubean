@@ -1336,16 +1336,31 @@ async function runPollStep(
     // Request: quarantined ctx + abort signal; budget-raced so a non-honoring
     // adapter can't block past the budget.
     const ac = new AbortController();
+    let budgetAborted = false;
     const budgetTimer = Number.isFinite(attemptBudget)
-      ? setTimeout(() => ac.abort(), Math.max(0, attemptBudget))
+      ? setTimeout(() => {
+          budgetAborted = true;
+          ac.abort();
+        }, Math.max(0, attemptBudget))
       : undefined;
     const reqCtx = quarantinedCtx(ctx);
+    const exhausted = (): PollExhaustedError =>
+      new PollExhaustedError(label, attempt, `attempt budget ${Math.round(attemptBudget)}ms exceeded`);
     try {
       lastRes = await raceBudget(
         executeContractCaseInFlow(step, state, reqCtx, runtimeId, { signal: ac.signal }),
         attemptBudget,
-        () => new PollExhaustedError(label, attempt, `attempt budget ${Math.round(attemptBudget)}ms exceeded`),
+        exhausted,
       );
+    } catch (err) {
+      // A signal-honoring adapter (HTTP) rejects with AbortError when OUR budget
+      // timer fired — convert it to the poll exhaustion error (with the attempt
+      // count) rather than leaking a raw AbortError. Genuine request errors (and
+      // aborts we didn't cause) propagate and fail the poll.
+      if (budgetAborted && err instanceof Error && err.name === "AbortError") {
+        throw exhausted();
+      }
+      throw err;
     } finally {
       if (budgetTimer) clearTimeout(budgetTimer);
     }

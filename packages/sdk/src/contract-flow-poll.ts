@@ -166,14 +166,30 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
     ): T | undefined => {
       // Run the schema NOW (the adapter consumes the return value); buffer the
       // event so it only lands on the real ctx if this attempt is flushed.
-      const parsed = (schema as { safeParse?: (d: unknown) => { success: boolean; data?: T } })
-        .safeParse?.(data);
-      const ok = parsed ? parsed.success : true;
+      // Mirror ctx.validate: support both safeParse and parse-only SchemaLikes
+      // (a parse-only schema must still run + transform, not silently no-op).
+      const s = schema as {
+        safeParse?: (d: unknown) => { success: boolean; data?: T };
+        parse?: (d: unknown) => T;
+      };
+      let ok = true;
+      let value: T | undefined;
+      if (typeof s.safeParse === "function") {
+        const r = s.safeParse(data);
+        ok = r.success;
+        value = r.success ? r.data : undefined;
+      } else if (typeof s.parse === "function") {
+        try {
+          value = s.parse(data);
+        } catch {
+          ok = false;
+        }
+      }
       recordAssert(ok);
       buffer.push((t) =>
         (t.validate as (...args: unknown[]) => unknown)(data, schema, label, options),
       );
-      return parsed && parsed.success ? parsed.data : undefined;
+      return value;
     },
     trace: (request: unknown) => {
       buffer.push((t) => (t.trace as (r: unknown) => void)(request));

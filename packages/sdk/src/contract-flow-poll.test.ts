@@ -176,6 +176,24 @@ describe("runtime — exhaustion fails the flow", () => {
     const flow = pollFlow({ until, timeoutMs: 40, every: 10 }, {}, box);
     await expect(runFlow(flow, ctx)).rejects.toThrow(/exhausted/);
   });
+
+  test("signal-honoring adapter aborting on budget → PollExhaustedError, not AbortError", async () => {
+    // Adapter hangs until aborted, then rejects AbortError (like fetch with signal).
+    contract.register(PROTO, {
+      executeCaseInFlow: (input: any) =>
+        new Promise((_resolve, reject) => {
+          input.signal?.addEventListener("abort", () => {
+            const e = new Error("aborted");
+            e.name = "AbortError";
+            reject(e);
+          });
+        }),
+    } as never);
+    const box = { value: undefined as any };
+    const until = predicateScope<{ status: number }>().when((r) => r.status).eq(200);
+    const flow = pollFlow({ until, maxAttempts: 1, perAttemptTimeoutMs: 20 }, {}, box);
+    await expect(runFlow(flow, ctx)).rejects.toThrow(PollExhaustedError);
+  });
 });
 
 // ── runtime: exit-predicate semantics ───────────────────────────────────────
@@ -247,6 +265,24 @@ describe("quarantinedCtx", () => {
     q.assert(false, "probe-noise");
     // no flush → discarded
     expect(seen).toHaveLength(0);
+  });
+
+  test("validate runs a parse-only schema and returns the transformed value", () => {
+    const real = { validate: () => {}, log: () => {} } as unknown as TestContext;
+    const q = quarantinedCtx(real);
+    const parseSchema = { parse: (d: any) => ({ ...d, parsed: true }) } as any;
+    const out = q.validate({ a: 1 }, parseSchema, "body");
+    expect(out).toEqual({ a: 1, parsed: true }); // transformed, not undefined
+    expect(q.hasFailure()).toBe(false);
+  });
+
+  test("validate records failure when a parse-only schema throws", () => {
+    const real = { validate: () => {}, log: () => {} } as unknown as TestContext;
+    const q = quarantinedCtx(real);
+    const badSchema = { parse: () => { throw new Error("bad"); } } as any;
+    const out = q.validate({ a: 1 }, badSchema, "body");
+    expect(out).toBeUndefined();
+    expect(q.hasFailure()).toBe(true);
   });
 });
 
