@@ -176,6 +176,53 @@ function _typeTests() {
     ],
     (b) => b.step("y", async (_c, s) => s),
   );
+
+  // TYPE THREADING: step → condition(adds field) → step(reads it) →
+  // switchOn(adds field) → step(reads exact accumulated shape). Confirms the
+  // state type flows INTO each branch and the converged shape flows OUT to the
+  // next step (not erased to `any`, not losing earlier fields).
+  gtest("thread")
+    .setup(async () => ({ a: 1 }))
+    .step("s1", async (_c, s) => ({ ...s, b: "x" })) // {a} → {a,b}
+    .condition(
+      { predicate: (_c, s) => s.a === 1 && s.b === "x" }, // sees {a,b} in the predicate
+      (b) => b.step("then", async (_c, s) => ({ ...s, c: true })), // adds c
+      (b) => b.step("else", async (_c, s) => ({ ...s, c: false })), // adds c (converges)
+    ) // {a,b,c}
+    .step("after-cond", async (_ctx, s) => {
+      const _a: number = s.a; // earlier field preserved through the branch
+      const _b: string = s.b;
+      const _cBool: boolean = s.c; // field added by the branch, typed
+      void _a;
+      void _b;
+      void _cBool;
+      return s;
+    })
+    .switchOn((_c, s) => s.b)( // switch on a field added before the previous branch
+      [{ value: "x", then: (b) => b.step("v", async (_c, s) => ({ ...s, d: 9 })) }],
+      (b) => b.step("dft", async (_c, s) => ({ ...s, d: 0 })),
+    ) // {a,b,c,d}
+    .step("after-switch", async (_c, s) => {
+      // The full accumulated shape is threaded out of both branches.
+      const _all: { a: number; b: string; c: boolean; d: number } = s;
+      void _all;
+      return s;
+    });
+
+  // TYPE THREADING (negative): the post-branch state is precise, NOT `any`.
+  gtest("thread-precise")
+    .setup(async () => ({ a: 1 }))
+    .condition(
+      { predicate: (_c, s) => s.a === 1 },
+      (b) => b.step("t", async (_c, s) => ({ ...s, c: true })),
+      (b) => b.step("e", async (_c, s) => ({ ...s, c: false })),
+    )
+    .step("after", async (_c, s) => {
+      // @ts-expect-error `nope` was never added — proves the threaded state is typed, not `any`
+      const _x: number = s.nope;
+      void _x;
+      return s;
+    });
 }
 
 test("Phase 6 builder type tests compile", () => {

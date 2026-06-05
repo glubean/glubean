@@ -178,6 +178,56 @@ export const t = test("nested")
   expect(ran).toEqual(expect.arrayContaining(["set-tier", "grant", "assert"]));
 });
 
+test("mixed chain: step + condition + step + switchOn + switchCond + step compose & thread state", async () => {
+  // A realistic flow mixing normal steps with all three branch primitives in
+  // one top-level chain. Verifies state threads across the mix, each branch
+  // takes the right case, non-taken cases skip, and the timeline order is right.
+  const src = `
+import { test } from "@glubean/sdk";
+export const t = test("mixed")
+  .setup(async () => ({ role: "admin", status: 404, amount: 500, log: [] }))
+  .step("seed", async (ctx, s) => ({ ...s, log: [...s.log, "seed"] }))
+  .condition(
+    { predicate: (ctx, s) => s.role === "admin" },
+    (b) => b.step("admin-step", async (ctx, s) => ({ ...s, log: [...s.log, "admin"] })),
+    (b) => b.step("guest-step", async (ctx, s) => ({ ...s, log: [...s.log, "guest"] })),
+  )
+  .step("mid", async (ctx, s) => ({ ...s, log: [...s.log, "mid"] }))
+  .switchOn((ctx, s) => s.status)(
+    [
+      { value: 200, then: (b) => b.step("use", async (ctx, s) => ({ ...s, log: [...s.log, "use"] })) },
+      { value: 404, then: (b) => b.step("create", async (ctx, s) => ({ ...s, log: [...s.log, "create"] })) },
+    ],
+    (b) => b.step("fallback", async (ctx, s) => ({ ...s, log: [...s.log, "fallback"] })),
+  )
+  .switchCond(
+    [
+      { when: (ctx, s) => s.amount > 1000, then: (b) => b.step("hi", async (ctx, s) => ({ ...s, log: [...s.log, "hi"] })) },
+      { when: (ctx, s) => s.amount > 100, then: (b) => b.step("mid-amt", async (ctx, s) => ({ ...s, log: [...s.log, "mid-amt"] })) },
+    ],
+    (b) => b.step("lo", async (ctx, s) => ({ ...s, log: [...s.log, "lo"] })),
+  )
+  .step("tail", async (ctx, s) => {
+    ctx.assert(s.log.join(",") === "seed,admin,mid,create,mid-amt", "state threaded through the mix: " + s.log.join(","));
+    return s;
+  });
+`;
+  const r = await run(src, "mixed");
+  expect(r.success).toBe(true);
+
+  // Three branch decisions: condition (took then=0), switchOn (404 → case 1),
+  // switchCond (amount 500 → case 1).
+  const br = branches(r.events);
+  expect(br.map((e) => e.takenIndex)).toEqual([0, 1, 1]);
+  expect(br[1].takenValue).toBe(404);
+
+  // Taken steps ran in chain order; non-taken cases skipped.
+  const ran = stepEnds(r.events).filter((e) => e.status === "passed").map((e) => e.name);
+  expect(ran).toEqual(["seed", "admin-step", "mid", "create", "mid-amt", "tail"]);
+  const skipped = stepEnds(r.events).filter((e) => e.status === "skipped").map((e) => e.name);
+  expect(skipped).toEqual(expect.arrayContaining(["guest-step", "use", "fallback", "hi", "lo"]));
+});
+
 test("a predicate that throws fails the test (branch decision failure)", async () => {
   const src = `
 import { test } from "@glubean/sdk";

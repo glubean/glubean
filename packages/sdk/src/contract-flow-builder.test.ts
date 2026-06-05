@@ -449,6 +449,43 @@ describe("nested branches via fragment builder", () => {
     );
     expect(final.perk).toBe("lounge");
   });
+
+  test("mixed chain: compute + condition + compute + switchOn + switchCond + compute thread state", async () => {
+    // A realistic flow mixing compute steps with all three branch primitives in
+    // one top-level chain; state must thread across the whole mix.
+    const final = await runCapture((box) =>
+      contract
+        .flow("p3-mixed")
+        .setup(async () => ({ role: "admin", status: 404, amount: 500, log: [] as string[] }))
+        .compute((s) => ({ ...s, log: [...s.log, "seed"] }))
+        .condition(
+          { predicate: (w) => w.when((s) => s.role).eq("admin") },
+          (b) => b.compute((s) => ({ ...s, log: [...s.log, "admin"] })),
+          (b) => b.compute((s) => ({ ...s, log: [...s.log, "guest"] })),
+        )
+        .compute((s) => ({ ...s, log: [...s.log, "mid"] }))
+        .switchOn((s) => s.status)(
+          [
+            { value: 200, then: (b) => b.compute((s) => ({ ...s, log: [...s.log, "use"] })) },
+            { value: 404, then: (b) => b.compute((s) => ({ ...s, log: [...s.log, "create"] })) },
+          ],
+          (b) => b.compute((s) => ({ ...s, log: [...s.log, "fallback"] })),
+        )
+        .switchCond(
+          [
+            { when: (w) => w.when((s) => s.amount).gt(1000), then: (b) => b.compute((s) => ({ ...s, log: [...s.log, "hi"] })) },
+            { when: (w) => w.when((s) => s.amount).gt(100), then: (b) => b.compute((s) => ({ ...s, log: [...s.log, "mid-amt"] })) },
+          ],
+          (b) => b.compute((s) => ({ ...s, log: [...s.log, "lo"] })),
+        )
+        .teardown(async (_c, s) => {
+          box.value = s;
+        })
+        .build(),
+    );
+    // admin (then) → 404 (switchOn case 1) → amount 500 (>100 first-match).
+    expect(final.log).toEqual(["seed", "admin", "mid", "create", "mid-amt"]);
+  });
 });
 
 describe("projection (_extracted) for branches built via the builder", () => {
@@ -606,6 +643,54 @@ function _typeTests() {
     { predicate: (_c, s) => s.status === 1 },
     (b) => b,
   );
+
+  // TYPE THREADING: compute → condition(adds field) → compute(reads it) →
+  // switchOn(adds field) → compute(reads exact accumulated shape). Confirms the
+  // state type flows INTO each branch and the converged shape flows OUT to the
+  // next step.
+  contract
+    .flow("thread")
+    .setup(async () => ({ a: 1 }))
+    .compute((s) => ({ ...s, b: "x" })) // {a} → {a,b}
+    .condition(
+      { predicate: (w) => w.when((s) => s.b).eq("x") }, // predicate sees {a,b}
+      (b) => b.compute((s) => ({ ...s, c: true })),
+      (b) => b.compute((s) => ({ ...s, c: false })),
+    ) // {a,b,c}
+    .compute((s) => {
+      const _a: number = s.a;
+      const _b: string = s.b;
+      const _cBool: boolean = s.c; // added by the branch, typed
+      void _a;
+      void _b;
+      void _cBool;
+      return s;
+    })
+    .switchOn((s) => s.b)(
+      [{ value: "x", then: (b) => b.compute((s) => ({ ...s, d: 9 })) }],
+      (b) => b.compute((s) => ({ ...s, d: 0 })),
+    ) // {a,b,c,d}
+    .compute((s) => {
+      const _all: { a: number; b: string; c: boolean; d: number } = s;
+      void _all;
+      return s;
+    });
+
+  // TYPE THREADING (negative): post-branch state is precise, NOT `any`.
+  contract
+    .flow("thread-precise")
+    .setup(async () => ({ a: 1 }))
+    .condition(
+      { predicate: (w) => w.when((s) => s.a).eq(1) },
+      (b) => b.compute((s) => ({ ...s, c: true })),
+      (b) => b.compute((s) => ({ ...s, c: false })),
+    )
+    .compute((s) => {
+      // @ts-expect-error `nope` was never added — proves threaded state is typed, not `any`
+      const _x: number = s.nope;
+      void _x;
+      return s;
+    });
 }
 
 test("Phase 3 type tests compile", () => {
