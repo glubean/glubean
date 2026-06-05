@@ -105,16 +105,27 @@ export class PollExhaustedError extends Error {
 // =============================================================================
 
 /**
- * A child `TestContext` whose event-emitting methods buffer instead of emitting,
- * so a poll attempt's side effects can be discarded (probe noise / timed-out
- * orphan) or merged (the satisfying attempt / an in-budget user predicate).
+ * A child `TestContext` that isolates the **pass/fail-affecting** APIs of a poll
+ * attempt — `assert` / `expect` / `validate` / `fail` — so a probe's validation
+ * noise or a timed-out orphan's late failure cannot corrupt the run's pass/fail
+ * outcome. Those are buffered and either flushed (the satisfying attempt / an
+ * in-budget deliberate failure) or discarded (probe / orphan).
  *
- * Pass-through accessors (vars / secrets / session / http) delegate to the real
- * ctx unchanged. `validate` runs the schema locally (the adapter needs its
- * return value) and buffers the event replay. `expect` routes through the
- * buffered `assert`. `skip` / `fail` are control flow — they delegate to the
- * real ctx and throw; the poll loop catches any rejection from a raced-out
- * attempt so a late skip/fail cannot surface as an unhandled rejection.
+ * Everything else PASSES THROUGH to the real ctx and emits per-attempt, by
+ * design — and this is deliberate, not an oversight:
+ *   - Observability (`trace` / `metric` / `log` / `action` / `event`): the
+ *     polling requests genuinely happened; their traces/metrics are wanted (you
+ *     want to see "polled 3×"). Buffering them would also be inconsistent: the
+ *     adapter's HTTP client is pre-bound to the real ctx at construction, so its
+ *     auto-traces emit to the real ctx regardless of this wrapper — there is no
+ *     way to intercept them here, so we don't pretend to.
+ *   - Accessors / side effects (`vars` / `secrets` / `session` / `http`): a
+ *     predicate that reads/writes these runs against the live ctx, exactly like
+ *     a condition predicate does (which is also evaluated against the real ctx).
+ *
+ * `skip` is pure control flow — the real `skip` only throws a SkipError (it
+ * emits nothing), so it is delegated. The poll loop catches any rejection from a
+ * raced-out attempt so a late skip/fail cannot surface as an unhandled rejection.
  */
 export interface QuarantinedContext extends TestContext {
   /** Replay all buffered emissions onto a real ctx (the satisfying attempt / in-budget predicate). */
@@ -132,10 +143,10 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
   };
 
   const q = {
+    // Pass through accessors + observability (vars/secrets/session/http/log/warn/
+    // trace/action/event/metric) — see the doc above. Only the pass/fail APIs
+    // below are isolated.
     ...real,
-    log: (message: string, data?: unknown) => {
-      buffer.push((t) => t.log(message, data));
-    },
     assert: (
       a: boolean | { passed: boolean; actual?: unknown; expected?: unknown },
       message?: string,
@@ -155,9 +166,6 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
           ),
         );
       }),
-    warn: (condition: boolean, message: string) => {
-      buffer.push((t) => t.warn(condition, message));
-    },
     validate: <T>(
       data: unknown,
       schema: SchemaLike<T>,
@@ -197,18 +205,6 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
         throw new Error(`fatal validation failed: ${label ?? "data"}`);
       }
       return value;
-    },
-    trace: (request: unknown) => {
-      buffer.push((t) => (t.trace as (r: unknown) => void)(request));
-    },
-    action: (a: unknown) => {
-      buffer.push((t) => (t.action as (a: unknown) => void)(a));
-    },
-    event: (ev: unknown) => {
-      buffer.push((t) => (t.event as (e: unknown) => void)(ev));
-    },
-    metric: (name: string, value: number, options?: unknown) => {
-      buffer.push((t) => (t.metric as (...args: unknown[]) => void)(name, value, options));
     },
     // skip is pure control flow — the real `skip` only THROWS a SkipError (it
     // emits no event), so delegating is safe: an in-budget skip skips the test;
