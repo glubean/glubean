@@ -599,6 +599,7 @@ async function executeCaseInFlowHttp(input: {
   caseKey: string;
   resolvedInputs: unknown;
   accept?: readonly unknown[];
+  signal?: AbortSignal;
 }): Promise<HttpFlowCaseOutput> {
   const { ctx, contract, caseKey, resolvedInputs } = input;
   const spec = contract._spec;
@@ -646,6 +647,9 @@ async function executeCaseInFlowHttp(input: {
     caseSpec.contentType ?? normalizedReq?.contentType ?? "application/json";
 
   const requestOptions: Record<string, unknown> = { throwHttpErrors: false };
+  // Poll attempts pass an AbortSignal (per-attempt budget). Honoring it truly
+  // cancels the in-flight request; non-poll calls never set it (behavior unchanged).
+  if (input.signal) requestOptions.signal = input.signal;
   if (body !== undefined) {
     Object.assign(
       requestOptions,

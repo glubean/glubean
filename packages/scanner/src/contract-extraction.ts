@@ -202,6 +202,30 @@ export type NormalizedFlowStep =
         steps: NormalizedFlowStep[];
       }>;
       default: NormalizedFlowStep[];
+    }
+  | {
+      /**
+       * Poll (bounded poll-until). Repeats one case until `until` holds, bounded
+       * by `timeoutMs` / `maxAttempts` / `perAttemptTimeoutMs`. `until` is the
+       * exit predicate (L2 precise, or `{kind:"opaque",...}` when marked).
+       */
+      kind: "poll";
+      name?: string;
+      contractId: string;
+      caseKey: string;
+      protocol: string;
+      target: string;
+      inputs?: NormalizedFieldMapping[];
+      outputs?: NormalizedFieldMapping[];
+      accept?: ReadonlyArray<string | number>;
+      /** Exit predicate (absent only in the duck-typed fallback path). */
+      until?: NormalizedPredicate;
+      message?: string;
+      every: number;
+      backoff: number;
+      timeoutMs?: number;
+      perAttemptTimeoutMs?: number;
+      maxAttempts?: number;
     };
 
 export interface NormalizedFieldMapping {
@@ -567,6 +591,26 @@ function mapExtractedStep(s: any): NormalizedFlowStep {
       default: (s.default ?? []).map(mapExtractedStep),
     };
   }
+  if (s.kind === "poll") {
+    return {
+      kind: "poll",
+      ...(s.name !== undefined ? { name: s.name } : {}),
+      contractId: s.contractId ?? "",
+      caseKey: s.caseKey ?? "",
+      protocol: s.protocol ?? "",
+      target: s.target ?? "",
+      inputs: s.inputs,
+      outputs: s.outputs,
+      ...(Array.isArray(s.accept) ? { accept: s.accept } : {}),
+      ...(s.until !== undefined ? { until: s.until as NormalizedPredicate } : {}),
+      ...(s.message !== undefined ? { message: s.message } : {}),
+      every: s.every ?? 0,
+      backoff: s.backoff ?? 1,
+      ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
+      ...(s.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: s.perAttemptTimeoutMs } : {}),
+      ...(s.maxAttempts !== undefined ? { maxAttempts: s.maxAttempts } : {}),
+    };
+  }
   return {
     kind: "contract-call",
     name: s.name,
@@ -601,6 +645,25 @@ function mapRuntimeFlowStep(s: any): NormalizedFlowStep {
         steps: (c.steps ?? []).map(mapRuntimeFlowStep),
       })),
       default: (s.default ?? []).map(mapRuntimeFlowStep),
+    };
+  }
+  if (s.kind === "poll") {
+    // `until` omitted: the runtime exit predicate is a branded builder object
+    // (not JSON-safe), like a branch predicate in this fallback path.
+    return {
+      kind: "poll",
+      ...(s.name !== undefined ? { name: s.name } : {}),
+      contractId: s.contract?._projection?.id ?? s.ref?.contractId ?? "",
+      caseKey: s.caseKey ?? s.ref?.caseKey ?? "",
+      protocol: s.ref?.protocol ?? "",
+      target: s.ref?.target ?? "",
+      ...(Array.isArray(s.bindings?.accept) ? { accept: s.bindings.accept } : {}),
+      ...(s.message !== undefined ? { message: s.message } : {}),
+      every: s.every ?? 0,
+      backoff: s.backoff ?? 1,
+      ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
+      ...(s.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: s.perAttemptTimeoutMs } : {}),
+      ...(s.maxAttempts !== undefined ? { maxAttempts: s.maxAttempts } : {}),
     };
   }
   return {

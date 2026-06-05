@@ -60,6 +60,15 @@ import {
   assertSwitchCaseValues,
   assertL2Predicate,
 } from "./contract-flow-condition.js";
+import {
+  quarantinedCtx,
+  raceBudget,
+  evalPollExit,
+  extractPollStep,
+  PollExhaustedError,
+  BACKOFF_CAP_MS,
+  type RuntimePollStep,
+} from "./contract-flow-poll.js";
 import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
 import {
   getExplicitInput,
@@ -1223,6 +1232,158 @@ function stepProjectionToRegistry(
  * Core flow execution helper. Implements the Rule 1 / Rule 2 teardown
  * semantics from contract-flow.md §7.
  */
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Execute ONE contract-call against its adapter (shared by the contract-call
+ * step and each poll attempt). Resolves `in`, enforces `needs` at the flow
+ * boundary, and calls `adapter.executeCaseInFlow`. Returns the raw response;
+ * the caller applies `out`. `opts.signal` is threaded to honoring adapters.
+ */
+async function executeContractCaseInFlow(
+  step: RuntimeContractCallStep | RuntimePollStep,
+  state: unknown,
+  ctx: TestContext,
+  runtimeId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<unknown> {
+  const adapter = _adapters.get(step.ref.protocol);
+  if (!adapter) {
+    throw new Error(
+      `flow "${runtimeId}" step "${step.name ?? step.caseKey}": ` +
+        `no registered adapter for protocol "${step.ref.protocol}". ` +
+        `Did you forget to import a contract plugin package?`,
+    );
+  }
+  if (!adapter.executeCaseInFlow) {
+    throw new Error(
+      `flow "${runtimeId}" step "${step.name ?? step.caseKey}": ` +
+        `adapter for "${step.ref.protocol}" does not implement executeCaseInFlow`,
+    );
+  }
+
+  // Enforce `needs` at the flow boundary (the conditional-tuple step() signature
+  // catches authoring shape, this catches `as any` / JS bypass + Zod transforms).
+  const contractSpec = (step.contract as { _spec?: unknown })._spec as
+    | { cases?: Record<string, { needs?: unknown }> }
+    | undefined;
+  const caseSpec = contractSpec?.cases?.[step.caseKey];
+  const needsSchema = caseSpec?.needs;
+  const hasIn = typeof step.bindings?.in === "function";
+
+  if (needsSchema && !hasIn) {
+    throw new Error(
+      `flow "${runtimeId}" step "${step.name ?? step.caseKey}": ` +
+        `case "${step.ref.contractId}.${step.caseKey}" declares \`needs\` ` +
+        `but the step has no \`bindings.in\`. Provide an ` +
+        `\`in: (state) => <logical input>\` binding or remove the \`needs\` schema.`,
+    );
+  }
+
+  let resolvedInputs = step.bindings?.in?.(state);
+  if (needsSchema) {
+    resolvedInputs = validateNeedsOutput(
+      needsSchema as { safeParse?: unknown; parse?: unknown },
+      resolvedInputs,
+      { testId: `${step.ref.contractId}.${step.caseKey}`, source: "flow" },
+    );
+  }
+
+  return adapter.executeCaseInFlow({
+    ctx,
+    contract: step.contract as any,
+    caseKey: step.caseKey,
+    resolvedInputs,
+    ...(step.bindings?.accept ? { accept: step.bindings.accept } : {}),
+    ...(opts?.signal ? { signal: opts.signal } : {}),
+  });
+}
+
+/**
+ * Bounded-retry execution of a poll step. Repeats the case until `until` holds
+ * (→ apply `out`, return next state) or a bound is exhausted (→ throw
+ * PollExhaustedError, failing the flow). Each attempt's request + exit predicate
+ * are budget-raced (so the loop is bounded regardless of whether the adapter
+ * honors `signal`) and run in quarantined contexts (probe noise / timed-out
+ * orphans discarded; the satisfying attempt's validation + in-budget predicate
+ * effects flushed). See contract-flow-poll.md §4.2.
+ */
+async function runPollStep(
+  step: RuntimePollStep,
+  state: unknown,
+  ctx: TestContext,
+  runtimeId: string,
+): Promise<unknown> {
+  const label =
+    step.name ?? `${(step.contract as { _projection: { id: string } })._projection.id}#${step.caseKey}`;
+  const now = (): number => performance.now();
+  const start = now();
+  const deadline = step.timeoutMs !== undefined ? start + step.timeoutMs : Infinity;
+  const perAttempt = step.perAttemptTimeoutMs ?? Infinity;
+  let attempt = 0;
+  let delay = step.every;
+  let lastRes: unknown;
+
+  for (;;) {
+    attempt += 1;
+    const remainingTotal = deadline - now();
+    if (remainingTotal <= 0) {
+      throw new PollExhaustedError(label, attempt - 1, "total timeout reached before next attempt");
+    }
+    const attemptBudget = Math.min(perAttempt, remainingTotal); // build-time validation ⇒ finite
+    const attemptStart = now();
+
+    // Request: quarantined ctx + abort signal; budget-raced so a non-honoring
+    // adapter can't block past the budget.
+    const ac = new AbortController();
+    const budgetTimer = Number.isFinite(attemptBudget)
+      ? setTimeout(() => ac.abort(), Math.max(0, attemptBudget))
+      : undefined;
+    const reqCtx = quarantinedCtx(ctx);
+    try {
+      lastRes = await raceBudget(
+        executeContractCaseInFlow(step, state, reqCtx, runtimeId, { signal: ac.signal }),
+        attemptBudget,
+        () => new PollExhaustedError(label, attempt, `attempt budget ${Math.round(attemptBudget)}ms exceeded`),
+      );
+    } finally {
+      if (budgetTimer) clearTimeout(budgetTimer);
+    }
+
+    // A sync-heavy request the timer couldn't preempt may have overrun — re-check.
+    if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
+    if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
+
+    // Exit predicate — quarantined ctx, budget-raced, flushed only on in-budget completion.
+    const predBudget = Math.min(deadline - now(), perAttempt - (now() - attemptStart));
+    const predCtx = quarantinedCtx(ctx);
+    const done = await raceBudget(
+      evalPollExit(step.until, lastRes, predCtx, state),
+      Math.max(0, predBudget),
+      () => new PollExhaustedError(label, attempt, "exit-predicate budget exceeded"),
+    );
+    if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
+    if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
+    predCtx.flushTo(ctx); // in-budget: user's deliberate skip/fail/assert count
+
+    if (done) {
+      reqCtx.flushTo(ctx); // satisfying attempt: final-response validation failures surface (P1)
+      return step.bindings?.out ? step.bindings.out(state, lastRes) : state;
+    }
+    // probe (not satisfied): reqCtx discarded (pending validation noise).
+
+    if (step.maxAttempts && attempt >= step.maxAttempts) {
+      throw new PollExhaustedError(label, attempt, "maxAttempts reached");
+    }
+    // A wait that would cross the deadline is pointless — fail now, don't sleep.
+    if (Number.isFinite(deadline) && now() + delay >= deadline) {
+      throw new PollExhaustedError(label, attempt, "next wait would exceed timeout");
+    }
+    await sleep(delay);
+    delay = Math.min(delay * step.backoff, BACKOFF_CAP_MS);
+  }
+}
+
 export async function runFlow<State>(
   flowContract: FlowContract<State>,
   ctx: TestContext,
@@ -1269,79 +1430,16 @@ export async function runFlow<State>(
         continue;
       }
 
+      // poll branch — bounded retry of ONE case until the exit predicate holds
+      // (or a bound is exhausted → the poll step fails). Shares the committed
+      // `state` cell like every other step.
+      if (step.kind === "poll") {
+        state = (await runPollStep(step, state, ctx, runtime.id)) as State;
+        continue;
+      }
+
       // contract-call branch
-      const adapter = _adapters.get(step.ref.protocol);
-      if (!adapter) {
-        throw new Error(
-          `flow "${runtime.id}" step "${step.name ?? step.caseKey}": ` +
-            `no registered adapter for protocol "${step.ref.protocol}". ` +
-            `Did you forget to import a contract plugin package?`,
-        );
-      }
-      if (!adapter.executeCaseInFlow) {
-        throw new Error(
-          `flow "${runtime.id}" step "${step.name ?? step.caseKey}": ` +
-            `adapter for "${step.ref.protocol}" does not implement executeCaseInFlow`,
-        );
-      }
-
-      // v10 Phase 2d Step 2+3 follow-up (RFR v2 / v2.1 P1): enforce `needs`
-      // schema at flow boundary, not just standalone. The conditional-tuple
-      // `step()` signature catches TS authoring shape mismatches, but runtime
-      // validation is the only line of defense against:
-      //   - `as any` / JS callers that bypass the TS check
-      //   - Zod parse / coerce / default semantics (schema can transform
-      //     the value, not just validate it)
-      //   - State drift producing invalid values at runtime despite valid
-      //     authoring types
-      // Standalone overlay path already validates via the same helper in
-      // `dispatchContract`'s test.fn closure; flow mirrors that to keep
-      // `needs` a true contract semantic rather than a TS-only boundary.
-      //
-      // Two-branch guard:
-      //   needs present + bindings.in missing  → throw (contract requires input)
-      //   needs present + bindings.in present  → validate unconditionally
-      //   needs absent                          → no guard
-      const contractSpec = (step.contract as { _spec?: unknown })._spec as
-        | { cases?: Record<string, { needs?: unknown }> }
-        | undefined;
-      const caseSpec = contractSpec?.cases?.[step.caseKey];
-      const needsSchema = caseSpec?.needs;
-      const hasIn = typeof step.bindings?.in === "function";
-
-      if (needsSchema && !hasIn) {
-        throw new Error(
-          `flow "${runtime.id}" step "${step.name ?? step.caseKey}": ` +
-            `case "${step.ref.contractId}.${step.caseKey}" declares \`needs\` ` +
-            `but the step has no \`bindings.in\`. The TypeScript conditional ` +
-            `tuple on FlowBuilder.step() usually prevents this at compile time; ` +
-            `this runtime check catches \`as any\` / JS bypass. Provide an ` +
-            `\`in: (state) => <logical input>\` binding or remove the \`needs\` ` +
-            `schema from the case.`,
-        );
-      }
-
-      let resolvedInputs = step.bindings?.in?.(state);
-
-      if (needsSchema) {
-        resolvedInputs = validateNeedsOutput(
-          needsSchema as { safeParse?: unknown; parse?: unknown },
-          resolvedInputs,
-          {
-            testId: `${step.ref.contractId}.${step.caseKey}`,
-            source: "flow",
-          },
-        );
-      }
-
-      const response = await adapter.executeCaseInFlow({
-        ctx,
-        contract: step.contract as any,
-        caseKey: step.caseKey,
-        resolvedInputs,
-        ...(step.bindings?.accept ? { accept: step.bindings.accept } : {}),
-      });
-
+      const response = await executeContractCaseInFlow(step, state, ctx, runtime.id);
       if (step.bindings?.out) {
         state = step.bindings.out(state, response) as State;
       }
@@ -1381,12 +1479,49 @@ export function normalizeFlow<State>(
   // diagnostics inside them are handled identically at every depth.
   const normalizeStep = (s: RuntimeFlowStep, idx: number): ExtractedFlowStep => {
     const stepLabel = s.name ??
-      (s.kind === "contract-call" ? `${s.contract._projection.id}#${s.caseKey}` : `step-${idx + 1}`);
+      (s.kind === "contract-call" || s.kind === "poll"
+        ? `${s.contract._projection.id}#${s.caseKey}`
+        : `step-${idx + 1}`);
 
     if (s.kind === "branch") {
       // Recurse over each case/default sub-step list. We re-index from 0 within
       // the branch for labeling; the branch name (if any) carries outer context.
       return extractBranchStep(s, (steps) => steps.map((sub, i) => normalizeStep(sub, i)));
+    }
+
+    if (s.kind === "poll") {
+      // Same Proxy dry-run as a contract-call step → the poll node carries
+      // input/output data-flow edges; the bounded-retry + exit predicate are
+      // carried by extractPollStep.
+      return extractPollStep(s, (ps) => {
+        let pInputs: FieldMapping[] | undefined;
+        if (ps.bindings?.in) {
+          try {
+            pInputs = extractMappings(ps.bindings.in);
+          } catch (err) {
+            if (err instanceof LensPurityError) {
+              throw new Error(
+                `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (poll in lens): ${err.message}`,
+              );
+            }
+            throw err;
+          }
+        }
+        let pOutputs: FieldMapping[] | undefined;
+        if (ps.bindings?.out) {
+          try {
+            pOutputs = extractMappingsOut(ps.bindings.out);
+          } catch (err) {
+            if (err instanceof LensPurityError) {
+              throw new Error(
+                `flow "${runtime.id}" step ${idx + 1} "${stepLabel}" (poll out lens): ${err.message}`,
+              );
+            }
+            throw err;
+          }
+        }
+        return { inputs: pInputs, outputs: pOutputs };
+      });
     }
 
     if (s.kind === "compute") {

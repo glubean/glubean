@@ -35,6 +35,12 @@ import type {
   BranchPredicate,
   PredicateScope,
 } from "./contract-flow-condition.js";
+// Poll node shapes live with the bounded-retry machinery (contract-flow-poll.ts);
+// imported type-only here so the step unions stay the single source of truth.
+import type {
+  RuntimePollStep,
+  ExtractedPollStep,
+} from "./contract-flow-poll.js";
 
 // =============================================================================
 // Protocol-agnostic enums
@@ -586,6 +592,15 @@ export interface ContractProtocolAdapter<
      * (validate against the single primary outcome).
      */
     accept?: readonly unknown[];
+    /**
+     * Optional abort signal — set only by `flow().poll()` (a poll caps each
+     * attempt with a budget and aborts the in-flight request when it elapses).
+     * Adapters that honor it (HTTP → `fetch({ signal })`) truly cancel the
+     * request; adapters that ignore it are still bounded by the core-side budget
+     * race. Absent on every non-poll call → existing step/condition behavior
+     * is unchanged.
+     */
+    signal?: AbortSignal;
   }) => Promise<unknown>;
 
   /**
@@ -842,7 +857,8 @@ export interface FieldMapping {
 export type RuntimeFlowStep =
   | RuntimeContractCallStep
   | RuntimeComputeStep
-  | RuntimeBranchStep;
+  | RuntimeBranchStep
+  | RuntimePollStep;
 
 export interface RuntimeContractCallStep {
   kind: "contract-call";
@@ -910,7 +926,8 @@ export interface RuntimeFlowProjection<State = unknown> {
 export type ExtractedFlowStep =
   | ExtractedContractCallStep
   | ExtractedComputeStep
-  | ExtractedBranchStep;
+  | ExtractedBranchStep
+  | ExtractedPollStep;
 
 export interface ExtractedContractCallStep {
   kind: "contract-call";

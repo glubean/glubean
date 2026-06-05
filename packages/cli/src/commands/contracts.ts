@@ -321,6 +321,39 @@ function formatFlowStep(step: NormalizedFlowStep, index: number): string[] {
     }
     return lines;
   }
+  if (step.kind === "poll") {
+    const name = step.name ? ` — ${step.name}` : "";
+    const target = step.target ? ` (${step.protocol} · ${step.target})` : "";
+    lines.push(`${index + 1}. **<poll> ${step.contractId}#${step.caseKey}**${name}${target}`);
+    const untilStr = step.until
+      ? formatPredicate(step.until)
+      : step.message
+        ? `"${step.message}"`
+        : "<exit predicate>";
+    lines.push(`   - until: ${untilStr}`);
+    const bound = [
+      step.timeoutMs !== undefined ? `≤${step.timeoutMs}ms` : null,
+      step.maxAttempts !== undefined ? `≤${step.maxAttempts}×` : null,
+      step.perAttemptTimeoutMs !== undefined ? `${step.perAttemptTimeoutMs}ms/try` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    lines.push(
+      `   - every ${step.every}ms${step.backoff !== 1 ? ` ×${step.backoff}` : ""}${bound ? ` (${bound})` : ""}`,
+    );
+    if (step.accept && step.accept.length > 0) {
+      lines.push(`   - accepts: ${step.accept.join(", ")}`);
+    }
+    if (step.inputs && step.inputs.length > 0) {
+      lines.push("   - inputs:");
+      for (const m of step.inputs) lines.push(`     - ${formatMappingArrow(m)}`);
+    }
+    if (step.outputs && step.outputs.length > 0) {
+      lines.push("   - outputs:");
+      for (const m of step.outputs) lines.push(`     - ${formatMappingArrow(m)}`);
+    }
+    return lines;
+  }
   // contract-call
   const name = step.name ? ` — ${step.name}` : "";
   const target = step.target ? ` (${step.protocol} · ${step.target})` : "";
@@ -383,6 +416,26 @@ function flowStepToJson(s: NormalizedFlowStep): Record<string, unknown> {
         steps: c.steps.map(flowStepToJson),
       })),
       default: s.default.map(flowStepToJson),
+    };
+  }
+  if (s.kind === "poll") {
+    return {
+      kind: "poll",
+      name: s.name,
+      contractId: s.contractId,
+      caseKey: s.caseKey,
+      protocol: s.protocol,
+      target: s.target,
+      inputs: s.inputs,
+      outputs: s.outputs,
+      ...(s.accept ? { accept: s.accept } : {}),
+      ...(s.until !== undefined ? { until: s.until } : {}),
+      ...(s.message !== undefined ? { message: s.message } : {}),
+      every: s.every,
+      backoff: s.backoff,
+      ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
+      ...(s.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: s.perAttemptTimeoutMs } : {}),
+      ...(s.maxAttempts !== undefined ? { maxAttempts: s.maxAttempts } : {}),
     };
   }
   return {
