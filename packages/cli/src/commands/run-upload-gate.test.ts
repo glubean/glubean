@@ -4,7 +4,7 @@
  * Glubean Cloud cannot render `kind:"branch"` flows yet; uploading one would
  * silently drop its branches (Cloud run view ≠ local). The CLI refuses the
  * upload and names the offending flows. This tests the gate's detection logic
- * (`flowStepsHaveBranch`) plus the real scan → NormalizedFlowMeta path that
+ * (`flowStepsHaveBranchOrPoll`) plus the real scan → NormalizedFlowMeta path that
  * feeds it. (contract-flow-condition.md §12 / Spike 6.)
  */
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeEach, afterEach, expect, test } from "vitest";
 import { __testing } from "./run.js";
 
-const { flowStepsHaveBranch } = __testing;
+const { flowStepsHaveBranchOrPoll } = __testing;
 
 // Fixtures must live inside the package so the scanner's dynamic import can
 // resolve `@glubean/sdk`.
@@ -34,21 +34,33 @@ afterAll(async () => {
   await rm(FIXTURE_ROOT, { recursive: true, force: true });
 });
 
-test("flowStepsHaveBranch detects a branch step (incl. nested) and ignores plain steps", () => {
-  expect(flowStepsHaveBranch(undefined)).toBe(false);
+test("flowStepsHaveBranchOrPoll detects a branch step (incl. nested) and ignores plain steps", () => {
+  expect(flowStepsHaveBranchOrPoll(undefined)).toBe(false);
   expect(
-    flowStepsHaveBranch([
+    flowStepsHaveBranchOrPoll([
       { kind: "contract-call" },
       { kind: "compute" },
     ]),
   ).toBe(false);
-  expect(flowStepsHaveBranch([{ kind: "branch" }])).toBe(true);
+  expect(flowStepsHaveBranchOrPoll([{ kind: "branch" }])).toBe(true);
+  // A top-level poll is detected.
+  expect(flowStepsHaveBranchOrPoll([{ kind: "poll" }])).toBe(true);
   // A branch nested inside another branch's case/default is also detected.
   expect(
-    flowStepsHaveBranch([
+    flowStepsHaveBranchOrPoll([
       {
         kind: "branch",
         cases: [{ steps: [{ kind: "compute" }, { kind: "branch" }] }],
+        default: [],
+      },
+    ]),
+  ).toBe(true);
+  // A poll nested inside a branch body is detected (fragment poll).
+  expect(
+    flowStepsHaveBranchOrPoll([
+      {
+        kind: "branch",
+        cases: [{ steps: [{ kind: "compute" }, { kind: "poll" }] }],
         default: [],
       },
     ]),
@@ -57,7 +69,7 @@ test("flowStepsHaveBranch detects a branch step (incl. nested) and ignores plain
 
 test("a real condition flow extracts to a branch step the gate detects (per-file, as the gate does)", async () => {
   // Mirror the --upload gate exactly: extractContractFromFile per selected file,
-  // then flowStepsHaveBranch on the flow attachment's steps.
+  // then flowStepsHaveBranchOrPoll on the flow attachment's steps.
   const { extractContractFromFile } = await import("@glubean/scanner");
   const file = join(dir, "route.flow.ts");
   await writeFile(
@@ -79,7 +91,7 @@ export const route = contract
   const result = await extractContractFromFile(file);
   const flowAtts = (result.attachments ?? []).filter((a: { kind: string }) => a.kind === "flow");
   expect(flowAtts.length).toBe(1);
-  expect(flowStepsHaveBranch((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(true);
+  expect(flowStepsHaveBranchOrPoll((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(true);
 });
 
 test("a plain (branchless) flow is NOT gated", async () => {
@@ -100,7 +112,7 @@ export const plain = contract
   const result = await extractContractFromFile(file);
   const flowAtts = (result.attachments ?? []).filter((a: { kind: string }) => a.kind === "flow");
   expect(flowAtts.length).toBe(1);
-  expect(flowStepsHaveBranch((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(false);
+  expect(flowStepsHaveBranchOrPoll((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(false);
 });
 
 test("a switchOn flow extracts to a branch step the gate detects", async () => {
@@ -124,5 +136,32 @@ export const sw = contract
   const result = await extractContractFromFile(file);
   const flowAtts = (result.attachments ?? []).filter((a: { kind: string }) => a.kind === "flow");
   expect(flowAtts.length).toBe(1);
-  expect(flowStepsHaveBranch((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(true);
+  expect(flowStepsHaveBranchOrPoll((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(true);
+});
+
+test("a real poll flow extracts to a poll step the gate detects", async () => {
+  const { extractContractFromFile } = await import("@glubean/scanner");
+  const file = join(dir, "poll.flow.ts");
+  await writeFile(
+    file,
+    `
+import { contract } from "@glubean/sdk";
+const api = contract.http.with("api", { client: {} as any, security: null });
+const job = api("job", { endpoint: "GET /jobs", cases: { status: { expect: { status: 200 } } } });
+export const pollFlow = contract
+  .flow("poll-flow")
+  .setup(async () => ({}))
+  .poll(job.case("status"), {
+    accept: [200, 202],
+    until: (w) => w.when((r) => r.status).eq(200),
+    timeout: 30000,
+  })
+  .build();
+`,
+  );
+
+  const result = await extractContractFromFile(file);
+  const flowAtts = (result.attachments ?? []).filter((a: { kind: string }) => a.kind === "flow");
+  expect(flowAtts.length).toBe(1);
+  expect(flowStepsHaveBranchOrPoll((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(true);
 });

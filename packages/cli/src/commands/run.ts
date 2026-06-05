@@ -218,22 +218,23 @@ async function findProjectConfig(
 }
 
 /**
- * True if a flow's extracted step tree contains a branch (condition / switch).
- * Recurses into branch cases/default (a nested branch would itself be caught by
- * the top-level `kind === "branch"`, but recursing is cheap belt-and-suspenders).
+ * True if a flow's extracted step tree contains a branch (condition / switch) or
+ * a poll (bounded poll-until). Recurses into branch cases/default so a poll
+ * nested inside a branch body is caught too.
  *
- * Used to gate `--upload`: Glubean Cloud cannot render `kind:"branch"` flows yet,
- * and uploading would silently drop the branches (local run view ≠ Cloud view),
- * so we refuse rather than mislead. See contract-flow-condition.md §12 / Spike 6.
+ * Used to gate `--upload`: Glubean Cloud cannot render `kind:"branch"` or
+ * `kind:"poll"` flows yet, and uploading would silently drop them (local run view
+ * ≠ Cloud view), so we refuse rather than mislead. See contract-flow-condition.md
+ * §12 / contract-flow-poll.md §8.
  */
-function flowStepsHaveBranch(
+function flowStepsHaveBranchOrPoll(
   steps: ReadonlyArray<{ kind?: string; cases?: ReadonlyArray<{ steps?: any[] }>; default?: any[] }> | undefined,
 ): boolean {
   if (!steps) return false;
   for (const s of steps) {
-    if (s.kind === "branch") return true;
-    if (s.cases && s.cases.some((c) => flowStepsHaveBranch(c.steps))) return true;
-    if (s.default && flowStepsHaveBranch(s.default)) return true;
+    if (s.kind === "branch" || s.kind === "poll") return true;
+    if (s.cases && s.cases.some((c) => flowStepsHaveBranchOrPoll(c.steps))) return true;
+    if (s.default && flowStepsHaveBranchOrPoll(s.default)) return true;
   }
   return false;
 }
@@ -635,8 +636,8 @@ export const __testing = {
   matchesTags: (...args: Parameters<typeof matchesTags>) => matchesTags(...args),
   matchesExcludeTags: (...args: Parameters<typeof matchesExcludeTags>) =>
     matchesExcludeTags(...args),
-  flowStepsHaveBranch: (...args: Parameters<typeof flowStepsHaveBranch>) =>
-    flowStepsHaveBranch(...args),
+  flowStepsHaveBranchOrPoll: (...args: Parameters<typeof flowStepsHaveBranchOrPoll>) =>
+    flowStepsHaveBranchOrPoll(...args),
 };
 
 function matchesTags(
@@ -1123,14 +1124,14 @@ export async function runCommand(
       (ft) => ft.test.meta.kind === "flow" && !ft.test.meta.deferred,
     );
     if (selectedFlows.length > 0) {
-      // Map each selected flow's source file → the set of its branch flow ids.
+      // Map each selected flow's source file → the set of its branch/poll flow ids.
       const branchIdsByFile = new Map<string, Set<string>>();
       for (const filePath of new Set(selectedFlows.map((ft) => ft.filePath))) {
         try {
           const extracted = await extractContractFromFile(filePath);
           const ids = new Set<string>();
           for (const att of extracted.attachments ?? []) {
-            if (att.kind === "flow" && flowStepsHaveBranch(att.flow.steps)) ids.add(att.flow.id);
+            if (att.kind === "flow" && flowStepsHaveBranchOrPoll(att.flow.steps)) ids.add(att.flow.id);
           }
           branchIdsByFile.set(filePath, ids);
         } catch {
@@ -1142,10 +1143,10 @@ export async function runCommand(
       );
       if (branchFlows.length > 0) {
         console.error(
-          `${colors.red}Error: --upload does not yet support branch (condition/switch) flows.${colors.reset}`,
+          `${colors.red}Error: --upload does not yet support branch (condition/switch) or poll flows.${colors.reset}`,
         );
         console.error(
-          `${colors.dim}Glubean Cloud can't render these flows yet, and uploading would silently drop their branches:${colors.reset}`,
+          `${colors.dim}Glubean Cloud can't render these flows yet, and uploading would silently drop their branches/polls:${colors.reset}`,
         );
         for (const ft of branchFlows) {
           console.error(
@@ -1153,7 +1154,7 @@ export async function runCommand(
           );
         }
         console.error(
-          `${colors.dim}Run without --upload, or remove condition/switchOn/switchCond from these flows, until Cloud branch support lands.${colors.reset}`,
+          `${colors.dim}Run without --upload, or remove condition/switchOn/switchCond/poll from these flows, until Cloud support lands.${colors.reset}`,
         );
         process.exit(1);
       }
