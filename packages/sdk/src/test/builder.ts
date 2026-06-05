@@ -23,11 +23,14 @@ import type {
   TestContext,
   TestFragmentBuilder,
   TestMeta,
+  TestPollData,
+  TestPollOpts,
 } from "../types.js";
 import { isTestBranchStep } from "../types.js";
 import { registerTest } from "../internal.js";
 import { toArray } from "../data.js";
 import { assertSwitchCaseValues } from "../contract-flow-condition.js";
+import { validatePollBounds } from "../contract-flow-poll.js";
 
 /**
  * Flatten steps for registry metadata: a branch contributes its first-class
@@ -130,6 +133,9 @@ function makeTestSink(steps: readonly StepDefinition[]): TestFragmentBuilder<any
     switchCond(cases: any, deflt: any) {
       return extend(buildTestSwitchCondStep(cases, deflt));
     },
+    poll(name: string, fn: any, opts: any) {
+      return extend(buildTestPollStep(name, fn, opts));
+    },
   };
   Object.defineProperty(sink, FRAGMENT_STEPS, {
     value: Object.freeze(steps),
@@ -185,6 +191,67 @@ function buildTestSwitchOnStep(
     subject: lens,
     cases: cases.map((c) => ({ value: c.value, steps: collectTestFragment(c.then) })),
     default: collectTestFragment(deflt),
+  });
+}
+
+/**
+ * A poll step is a StepDefinition carrying `poll`; a poll-aware harness
+ * dispatches on it and never calls `fn`. If `fn` IS called the runner is too old
+ * (SDK/runner version skew) — surface an actionable upgrade message.
+ */
+function makePollStepDef(name: string, poll: TestPollData): StepDefinition {
+  return {
+    meta: { name },
+    fn: (async () => {
+      throw new Error(
+        `This test uses test().poll, which requires a @glubean/runner / Glubean CLI new ` +
+          `enough to execute poll steps. Your runner is older than the @glubean/sdk that built ` +
+          `this test — upgrade @glubean/runner and the CLI to match @glubean/sdk.`,
+      );
+    }) as unknown as StepFunction,
+    poll,
+  };
+}
+
+/** test().poll → a bounded poll-until step (validates bounds at construction). */
+function buildTestPollStep(
+  name: string,
+  fn: (ctx: any, state: any) => Promise<unknown>,
+  opts: {
+    until: (ctx: any, res: unknown, state: any) => boolean | Promise<boolean>;
+    out?: (state: any, res: unknown) => unknown;
+    every?: number;
+    backoff?: number;
+    timeout?: number;
+    perAttemptTimeout?: number;
+    maxAttempts?: number;
+  },
+): StepDefinition {
+  if (typeof fn !== "function") {
+    throw new Error("test().poll: the attempt `fn` must be a function");
+  }
+  if (!opts || typeof opts.until !== "function") {
+    throw new Error("test().poll: `opts.until` must be a function");
+  }
+  validatePollBounds(
+    {
+      timeout: opts.timeout,
+      maxAttempts: opts.maxAttempts,
+      perAttemptTimeout: opts.perAttemptTimeout,
+      every: opts.every,
+      backoff: opts.backoff,
+    },
+    name,
+  );
+  return makePollStepDef(name, {
+    fn,
+    until: opts.until,
+    ...(opts.out ? { out: opts.out } : {}),
+    ...(opts.every !== undefined ? { every: opts.every } : {}),
+    ...(opts.backoff !== undefined ? { backoff: opts.backoff } : {}),
+    ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
+    ...(opts.perAttemptTimeout !== undefined ? { perAttemptTimeout: opts.perAttemptTimeout } : {}),
+    ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
   });
 }
 
@@ -534,6 +601,17 @@ export class TestBuilder<S = unknown, Ctx extends TestContext = TestContext> {
   ): TestBuilder<T, Ctx>;
   switchCond(cases: any, deflt: any): TestBuilder<any, Ctx> {
     this._steps.push(buildTestSwitchCondStep(cases, deflt));
+    return this as TestBuilder<any, Ctx>;
+  }
+
+  /** Bounded poll-until — repeat `fn` until `opts.until` holds (or a bound exhausts). */
+  poll<Res, NewS = S>(
+    name: string,
+    fn: (ctx: Ctx, state: S) => Promise<Res>,
+    opts: TestPollOpts<S, Ctx, Res, NewS>,
+  ): TestBuilder<NewS, Ctx>;
+  poll(name: string, fn: any, opts: any): TestBuilder<any, Ctx> {
+    this._steps.push(buildTestPollStep(name, fn, opts));
     return this as TestBuilder<any, Ctx>;
   }
 

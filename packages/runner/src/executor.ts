@@ -360,6 +360,21 @@ export type ExecutionEvent = { testId?: string } & (
     /** Set when the branch decision itself failed (predicate threw). */
     error?: string;
   }
+  | {
+    type: "poll";
+    index: number;
+    name: string;
+    /** Attempts made (>= 1). */
+    attempts: number;
+    /** Total wall-clock elapsed (ms) across the poll. */
+    elapsedMs: number;
+    /** True if the exit predicate was satisfied. */
+    satisfied: boolean;
+    /** True if a bound was exhausted before satisfaction. */
+    exhausted: boolean;
+    /** Set when the poll failed (exhausted / fn or until threw / non-boolean). */
+    error?: string;
+  }
   | { type: "timeout_update"; timeout: number }
   | { type: "session:set"; key: string; value: unknown; ts: number }
   | {
@@ -414,6 +429,7 @@ export type TimelineEvent =
   | { type: "step_start"; ts: number; testId?: string; index: number; name: string; total: number }
   | { type: "step_end"; ts: number; testId?: string; index: number; name: string; status: "passed" | "failed" | "skipped"; durationMs: number; assertions: number; failedAssertions: number; error?: string; returnState?: unknown; attempts?: number; retriesUsed?: number }
   | { type: "branch"; ts: number; testId?: string; index: number; name: string; takenIndex: number | "default"; takenValue?: string | number | boolean | null; message?: string; total: number; error?: string }
+  | { type: "poll"; ts: number; testId?: string; index: number; name: string; attempts: number; elapsedMs: number; satisfied: boolean; exhausted: boolean; error?: string }
   | { type: "summary"; ts: number; testId?: string; data: { httpRequestTotal: number; httpErrorTotal: number; httpErrorRate: number; assertionTotal: number; assertionFailed: number; warningTotal: number; warningTriggered: number; schemaValidationTotal: number; schemaValidationFailed: number; schemaValidationWarnings: number; stepTotal: number; stepPassed: number; stepFailed: number; stepSkipped: number } };
 
 export type EventHandler = (event: TimelineEvent) => void | Promise<void>;
@@ -1197,6 +1213,9 @@ export class TestExecutor {
           break;
         case "branch":
           timelineEvent = { type: "branch", ts, ...(includeTestId && { testId }), index: event.index, name: event.name, takenIndex: event.takenIndex, ...(event.takenValue !== undefined && { takenValue: event.takenValue }), ...(event.message !== undefined && { message: event.message }), total: event.total, ...(event.error !== undefined && { error: event.error }) };
+          break;
+        case "poll":
+          timelineEvent = { type: "poll", ts, ...(includeTestId && { testId }), index: event.index, name: event.name, attempts: event.attempts, elapsedMs: event.elapsedMs, satisfied: event.satisfied, exhausted: event.exhausted, ...(event.error !== undefined && { error: event.error }) };
           break;
         case "timeout_update":
           break;

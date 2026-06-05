@@ -38,7 +38,8 @@ import type {
   TestContext,
   ValidateOptions,
 } from "@glubean/sdk";
-import { isTestBranchStep } from "@glubean/sdk";
+import { isTestBranchStep, isTestPollStep } from "@glubean/sdk";
+import type { TestPollData } from "@glubean/sdk";
 import { Expectation } from "@glubean/sdk/expect";
 
 // Global error handlers for async errors that escape try/catch
@@ -1868,6 +1869,13 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 continue;
               }
 
+              // Poll step (test().poll): bounded retry of the attempt fn until
+              // the exit predicate holds (or a bound exhausts → the step fails).
+              if (isTestPollStep(step)) {
+                await runPollStep(step);
+                continue;
+              }
+
               const i = stepSeq++;
 
               // Reset per-step assertion counters and set step scope
@@ -2048,6 +2056,164 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 // Don't throw here — let the loop continue to emit skip events
               }
             }
+            };
+
+            // Execute a poll step (test().poll): a first-class leaf step whose
+            // body is a bounded retry of `fn` until `until` holds (or a bound
+            // exhausts → the step fails). Each attempt is RACED against its
+            // budget (best-effort: arbitrary user `fn`/`until` can't be force-
+            // cancelled, but the step never waits past the budget). Emits a
+            // `poll` timeline event (attempts/elapsed/satisfied/exhausted) plus
+            // the normal step_start/step_end. fn/until run against the live ctx
+            // (test-side, like ctx.pollUntil — assertions count).
+            const runPollStep = async (
+              step: StepDefinition<unknown> & { poll: TestPollData<unknown> },
+            ): Promise<void> => {
+              const poll = step.poll;
+              const i = stepSeq++;
+              {
+                const trc = currentTestCtx()!;
+                trc.stepFailedAssertions = 0;
+                trc.stepAssertionTotal = 0;
+                trc.currentStepIndex = i;
+              }
+              const stepStart = performance.now();
+              emitEvent({ type: "step_start", index: i, name: step.meta.name, total: stepTotal });
+
+              // Local budget sentinel so a budget timeout is distinguishable from
+              // a genuine fn/until error or a SkipError.
+              class PollBudgetTimeout extends Error {}
+              const raceBudget = <T>(p: Promise<T>, budgetMs: number): Promise<T> => {
+                if (!Number.isFinite(budgetMs)) return p;
+                return new Promise<T>((resolve, reject) => {
+                  const t = setTimeout(() => reject(new PollBudgetTimeout()), Math.max(0, budgetMs));
+                  p.then(
+                    (v) => { clearTimeout(t); resolve(v); },
+                    (e) => { clearTimeout(t); reject(e); },
+                  );
+                });
+              };
+
+              const everyMs = poll.every ?? 1000;
+              const backoff = poll.backoff ?? 1;
+              const perAttempt = poll.perAttemptTimeout ?? Infinity;
+              const start = performance.now();
+              const deadline = poll.timeout !== undefined ? start + poll.timeout : Infinity;
+              let attempt = 0;
+              let delay = everyMs;
+              let satisfied = false;
+              let exhausted = false;
+              let pollError: string | undefined;
+              let lastRes: unknown;
+
+              for (;;) {
+                attempt += 1;
+                const remainingTotal = deadline - performance.now();
+                if (remainingTotal <= 0) { exhausted = true; break; }
+                const attemptBudget = Math.min(perAttempt, remainingTotal);
+                const attemptStart = performance.now();
+
+                // Attempt fn (best-effort raced).
+                try {
+                  lastRes = await raceBudget(Promise.resolve(poll.fn(effectiveCtx, state)), attemptBudget);
+                } catch (err) {
+                  if (err instanceof SkipError) { skipRequest = err; break; }
+                  if (err instanceof PollBudgetTimeout) { exhausted = true; break; }
+                  pollError = err instanceof Error ? err.message : String(err);
+                  break;
+                }
+                if (performance.now() > deadline || performance.now() - attemptStart > perAttempt) {
+                  exhausted = true;
+                  break;
+                }
+
+                // Exit predicate (raced to the remaining attempt budget).
+                let done: boolean;
+                try {
+                  const predBudget = Math.min(deadline - performance.now(), perAttempt - (performance.now() - attemptStart));
+                  const out = await raceBudget(
+                    Promise.resolve(poll.until(effectiveCtx, lastRes, state)),
+                    Math.max(0, predBudget),
+                  );
+                  if (typeof out !== "boolean") {
+                    pollError = `poll "${step.meta.name}": until must return a boolean; got ${out === null ? "null" : typeof out}`;
+                    break;
+                  }
+                  done = out;
+                } catch (err) {
+                  if (err instanceof SkipError) { skipRequest = err; break; }
+                  if (err instanceof PollBudgetTimeout) { exhausted = true; break; }
+                  pollError = err instanceof Error ? err.message : String(err);
+                  break;
+                }
+
+                if (done) {
+                  satisfied = true;
+                  if (poll.out) {
+                    const next = poll.out(state, lastRes);
+                    if (next !== undefined) state = next;
+                  }
+                  break;
+                }
+
+                // Not satisfied → check bounds, then wait.
+                if (poll.maxAttempts && attempt >= poll.maxAttempts) { exhausted = true; break; }
+                if (Number.isFinite(deadline) && performance.now() + delay >= deadline) { exhausted = true; break; }
+                await new Promise<void>((r) => setTimeout(r, delay));
+                delay = Math.min(delay * backoff, 30_000);
+              }
+
+              const durationMs = Math.round(performance.now() - stepStart);
+              const failedAssertions = getStepFailedAssertions();
+              const assertions = getStepAssertionTotal();
+
+              // ctx.skip() in fn/until skips the whole test (unless a failure was
+              // already recorded — failure wins, mirroring the normal step path).
+              if (skipRequest && failedAssertions === 0 && !pollError && !exhausted) {
+                emitEvent({
+                  type: "step_end",
+                  index: i,
+                  name: step.meta.name,
+                  status: "skipped",
+                  durationMs,
+                  assertions,
+                  failedAssertions: 0,
+                  attempts: attempt,
+                });
+                currentTestCtx()!.currentStepIndex = null;
+                return;
+              }
+              skipRequest = undefined;
+
+              if (exhausted && !pollError) {
+                pollError = `poll "${step.meta.name}" exhausted: condition not met after ${attempt} attempt(s)`;
+              }
+              const failed = !!pollError || failedAssertions > 0 || !satisfied;
+
+              emitEvent({
+                type: "poll",
+                index: i,
+                name: step.meta.name,
+                attempts: attempt,
+                elapsedMs: Math.round(performance.now() - start),
+                satisfied,
+                exhausted,
+                ...(pollError && { error: pollError }),
+              });
+
+              emitEvent({
+                type: "step_end",
+                index: i,
+                name: step.meta.name,
+                status: failed ? "failed" : "passed",
+                durationMs,
+                assertions,
+                failedAssertions,
+                attempts: attempt,
+                ...(pollError && { error: pollError }),
+              });
+              currentTestCtx()!.currentStepIndex = null;
+              if (failed) stepFailed = true;
             };
 
             // Execute a branch step: evaluate the decision (value-switch subject

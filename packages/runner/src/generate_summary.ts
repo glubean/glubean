@@ -105,6 +105,8 @@ export function generateSummary(events: TimelineEvent[]): Summary {
     // result.success. Check PRESENCE (an empty-string error message is still a
     // failure), not truthiness.
     if (t === "branch") return (e as { error?: string }).error !== undefined;
+    // A poll that exhausted / threw / returned a non-boolean carries `error`.
+    if (t === "poll") return (e as { error?: string }).error !== undefined;
     return false;
   });
   if (hasHardFailure) {

@@ -205,6 +205,21 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "name",
     handler: "raw-string",
   },
+  {
+    id: "poll.error",
+    name: "Poll error",
+    event: "poll",
+    target: "error",
+    handler: "raw-string",
+  },
+  {
+    // The poll step name could embed a secret; scan it like other free text.
+    id: "poll.name",
+    name: "Poll name label",
+    event: "poll",
+    target: "name",
+    handler: "raw-string",
+  },
 ];
 
 // ── Built-in pattern source strings ──────────────────────────────────────────

@@ -2325,15 +2325,41 @@ export interface TestBranchData<S = unknown> {
 }
 
 /**
+ * Runtime poll data attached to a `StepDefinition` via its optional `poll` field
+ * (`test().poll`). The harness repeats `fn` until `until` holds (or a bound is
+ * exhausted → the step fails), bounded by timeout / maxAttempts / per-attempt
+ * budget. test-side `fn`/`until` are arbitrary functions (may be async / impure
+ * / read ctx); there is no projection, so no purity gate. Unlike the flow side
+ * the abort is best-effort (arbitrary user code can't be force-cancelled), so
+ * each attempt is RACED against its budget — the step won't wait past it.
+ */
+export interface TestPollData<S = unknown> {
+  /** The repeated attempt — arbitrary async work returning a probe response. */
+  fn: (ctx: TestContext, state: S) => Promise<unknown>;
+  /** Exit predicate (first true ends the poll). Gets ctx, the response, and state. */
+  until: (ctx: TestContext, res: unknown, state: S) => boolean | Promise<boolean>;
+  /** Capture the satisfying response into state. */
+  out?: (state: S, res: unknown) => unknown;
+  every?: number;
+  backoff?: number;
+  timeout?: number;
+  perAttemptTimeout?: number;
+  maxAttempts?: number;
+}
+
+/**
  * Internal step definition (stored in builder). A normal step has a callable
- * `fn`; a branch step (condition/switch) additionally carries `branch` and the
- * harness dispatches on it before ever calling `fn` (which is a throwing stub).
+ * `fn`; a branch step (condition/switch) additionally carries `branch` and a
+ * poll step carries `poll` — for both, the harness dispatches on the extra
+ * field before ever calling `fn` (which is a throwing stub).
  */
 export interface StepDefinition<S = unknown> {
   meta: StepMeta;
   fn: StepFunction<S>;
   /** Present iff this is a branch step. */
   branch?: TestBranchData<S>;
+  /** Present iff this is a poll step. */
+  poll?: TestPollData<S>;
 }
 
 /** Narrow a StepDefinition to a branch step. */
@@ -2341,6 +2367,13 @@ export function isTestBranchStep<S>(
   step: StepDefinition<S>,
 ): step is StepDefinition<S> & { branch: TestBranchData<S> } {
   return step.branch !== undefined;
+}
+
+/** Narrow a StepDefinition to a poll step. */
+export function isTestPollStep<S>(
+  step: StepDefinition<S>,
+): step is StepDefinition<S> & { poll: TestPollData<S> } {
+  return step.poll !== undefined;
 }
 
 /** No-else branch shape guard (same intent as the flow side): forbids added keys. */
@@ -2351,6 +2384,21 @@ export interface TestConditionSpec<S, Ctx extends TestContext = TestContext> {
   predicate: (ctx: Ctx, state: S) => boolean | Promise<boolean>;
   /** Display label shown on the branch decision event. */
   message?: string;
+}
+
+/**
+ * `test().poll` options. `Res` is inferred from the attempt `fn`'s return, tying
+ * `until`/`out` to it. Bound semantics mirror the flow side (timeout / maxAttempts
+ * / per-attempt budget); `maxAttempts`-only is rejected at runtime.
+ */
+export interface TestPollOpts<S, Ctx extends TestContext, Res, NewS> {
+  until: (ctx: Ctx, res: Res, state: S) => boolean | Promise<boolean>;
+  every?: number;
+  backoff?: number;
+  timeout?: number;
+  perAttemptTimeout?: number;
+  maxAttempts?: number;
+  out?: (state: S, res: Res) => NewS;
 }
 
 /** Module-private phantom brand making TestFragmentBuilder invariant in State. */
@@ -2419,6 +2467,13 @@ export interface TestFragmentBuilder<S = unknown, Ctx extends TestContext = Test
     }>,
     deflt: (b: TestFragmentBuilder<S, Ctx>) => TestFragmentBuilder<T, Ctx>,
   ): TestFragmentBuilder<T, Ctx>;
+
+  /** Bounded poll-until — repeat `fn` until `opts.until` holds (or a bound exhausts). */
+  poll<Res, NewS = S>(
+    name: string,
+    fn: (ctx: Ctx, state: S) => Promise<Res>,
+    opts: TestPollOpts<S, Ctx, Res, NewS>,
+  ): TestFragmentBuilder<NewS, Ctx>;
 }
 
 /**
