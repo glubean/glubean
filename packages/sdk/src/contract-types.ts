@@ -1322,6 +1322,24 @@ export type FlowRegistryStep =
         steps: FlowRegistryStep[];
       }>;
       default: FlowRegistryStep[];
+    }
+  | {
+      kind: "poll";
+      name?: string;
+      contractId?: string;
+      caseKey?: string;
+      protocol?: string;
+      target?: string;
+      inputs?: FieldMapping[];
+      outputs?: FieldMapping[];
+      accept?: ReadonlyArray<string | number>;
+      until?: ExtractedPredicate;
+      message?: string;
+      every?: number;
+      backoff?: number;
+      timeoutMs?: number;
+      perAttemptTimeoutMs?: number;
+      maxAttempts?: number;
     };
 
 export interface FlowRegistryMeta {

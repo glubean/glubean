@@ -148,6 +148,19 @@ describe("runtime — bounded retry until satisfied", () => {
     expect(box.value.report).toEqual({ state: "done" });
   });
 
+  test("omitted backoff defaults to 1 in the loop (no NaN delay)", async () => {
+    const adapter = mockAdapter([
+      { status: 202, body: {} },
+      { status: 200, body: {} },
+    ]);
+    const box = { value: undefined as any };
+    const until = predicateScope<{ status: number }>().when((r) => r.status).eq(200);
+    // backoff omitted → runtime defaults to 1; delay * undefined would be NaN.
+    const flow = pollFlow({ until, timeoutMs: 5000, every: 5, backoff: undefined as any }, {}, box);
+    await runFlow(flow, ctx);
+    expect(adapter.calls).toBe(2); // retried once at the default backoff, then satisfied
+  });
+
   test("first attempt already satisfied → 1 call, no waiting", async () => {
     const adapter = mockAdapter([{ status: 200, body: {} }]);
     const box = { value: undefined as any };

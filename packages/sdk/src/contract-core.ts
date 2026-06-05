@@ -68,6 +68,7 @@ import {
   validatePollBounds,
   PollExhaustedError,
   BACKOFF_CAP_MS,
+  DEFAULT_EVERY_MS,
   type RuntimePollStep,
 } from "./contract-flow-poll.js";
 import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
@@ -1216,6 +1217,26 @@ function stepProjectionToRegistry(
       default: step.default.map(stepProjectionToRegistry),
     };
   }
+  if (step.kind === "poll") {
+    return {
+      kind: "poll",
+      name: step.name,
+      contractId: step.contractId,
+      caseKey: step.caseKey,
+      protocol: step.protocol,
+      target: step.target,
+      inputs: step.inputs,
+      outputs: step.outputs,
+      ...(step.accept ? { accept: step.accept } : {}),
+      ...(step.until !== undefined ? { until: step.until } : {}),
+      ...(step.message !== undefined ? { message: step.message } : {}),
+      every: step.every,
+      backoff: step.backoff,
+      ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+      ...(step.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: step.perAttemptTimeoutMs } : {}),
+      ...(step.maxAttempts !== undefined ? { maxAttempts: step.maxAttempts } : {}),
+    };
+  }
   return {
     kind: "contract-call",
     name: step.name,
@@ -1331,12 +1352,17 @@ async function runPollStep(
     },
     label,
   );
+  // Default interval/backoff — validatePollBounds permits them to be omitted, but
+  // the loop must not read `undefined` (sleep(undefined) hot-loops; delay*undefined
+  // is NaN). The builder applies the same defaults; this covers as-any/JS callers.
+  const everyMs = step.every ?? DEFAULT_EVERY_MS;
+  const backoff = step.backoff ?? 1;
   const now = (): number => performance.now();
   const start = now();
   const deadline = step.timeoutMs !== undefined ? start + step.timeoutMs : Infinity;
   const perAttempt = step.perAttemptTimeoutMs ?? Infinity;
   let attempt = 0;
-  let delay = step.every;
+  let delay = everyMs;
   let lastRes: unknown;
 
   for (;;) {
@@ -1422,7 +1448,7 @@ async function runPollStep(
       throw new PollExhaustedError(label, attempt, "next wait would exceed timeout");
     }
     await sleep(delay);
-    delay = Math.min(delay * step.backoff, BACKOFF_CAP_MS);
+    delay = Math.min(delay * backoff, BACKOFF_CAP_MS);
   }
 }
 
