@@ -189,6 +189,13 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
       buffer.push((t) =>
         (t.validate as (...args: unknown[]) => unknown)(data, schema, label, options),
       );
+      // `severity: "fatal"` aborts at the validation point in the real ctx —
+      // preserve that control flow (the buffered event still flushes/discards
+      // with the attempt). The throw propagates; the poll loop flushes this
+      // ctx for an in-budget throw, discards it for a timed-out orphan.
+      if (!ok && (options as { severity?: string } | undefined)?.severity === "fatal") {
+        throw new Error(`fatal validation failed: ${label ?? "data"}`);
+      }
       return value;
     },
     trace: (request: unknown) => {
@@ -203,11 +210,19 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
     metric: (name: string, value: number, options?: unknown) => {
       buffer.push((t) => (t.metric as (...args: unknown[]) => void)(name, value, options));
     },
-    // skip / fail are control flow — delegate to the real ctx (they throw).
+    // skip is pure control flow — the real `skip` only THROWS a SkipError (it
+    // emits no event), so delegating is safe: an in-budget skip skips the test;
+    // a timed-out orphan's skip rejects the abandoned promise (no leak).
     skip: (reason?: string): never => real.skip(reason),
+    // fail emits a failed assertion AND bumps the counter in the real ctx, so it
+    // must NOT delegate (a timed-out orphan would mutate the abandoned run).
+    // Buffer the failure event + throw locally; the poll loop flushes this ctx
+    // for an in-budget fail (the assertion lands + the throw fails the poll) and
+    // discards it for an orphan.
     fail: (message: string): never => {
       failed = true;
-      return real.fail(message);
+      buffer.push((t) => (t.assert as (...args: unknown[]) => void)({ passed: false }, message));
+      throw new Error(message);
     },
   } as unknown as QuarantinedContext;
 

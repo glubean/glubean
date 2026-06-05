@@ -177,6 +177,33 @@ describe("runtime — exhaustion fails the flow", () => {
     await expect(runFlow(flow, ctx)).rejects.toThrow(/exhausted/);
   });
 
+  test("in-budget predicate ctx.fail fails the poll and the failure assertion lands", async () => {
+    mockAdapter([{ status: 200, body: {} }]);
+    const asserts: Array<{ passed: boolean; msg?: string }> = [];
+    const failCtx = {
+      log: () => {},
+      assert: (a: any, m?: string) => asserts.push({ passed: a.passed ?? a, msg: m }),
+    } as unknown as TestContext;
+    const flow = pollFlow(
+      {
+        until: {
+          kind: "opaque",
+          sync: true,
+          fn: (c: TestContext) => {
+            c.fail("predicate says no");
+            return false;
+          },
+        },
+        message: "x",
+        timeoutMs: 1000,
+      },
+      {},
+      { value: undefined },
+    );
+    await expect(runFlow(flow, failCtx)).rejects.toThrow("predicate says no");
+    expect(asserts).toContainEqual({ passed: false, msg: "predicate says no" }); // flushed to real ctx
+  });
+
   test("signal-honoring adapter aborting on budget → PollExhaustedError, not AbortError", async () => {
     // Adapter hangs until aborted, then rejects AbortError (like fetch with signal).
     contract.register(PROTO, {
@@ -282,6 +309,31 @@ describe("quarantinedCtx", () => {
     const badSchema = { parse: () => { throw new Error("bad"); } } as any;
     const out = q.validate({ a: 1 }, badSchema, "body");
     expect(out).toBeUndefined();
+    expect(q.hasFailure()).toBe(true);
+  });
+
+  test("fail buffers the assertion (no real emit until flush) and throws", () => {
+    const seen: Array<{ passed: boolean; msg?: string }> = [];
+    let realFailCalled = false;
+    const real = {
+      assert: (a: any, msg?: string) => seen.push({ passed: a.passed ?? a, msg }),
+      fail: () => { realFailCalled = true; throw new Error("real-fail"); },
+      log: () => {},
+    } as unknown as TestContext;
+    const q = quarantinedCtx(real);
+    expect(() => q.fail("boom")).toThrow("boom");
+    expect(realFailCalled).toBe(false); // did NOT delegate to real.fail (no orphan leak)
+    expect(seen).toHaveLength(0); // buffered
+    expect(q.hasFailure()).toBe(true);
+    q.flushTo(real);
+    expect(seen).toEqual([{ passed: false, msg: "boom" }]);
+  });
+
+  test("validate with severity:fatal throws on failure (control flow preserved)", () => {
+    const real = { validate: () => {}, log: () => {} } as unknown as TestContext;
+    const q = quarantinedCtx(real);
+    const schema = { safeParse: (_d: any) => ({ success: false }) } as any;
+    expect(() => q.validate({ a: 1 }, schema, "body", { severity: "fatal" })).toThrow(/fatal validation/);
     expect(q.hasFailure()).toBe(true);
   });
 });

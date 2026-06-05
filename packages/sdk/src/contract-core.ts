@@ -1355,11 +1355,14 @@ async function runPollStep(
     } catch (err) {
       // A signal-honoring adapter (HTTP) rejects with AbortError when OUR budget
       // timer fired — convert it to the poll exhaustion error (with the attempt
-      // count) rather than leaking a raw AbortError. Genuine request errors (and
-      // aborts we didn't cause) propagate and fail the poll.
+      // count) rather than leaking a raw AbortError.
       if (budgetAborted && err instanceof Error && err.name === "AbortError") {
         throw exhausted();
       }
+      // A budget timeout discards this attempt's ctx (orphan); a genuine request
+      // error (incl. fatal validation / ctx.fail in the adapter) is in-budget —
+      // flush its buffered effects (the failure assertion lands) then fail the poll.
+      if (!(err instanceof PollExhaustedError)) reqCtx.flushTo(ctx);
       throw err;
     } finally {
       if (budgetTimer) clearTimeout(budgetTimer);
@@ -1372,11 +1375,20 @@ async function runPollStep(
     // Exit predicate — quarantined ctx, budget-raced, flushed only on in-budget completion.
     const predBudget = Math.min(deadline - now(), perAttempt - (now() - attemptStart));
     const predCtx = quarantinedCtx(ctx);
-    const done = await raceBudget(
-      evalPollExit(step.until, lastRes, predCtx, state),
-      Math.max(0, predBudget),
-      () => new PollExhaustedError(label, attempt, "exit-predicate budget exceeded"),
-    );
+    let done: boolean;
+    try {
+      done = await raceBudget(
+        evalPollExit(step.until, lastRes, predCtx, state),
+        Math.max(0, predBudget),
+        () => new PollExhaustedError(label, attempt, "exit-predicate budget exceeded"),
+      );
+    } catch (err) {
+      // Timed-out predicate orphan → discard predCtx. An in-budget predicate that
+      // threw (ctx.fail / ctx.skip / a thrown error) → flush its buffered effects
+      // (the failure assertion lands) then propagate (the poll fails / skips).
+      if (!(err instanceof PollExhaustedError)) predCtx.flushTo(ctx);
+      throw err;
+    }
     if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
     if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
     predCtx.flushTo(ctx); // in-budget: user's deliberate skip/fail/assert count
