@@ -980,6 +980,40 @@ export interface ExtractedFlowProjection {
 // --- FlowBuilder / FlowContract ----------------------------------------------
 
 /**
+ * Base options shared by `poll` / `pollFn` / `pollAsync`. `Res` switches on
+ * `accept` exactly like `step` (no accept → CaseOutput; accept → RawOutcome).
+ * `accept?: Accept` is what drives the `Accept` inference. Bound semantics +
+ * the build-time rules live in `validatePollBounds`. (Spike P.)
+ */
+export interface PollOptsBase<State, Res, NewState, Accept extends readonly unknown[]> {
+  /** The exit (satisfying) response written into state. */
+  out?: (state: State, response: Res) => NewState;
+  /** Accepted alternate outcome keys (HTTP: status numbers) — drives `Accept` inference. */
+  accept?: Accept;
+  name?: string;
+  /** Total wall-clock bound (ms). */
+  timeout?: number;
+  /** Max attempts (incl. the first). */
+  maxAttempts?: number;
+  /** Per-attempt budget (ms) — required when `timeout` is absent. */
+  perAttemptTimeout?: number;
+  /** Interval between attempts (ms, default 1000). */
+  every?: number;
+  /** Backoff multiplier applied to `every` after each retry (default 1, capped). */
+  backoff?: number;
+}
+
+/**
+ * Poll argument tuple. Mirrors `step`'s conditional tuple: `in` is REQUIRED for
+ * a needs-input case and FORBIDDEN for a void-input case. `Exit` is each tier's
+ * `{ until, message }` fragment (L2 declarative vs opaque). (Spike P.)
+ */
+export type PollArgs<State, CaseInputs, Res, NewState, Accept extends readonly unknown[], Exit> =
+  [CaseInputs] extends [void]
+    ? [opts: PollOptsBase<State, Res, NewState, Accept> & Exit]
+    : [opts: PollOptsBase<State, Res, NewState, Accept> & Exit & { in: (state: State) => CaseInputs }];
+
+/**
  * Builder for `contract.flow(id)`. State chain threads through `.step()` /
  * `.compute()` via TypeScript generics.
  */
@@ -1136,6 +1170,48 @@ export interface FlowBuilder<State = unknown> {
     deflt: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
   ): FlowBuilder<T>;
 
+  // ── Poll (bounded poll-until). Repeats ONE case until `until` (over the
+  //    RESPONSE) holds, bounded by timeout/maxAttempts/perAttemptTimeout. Three
+  //    tiers like condition: L2 declarative (projectable) / L1 opaque-sync / L0
+  //    opaque-async. `Res` switches on `accept` exactly like `step`. (Spike P.)
+
+  /** L2 — declarative exit predicate over the response (precisely projectable). poll-on-status needs `accept`. */
+  poll<CaseInputs, CaseOutput, AcceptKey, RawOutcome, Accept extends readonly AcceptKey[] = never, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    ...args: PollArgs<State, CaseInputs, [Accept] extends [never] ? CaseOutput : RawOutcome, NewState, Accept, {
+      until: (
+        w: PredicateScope<[Accept] extends [never] ? CaseOutput : RawOutcome>,
+      ) => BranchPredicate<[Accept] extends [never] ? CaseOutput : RawOutcome>;
+      message?: string;
+    }>
+  ): FlowBuilder<NewState>;
+
+  /** L1 — opaque sync exit predicate (gets ctx, res, state). `message` required (marked gate). */
+  pollFn<CaseInputs, CaseOutput, AcceptKey, RawOutcome, Accept extends readonly AcceptKey[] = never, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    ...args: PollArgs<State, CaseInputs, [Accept] extends [never] ? CaseOutput : RawOutcome, NewState, Accept, {
+      until: (
+        ctx: TestContext,
+        res: [Accept] extends [never] ? CaseOutput : RawOutcome,
+        state: State,
+      ) => boolean;
+      message: string;
+    }>
+  ): FlowBuilder<NewState>;
+
+  /** L0 — opaque async exit predicate (may do contract-external I/O). `message` required (marked gate). */
+  pollAsync<CaseInputs, CaseOutput, AcceptKey, RawOutcome, Accept extends readonly AcceptKey[] = never, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    ...args: PollArgs<State, CaseInputs, [Accept] extends [never] ? CaseOutput : RawOutcome, NewState, Accept, {
+      until: (
+        ctx: TestContext,
+        res: [Accept] extends [never] ? CaseOutput : RawOutcome,
+        state: State,
+      ) => Promise<boolean>;
+      message: string;
+    }>
+  ): FlowBuilder<NewState>;
+
   build(): FlowContract<State>;
 }
 
@@ -1232,6 +1308,34 @@ export interface FlowFragmentBuilder<State = unknown> {
     }>,
     deflt: (b: FlowFragmentBuilder<State>) => FlowFragmentBuilder<T>,
   ): FlowFragmentBuilder<T>;
+
+  // Poll — same three tiers as the top-level builder, so a branch body can
+  // `poll` (e.g. `if requires_action → poll until settled`). (Spike P / R3.)
+  poll<CaseInputs, CaseOutput, AcceptKey, RawOutcome, Accept extends readonly AcceptKey[] = never, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    ...args: PollArgs<State, CaseInputs, [Accept] extends [never] ? CaseOutput : RawOutcome, NewState, Accept, {
+      until: (
+        w: PredicateScope<[Accept] extends [never] ? CaseOutput : RawOutcome>,
+      ) => BranchPredicate<[Accept] extends [never] ? CaseOutput : RawOutcome>;
+      message?: string;
+    }>
+  ): FlowFragmentBuilder<NewState>;
+
+  pollFn<CaseInputs, CaseOutput, AcceptKey, RawOutcome, Accept extends readonly AcceptKey[] = never, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    ...args: PollArgs<State, CaseInputs, [Accept] extends [never] ? CaseOutput : RawOutcome, NewState, Accept, {
+      until: (ctx: TestContext, res: [Accept] extends [never] ? CaseOutput : RawOutcome, state: State) => boolean;
+      message: string;
+    }>
+  ): FlowFragmentBuilder<NewState>;
+
+  pollAsync<CaseInputs, CaseOutput, AcceptKey, RawOutcome, Accept extends readonly AcceptKey[] = never, NewState = State>(
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    ...args: PollArgs<State, CaseInputs, [Accept] extends [never] ? CaseOutput : RawOutcome, NewState, Accept, {
+      until: (ctx: TestContext, res: [Accept] extends [never] ? CaseOutput : RawOutcome, state: State) => Promise<boolean>;
+      message: string;
+    }>
+  ): FlowFragmentBuilder<NewState>;
 }
 
 /** Module-private phantom brand making FlowFragmentBuilder invariant in State. */

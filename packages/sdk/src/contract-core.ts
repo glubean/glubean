@@ -922,6 +922,15 @@ function makeStepSink(flowId: string, steps: readonly RuntimeFlowStep[]): FlowFr
     switchCond(cases: any, deflt: any) {
       return extend(buildSwitchCondStep(flowId, cases, deflt));
     },
+    poll(ref: ContractCaseRef<any, any, any, any>, opts: any) {
+      return extend(buildPollStep(flowId, "L2", ref, opts));
+    },
+    pollFn(ref: ContractCaseRef<any, any, any, any>, opts: any) {
+      return extend(buildPollStep(flowId, "L1", ref, opts));
+    },
+    pollAsync(ref: ContractCaseRef<any, any, any, any>, opts: any) {
+      return extend(buildPollStep(flowId, "L0", ref, opts));
+    },
   };
   // Non-enumerable, frozen step list snapshot for this sink.
   Object.defineProperty(sink, FRAGMENT_STEPS, {
@@ -1016,6 +1025,97 @@ function buildSwitchOnStep(
   };
 }
 
+/**
+ * poll / pollFn / pollAsync → a bounded poll-until step. Validates flow-safety
+ * (like a contract-call step) + bounds (validatePollBounds), builds the exit
+ * predicate (L2 declarative over the response via predicateScope + brand gate;
+ * L1/L0 opaque, message REQUIRED), and applies the every/backoff defaults.
+ */
+function buildPollStep(
+  flowId: string,
+  tier: "L2" | "L1" | "L0",
+  ref: ContractCaseRef<any, any, any, any>,
+  opts: {
+    in?: (state: any) => any;
+    out?: (state: any, response: any) => any;
+    accept?: readonly unknown[];
+    name?: string;
+    until: any;
+    message?: string;
+    every?: number;
+    backoff?: number;
+    timeout?: number;
+    perAttemptTimeout?: number;
+    maxAttempts?: number;
+  },
+): RuntimePollStep {
+  const adapter = _adapters.get(ref.protocol);
+  if (!adapter) {
+    throw new Error(
+      `contract.flow(${JSON.stringify(flowId)}).poll: unknown protocol "${ref.protocol}". ` +
+        `Did you forget to import a contract plugin package?`,
+    );
+  }
+  if (!adapter.executeCaseInFlow) {
+    throw new Error(
+      `contract.flow(${JSON.stringify(flowId)}).poll: adapter for "${ref.protocol}" ` +
+        `does not implement executeCaseInFlow — this protocol cannot appear in a flow.`,
+    );
+  }
+  const contractRef = ref.contract as ProtocolContract<unknown, unknown, unknown>;
+  adapter.validateCaseForFlow?.((contractRef as { _spec?: unknown })._spec, ref.caseKey, ref.contractId);
+
+  const stepLabel = opts.name ?? `${ref.contractId}#${ref.caseKey}`;
+  validatePollBounds(
+    {
+      timeout: opts.timeout,
+      maxAttempts: opts.maxAttempts,
+      perAttemptTimeout: opts.perAttemptTimeout,
+      every: opts.every,
+      backoff: opts.backoff,
+    },
+    stepLabel,
+  );
+
+  let until: BranchPredicate<any> | OpaquePredicate;
+  let message: string | undefined;
+  if (tier === "L2") {
+    until = opts.until(predicateScope<any>());
+    assertL2Predicate(until, "poll"); // runtime brand: reject forged/opaque/non-JSON exit predicates
+    message = opts.message;
+  } else {
+    if (typeof opts.message !== "string" || opts.message.length === 0) {
+      throw new LensPurityError(
+        tier === "L1" ? "pollFn" : "pollAsync",
+        `opaque (${tier}) poll exit predicate requires a non-empty \`message\` — the projection marks ` +
+          `this poll as an opaque/dynamic gate and the message is its only human-facing label`,
+      );
+    }
+    message = opts.message;
+    until = { kind: "opaque", sync: tier === "L1", fn: opts.until };
+  }
+
+  return {
+    kind: "poll",
+    name: opts.name,
+    ref,
+    caseKey: ref.caseKey,
+    contract: ref.contract,
+    bindings: {
+      in: opts.in,
+      out: opts.out as any,
+      ...(opts.accept ? { accept: opts.accept } : {}),
+    },
+    until,
+    ...(message ? { message } : {}),
+    every: opts.every ?? DEFAULT_EVERY_MS,
+    backoff: opts.backoff ?? 1,
+    ...(opts.timeout !== undefined ? { timeoutMs: opts.timeout } : {}),
+    ...(opts.perAttemptTimeout !== undefined ? { perAttemptTimeoutMs: opts.perAttemptTimeout } : {}),
+    ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+  };
+}
+
 export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
   const meta: FlowMeta = typeof idOrMeta === "string"
     ? { id: idOrMeta }
@@ -1089,6 +1189,21 @@ export function flow(idOrMeta: string | FlowMeta): FlowBuilder<unknown> {
 
     switchCond(cases: any, deflt: any): FlowBuilder<any> {
       steps.push(buildSwitchCondStep(meta.id, cases, deflt));
+      return builder;
+    },
+
+    poll(ref: ContractCaseRef<any, any, any, any>, opts: any): FlowBuilder<any> {
+      steps.push(buildPollStep(meta.id, "L2", ref, opts));
+      return builder;
+    },
+
+    pollFn(ref: ContractCaseRef<any, any, any, any>, opts: any): FlowBuilder<any> {
+      steps.push(buildPollStep(meta.id, "L1", ref, opts));
+      return builder;
+    },
+
+    pollAsync(ref: ContractCaseRef<any, any, any, any>, opts: any): FlowBuilder<any> {
+      steps.push(buildPollStep(meta.id, "L0", ref, opts));
       return builder;
     },
 
