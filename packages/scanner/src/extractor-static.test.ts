@@ -336,6 +336,19 @@ export const flow = test("lens")
   expect(result[0].steps).toEqual([{ name: "ok" }, { name: "def" }]);
 });
 
+test("a fragment-named helper inside an opaque step body does not collect leaves", () => {
+  const content = `
+export const flow = test("nested-frag")
+  .step("outer", async (ctx) => {
+    await helper.group("g", (b) => b.poll("fake", async () => ({})));
+    await helper.condition({ predicate: () => true }, (b) => b.step("fake2", async () => ({})));
+  })
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "outer" }, { name: "verify" }]);
+});
+
 test("a regex literal after throw in a step body does not desync the scan", () => {
   const content = `
 export const flow = test("thr")

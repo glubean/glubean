@@ -476,19 +476,21 @@ function skipNonCode(s: string, i: number, lastBraceObj: boolean): number {
  * joins.
  *
  * The set of leaves must match `flattenStepsForRegistry` (sdk builder.ts):
- *   - `.group(id, b => …)` / `.use(b => …)` and the `then`/default branch
- *     fragments of `.condition` / `.switchCond` / `.switchOn` contribute their
- *     nested `.step()`/`.poll()` as REAL leaves → those bodies still collect.
- *   - the bodies of `.step` / `.poll` / `.setup` / `.teardown` are opaque user
- *     code → a helper call there (e.g. `client.poll("job")`) is NOT a leaf.
- *   - a branch predicate/lens is opaque too: `.switchOn(lens)` is opaque (its
- *     cases still collect via the curried second call), and the value of a
- *     `predicate:` / `when:` property is suppressed — `flattenStepsForRegistry`
- *     never includes them, and (with conditionAsync) they may call I/O helpers.
+ *   - the bodies of `.step` / `.poll` / `.setup` / `.teardown` (and the
+ *     `.switchOn(lens)` lens) are opaque user code → a helper call there (e.g.
+ *     `client.poll("job")`) is NOT a leaf. Their frames force-suppress.
+ *   - every other call inherits its parent's collecting state. At the top of the
+ *     chain (or inside a collecting fragment) that means `.group(id, b => …)` /
+ *     `.use(b => …)` and the `then`/default fragments of `.condition` /
+ *     `.switchCond` / `.switchOn` DO collect their nested `.step()`/`.poll()`
+ *     leaves — but the SAME method names called inside an opaque body stay
+ *     suppressed (they're user helpers, not builder fragments).
+ *   - the value of a `predicate:` / `when:` property is suppressed too: those are
+ *     branch predicates `flattenStepsForRegistry` never includes (and with
+ *     conditionAsync they may call I/O helpers).
  * Bracket depth is tracked literal/comment-aware so a `)`/`}`/`]` inside a
  * string, template, comment, or regex literal cannot desync the scan.
  */
-const FRAGMENT_METHODS = new Set(["group", "use", "condition", "switchCond"]);
 const OPAQUE_METHODS = new Set(["step", "poll", "setup", "teardown", "switchOn"]);
 const OPAQUE_PROPS = new Set(["predicate", "when"]);
 
@@ -535,9 +537,10 @@ function extractSteps(scope: string): { name: string }[] {
             const nameM = leafName.exec(scope.slice(j + 1));
             if (nameM) steps.push({ name: nameM[2] });
           }
-          collects.push(
-            FRAGMENT_METHODS.has(method) ? true : OPAQUE_METHODS.has(method) ? false : collecting(),
-          );
+          // Opaque-body methods suppress their body; every other call (fragment
+          // builders included) inherits the parent — so a fragment-named helper
+          // inside an opaque body stays suppressed.
+          collects.push(OPAQUE_METHODS.has(method) ? false : collecting());
           i = j + 1; // consume the "("
           continue;
         }
