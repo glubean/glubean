@@ -340,6 +340,27 @@ export const flow = test("ngx")
   ]);
 });
 
+test("extracts a generic call whose object type arg has semicolon-separated fields", () => {
+  const content = `
+export const flow = test("semi")
+  .step<{ id: string; name: string }>("kick", async () => ({ id: "1", name: "a" }))
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "kick" }, { name: "verify" }]);
+});
+
+test("division of a string/postfix value in a step body is not read as a regex", () => {
+  const content = `
+export const flow = test("vdiv")
+  .step("a", async () => { const x = "6" / 2; return x; })
+  .step("b", async (ctx) => { let n = 1; return n++ / 2; })
+  .step("c", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }, { name: "c" }]);
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================

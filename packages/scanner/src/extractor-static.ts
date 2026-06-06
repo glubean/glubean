@@ -376,7 +376,10 @@ function regexStartsAt(s: string, i: number, lastBraceWasObject: boolean): boole
   while (j >= 0 && /\s/.test(s[j])) j--;
   if (j < 0) return true;
   const p = s[j];
-  if (p === ")" || p === "]") return false;
+  // value-ending tokens → the `/` is division: `)`, `]`, a closing string/
+  // template quote, or a postfix `++`/`--`.
+  if (p === ")" || p === "]" || p === '"' || p === "'" || p === "`") return false;
+  if ((p === "+" || p === "-") && s[j - 1] === p) return false;
   // `}` is ambiguous: it ends a block (→ a following `/` is a regex, e.g.
   // `if (x) {} /re/`) or an object literal (→ division, e.g. `{ n: 1 } / 2`).
   // The caller tracks which kind the most-recently-closed brace was.
@@ -396,16 +399,24 @@ function regexStartsAt(s: string, i: number, lastBraceWasObject: boolean): boole
  * belongs to `=>`, not the bracket. Spans newlines; bails on `;` (not a type).
  */
 function skipAngles(s: string, i: number): number {
-  let depth = 0;
+  let depth = 0; // < > nesting
+  let inner = 0; // ( { [ nesting inside the type args
   let j = i;
   while (j < s.length) {
     const c = s[j];
     if (c === '"' || c === "'") { j = skipString(s, j); continue; }
     if (c === "`") { j = skipTemplate(s, j); continue; }
     if (c === "=" && s[j + 1] === ">") { j += 2; continue; } // function-type arrow
-    if (c === "<") { depth++; j++; continue; }
-    if (c === ">") { depth--; j++; if (depth === 0) return j; continue; }
-    if (c === ";") return -1;
+    if (c === "(" || c === "{" || c === "[") { inner++; j++; continue; }
+    if (c === ")" || c === "}" || c === "]") { inner--; j++; continue; }
+    if (inner === 0) {
+      // angle brackets and the statement terminator only count outside any
+      // nested (), {}, [] — so `;` separating object-type fields (`{ a; b }`)
+      // and arrows/brackets within type args don't end or unbalance the scan.
+      if (c === "<") { depth++; j++; continue; }
+      if (c === ">") { depth--; j++; if (depth === 0) return j; continue; }
+      if (c === ";") return -1;
+    }
     j++;
   }
   return -1;
