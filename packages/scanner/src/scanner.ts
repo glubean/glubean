@@ -6,7 +6,8 @@
  */
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
-import { extractAliasesFromSource, extractContractCases } from "./extractor-static.js";
+import { extractContractCases } from "./extractor-ast.js";
+import { extractAliasesFromSource } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedFlowMeta } from "./contract-extraction.js";
