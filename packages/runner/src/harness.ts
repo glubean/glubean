@@ -2105,6 +2105,15 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
               let exhausted = false;
               let pollError: string | undefined;
               let lastRes: unknown;
+              // A poll-phase throw (fn / until / out-mapper) must surface a
+              // non-empty message: pollError is tested for truthiness below to
+              // decide failure AND whether to emit an `error`, so an empty
+              // message (`throw new Error("")` / `throw ""`) would otherwise be
+              // silently treated as a pass.
+              const pollErrMsg = (e: unknown): string => {
+                const m = e instanceof Error ? e.message : String(e);
+                return m || `poll "${step.meta.name}" threw an empty error`;
+              };
 
               for (;;) {
                 attempt += 1;
@@ -2119,7 +2128,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 } catch (err) {
                   if (err instanceof SkipError) { skipRequest = err; break; }
                   if (err instanceof PollBudgetTimeout) { exhausted = true; break; }
-                  pollError = err instanceof Error ? err.message : String(err);
+                  pollError = pollErrMsg(err);
                   break;
                 }
                 if (performance.now() > deadline || performance.now() - attemptStart > perAttempt) {
@@ -2143,7 +2152,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 } catch (err) {
                   if (err instanceof SkipError) { skipRequest = err; break; }
                   if (err instanceof PollBudgetTimeout) { exhausted = true; break; }
-                  pollError = err instanceof Error ? err.message : String(err);
+                  pollError = pollErrMsg(err);
                   break;
                 }
 
@@ -2157,7 +2166,7 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                       const next = poll.out(state, lastRes);
                       if (next !== undefined) state = next;
                     } catch (err) {
-                      pollError = err instanceof Error ? err.message : String(err);
+                      pollError = pollErrMsg(err);
                     }
                   }
                   break;

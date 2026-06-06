@@ -434,8 +434,13 @@ function parseTestDeclaration(
     defaultRun = builderMeta.defaultRun;
   }
 
-  // Extract .step("name", ...) chains from the full scope
-  const steps = extractSteps(scope);
+  // Extract .step("name", ...) / .poll("name", ...) leaf steps from the
+  // builder chain ONLY (the text after the test() call closes) — the same
+  // scope as builderMeta, NOT the full scope. Otherwise a simple test()'s
+  // callback body calling a client `.poll(...)` (or `.step(...)`) helper would
+  // get fake step metadata, breaking consumers that join discovered steps to
+  // runtime step indexes.
+  const steps = extractSteps(builderChainScope);
 
   const result: ExportMeta = {
     type: "test",

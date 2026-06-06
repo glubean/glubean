@@ -172,6 +172,22 @@ export const flow = test("poll-only")
   expect(result[0].steps).toEqual([{ name: "await-job" }]);
 });
 
+test("a simple test()'s callback calling .poll()/.step() helpers gets NO fake steps", () => {
+  const content = `
+export const flow = test("simple-with-client-poll", async (ctx) => {
+  const client = makeClient();
+  await client.poll("job-status");
+  await client.step("not-a-step");
+});
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  expect(result[0].id).toBe("simple-with-client-poll");
+  // No builder chain → callback-body .poll()/.step() must NOT become leaf-step
+  // metadata (it emits no runtime step events; fake steps break index joins).
+  expect(result[0].steps).toBeUndefined();
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================

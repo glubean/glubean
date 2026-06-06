@@ -169,3 +169,27 @@ export const t = test("poll-out-throw")
   const ended = stepEnds(r.events).map((e) => e.name);
   expect(ended).toEqual(expect.arrayContaining(started));
 });
+
+test("an out-mapper that throws an empty error still fails the poll", async () => {
+  const src = `
+import { test } from "@glubean/sdk";
+export const t = test("poll-out-empty")
+  .setup(async () => ({}))
+  .poll("commit", async () => ({ ready: true }), {
+    until: (ctx, res) => res.ready === true,
+    timeout: 5000,
+    out: () => { throw new Error(""); },
+  });
+`;
+  const r = await run(src, "poll-out-empty");
+  expect(r.success).toBe(false);
+  const p = polls(r.events);
+  expect(p).toHaveLength(1);
+  expect(p[0].satisfied).toBe(true);
+  // An empty thrown message must NOT be falsy-coerced into a pass — the poll
+  // event + step_end must carry a non-empty error.
+  expect(p[0].error).toBeTruthy();
+  const end = stepEnds(r.events).find((e) => e.name === "commit");
+  expect(end?.status).toBe("failed");
+  expect(end?.error).toBeTruthy();
+});
