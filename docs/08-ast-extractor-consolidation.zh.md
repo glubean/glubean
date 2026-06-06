@@ -221,3 +221,14 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 - scanner 138 + vscode parser.test 不改全过;新增 R2–R20 场景测试全过。
 - `codex review` 在本工作线收敛到零 findings。
 - 一个真实 dogfood 项目的 `scan` 输出与回退前(baseline)对齐(被消费字段:tests 的 id/name/tags/meta、`ContractStaticMeta`、`PickMeta`),性能无显著回归。
+
+---
+
+## 11. 未来能力:静态(零执行)投影 —— 本迁移解锁的 payoff
+
+本迁移本身只"AST 替换正则"(不改投影行为)。但它**铺好了静态投影的地基**:
+
+- **现状两条路**:运行时投影(动态 `import()` 执行用户代码 → 完整 `NormalizedFlowMeta`,**权威但要执行**);静态(旧正则)只能凑 id/name/tags + 扁平 `.step`,**没有结构**。
+- **AST 解锁**:从源码、**不执行**地抽出**结构**——`.step`/`.poll`/`.group`/`.condition`/`switchOn`/`switchCond` 的嵌套 + case/default 分支、contract case 明细、控制流形状。→ no-exec、快、安全的投影:VSCode 测试树展开嵌套结构、CodeLens 标注分支/轮询、coverage/可视化不跑就能画。
+- **边界**:AST 只看语法,看不到运行时值;运行时计算的 id/schema、循环/spread 生成的 cases 投影不了(这正是 contract/flow 走动态 import 的原因)。定位:**静态投影 = 快/安全的"大多数情况";运行时投影仍是动态部分的权威 fallback**,二者互补。
+- **落点**:届时 `ExportMeta.steps[]`(目前"只写不读")可升级成真正的结构化静态投影,第一个真实消费者是 VSCode 结构展示 / 可视化。**这是建立在本迁移之上的独立 feature,不在 P0–P4 范围**。

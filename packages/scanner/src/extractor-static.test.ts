@@ -1,8 +1,8 @@
 import { test, expect } from "vitest";
-import { extractAliasesFromSource, extractContractCases, extractPickExamples, isGlubeanFile } from "./extractor-static.js";
-// P1: extractFromSource is now AST-based (@babel/parser). The existing test suite
-// runs unchanged against it as the conformance contract.
-import { extractFromSource } from "./extractor-ast.js";
+import { extractAliasesFromSource, extractPickExamples, isGlubeanFile } from "./extractor-static.js";
+// P1/P2: extractFromSource + extractContractCases are now AST-based (@babel/parser).
+// The existing test suites run unchanged against them as the conformance contract.
+import { extractFromSource, extractContractCases } from "./extractor-ast.js";
 
 // =============================================================================
 // Empty / no-export cases

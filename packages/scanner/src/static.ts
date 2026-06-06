@@ -20,12 +20,12 @@
  * @module static
  */
 
-// extractFromSource + createStaticExtractor are AST-based (P1, @babel/parser);
-// the rest stay regex in extractor-static.ts (cheap guards / not-yet-migrated).
-export { createStaticExtractor, extractFromSource } from "./extractor-ast.js";
+// extractFromSource + createStaticExtractor + extractContractCases are AST-based
+// (@babel/parser); the rest stay regex in extractor-static.ts (cheap guards /
+// not-yet-migrated).
+export { createStaticExtractor, extractFromSource, extractContractCases } from "./extractor-ast.js";
 export {
   extractAliasesFromSource,
-  extractContractCases,
   extractPickExamples,
   isGlubeanFile,
 } from "./extractor-static.js";

@@ -21,12 +21,14 @@ import {
   objectFromExpression,
   objectProperty,
   stringProperty,
+  propertyNameText,
   findPropertyCall,
   walk,
   lineOf,
   type AnyNode,
 } from "./ast.js";
 import type { ExportMeta } from "./types.js";
+import type { ContractCaseStaticMeta, ContractStaticMeta } from "./extractor-static.js";
 
 const BASE_FNS = new Set(["test", "task"]);
 
@@ -239,6 +241,120 @@ export function extractFromSource(content: string, customFns?: string[]): Export
   forEachExportedConst(source, (statement, declaration) => {
     const meta = parseTestDeclaration(declaration, statement, fns);
     if (meta) results.push(meta);
+  });
+  return results;
+}
+
+/** Find the `contract.<protocol>(...)` call in a chain (object named `contract`). */
+function findContractCall(init: AnyNode): { protocol: string; call: AnyNode } | undefined {
+  let node: AnyNode | undefined = unwrapExpression(init);
+  while (node && node.type === "CallExpression") {
+    const callee = unwrapExpression(node.callee as AnyNode);
+    if (!callee) break;
+    if (callee.type === "MemberExpression") {
+      const object = callee.object as AnyNode;
+      const property = callee.property as AnyNode;
+      if (object.type === "Identifier" && object.name === "contract" && property.type === "Identifier") {
+        return { protocol: property.name as string, call: node };
+      }
+      node = unwrapExpression(object);
+    } else if (callee.type === "CallExpression") {
+      node = callee;
+    } else {
+      break;
+    }
+  }
+  return undefined;
+}
+
+const _REQUIRES = new Set(["headless", "browser", "out-of-band"]);
+const _DEFAULT_RUN = new Set(["always", "opt-in"]);
+
+/** Parse the `cases: { key: { ... } }` object into ContractCaseStaticMeta[]. */
+function readCases(casesObj: AnyNode): ContractCaseStaticMeta[] {
+  const out: ContractCaseStaticMeta[] = [];
+  const properties = (casesObj.properties as AnyNode[] | undefined) ?? [];
+  for (const property of properties) {
+    if (property.type !== "ObjectProperty") continue;
+    const key = propertyNameText(property);
+    const body = objectFromExpression(property.value as AnyNode);
+    if (key === undefined || !body) continue;
+
+    const meta: ContractCaseStaticMeta = { key, line: lineOf(property.value as AnyNode) };
+
+    const description = stringProperty(body, "description");
+    if (description !== undefined) meta.description = description;
+
+    // Status lives under `expect: { status: N }` (BaseCaseSpec); fall back to a
+    // top-level `status` if present.
+    const expectObj = objectFromExpression(objectProperty(body, "expect")?.value as AnyNode | undefined);
+    const statusProp =
+      (expectObj && objectProperty(expectObj, "status")) ?? objectProperty(body, "status");
+    const statusVal = statusProp ? unwrapExpression(statusProp.value as AnyNode) : undefined;
+    if (statusVal?.type === "NumericLiteral" && typeof statusVal.value === "number") {
+      meta.expectStatus = statusVal.value as number;
+    }
+
+    const deferred = stringProperty(body, "deferred");
+    if (deferred !== undefined) meta.deferred = deferred;
+
+    const requires = stringProperty(body, "requires");
+    if (requires !== undefined && _REQUIRES.has(requires)) meta.requires = requires;
+
+    const defaultRun = stringProperty(body, "defaultRun");
+    if (defaultRun !== undefined && _DEFAULT_RUN.has(defaultRun)) meta.defaultRun = defaultRun;
+
+    const given = stringProperty(body, "given");
+    if (given !== undefined) meta.given = given;
+
+    out.push(meta);
+  }
+  return out;
+}
+
+/**
+ * AST replacement for the regex `extractContractCases`. Extracts
+ * `contract.<protocol>("id", { endpoint, description, feature, cases })` exports
+ * → `ContractStaticMeta[]` (same fields the regex set: contract id/exportName/
+ * line/endpoint/protocol/description/feature + per-case key/line/description/
+ * expectStatus/deferred/requires/defaultRun/given). Returns [] on parse error.
+ */
+export function extractContractCases(content: string): ContractStaticMeta[] {
+  let source;
+  try {
+    source = parseSource(content);
+  } catch {
+    return [];
+  }
+  const results: ContractStaticMeta[] = [];
+  forEachExportedConst(source, (statement, declaration) => {
+    const exportName = (declaration.id as AnyNode | undefined)?.name as string | undefined;
+    const init = declaration.init as AnyNode | undefined;
+    if (!exportName || !init) return;
+
+    const found = findContractCall(init);
+    if (!found) return;
+    const args = (found.call.arguments as AnyNode[] | undefined) ?? [];
+    const contractId = stringFromExpression(args[0]);
+    const spec = objectFromExpression(args[1]);
+    if (contractId === undefined || !spec) return;
+
+    const casesObj = objectFromExpression(objectProperty(spec, "cases")?.value as AnyNode | undefined);
+
+    const meta: ContractStaticMeta = {
+      contractId,
+      exportName,
+      line: lineOf(statement),
+      endpoint: stringProperty(spec, "endpoint") ?? "",
+      protocol: found.protocol,
+      cases: casesObj ? readCases(casesObj) : [],
+    };
+    const description = stringProperty(spec, "description");
+    if (description !== undefined) meta.description = description;
+    const feature = stringProperty(spec, "feature");
+    if (feature !== undefined) meta.feature = feature;
+
+    results.push(meta);
   });
   return results;
 }
