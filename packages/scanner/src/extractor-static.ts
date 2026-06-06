@@ -505,45 +505,60 @@ function findCallCloseAware(s: string, openIndex: number): number {
  * mixed test would otherwise have no/misaligned step metadata for step-index
  * joins.
  *
- * The set of leaves must match `flattenStepsForRegistry` (sdk builder.ts):
- *   - ONLY the known builder-fragment methods (`.group(id, b => …)`,
- *     `.use(b => …)`, and the `then`/default fragments of `.condition` /
- *     `.switchCond`) collect their nested `.step()`/`.poll()` as leaves — and
- *     only when the parent is already collecting (a fragment-named helper inside
- *     an opaque body does not).
- *   - every OTHER call is opaque: `.step`/`.poll`/`.setup`/`.teardown` bodies,
- *     `.switchOn(lens)` (its cases collect via the curried second call, a plain
- *     `(`), `.meta`/`.each`/`.pick`, and any unknown helper — a `.poll()` in
- *     their args is NOT a leaf.
- *   - the value of a `predicate:` / `when:` property is suppressed too: those are
- *     branch predicates `flattenStepsForRegistry` never includes (and with
- *     conditionAsync they may call I/O helpers).
- * Bracket depth is tracked literal/comment-aware so a `)`/`}`/`]` inside a
- * string, template, comment, or regex literal cannot desync the scan.
+ * The set of leaves must match `flattenStepsForRegistry` (sdk builder.ts), which
+ * flattens only the steps RETURNED by branch/group/use builder callbacks. So a
+ * leaf is collected in exactly two places:
+ *   - the top-level chain itself (the base frame); and
+ *   - the body of a FRAGMENT-callback arrow — the `(b) => …` passed to
+ *     `.group`/`.use` or the `then`/default of `.condition`/`.switchCond`, and
+ *     `switchOn`'s curried `(cases, default)` call.
+ * Everything else is opaque: `.step`/`.poll`/`.setup`/`.teardown` bodies,
+ * `.meta`/`.each`/`.pick`, the `switchOn(lens)` lens, a fragment method's
+ * non-callback args (specs/factories like `condition(makeSpec(client.poll()), …)`),
+ * and `predicate:`/`when:` predicate values — a `.step()`/`.poll()` helper in any
+ * of those is NOT a leaf. Bracket depth is tracked literal/comment/regex-aware so
+ * a `)`/`}`/`]` inside a literal cannot desync the scan.
  */
 const FRAGMENT_METHODS = new Set(["group", "use", "condition", "switchCond"]);
 const OPAQUE_PROPS = new Set(["predicate", "when"]);
 
 function extractSteps(scope: string): { name: string }[] {
   const steps: { name: string }[] = [];
-  // Per open bracket: a collecting flag (does a leaf .step()/.poll() here count?)
-  // and a kind ("obj" | "block" | "paren" | "arr"). The base frame (the builder
-  // chain itself) collects; opaque-body methods force suppress; every other call
-  // inherits the parent.
+  // Per open bracket: a collecting flag, whether arrows opened here are FRAGMENT
+  // builder callbacks (their bodies collect), and a kind ("obj"|"block"|"paren"|
+  // "arr"|"call:switchOn"). Only the top-level chain (the base frame) and
+  // fragment-callback arrow bodies collect; a fragment method's non-callback args
+  // (specs/factories) and opaque method bodies do not.
   const collects: boolean[] = [true];
+  const fragArgs: boolean[] = [false];
   const kinds: string[] = ["base"];
-  // While a branch predicate (`predicate:`/`when:` value, or `predicate(…){…}`
-  // method shorthand) is scanned, suppress collection until we return to its
-  // bracket depth and hit `,`/`}` (or pop out). `-1` = not suppressing.
+  // Depths (collects.length) at which a fragment EXPRESSION-body arrow is active
+  // (`(b) => b.step(...)`); a leaf at that exact depth collects. Block-body
+  // arrows (`(b) => { ... }`) collect via their `{` frame instead.
+  const exprArrows: number[] = [];
+  let nextBraceCollects = false; // an upcoming `=> {` block body collects
+  let nextParenIsFrag = false; // an upcoming `(` is switchOn's curried cases call
+  // While a `predicate:`/`when:` branch-predicate value is scanned, suppress
+  // collection until its bracket depth closes. `-1` = not suppressing.
   let suppressDepth = -1;
-  const collecting = () => suppressDepth === -1 && collects[collects.length - 1];
+
+  const frameCollect = () => collects[collects.length - 1];
+  const collecting = () =>
+    suppressDepth === -1 &&
+    (frameCollect() ||
+      (exprArrows.length > 0 && exprArrows[exprArrows.length - 1] === collects.length));
   const methodName = /^\.\s*([A-Za-z_$][\w$]*)/;
   const word = /^[A-Za-z_$][\w$]*/;
   const leafName = /^\s*(['"])([^'"]+)\1/;
-  const push = (collect: boolean, kind: string) => { collects.push(collect); kinds.push(kind); };
+  const push = (collect: boolean, frag: boolean, kind: string) => {
+    collects.push(collect); fragArgs.push(frag); kinds.push(kind);
+  };
   const pop = () => {
-    if (collects.length > 1) { collects.pop(); kinds.pop(); }
+    const closed = kinds[kinds.length - 1];
+    if (collects.length > 1) { collects.pop(); fragArgs.pop(); kinds.pop(); }
     if (suppressDepth !== -1 && collects.length < suppressDepth) suppressDepth = -1;
+    while (exprArrows.length > 0 && exprArrows[exprArrows.length - 1] > collects.length) exprArrows.pop();
+    return closed;
   };
 
   const n = scope.length;
@@ -553,6 +568,20 @@ function extractSteps(scope: string): { name: string }[] {
     if (skipTriviaFwd(scope, st)) continue;
     const i = st.i;
     const c = scope[i];
+
+    // A `=>` arrow: in a fragment-args context (and not in a predicate), its body
+    // collects — block bodies via the next `{`, expression bodies via exprArrows.
+    if (c === "=" && scope[i + 1] === ">") {
+      if (suppressDepth === -1 && fragArgs[fragArgs.length - 1]) {
+        let p = i + 2;
+        while (p < n && /\s/.test(scope[p])) p++;
+        if (scope[p] === "{") nextBraceCollects = true;
+        else exprArrows.push(collects.length);
+      }
+      st.i = i + 2; st.ev = false;
+      continue;
+    }
+
     if (c === ".") {
       const m = methodName.exec(scope.slice(i));
       if (m) {
@@ -566,15 +595,21 @@ function extractSteps(scope: string): { name: string }[] {
         while (j < n && /\s/.test(scope[j])) j++;
         if (scope[j] === "(") {
           const method = m[1];
-          if ((method === "step" || method === "poll") && collecting()) {
+          // A method is a real builder call only when the parent is collecting;
+          // the same name in an opaque body is a user helper, not a fragment.
+          const parentCollecting = collecting();
+          if ((method === "step" || method === "poll") && parentCollecting) {
             const nameM = leafName.exec(scope.slice(j + 1));
             if (nameM) steps.push({ name: nameM[2] });
           }
-          // A call collects its args only if it is a known builder fragment AND
-          // the parent is already collecting; every other call (opaque bodies,
-          // .meta/.each, switchOn lens, unknown helpers) is opaque, so a helper
-          // `.poll()` in its args is not mistaken for a leaf.
-          push(FRAGMENT_METHODS.has(method) ? collecting() : false, "paren");
+          // Fragment methods open a fragment-args scope (only their arrow
+          // callbacks collect); switchOn is opaque but its curried second call is
+          // a fragment-args scope; every other call is fully opaque.
+          push(
+            false,
+            FRAGMENT_METHODS.has(method) && parentCollecting,
+            method === "switchOn" && parentCollecting ? "call:switchOn" : "paren",
+          );
           st.i = j + 1; st.ev = false; // just opened the call's "("
           continue;
         }
@@ -583,12 +618,36 @@ function extractSteps(scope: string): { name: string }[] {
         continue;
       }
     }
-    if (c === "{") { push(collecting(), isObjectBracePos(scope, i) ? "obj" : "block"); st.i++; st.ev = false; continue; }
-    if (c === "(") { push(collecting(), "paren"); st.i++; st.ev = false; continue; }
-    if (c === "[") { push(collecting(), "arr"); st.i++; st.ev = false; continue; }
-    if (c === ")" || c === "]") { pop(); st.i++; st.ev = true; continue; }
-    if (c === "}") { const closed = kinds[kinds.length - 1]; pop(); st.i++; st.ev = closed === "obj"; continue; }
-    if (c === ",") { if (suppressDepth === collects.length) suppressDepth = -1; st.i++; st.ev = false; continue; }
+
+    if (c === "{") {
+      let col: boolean, frag: boolean;
+      if (nextBraceCollects) { col = true; frag = false; nextBraceCollects = false; }
+      else { col = collecting(); frag = fragArgs[fragArgs.length - 1]; }
+      push(col, frag, isObjectBracePos(scope, i) ? "obj" : "block");
+      st.i++; st.ev = false; continue;
+    }
+    if (c === "(") {
+      if (nextParenIsFrag) { nextParenIsFrag = false; push(false, true, "paren"); }
+      else push(collecting(), fragArgs[fragArgs.length - 1], "paren");
+      st.i++; st.ev = false; continue;
+    }
+    if (c === "[") { push(collecting(), fragArgs[fragArgs.length - 1], "arr"); st.i++; st.ev = false; continue; }
+    if (c === ")" || c === "]") {
+      const closed = pop();
+      st.i++; st.ev = true;
+      if (closed === "call:switchOn") {
+        let p = st.i;
+        while (p < n && /\s/.test(scope[p])) p++;
+        if (scope[p] === "(") nextParenIsFrag = true; // switchOn(lens)(cases, …)
+      }
+      continue;
+    }
+    if (c === "}") { const closed = pop(); st.i++; st.ev = closed === "obj"; continue; }
+    if (c === ",") {
+      if (suppressDepth === collects.length) suppressDepth = -1;
+      if (exprArrows.length > 0 && exprArrows[exprArrows.length - 1] === collects.length) exprArrows.pop();
+      st.i++; st.ev = false; continue;
+    }
     // A bare identifier: detect a `predicate`/`when` branch-predicate property —
     // either `predicate:`/`when:` (value form) or `predicate(…){…}` (method
     // shorthand) — but ONLY when directly inside an object literal (a branch-spec

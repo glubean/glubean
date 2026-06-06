@@ -392,6 +392,19 @@ export const flow = test("nested-frag")
   expect(result[0].steps).toEqual([{ name: "outer" }, { name: "verify" }]);
 });
 
+test("a helper call in a fragment method's non-callback (spec/factory) arg is not a step", () => {
+  const content = `
+export const flow = test("factoryarg")
+  .condition(makeSpec(client.poll("status")), (b) => b.step("real", async () => ({})))
+  .switchCond(
+    [{ when: makeWhen(client.poll("w")), then: (b) => b.step("hit", async () => ({})) }],
+    (b) => b.step("def", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "real" }, { name: "hit" }, { name: "def" }]);
+});
+
 test("a helper .poll() inside .meta()/non-fragment args is not a step", () => {
   const content = `
 export const flow = test("metapoll")
