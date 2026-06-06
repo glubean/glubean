@@ -72,21 +72,22 @@ VSCode extension(`vscode/src/`)**早就在用 AST**:
 ### 3.2 Out-of-scope —— **不动**的
 
 - **运行时动态提取**:`contract-extraction.ts` 的 `extractContractFromFile` / `extractContractsFromProject`(通过 `import()` 读取 contract/flow 的运行时对象形状)。这条路本就不是正则,继续保留。AST 只替换**静态文本分析**层。
-- **scanner 扫描骨架 / 路由**:`scanner.ts` 的 5 阶段、文件后缀路由、`ScanOptions` 默认值不变(见 §3.4)。
+- **scanner 扫描骨架 / 路由**:`scanner.ts` 的 5 阶段、文件后缀路由、`ScanOptions` 默认值不变(见 §3.4)。**特别注意保留 contract/flow 的双向处理**(Phase 4 对 `contractFiles + flowFiles` 都跑合约提取;Phase 5 对 `flowFiles + contractFiles` 都跑 flow 提取),因为 `.flow.*` 可内联导出 contract、`.contract.*` 可导出 flow。AST 迁移**不得**退化成"按后缀单向路由",否则混合文件会丢元数据。
 - **runner / sdk / 执行路径**:权威 step 结构来自 runtime `import()` → `Test.steps`(完整 `StepDefinition`,含 `branch`/`poll`),由 execution / upload gate / contracts 可视化使用;本设计不触碰。
 - 公开**输出契约**(`ExportMeta` / `PickMeta` / `ContractStaticMeta` 等的字段语义)保持不变(§5)。
 
 ### 3.3 关于 `ExportMeta.steps[]`
 
-经核实(commit `cfe17e7` 的依据):`ExportMeta.steps[]` 全仓库**只写不读**——CLI / MCP discovery 都丢弃它,scanner 项目扫描不透传它,只有 scanner 自己的单测断言它。
+澄清(纠正初稿)。`steps[]` 没有**代码消费者**做逻辑判断——CLI `discoverTests` / MCP `discover_tests` 在映射时都丢弃它(只取 id/name/tags/meta)。**但它是公开产物的一部分**:`Scanner.scan` 把 extractor 结果原样存进 `files[path].exports`,CLI 的 `buildMetadata`(`packages/cli/src/metadata.ts`)再把 `scanResult.files` 拷进 `metadata.json`(上传 bundle 的一部分)。所以 `ExportMeta.steps[]` **会随 `metadata.json` 输出**——它是 public 字段,删除属于 bundle schema 的破坏性变更。
 
-设计决策:**AST 版按 `flattenStepsForRegistry`(sdk `builder.ts`)的语义产出"扁平叶子(含 branch case/default 与 poll 展平)",一次做对**——AST 让这件事变得平凡(不再有正则那 19 轮的边缘)。即:保留并修正该字段,而非删除。这样若将来要做"静态 step 投影/可视化"(目前无消费者),字段已正确就绪。**未决问题 §9.1** 让 owner 拍是否要保留该字段。
+设计决策:**保留并做对**。AST 版按 `flattenStepsForRegistry`(sdk `builder.ts`)的语义产出"扁平叶子(含 branch case/default 与 poll 展平)",一次做对——AST 让这件事变得平凡(不再有正则那 19 轮的边缘)。**不提供删除选项**;如确需删除,须按 `metadata.json` schema 迁移单独立项(见 §9.1)。
 
 ### 3.4 扫描骨架(事实,供对照,不改)
 
 - `DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"]`;`DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build"]`。
-- 后缀路由:`*.test.*` → 测试;`*.contract.*` → 合约;`*.flow.*` → 流。
-- 5 阶段:① 收别名(`extractAliasesFromSource`)② 收集文件 ③ 抽测试元数据(注入的静态 extractor)④ 抽合约元数据(运行时 `extractContractFromFile` + 静态 `extractContractCases` 一并)⑤ 抽 flow 元数据(运行时)。
+- 后缀**分桶**:`*.test.*` → 测试桶;`*.contract.*` → 合约桶;`*.flow.*` → 流桶。
+- 但**提取是跨桶的**:Phase 4 合约提取跑 `[...contractFiles, ...flowFiles]`,Phase 5 flow 提取跑 `[...flowFiles, ...contractFiles]`(`.flow.*` 可内联 contract、`.contract.*` 可导出 flow)。后缀只决定进哪个桶,不决定跑哪种提取。
+- 5 阶段:① 收别名(`extractAliasesFromSource`)② 收集并分桶文件 ③ 抽测试元数据(注入的静态 extractor)④ 抽合约元数据(对 contract+flow 文件跑运行时 `extractContractFromFile`;失败回退静态 `extractContractCases`)⑤ 抽 flow 元数据(对 flow+contract 文件跑运行时提取)。
 
 ---
 
@@ -191,7 +192,7 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 1. **acorn-typescript 维护性 / 新语法滞后**:薄封装隔离(换 parser 改一处);`satisfies` 兜底已有;锁版本 + 测试覆盖现实 TS。
 2. **输出漂移**:既有 conformance 测试(scanner 138 + vscode parser.test)不改全过为硬底线;`ContractStaticMeta`/`PickMeta` 这类被消费的输出做 golden 快照。
 3. **性能**:AST parse 比正则重,但 parse-only(不建 Program、不读 tsconfig、不碰 FS),量级是几百个小文件;P1 后跑一次基准(scan 一个真实 dogfood 项目)对比,设回归阈值。必要时按 `isGlubeanFile` 先门控再 parse。
-4. **跨仓版本耦合**(P3):scanner 是已发布包,vscode 依赖它。按现有发版流程(`pnpm publish`,`@glubean/cli` 等同步)升 scanner,再升 vscode 依赖;P3 之前 vscode 维持现状,不阻塞 P1/P2。
+4. **跨仓版本耦合**(P3):scanner 是已发布包,vscode 依赖它。发版走 repo 的**协调发布**:`.github/workflows/publish.yml` 由 `v*` tag 触发(workflow 内部用 `pnpm publish` 自动把 `workspace:*` 转真实版本),**不是本地手动 `pnpm publish`**。P3 需要 scanner 新版时,流程是:bump 版本 → commit → 打 `v*` tag → push(让 CI 发布),再升 vscode 依赖;P3 之前 vscode 维持现状,不阻塞 P1/P2。
 5. **体积**:+~600KB 到 scanner 运行时依赖。consolidate 后 vscode **净减**(删掉自有 ~600KB 副本,改为共享),CLI/MCP 增 ~600KB(可接受,且远小于 typescript)。
 6. **原生二进制**:无(纯 JS)。
 
@@ -199,7 +200,7 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 ## 9. 未决问题(给 owner)
 
-1. **`ExportMeta.steps[]` 去留**:它目前无生产消费者(§3.3)。AST 版做对它几乎零成本。**保留并做对**(为将来 step 投影/可视化预留)还是**借机删除**(减字段)?建议保留并做对。
+1. **`ExportMeta.steps[]`**:它在 `metadata.json` 公开产物里(§3.3),无代码逻辑消费但属公开字段。本方案**默认保留并做对**(AST 让其正确化几乎零成本)。唯一未决:是否将来另立项做一次 `metadata.json` schema 迁移把它移除(本方案不含)?建议暂不,保留。
 2. **子路径布局**:`@glubean/scanner/ast` + `@glubean/scanner/contract-ast` 单独导出,还是都并入 `@glubean/scanner`?建议 helper 走 `/ast` 子路径(vscode 直接用),提取器走主/`/static`。
 3. **vscode `parser.ts` 适配层**:`each:`/`pick:` 前缀、step 对象→字符串、`(data-driven)`/`(pick)` 名称后缀——确认**留在 vscode**(VSCode UI 契约),scanner 只产出中性 `ExportMeta`?(建议是。)
 4. **flatten 语义落点**:`flattenStepsForRegistry` 在 sdk;scanner 静态复刻它的"展平规则"。是否抽成 sdk 导出的纯函数让 scanner 直接复用规则定义(避免两处漂移)?还是 scanner 自持一份带测试的复刻?
