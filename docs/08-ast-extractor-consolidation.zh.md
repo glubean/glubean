@@ -2,7 +2,7 @@
 
 > 选型更新 2026-06-06:初稿定 acorn + acorn-typescript,后因其停更 2.5 年/不支持 `satisfies` 改用 **`@babel/parser`**(见 §2)。下文 acorn 相关段落多为背景/历史,实现以 §2 为准。
 
-状态:设计稿(待 codex 收敛 → owner 批准后实施)
+状态:**P0–P2 + P1-pick + P4 已实施并 codex 收敛到零**(scanner 侧 100% AST 替代正则;scanner 151 + cli 291 + mcp 31 全绿)。**P3(vscode consolidation + 去 marker)未做** —— 跨仓 + 需发布 scanner 0.5.0,见 §12 执行手册。
 作者:peisong + Claude
 日期:2026-06-06
 影响包:`@glubean/scanner`(主)、`vscode`(consolidation 目标)、间接 `@glubean/cli` / `@glubean/mcp`
