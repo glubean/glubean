@@ -188,6 +188,24 @@ export const flow = test("simple-with-client-poll", async (ctx) => {
   expect(result[0].steps).toBeUndefined();
 });
 
+test("a .poll()/.step() helper nested inside a builder step body is not a top-level step", () => {
+  const content = `
+export const flow = test("nested-helper")
+  .step("kick", async (ctx) => { await client.poll("job"); await ctx.step("inner"); })
+  .poll("await-job", async () => ({ ready: true }), { until: (ctx, res) => res.ready })
+  .step("verify", async (ctx) => {});
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  // Only the three top-level builder leaf steps — the nested client.poll("job")
+  // and ctx.step("inner") inside the "kick" body must not appear.
+  expect(result[0].steps).toEqual([
+    { name: "kick" },
+    { name: "await-job" },
+    { name: "verify" },
+  ]);
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================

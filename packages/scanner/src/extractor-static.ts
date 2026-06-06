@@ -312,16 +312,35 @@ function extractBuilderMeta(
 /**
  * Extract step names from `.step("name", ...)` / `.poll("name", ...)` chains
  * within `scope` (both are first-class leaf steps that emit step events at run
- * time; a single regex keeps them in source order). `.poll(...)` is the test()
- * bounded poll-until step — without this, a poll-only or mixed test scanned
- * statically would have no step metadata, breaking step-index joins.
+ * time; source order is preserved). `.poll(...)` is the test() bounded
+ * poll-until step — without it, a poll-only or mixed test scanned statically
+ * would have no step metadata, breaking step-index joins.
+ *
+ * Only TOP-LEVEL builder-chain calls count: bracket depth is tracked so a
+ * `.step(...)` / `.poll(...)` nested inside an argument or callback body — e.g.
+ * a step whose body calls `client.poll("job")` — is NOT mistaken for a step
+ * (the runner emits no step event for it).
  */
 function extractSteps(scope: string): { name: string }[] {
   const steps: { name: string }[] = [];
-  const stepPattern = /\.(?:step|poll)\(\s*(['"])([^'"]+)\1/g;
-  let m;
-  while ((m = stepPattern.exec(scope)) !== null) {
-    steps.push({ name: m[2] });
+  const leaf = /^\.\s*(?:step|poll)\s*\(\s*(['"])([^'"]+)\1/;
+  let depth = 0;
+  let i = 0;
+  while (i < scope.length) {
+    const c = scope[i];
+    if (c === "(" || c === "{" || c === "[") { depth++; i++; continue; }
+    if (c === ")" || c === "}" || c === "]") { depth--; i++; continue; }
+    if (depth === 0 && c === ".") {
+      const m = leaf.exec(scope.slice(i));
+      if (m) {
+        steps.push({ name: m[2] });
+        // Jump to this call's opening paren so the loop counts it and descends
+        // into the arguments (depth > 0), where nested calls won't match.
+        i += scope.slice(i).indexOf("(");
+        continue;
+      }
+    }
+    i++;
   }
   return steps;
 }
