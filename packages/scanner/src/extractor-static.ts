@@ -377,7 +377,10 @@ function extractSteps(scope: string): { name: string }[] {
   // collect, opaque-body methods force suppress, everything else inherits.
   const collects: boolean[] = [true];
   const collecting = () => collects[collects.length - 1];
-  const methodCall = /^\.\s*([A-Za-z_$][\w$]*)\s*\(/;
+  // Optional `<...>` matches explicit type args on a generic call, e.g.
+  // `.poll<Result>(...)` / `.step<NewS>(...)` (same convention as the test<T>()
+  // call match), so the leaf is recognized and its body is treated as opaque.
+  const methodCall = /^\.\s*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/;
   const leafName = /^\s*(['"])([^'"]+)\1/;
 
   const n = scope.length;

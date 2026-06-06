@@ -268,6 +268,17 @@ export const flow = test("lit")
   expect(result[0].steps).toEqual([{ name: "first" }, { name: "second" }, { name: "third" }]);
 });
 
+test("extracts generic .step<T>() / .poll<T>() calls (explicit type args)", () => {
+  const content = `
+export const flow = test("g-poll")
+  .step<{ id: string }>("kick", async () => ({ id: "1" }))
+  .poll<{ ready: boolean }>("await", async () => ({ ready: true }), { until: (_c, r) => r.ready })
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "kick" }, { name: "await" }, { name: "verify" }]);
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================
