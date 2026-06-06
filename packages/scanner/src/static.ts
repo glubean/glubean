@@ -20,15 +20,17 @@
  * @module static
  */
 
-// extractFromSource + createStaticExtractor + extractContractCases are AST-based
-// (@babel/parser); the rest stay regex in extractor-static.ts (cheap guards /
-// not-yet-migrated).
-export { createStaticExtractor, extractFromSource, extractContractCases } from "./extractor-ast.js";
+// The expression-parsing extractors are AST-based (@babel/parser):
+// extractFromSource + createStaticExtractor + extractContractCases +
+// extractPickExamples. isGlubeanFile + extractAliasesFromSource stay regex (cheap
+// guards run over all files; simple import/decl patterns, no TS-expression parsing).
 export {
-  extractAliasesFromSource,
+  createStaticExtractor,
+  extractFromSource,
+  extractContractCases,
   extractPickExamples,
-  isGlubeanFile,
-} from "./extractor-static.js";
+} from "./extractor-ast.js";
+export { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
 
 export type { ExportMeta } from "./types.js";
 export type { ContractCaseStaticMeta, ContractStaticMeta, PickMeta } from "./extractor-static.js";

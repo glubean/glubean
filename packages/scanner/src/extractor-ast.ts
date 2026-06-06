@@ -28,7 +28,8 @@ import {
   type AnyNode,
 } from "./ast.js";
 import type { ExportMeta } from "./types.js";
-import type { ContractCaseStaticMeta, ContractStaticMeta } from "./extractor-static.js";
+import type { ContractCaseStaticMeta, ContractStaticMeta, PickMeta } from "./extractor-static.js";
+import { resolveDataPath } from "./data-path.js";
 
 const BASE_FNS = new Set(["test", "task"]);
 
@@ -364,6 +365,158 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
     if (feature !== undefined) meta.feature = feature;
 
     results.push(meta);
+  });
+  return results;
+}
+
+// --- test.pick() example extraction (CodeLens) ----------------------------
+
+type PickLoaderType =
+  | "json-import" | "dir-merge" | "dir" | "dir-concat" | "yaml-map" | "json-loader" | "json-map";
+
+/** Classify a data-loader call (`fromDir(...)`, `fromYaml.map(...)`, …) → {type, raw path}. */
+function classifyLoader(call: AnyNode): { type: PickLoaderType; path: string } | undefined {
+  const callee = unwrapExpression(call.callee as AnyNode);
+  if (!callee) return undefined;
+  const path = stringFromExpression((call.arguments as AnyNode[] | undefined)?.[0]);
+  if (path === undefined) return undefined;
+  if (callee.type === "Identifier") {
+    if (callee.name === "fromDir") return { type: "dir", path };
+    if (callee.name === "fromJson") return { type: "json-loader", path };
+  } else if (callee.type === "MemberExpression" && callee.computed !== true) {
+    const object = callee.object as AnyNode;
+    const property = callee.property as AnyNode;
+    if (object.type === "Identifier" && property.type === "Identifier") {
+      if (object.name === "fromDir" && property.name === "merge") return { type: "dir-merge", path };
+      if (object.name === "fromDir" && property.name === "concat") return { type: "dir-concat", path };
+      if (object.name === "fromYaml" && property.name === "map") return { type: "yaml-map", path };
+      if (object.name === "fromJson" && property.name === "map") return { type: "json-map", path };
+    }
+  }
+  return undefined;
+}
+
+/** Map a variable name → its data source: default `.json` imports + `await from*(...)` loaders. */
+function buildDataSources(source: { program: AnyNode }): Map<string, { type: PickLoaderType; path: string }> {
+  const map = new Map<string, { type: PickLoaderType; path: string }>();
+  walk(source.program, (node) => {
+    if (node.type === "ImportDeclaration") {
+      const importPath = (node.source as AnyNode | undefined)?.value;
+      if (typeof importPath === "string" && importPath.endsWith(".json")) {
+        for (const sp of (node.specifiers as AnyNode[] | undefined) ?? []) {
+          if (sp.type === "ImportDefaultSpecifier" && (sp.local as AnyNode)?.type === "Identifier") {
+            map.set((sp.local as AnyNode).name as string, { type: "json-import", path: importPath });
+          }
+        }
+      }
+      return;
+    }
+    if (node.type === "VariableDeclarator") {
+      const id = node.id as AnyNode | undefined;
+      if (id?.type !== "Identifier") return;
+      let init = node.init as AnyNode | undefined;
+      if (init?.type === "AwaitExpression") init = init.argument as AnyNode;
+      const call = unwrapExpression(init);
+      if (call?.type !== "CallExpression") return;
+      const loader = classifyLoader(call);
+      if (loader) map.set(id.name as string, loader);
+    }
+  });
+  return map;
+}
+
+/**
+ * AST replacement for the regex `extractPickExamples` — discovers
+ * `<fn>.pick(data)("id-template", ...)` exports for CodeLens. Inline object data
+ * → keys + `{type:"inline"}`; a variable referencing a `.json` import or a
+ * `from*` loader → keys:null + the resolved dataSource path; an unknown simple
+ * variable → keys:null + no dataSource. Non-object / non-identifier data args are
+ * not recorded (mirrors the regex). Returns [] on parse error.
+ */
+export function extractPickExamples(
+  content: string,
+  options?: { customFns?: string[]; filePath?: string; projectRoot?: string },
+): PickMeta[] {
+  let source;
+  try {
+    source = parseSource(content, options?.filePath);
+  } catch {
+    return [];
+  }
+  const fns =
+    options?.customFns && options.customFns.length > 0
+      ? new Set([...BASE_FNS, ...options.customFns])
+      : undefined;
+  const dataSources = buildDataSources(source);
+  const results: PickMeta[] = [];
+
+  forEachExportedConst(source, (statement, declaration) => {
+    const exportName = (declaration.id as AnyNode | undefined)?.name as string | undefined;
+    const init = declaration.init as AnyNode | undefined;
+    if (!exportName || !init) return;
+
+    // `<fn>.pick(data)(idTemplate, ...)` — a curried call whose factory is `<fn>.pick`.
+    const head = chainHead(init);
+    if (!head || head.type !== "CallExpression") return;
+    const headCallee = unwrapExpression(head.callee as AnyNode);
+    if (headCallee?.type !== "CallExpression") return;
+    const factoryCallee = unwrapExpression(headCallee.callee as AnyNode);
+    if (!factoryCallee || factoryCallee.type !== "MemberExpression" || factoryCallee.computed === true) {
+      return;
+    }
+    const object = factoryCallee.object as AnyNode;
+    const property = factoryCallee.property as AnyNode;
+    if (object.type !== "Identifier" || property.type !== "Identifier" || property.name !== "pick") return;
+    if (!isTestFnName(object.name as string, fns)) return;
+
+    // Test ID from the curried call's first arg (string or `{ id }`).
+    const idArg = (head.arguments as AnyNode[] | undefined)?.[0];
+    let testId = stringFromExpression(idArg);
+    if (testId === undefined) {
+      const idObj = objectFromExpression(idArg);
+      if (idObj) testId = stringProperty(idObj, "id");
+    }
+    if (testId === undefined) return;
+
+    const line = lineOf(statement);
+    const pickArg = (headCallee.arguments as AnyNode[] | undefined)?.[0];
+
+    const inlineObj = objectFromExpression(pickArg);
+    if (inlineObj) {
+      const keys = ((inlineObj.properties as AnyNode[] | undefined) ?? [])
+        .filter((p) => p.type === "ObjectProperty")
+        .map((p) => propertyNameText(p))
+        .filter((k): k is string => typeof k === "string");
+      results.push({
+        testId,
+        line,
+        exportName,
+        keys: keys.length > 0 ? keys : null,
+        dataSource: keys.length > 0 ? { type: "inline" } : undefined,
+      });
+      return;
+    }
+
+    const pickVar = unwrapExpression(pickArg);
+    if (pickVar?.type === "Identifier") {
+      const loader = dataSources.get(pickVar.name as string);
+      results.push({
+        testId,
+        line,
+        exportName,
+        keys: null,
+        dataSource: loader
+          ? ({
+              type: loader.type,
+              path: resolveDataPath(loader.path, {
+                filePath: options?.filePath,
+                projectRoot: options?.projectRoot,
+              }).resolvedPath,
+            } as PickMeta["dataSource"])
+          : undefined,
+      });
+    }
+    // Any other data-arg shape (member access, call, …) is not recorded.
   });
   return results;
 }
