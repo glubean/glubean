@@ -1219,6 +1219,16 @@ export const getUser = contract.graphql("get-user", {
   expect(result[0].cases.map((c) => c.key)).toEqual(["ok", "unauth"]);
 });
 
+test("extractContractCases — reads case-level deprecated", () => {
+  const source = `
+export const c = contract.http("c", {
+  endpoint: "GET /c",
+  cases: { old: { deprecated: "use v2", expect: { status: 200 } } },
+});
+`;
+  expect(extractContractCases(source)[0].cases[0].deprecated).toBe("use v2");
+});
+
 test("extractContractCases — computed protocol access is not a literal contract", () => {
   // `contract[protocol](...)` is dynamic — must NOT emit bogus protocol metadata.
   const source = `

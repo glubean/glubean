@@ -308,6 +308,9 @@ function readCases(casesObj: AnyNode): ContractCaseStaticMeta[] {
     const deferred = stringProperty(body, "deferred");
     if (deferred !== undefined) meta.deferred = deferred;
 
+    const deprecated = stringProperty(body, "deprecated");
+    if (deprecated !== undefined) meta.deprecated = deprecated;
+
     const requires = stringProperty(body, "requires");
     if (requires !== undefined && _REQUIRES.has(requires)) meta.requires = requires;
 
