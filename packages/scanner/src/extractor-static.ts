@@ -362,39 +362,37 @@ function skipRegex(s: string, i: number): number {
   return i;
 }
 
-/**
- * A `/` starts a regex literal (not division) when the previous significant
- * token is not a value: not `)`/`]`, and not an identifier/number unless that
- * identifier is a keyword taking an expression next (return, typeof, …).
- */
+// Keywords after which a `/` begins a regex literal (the keyword takes an
+// expression next), e.g. `return /re/`, `case /re/`, `throw /re/`.
 const REGEX_PRECEDING_KEYWORDS = new Set([
   "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
   "do", "else", "yield", "await", "case", "throw",
 ]);
-function regexStartsAt(s: string, i: number, lastBraceWasObject: boolean): boolean {
-  let j = i - 1;
-  while (j >= 0 && /\s/.test(s[j])) j--;
-  if (j < 0) return true;
-  const p = s[j];
-  // value-ending tokens → the `/` is division: `)`, `]`, a closing string/
-  // template quote, or a postfix `++`/`--`.
-  if (p === ")" || p === "]" || p === '"' || p === "'" || p === "`") return false;
-  if ((p === "+" || p === "-") && s[j - 1] === p) return false;
-  // `}` is ambiguous: it ends a block (→ a following `/` is a regex, e.g.
-  // `if (x) {} /re/`) or an object literal (→ division, e.g. `{ n: 1 } / 2`).
-  // The caller tracks which kind the most-recently-closed brace was.
-  if (p === "}") return !lastBraceWasObject;
-  if (/[A-Za-z0-9_$]/.test(p)) {
-    let k = j;
-    while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
-    if (!REGEX_PRECEDING_KEYWORDS.has(s.substring(k + 1, j + 1))) return false;
-    // A property access named like a keyword (`schema.of / 2`) is a value, so
-    // the `/` is division — only a standalone keyword token leads a regex.
-    let b = k;
+
+/**
+ * Consume one CODE token (NOT a string/template/comment/regex — callers skip
+ * those first) starting at `i`, reporting whether it ends a value. The scanners
+ * track this forward as `prevEndsValue`: the next `/` is division when the
+ * previous token ended a value, and a regex literal otherwise. A word/number
+ * ends a value unless it is a regex-leading keyword used as a standalone token
+ * (`return /re/` vs the property `schema.of / 2`); a postfix `++`/`--` ends a
+ * value; any other operator/punctuation does not. Brackets are handled by the
+ * callers (which also track depth/kind), so this is reached only for
+ * words/numbers/operators.
+ */
+function consumeValueToken(s: string, i: number): { i: number; endsValue: boolean } {
+  const c = s[i];
+  if (/[A-Za-z0-9_$]/.test(c)) {
+    let k = i;
+    while (k < s.length && /[A-Za-z0-9_$]/.test(s[k])) k++;
+    const w = s.substring(i, k);
+    let b = i - 1;
     while (b >= 0 && /\s/.test(s[b])) b--;
-    return s[b] !== ".";
+    const isProperty = s[b] === ".";
+    return { i: k, endsValue: isProperty || !REGEX_PRECEDING_KEYWORDS.has(w) };
   }
-  return true;
+  if ((c === "+" || c === "-") && s[i + 1] === c) return { i: i + 2, endsValue: true };
+  return { i: i + 1, endsValue: false };
 }
 
 /**
@@ -449,28 +447,31 @@ function isObjectBracePos(s: string, at: number): boolean {
 const BLOCK_KEYWORDS = new Set(["else", "try", "catch", "finally", "do"]);
 
 /**
- * If `s[i]` starts a string, template, comment, or regex literal, return the
- * index just past it; otherwise -1. Lets the chain/step scanners skip token
- * content whose brackets must not affect bracket-depth tracking. `lastBraceObj`
- * (whether the most-recently-closed `}` was an object literal) disambiguates a
- * `/` following `}` between regex and division.
+ * Forward lexer cursor: `st.i` is the scan position and `st.ev` tracks whether
+ * the previous significant token ends a value (so the next `/` is division, not
+ * a regex). If `st.i` is at whitespace or a string/template/comment/regex
+ * literal, advance past it (updating `st.ev`) and return true; otherwise return
+ * false so the caller handles the code token. A string/template/regex ends a
+ * value; whitespace and comments leave `st.ev` unchanged.
  */
-function skipNonCode(s: string, i: number, lastBraceObj: boolean): number {
-  const c = s[i];
-  if (c === '"' || c === "'") return skipString(s, i);
-  if (c === "`") return skipTemplate(s, i);
-  if (c === "/" && s[i + 1] === "/") {
-    i += 2;
-    while (i < s.length && s[i] !== "\n") i++;
-    return i;
+function skipTriviaFwd(s: string, st: { i: number; ev: boolean }): boolean {
+  const c = s[st.i];
+  if (/\s/.test(c)) { st.i++; return true; }
+  if (c === '"' || c === "'") { st.i = skipString(s, st.i); st.ev = true; return true; }
+  if (c === "`") { st.i = skipTemplate(s, st.i); st.ev = true; return true; }
+  if (c === "/" && s[st.i + 1] === "/") {
+    st.i += 2;
+    while (st.i < s.length && s[st.i] !== "\n") st.i++;
+    return true;
   }
-  if (c === "/" && s[i + 1] === "*") {
-    i += 2;
-    while (i < s.length && !(s[i] === "*" && s[i + 1] === "/")) i++;
-    return Math.min(i + 2, s.length);
+  if (c === "/" && s[st.i + 1] === "*") {
+    st.i += 2;
+    while (st.i < s.length && !(s[st.i] === "*" && s[st.i + 1] === "/")) st.i++;
+    st.i = Math.min(st.i + 2, s.length);
+    return true;
   }
-  if (c === "/" && regexStartsAt(s, i, lastBraceObj)) return skipRegex(s, i);
-  return -1;
+  if (c === "/" && !st.ev) { st.i = skipRegex(s, st.i); st.ev = true; return true; }
+  return false;
 }
 
 /**
@@ -482,18 +483,17 @@ function skipNonCode(s: string, i: number, lastBraceObj: boolean): number {
 function findCallCloseAware(s: string, openIndex: number): number {
   let depth = 0;
   const braceObj: boolean[] = [];
-  let lastBraceObj = false;
-  let i = openIndex;
-  while (i < s.length) {
-    const adv = skipNonCode(s, i, lastBraceObj);
-    if (adv !== -1) { i = adv; continue; }
-    const c = s[i];
-    if (c === "(" || c === "[") { depth++; i++; continue; }
-    if (c === "{") { depth++; braceObj.push(isObjectBracePos(s, i)); i++; continue; }
-    if (c === ")") { depth--; if (depth === 0) return i; i++; continue; }
-    if (c === "]") { depth--; i++; continue; }
-    if (c === "}") { depth--; lastBraceObj = braceObj.pop() ?? false; i++; continue; }
-    i++;
+  const st = { i: openIndex, ev: false };
+  while (st.i < s.length) {
+    if (skipTriviaFwd(s, st)) continue;
+    const c = s[st.i];
+    if (c === "(" || c === "[") { depth++; st.i++; st.ev = false; continue; }
+    if (c === "{") { depth++; braceObj.push(isObjectBracePos(s, st.i)); st.i++; st.ev = false; continue; }
+    if (c === ")") { if (depth === 1) return st.i; depth--; st.i++; st.ev = true; continue; }
+    if (c === "]") { depth--; st.i++; st.ev = true; continue; }
+    if (c === "}") { depth--; st.i++; st.ev = braceObj.pop() ?? false; continue; }
+    const t = consumeValueToken(s, st.i);
+    st.i = t.i; st.ev = t.endsValue;
   }
   return -1;
 }
@@ -532,7 +532,6 @@ function extractSteps(scope: string): { name: string }[] {
   // inherits the parent.
   const collects: boolean[] = [true];
   const kinds: string[] = ["base"];
-  let lastBraceObj = false; // whether the most-recently-closed `}` was an object
   // While a branch predicate (`predicate:`/`when:` value, or `predicate(…){…}`
   // method shorthand) is scanned, suppress collection until we return to its
   // bracket depth and hit `,`/`}` (or pop out). `-1` = not suppressing.
@@ -543,19 +542,16 @@ function extractSteps(scope: string): { name: string }[] {
   const leafName = /^\s*(['"])([^'"]+)\1/;
   const push = (collect: boolean, kind: string) => { collects.push(collect); kinds.push(kind); };
   const pop = () => {
-    if (collects.length > 1) {
-      collects.pop();
-      const k = kinds.pop();
-      if (k === "obj" || k === "block") lastBraceObj = k === "obj";
-    }
+    if (collects.length > 1) { collects.pop(); kinds.pop(); }
     if (suppressDepth !== -1 && collects.length < suppressDepth) suppressDepth = -1;
   };
 
   const n = scope.length;
-  let i = 0;
-  while (i < n) {
-    const adv = skipNonCode(scope, i, lastBraceObj);
-    if (adv !== -1) { i = adv; continue; }
+  // The chain begins right after the test() call's `)`, which ends a value.
+  const st = { i: 0, ev: true };
+  while (st.i < n) {
+    if (skipTriviaFwd(scope, st)) continue;
+    const i = st.i;
     const c = scope[i];
     if (c === ".") {
       const m = methodName.exec(scope.slice(i));
@@ -578,19 +574,20 @@ function extractSteps(scope: string): { name: string }[] {
           // builders included) inherits the parent — so a fragment-named helper
           // inside an opaque body stays suppressed.
           push(OPAQUE_METHODS.has(method) ? false : collecting(), "paren");
-          i = j + 1; // consume the "("
+          st.i = j + 1; st.ev = false; // just opened the call's "("
           continue;
         }
-        // A property access like `.length` (no call) — skip the name only.
-        i += m[0].length;
+        // A property access like `.length` (no call) — skip the name; it's a value.
+        st.i = i + m[0].length; st.ev = true;
         continue;
       }
     }
-    if (c === "{") { push(collecting(), isObjectBracePos(scope, i) ? "obj" : "block"); i++; continue; }
-    if (c === "(") { push(collecting(), "paren"); i++; continue; }
-    if (c === "[") { push(collecting(), "arr"); i++; continue; }
-    if (c === ")" || c === "]" || c === "}") { pop(); i++; continue; }
-    if (c === "," && suppressDepth === collects.length) { suppressDepth = -1; i++; continue; }
+    if (c === "{") { push(collecting(), isObjectBracePos(scope, i) ? "obj" : "block"); st.i++; st.ev = false; continue; }
+    if (c === "(") { push(collecting(), "paren"); st.i++; st.ev = false; continue; }
+    if (c === "[") { push(collecting(), "arr"); st.i++; st.ev = false; continue; }
+    if (c === ")" || c === "]") { pop(); st.i++; st.ev = true; continue; }
+    if (c === "}") { const closed = kinds[kinds.length - 1]; pop(); st.i++; st.ev = closed === "obj"; continue; }
+    if (c === ",") { if (suppressDepth === collects.length) suppressDepth = -1; st.i++; st.ev = false; continue; }
     // A bare identifier: detect a `predicate`/`when` branch-predicate property —
     // either `predicate:`/`when:` (value form) or `predicate(…){…}` (method
     // shorthand) — but ONLY when directly inside an object literal (a branch-spec
@@ -610,10 +607,13 @@ function extractSteps(scope: string): { name: string }[] {
       ) {
         suppressDepth = collects.length;
       }
-      i += w.length;
+      st.i = i + w.length;
+      st.ev = !REGEX_PRECEDING_KEYWORDS.has(w);
       continue;
     }
-    i++;
+    // Any other operator/punctuation (or a digit-led number).
+    const t = consumeValueToken(scope, i);
+    st.i = t.i; st.ev = t.endsValue;
   }
   return steps;
 }
@@ -668,22 +668,21 @@ function parseTestDeclaration(
     const chainStart = callCloseIndex + 1;
     let depth = 0;
     let chainEnd = rest.length;
-    // Literal/comment/regex-aware so a `)`/`}`/`]`/`;` inside a string, template,
-    // comment, or regex literal in a step body cannot desync depth and truncate
-    // the chain early.
+    // Forward-lexed (string/template/comment/regex-aware) so a `)`/`}`/`]`/`;`
+    // inside a literal in a step body cannot desync depth and truncate the chain
+    // early. `st.ev` carries the regex/division state into a step body.
     const braceObj: boolean[] = [];
-    let lastBraceObj = false;
-    let i = chainStart;
-    while (i < rest.length) {
-      const adv = skipNonCode(rest, i, lastBraceObj);
-      if (adv !== -1) { i = adv; continue; }
-      const c = rest[i];
-      if (c === "{") { depth++; braceObj.push(isObjectBracePos(rest, i)); }
-      else if (c === "(" || c === "[") depth++;
-      else if (c === "}") { depth--; lastBraceObj = braceObj.pop() ?? false; }
-      else if (c === ")" || c === "]") depth--;
-      else if (c === ";" && depth === 0) { chainEnd = i; break; }
-      i++;
+    const st = { i: chainStart, ev: true }; // starts after the test() `)` (a value)
+    while (st.i < rest.length) {
+      if (skipTriviaFwd(rest, st)) continue;
+      const c = rest[st.i];
+      if (c === "(" || c === "[") { depth++; st.i++; st.ev = false; continue; }
+      if (c === "{") { depth++; braceObj.push(isObjectBracePos(rest, st.i)); st.i++; st.ev = false; continue; }
+      if (c === ")" || c === "]") { depth--; st.i++; st.ev = true; continue; }
+      if (c === "}") { depth--; st.i++; st.ev = braceObj.pop() ?? false; continue; }
+      if (c === ";" && depth === 0) { chainEnd = st.i; break; }
+      const t = consumeValueToken(rest, st.i);
+      st.i = t.i; st.ev = t.endsValue;
     }
     builderChainScope = rest.substring(chainStart, chainEnd);
   }

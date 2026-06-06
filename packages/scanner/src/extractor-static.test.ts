@@ -336,6 +336,17 @@ export const flow = test("lens")
   expect(result[0].steps).toEqual([{ name: "ok" }, { name: "def" }]);
 });
 
+test("a regex literal followed by division in a step body does not desync the scan", () => {
+  const content = `
+export const flow = test("rxdiv")
+  .step("a", async (ctx) => { const x = /a/ / ctx.n; return x; })
+  .step("b", async (ctx) => { return /z/.source.length / 2; })
+  .step("c", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }, { name: "c" }]);
+});
+
 test("an optional catch block followed by a regex in a step body does not desync the scan", () => {
   const content = `
 export const flow = test("catchrx")
