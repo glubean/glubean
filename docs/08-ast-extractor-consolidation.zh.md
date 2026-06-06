@@ -2,7 +2,7 @@
 
 > 选型更新 2026-06-06:初稿定 acorn + acorn-typescript,后因其停更 2.5 年/不支持 `satisfies` 改用 **`@babel/parser`**(见 §2)。下文 acorn 相关段落多为背景/历史,实现以 §2 为准。
 
-状态:**全部实施中并 codex 收敛**。scanner 侧(P0–P2+P1-pick+P4)100% AST 替代正则 + `extractFlows`,已发布 **@glubean/scanner@0.5.1**(scanner 155 + cli 291 + mcp 31 全绿)。**P3(vscode consolidation + 去 marker)进行中** —— vscode 已升 ^0.5.0、改结构提取、删自有 ast/contractAst marker 部分,见 §12。
+状态:**scanner 侧完成(P0–P2+P1-pick+P4)+ 已发布 `@glubean/scanner@0.5.1`**(157 + cli 291 + mcp 31 全绿,各阶段 codex 零)。**P3(vscode consolidation + 去 marker)尝试后回退** —— 撞上一个真实阻塞:vscode 的合约检测是**宽口径鸭子类型**(任意 `<factory>("id",{cases})`,含 `.with()` scoped 实例 + `stableApi`/`orderApi` 等自定义工厂,cookbook/demo 实际大量使用),而 scanner 的 `extractContractCases` 是**窄口径**(忠于正则的 `contract.<protocol>`)。直接 consolidate 会**回退** vscode 的合约发现。这是个需要 **owner 拍板的产品决策**(是否把 scanner 静态合约检测放宽到鸭子类型,牵涉 CLI/MCP 元数据 + `protocol` 字段语义 + 此前 codex 提的 computed-protocol),不擅自改。详见 §12。vscode 已回退到工作态(99 测试全绿,scanner 0.3.0)。
 作者:peisong + Claude
 日期:2026-06-06
 影响包:`@glubean/scanner`(主)、`vscode`(consolidation 目标)、间接 `@glubean/cli` / `@glubean/mcp`
@@ -236,26 +236,30 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 ---
 
-## 12. P3 执行手册(consolidate vscode + 去 marker)—— 未做,回来照这个干
+## 12. P3 执行手册(consolidate vscode + 去 marker)—— 尝试后回退,卡在一个 owner 决策
 
-> 背景:vscode 仓在 `/Users/peisong/glubean/vscode`,**不是**本 monorepo 的 workspace 成员,通过**已发布的 npm `@glubean/scanner`**(当前装 `^0.3.0`,实装 0.3.0)依赖。它已把 test/pick 提取委托给 `@glubean/scanner/static`(`parser.ts`/`codeLensProvider.ts`/`diagnose.ts`),只有 contract/flow 的 **marker 提取**还在自有 `contractAst.ts`(acorn)。
+> 背景:vscode 仓在 `/Users/peisong/glubean/vscode`,**不是**本 monorepo 的 workspace 成员,通过**已发布的 npm `@glubean/scanner`**(现 `^0.3.0`)依赖。它已把 test/pick 提取委托给 `@glubean/scanner/static`,只有 contract/flow 还在自有 `contractAst.ts`(acorn)。
 
-**为什么没在这次 session 做**:① 需要把 `@glubean/scanner@0.5.0` **发布到 npm**(对外、不可逆,走 `v*` tag CI)——owner 不在,不自作主张发版;② 需要 scanner **新增 flow 结构化提取器**(去 marker 用,现在只有 contract 的);③ 跨仓大改 + vscode 自己的测试/codex 闸。
+### 🚧 阻塞:scanner 窄口径 vs vscode 宽口径合约检测(需 owner 拍板)
 
-**已完成的前置**:scanner 已发布 **0.5.1**(含 `/ast` + AST 提取器 + `extractFlows`,支持 `flow(string|FlowMeta)` 两种重载 + 案例级 `deprecated`)。`extractFlows` 已实现并测试(§步骤 2 完成)。
+P3 在本 session 实做过一遍(vscode 升 0.5.1、删自有 ast.ts、contractAst 改指 `@glubean/scanner/ast`、contract/flow 改 scanner 结构提取、去 `@contract`/`@flow` marker),`tsc` 通过,但 **vscode 测试暴露真实回退**,已**全部回退**(vscode 恢复 0.3.0 + 99 测试全绿)。根因:
 
-### 步骤
-1. ✅ **scanner 0.5.1 已发布**(本地 `pnpm publish`,scanner 无 `workspace:*` 依赖)。如需重发走 `v*` tag → CI(见 memory `project_npm_token_source_zshrc`)。
-2. ✅ **scanner `extractFlows` 已实现**(`extractor-ast.ts`,结构识别 `.flow("id")` / `.flow({id,skip})`,无 marker,§9.5)。
-3. ✅ **vscode 升依赖** `^0.5.0` + `pnpm install`(0.5.1 已装)。
-4. **vscode 去 marker + 改结构识别**:
-   - contract:`parser.ts` 的 `extractMarkedContracts` 改用 scanner `extractContractCases`(结构、无 marker)。
-   - flow:`extractMarkedFlows` 改用 scanner 新 `extractFlows`(无 marker)。
-   - 删 `// @contract`/`// @flow` 强制;**行为变化**(§9.5):vscode 自动发现所有 contract/flow 导出(与 CLI 对齐)。
-   - 删 vscode 自有 `src/ast.ts` + `src/contractAst.ts`;若仍需 AST helper,`import ... from "@glubean/scanner/ast"`。`hasLeadingMarker` 随之退场(`contract.bootstrap` 是结构识别,不靠注释——确认 `extractBootstrapMarkers` 迁移或保留)。
-5. **保 CodeLens(§9.6 硬底线)**:`codeLensProvider.ts`/`diagnose.ts` 的 `PickMeta`(keys/line/dataSource)+ 各导出行号断言不改全过;contract/flow 的 Run lens 锚点用 scanner 返回的 `line`。
-6. **闸**:vscode `parser.test.ts` 全过 + `codex review --base <P2 之前>`(在 vscode 仓)收敛到零。
+- **vscode `readContractCall` 是宽口径鸭子类型**:任意 `<factory>("id", { …cases… })` 都认——`contract.http(...)`、`contract.http.with(defaults)(...)`(scoped 实例)、自定义工厂 `stableApi(...)`/`orderApi(...)`/`graphqlApi(...)`。**cookbook/demo 实际大量用**(`.with(` 遍布 dummyjson/attachment-model/notifications;自定义 *Api 工厂多处)。
+- **scanner `extractContractCases` 是窄口径**:忠于旧正则,只认字面 `contract.<protocol>(...)`。
+- 直接让 vscode 用 scanner 的窄提取 → **漏掉所有 `.with()`/自定义工厂合约**,vscode 测试树合约发现回退。
+
+**决策点(owner)**:是否把 scanner 静态合约检测**放宽到鸭子类型**(任意 `<factory>(string, {cases})`)?牵涉:① CLI/MCP 静态 fallback 会发现更多合约(其实更贴近 runtime import 路径,算对齐);② 自定义工厂**没有字面 `protocol`**(`ContractStaticMeta.protocol` 会缺,CLI buildMetadata 消费它);③ 与此前 codex 提的 "拒绝 computed-protocol" 冲突(宽口径不看 callee 名)。这几条要一起定。
+
+### 决策后的执行步骤(scanner 前置已就绪:0.5.1 含 `/ast` + AST 提取器 + `extractFlows`(string|FlowMeta 两重载)+ 案例级 `deprecated`)
+
+- **若 owner 选"放宽"**:在 scanner 加一个宽口径合约提取(或给 `extractContractCases` 加 `{ broad?: true }` 档,见 [[project_contract_progressive_strictness]] 渐进严格度思路),补 conformance + codex;发 0.6.0;再做下面 vscode 步骤。
+- **若 owner 选"保持窄口径"**:vscode 的 contract 提取**不 consolidate**(保留自有 `contractAst`),P3 缩小为"仅 test/pick/flow + ast.ts helper consolidate"。
+
+vscode 步骤(去 marker + 改结构,§9.5):
+1. 升依赖到发布版;`extractMarkedContracts`→scanner 合约提取、`extractMarkedFlows`→scanner `extractFlows`;删 `@contract`/`@flow` 强制。
+2. 删 vscode 自有 `src/ast.ts`;`contractAst`(保留 bootstrap/import/findContractId)+ `dataDrivenRows` 改 `import ... from "@glubean/scanner/ast"`。**注意 babel 节点形状**:vscode `readCases` 用 `"Property"`、`findImportPath` 用 `"Literal"`,babel 是 `"ObjectProperty"`/`"StringLiteral"`——迁移时必须改(否则 readCases 静默返回空)。`dataDrivenRows` 已验证只用共享节点名(安全)。
+3. **vscode 测试需迁移**(本 session 实测会红):marker-required 用例、acorn-shape 用例、"nested generic 丢 dataSource(已知限制)"等都编码了旧行为——按新结构/babel 行为改断言。
+4. **保 CodeLens(§9.6 硬底线)** + vscode `parser.test.ts` 全过 + vscode 仓 `codex review` 收敛到零。
 
 ### 验收
-- vscode 不再有 `// @contract`/`// @flow` 依赖;contract/flow/test/pick 全经 `@glubean/scanner`(单一来源);自有 ast/contractAst 删除。
-- CodeLens(含 pick 每 example、contract/flow Run)行为不变或更全;vscode 测试 + codex 全绿。
+- contract/flow/test/pick 全经 `@glubean/scanner`(单一来源);vscode 自有 ast/contractAst marker 部分删除;CodeLens 行为不变或更全;vscode 测试 + codex 全绿。
