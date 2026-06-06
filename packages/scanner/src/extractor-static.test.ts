@@ -1462,14 +1462,21 @@ export const signupFlow = contract
   expect(flows[0].skip).toBeUndefined();
 });
 
-test("extractFlows supports the object overload flow({ id, skip })", () => {
+test("extractFlows supports the object overload flow({ id }) — id honored, object skip ignored", () => {
+  // Runtime reads id from the object overload but does NOT honor its skip (skip
+  // only applies from a chained .meta({ skip })), so we don't expose object skip.
   const source = `
 export const f = contract.flow({ id: "obj-flow", skip: "wip" }).step("s", async () => {});
 `;
   const flows = extractFlows(source);
   expect(flows).toHaveLength(1);
   expect(flows[0].flowId).toBe("obj-flow");
-  expect(flows[0].skip).toBe("wip");
+  expect(flows[0].skip).toBeUndefined();
+});
+
+test("extractFlows ignores a non-contract .flow() (e.g. otherLib.flow)", () => {
+  const source = `export const p = otherLib.flow("daily").run();`;
+  expect(extractFlows(source)).toEqual([]);
 });
 
 test("extractFlows reads .meta({ skip }) and ignores non-flow exports", () => {

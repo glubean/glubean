@@ -392,28 +392,58 @@ export function extractFlows(content: string): FlowStaticMeta[] {
     const init = declaration.init as AnyNode | undefined;
     if (!exportName || !init) return;
 
-    const flowCall = findPropertyCall(init, "flow");
+    const flowCall = findFlowCall(init);
     if (!flowCall) return;
-    // `flow(idOrMeta: string | FlowMeta)` — string id or `{ id, skip, ... }`.
+    // `flow(idOrMeta: string | FlowMeta)` — string id or `{ id, ... }`. Runtime
+    // honors the object's `id`; its `skip` is IGNORED at runtime (skip is only
+    // applied from a chained `.meta({ skip })`), so we read skip only from there.
     const flowArg = (flowCall.arguments as AnyNode[] | undefined)?.[0];
     const flowMetaObj = objectFromExpression(flowArg);
     const flowId = stringFromExpression(flowArg) ?? (flowMetaObj && stringProperty(flowMetaObj, "id"));
     if (!flowId) return;
 
-    // skip may come from the flow-meta object overload or a chained `.meta({ skip })`.
     const metaCall = findPropertyCall(init, "meta");
     const metaObj = metaCall
       ? objectFromExpression((metaCall.arguments as AnyNode[] | undefined)?.[0])
       : undefined;
-    const skip =
-      (flowMetaObj && stringProperty(flowMetaObj, "skip")) ??
-      (metaObj ? stringProperty(metaObj, "skip") : undefined);
+    const skip = metaObj ? stringProperty(metaObj, "skip") : undefined;
 
     const meta: FlowStaticMeta = { exportName, line: lineOf(statement), flowId };
     if (skip !== undefined) meta.skip = skip;
     results.push(meta);
   });
   return results;
+}
+
+/**
+ * Find the Glubean flow call in a chain: `contract.flow(...)` (member on the
+ * `contract` namespace) or a direct `flow(...)` (the imported builder). Does NOT
+ * match an arbitrary `.flow(...)` on some other object (e.g. `otherLib.flow(...)`),
+ * which the runtime would not recognize as a flow.
+ */
+function findFlowCall(init: AnyNode): AnyNode | undefined {
+  let node: AnyNode | undefined = unwrapExpression(init);
+  while (node && node.type === "CallExpression") {
+    const callee = unwrapExpression(node.callee as AnyNode);
+    if (!callee) break;
+    if (callee.type === "Identifier" && callee.name === "flow") return node; // direct flow("id")
+    if (callee.type === "MemberExpression" && callee.computed !== true) {
+      const object = callee.object as AnyNode;
+      const property = callee.property as AnyNode;
+      if (
+        property.type === "Identifier" && property.name === "flow" &&
+        object.type === "Identifier" && object.name === "contract"
+      ) {
+        return node; // contract.flow("id")
+      }
+      node = unwrapExpression(object);
+    } else if (callee.type === "CallExpression") {
+      node = callee;
+    } else {
+      break;
+    }
+  }
+  return undefined;
 }
 
 // --- test.pick() example extraction (CodeLens) ----------------------------
