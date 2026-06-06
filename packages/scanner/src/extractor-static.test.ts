@@ -336,6 +336,28 @@ export const flow = test("lens")
   expect(result[0].steps).toEqual([{ name: "ok" }, { name: "def" }]);
 });
 
+test("division of a keyword-named property in a step body is not read as a regex", () => {
+  const content = `
+export const flow = test("kwprop")
+  .step("a", async (ctx) => { const n = schema.of / 2; return n; })
+  .step("b", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }]);
+});
+
+test("a regex with a paren in a simple-test callback does not make a helper poll a step", () => {
+  const content = `
+export const flow = test("simpleRx", async (ctx) => {
+  if (/[)]/.test(ctx.x)) return;
+  await client.poll("job");
+});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].id).toBe("simpleRx");
+  expect(result[0].steps).toBeUndefined();
+});
+
 test("a fragment-named helper inside an opaque step body does not collect leaves", () => {
   const content = `
 export const flow = test("nested-frag")

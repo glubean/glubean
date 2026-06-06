@@ -387,7 +387,12 @@ function regexStartsAt(s: string, i: number, lastBraceWasObject: boolean): boole
   if (/[A-Za-z0-9_$]/.test(p)) {
     let k = j;
     while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
-    return REGEX_PRECEDING_KEYWORDS.has(s.substring(k + 1, j + 1));
+    if (!REGEX_PRECEDING_KEYWORDS.has(s.substring(k + 1, j + 1))) return false;
+    // A property access named like a keyword (`schema.of / 2`) is a value, so
+    // the `/` is division — only a standalone keyword token leads a regex.
+    let b = k;
+    while (b >= 0 && /\s/.test(s[b])) b--;
+    return s[b] !== ".";
   }
   return true;
 }
@@ -465,6 +470,31 @@ function skipNonCode(s: string, i: number, lastBraceObj: boolean): number {
     return Math.min(i + 2, s.length);
   }
   if (c === "/" && regexStartsAt(s, i, lastBraceObj)) return skipRegex(s, i);
+  return -1;
+}
+
+/**
+ * Find the `)` matching the `(` at `openIndex`, skipping string/template/comment/
+ * regex literals so a `)` inside one (e.g. a regex `/[)]/` in a simple test()
+ * callback) cannot close the call early — which would otherwise make the derived
+ * builderChainScope start inside the callback and mis-read helper calls as steps.
+ */
+function findCallCloseAware(s: string, openIndex: number): number {
+  let depth = 0;
+  const braceObj: boolean[] = [];
+  let lastBraceObj = false;
+  let i = openIndex;
+  while (i < s.length) {
+    const adv = skipNonCode(s, i, lastBraceObj);
+    if (adv !== -1) { i = adv; continue; }
+    const c = s[i];
+    if (c === "(" || c === "[") { depth++; i++; continue; }
+    if (c === "{") { depth++; braceObj.push(isObjectBracePos(s, i)); i++; continue; }
+    if (c === ")") { depth--; if (depth === 0) return i; i++; continue; }
+    if (c === "]") { depth--; i++; continue; }
+    if (c === "}") { depth--; lastBraceObj = braceObj.pop() ?? false; i++; continue; }
+    i++;
+  }
   return -1;
 }
 
@@ -618,7 +648,7 @@ function parseTestDeclaration(
   // both bounds `scope` runs until the next export and could pick up a
   // sibling `foo().meta({ requires: "browser" })` between this test and
   // the next export, mis-attributing capability metadata.
-  const callCloseIndex = findCloseParen(rest, callOpenIndex);
+  const callCloseIndex = findCallCloseAware(rest, callOpenIndex);
   let builderChainScope = "";
   if (callCloseIndex !== -1) {
     const chainStart = callCloseIndex + 1;
