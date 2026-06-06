@@ -506,22 +506,22 @@ function findCallCloseAware(s: string, openIndex: number): number {
  * joins.
  *
  * The set of leaves must match `flattenStepsForRegistry` (sdk builder.ts):
- *   - the bodies of `.step` / `.poll` / `.setup` / `.teardown` (and the
- *     `.switchOn(lens)` lens) are opaque user code → a helper call there (e.g.
- *     `client.poll("job")`) is NOT a leaf. Their frames force-suppress.
- *   - every other call inherits its parent's collecting state. At the top of the
- *     chain (or inside a collecting fragment) that means `.group(id, b => …)` /
- *     `.use(b => …)` and the `then`/default fragments of `.condition` /
- *     `.switchCond` / `.switchOn` DO collect their nested `.step()`/`.poll()`
- *     leaves — but the SAME method names called inside an opaque body stay
- *     suppressed (they're user helpers, not builder fragments).
+ *   - ONLY the known builder-fragment methods (`.group(id, b => …)`,
+ *     `.use(b => …)`, and the `then`/default fragments of `.condition` /
+ *     `.switchCond`) collect their nested `.step()`/`.poll()` as leaves — and
+ *     only when the parent is already collecting (a fragment-named helper inside
+ *     an opaque body does not).
+ *   - every OTHER call is opaque: `.step`/`.poll`/`.setup`/`.teardown` bodies,
+ *     `.switchOn(lens)` (its cases collect via the curried second call, a plain
+ *     `(`), `.meta`/`.each`/`.pick`, and any unknown helper — a `.poll()` in
+ *     their args is NOT a leaf.
  *   - the value of a `predicate:` / `when:` property is suppressed too: those are
  *     branch predicates `flattenStepsForRegistry` never includes (and with
  *     conditionAsync they may call I/O helpers).
  * Bracket depth is tracked literal/comment-aware so a `)`/`}`/`]` inside a
  * string, template, comment, or regex literal cannot desync the scan.
  */
-const OPAQUE_METHODS = new Set(["step", "poll", "setup", "teardown", "switchOn"]);
+const FRAGMENT_METHODS = new Set(["group", "use", "condition", "switchCond"]);
 const OPAQUE_PROPS = new Set(["predicate", "when"]);
 
 function extractSteps(scope: string): { name: string }[] {
@@ -570,10 +570,11 @@ function extractSteps(scope: string): { name: string }[] {
             const nameM = leafName.exec(scope.slice(j + 1));
             if (nameM) steps.push({ name: nameM[2] });
           }
-          // Opaque-body methods suppress their body; every other call (fragment
-          // builders included) inherits the parent — so a fragment-named helper
-          // inside an opaque body stays suppressed.
-          push(OPAQUE_METHODS.has(method) ? false : collecting(), "paren");
+          // A call collects its args only if it is a known builder fragment AND
+          // the parent is already collecting; every other call (opaque bodies,
+          // .meta/.each, switchOn lens, unknown helpers) is opaque, so a helper
+          // `.poll()` in its args is not mistaken for a leaf.
+          push(FRAGMENT_METHODS.has(method) ? collecting() : false, "paren");
           st.i = j + 1; st.ev = false; // just opened the call's "("
           continue;
         }

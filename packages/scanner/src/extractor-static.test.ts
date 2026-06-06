@@ -392,6 +392,16 @@ export const flow = test("nested-frag")
   expect(result[0].steps).toEqual([{ name: "outer" }, { name: "verify" }]);
 });
 
+test("a helper .poll() inside .meta()/non-fragment args is not a step", () => {
+  const content = `
+export const flow = test("metapoll")
+  .meta({ name: labels.poll("ui") })
+  .step("real", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "real" }]);
+});
+
 test("an ordinary when()/predicate() call inside a fragment block is not a predicate", () => {
   const content = `
 export const flow = test("helper-when")
