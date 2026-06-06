@@ -349,6 +349,22 @@ export const flow = test("nested-frag")
   expect(result[0].steps).toEqual([{ name: "outer" }, { name: "verify" }]);
 });
 
+test("a method-shorthand branch predicate body does not collect leaves", () => {
+  const content = `
+export const flow = test("shorthand")
+  .condition(
+    { predicate(ctx) { client.poll("status"); return true; } },
+    (b) => b.step("then-a", async () => ({})),
+  )
+  .switchCond(
+    [{ when(ctx) { client.poll("y"); return true; }, then: (b) => b.step("hit", async () => ({})) }],
+    (b) => b.step("def", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "then-a" }, { name: "hit" }, { name: "def" }]);
+});
+
 test("a regex literal after throw in a step body does not desync the scan", () => {
   const content = `
 export const flow = test("thr")

@@ -554,13 +554,16 @@ function extractSteps(scope: string): { name: string }[] {
     if (c === "}") { if (collects.length > 1) collects.pop(); lastBraceObj = braceObj.pop() ?? false; clearSuppressIfPopped(); i++; continue; }
     if (c === ")" || c === "]") { if (collects.length > 1) collects.pop(); clearSuppressIfPopped(); i++; continue; }
     if (c === "," && suppressDepth === collects.length) { suppressDepth = -1; i++; continue; }
-    // A bare identifier: detect `predicate:` / `when:` keys to open an opaque
-    // value region (consuming the whole word also speeds the scan).
+    // A bare identifier: detect a `predicate`/`when` branch-predicate property —
+    // either `predicate:`/`when:` (value form) or `predicate(…){…}`/`when(…){…}`
+    // (object method shorthand) — to open an opaque value region. (Consuming the
+    // whole word also speeds the scan.) `w.when(…)` in the L2 predicate DSL is a
+    // method call caught by the `.` branch above, so it never reaches here.
     if (/[A-Za-z_$]/.test(c)) {
       const w = word.exec(scope.slice(i))![0];
       let k = i + w.length;
       while (k < n && /\s/.test(scope[k])) k++;
-      if (suppressDepth === -1 && OPAQUE_PROPS.has(w) && scope[k] === ":") {
+      if (suppressDepth === -1 && OPAQUE_PROPS.has(w) && (scope[k] === ":" || scope[k] === "(")) {
         suppressDepth = collects.length;
       }
       i += w.length;
