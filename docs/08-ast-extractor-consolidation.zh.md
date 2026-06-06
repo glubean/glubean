@@ -173,14 +173,15 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 ---
 
-## 7. 迁移计划(分阶段,每阶段 vitest + codex 闸门)
+## 7. 迁移计划(分阶段)
 
-> 与 [[condition_switch_unlimited_codex_rounds]] 一致:本工作线授权不限轮次收敛到 codex 零。
+**每阶段两道 review 闸(owner 2026-06-06 定的新规则)**:实现 → ① 先起 **review subagent(Opus 4.8,exhaustive/xhigh brief)反复收敛到干净** → ② 再 **`codex review` 收敛到零** → vitest 绿 → commit。与 [[condition_switch_unlimited_codex_rounds]] 一致:授权不限轮次。
 
-- **P0 — 落地 parser 与 helper**:scanner 加 `acorn`/`acorn-typescript` 依赖;移入 `ast.ts`(+ `satisfies` 兜底)并补单测(移植 vscode `ast` 相关测试)。新增 `@glubean/scanner/ast` 子路径。
-- **P1 — test 路径 AST 化**:实现 `extractor-ast.ts` 的 `extractFromSource` / `extractAliasesFromSource` / `isGlubeanFile` / `createStaticExtractor` / `extractPickExamples`;`static.ts` 切到它;**现有 138 测试不改全过** + 新增"正则做不到"的用例(§5.3,即 R2–R20 场景)。
+- **P0 — 落地 parser 与 helper**:scanner 加 `acorn`/`acorn-typescript` 依赖;移入 `ast.ts`(+ `satisfies` 兜底)并补单测(移植 vscode `ast` 相关测试)。新增 `@glubean/scanner/ast` 子路径。**不改任何提取行为**(extractor-static.ts 原样保留),纯加基础设施 → 低风险。
+- **P1a — sdk 导出 flatten 纯函数**(§9.4):把 `flattenStepsForRegistry` 抽成 sdk 导出函数,运行时内部改调它(行为不变 + 测试锁);scanner 后续 import 复用。
+- **P1 — test 路径 AST 化**:实现 `extractor-ast.ts` 的 `extractFromSource` / `extractAliasesFromSource` / `isGlubeanFile` / `createStaticExtractor` / `extractPickExamples`(steps 用 P1a 的 sdk flatten);`static.ts` 切到它;**现有 138 测试不改全过** + 新增"正则做不到"的用例(§5.3,即 R2–R20 场景)。
 - **P2 — contract 路径 AST 化**:移入 `contract-ast.ts`,实现 AST 版 `extractContractCases`;scanner Phase 4 conformance(`ContractStaticMeta` 输出对齐;有真实差异则显式列出 + 测试)。
-- **P3 — consolidate vscode**:vscode 改 import 指向 `@glubean/scanner`,删自有 `ast.ts`/`contractAst.ts`;`dataDrivenRows.ts` 用共享 helper;vscode `parser.test.ts` 跨仓全过。需 scanner 发版 + vscode 升依赖(§8.3)。
+- **P3 — consolidate vscode**:vscode 改 import 指向 `@glubean/scanner`,删自有 `ast.ts`/`contractAst.ts`;`dataDrivenRows.ts` 用共享 helper;vscode `parser.test.ts` 跨仓全过。需 scanner 发版 + vscode 升依赖(发版走 §8 风险4 的 `v*` tag CI)。
 - **P4 — 删除正则**:parity 全绿后删 `extractor-static.ts`;清理死代码(`stripComments`/`findMatching` 等若无引用)。
 
 每阶段独立可提交、可回滚;P1/P2 完成即拿到"100% 替代正则(scanner 侧)";P3/P4 完成"全仓单一来源"。
@@ -198,12 +199,12 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 ---
 
-## 9. 未决问题(给 owner)
+## 9. 决策(owner 已定 2026-06-06)
 
-1. **`ExportMeta.steps[]`**:它在 `metadata.json` 公开产物里(§3.3),无代码逻辑消费但属公开字段。本方案**默认保留并做对**(AST 让其正确化几乎零成本)。唯一未决:是否将来另立项做一次 `metadata.json` schema 迁移把它移除(本方案不含)?建议暂不,保留。
-2. **子路径布局**:`@glubean/scanner/ast` + `@glubean/scanner/contract-ast` 单独导出,还是都并入 `@glubean/scanner`?建议 helper 走 `/ast` 子路径(vscode 直接用),提取器走主/`/static`。
-3. **vscode `parser.ts` 适配层**:`each:`/`pick:` 前缀、step 对象→字符串、`(data-driven)`/`(pick)` 名称后缀——确认**留在 vscode**(VSCode UI 契约),scanner 只产出中性 `ExportMeta`?(建议是。)
-4. **flatten 语义落点**:`flattenStepsForRegistry` 在 sdk;scanner 静态复刻它的"展平规则"。是否抽成 sdk 导出的纯函数让 scanner 直接复用规则定义(避免两处漂移)?还是 scanner 自持一份带测试的复刻?
+1. **`ExportMeta.steps[]` — 保留并做对**。它在 `metadata.json` 公开产物里(§3.3),属公开字段。AST 版按 §6 / §9.4 的 sdk 规则正确产出;**不删除**(如将来要删,另立 `metadata.json` schema 迁移)。
+2. **子路径布局 — helper 走 `@glubean/scanner/ast`**(vscode 直接 import);提取器走主入口 / `@glubean/scanner/static`(API 不变)。`contract-ast` 是否单独子路径在 P2 落地时定(默认并入主)。
+3. **vscode `parser.ts` 适配层留在 vscode** —— `each:`/`pick:` 前缀、step 对象→字符串、`(data-driven)`/`(pick)` 名称后缀是 VSCode UI 契约;scanner 只产出中性 `ExportMeta`。
+4. **flatten 规则由 sdk 导出纯函数**。`flattenStepsForRegistry`(目前在 sdk `builder.ts` 内部)抽成 sdk 的**导出纯函数**(输入 `StepDefinition[]` 或等价的轻量结构 → 输出扁平叶子 `{name, group?}[]`),scanner `import` 复用**同一份规则定义**,杜绝两处漂移。这给迁移加一个前置子步骤 **P1a**(sdk 导出 flatten)在 P1 之前。运行时 `flattenStepsForRegistry` 改为调用该导出函数(行为不变,有测试锁)。
 
 ---
 
