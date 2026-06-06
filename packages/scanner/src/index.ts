@@ -44,8 +44,10 @@ export type { BundleMetadata, ExportMeta, FileMeta, ScanOptions, ScanResult, Val
 export { Scanner } from "./scanner.js";
 export type { FileSystem, Hasher, MetadataExtractor } from "./scanner.js";
 
-// Re-export static analysis extractor
-export { createStaticExtractor, extractAliasesFromSource, extractContractCases, extractFromSource, isGlubeanFile } from "./extractor-static.js";
+// Re-export static analysis extractor (extractFromSource + createStaticExtractor
+// are AST-based via @babel/parser; the rest stay regex — see extractor-ast.ts).
+export { createStaticExtractor, extractFromSource } from "./extractor-ast.js";
+export { extractAliasesFromSource, extractContractCases, isGlubeanFile } from "./extractor-static.js";
 export type { ContractStaticMeta, ContractCaseStaticMeta } from "./extractor-static.js";
 export {
   findTemplateMatch,
@@ -93,7 +95,7 @@ export { nodeFs, nodeHasher } from "./fs.js";
 
 // Imports for convenience functions
 import { nodeFs, nodeHasher } from "./fs.js";
-import { createStaticExtractor } from "./extractor-static.js";
+import { createStaticExtractor } from "./extractor-ast.js";
 import { Scanner } from "./scanner.js";
 import { SPEC_VERSION } from "./spec.js";
 import type { ScanOptions, ScanResult, ValidationResult } from "./types.js";
