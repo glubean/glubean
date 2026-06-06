@@ -1,4 +1,6 @@
-# 08 · AST 提取器统一方案(用 acorn + acorn-typescript 100% 替代正则静态扫描)
+# 08 · AST 提取器统一方案(用 @babel/parser 100% 替代正则静态扫描)
+
+> 选型更新 2026-06-06:初稿定 acorn + acorn-typescript,后因其停更 2.5 年/不支持 `satisfies` 改用 **`@babel/parser`**(见 §2)。下文 acorn 相关段落多为背景/历史,实现以 §2 为准。
 
 状态:设计稿(待 codex 收敛 → owner 批准后实施)
 作者:peisong + Claude
@@ -36,21 +38,21 @@ VSCode extension(`vscode/src/`)**早就在用 AST**:
 
 ---
 
-## 2. Parser 选型(已定)
+## 2. Parser 选型(已定:`@babel/parser`)
 
-**acorn + acorn-typescript + acorn-walk**(纯 JS)。
+**`@babel/parser`**(纯 JS)。
 
 | 维度 | 结论 |
 |---|---|
-| TS 覆盖 | 全(acorn-typescript 用于 Svelte 等生产场景;测试/合约文件是普通 TS) |
+| TS 覆盖 | **全且现役**:`satisfies` / `const` 类型参数 / 装饰器 / `.ts` 角括号断言 `<Foo>bar` / import attributes(`with {}`)/ `using` —— 全部原生解析,**无需任何源码预处理 hack** |
 | 形态 | **纯 JS,无原生二进制** → Node/Deno/Bun/各 CI arch 都稳(对 published `@glubean/scanner` 关键) |
-| 体积 | ~600KB(vs `typescript` ~3MB bundled / 磁盘 ~23MB) |
-| 验证 | vscode `ast.ts` 已生产使用 |
-| 可换性 | 薄封装隔离,换 parser 只改一个文件 |
+| 体积 | ~2–3MB(比 `typescript` ~23MB 小 ~10×) |
+| 维护 | **活跃**(月级发布,~1.8 亿/wk);AST = `StringLiteral`/`ObjectProperty` + `TSAsExpression`/`TSSatisfiesExpression` 等 |
+| 可换性 | 薄封装(`ast.ts`)隔离,换 parser 只改一个文件 |
 
-**已知坑 + 兜底**:acorn-typescript ≤1.4.x 不支持 `satisfies`。vscode `ast.ts` 已有 pre-normalization(逐字符扫描,把代码区的 `satisfies T` 替换为 `as T` + 等长填充,保留列号,且不误伤字符串/模板/注释里的 `satisfies`)。我们**原样继承**这段兜底,并加测试锁死。
+**选型修正记录(2026-06-06)**:初稿选了 acorn + acorn-typescript(因 vscode 在用 + 体积 ~600KB)。实测发现 **acorn-typescript 自 2024-01 起停更(~2.5 年)、周下载仅 38 万、解析不了 `satisfies`/`const T`** —— 它逼出一个脆弱的 `normalizeSatisfies` 字符 hack,P0 codex 连开多轮都在补这个 hack 的边缘(`satisfies` 作标识符在各位置被改坏)。一个停更、跟不上 TS 演进的 parser,用来扫**任意用户 TS** 是长期负债。改用 `@babel/parser`:hack 整个删除,角括号/const-T 限制消失,且未来 TS 新语法跟得上。
 
-被否方案:`typescript`(体积,团队已弃)、`oxc-parser` / `@swc/core`(原生二进制,Deno/冷门 arch/edge 风险;扫几百个小文件不需要这速度)、`acorn` 裸用 / `espree`(TS 不全)。
+被否方案:`typescript` 裸用(~23MB + AST 啰嗦)、`@typescript-eslint/typescript-estree`(改动最省但内部拉 typescript ~23MB)、`oxc-parser` / `@swc/core`(原生二进制,published 库的 Deno/冷门 arch/edge 风险;扫几百个小文件不需要这速度)、`acorn` 裸用 / `espree`(TS 不全)、~~acorn-typescript~~(停更)。
 
 ---
 
@@ -96,7 +98,7 @@ VSCode extension(`vscode/src/`)**早就在用 AST**:
 ### 4.1 目标模块布局(`packages/scanner/src/`)
 
 ```
-ast.ts              ← 新增:从 vscode/src/ast.ts 移入(acorn 薄封装 + helper 工具箱)
+ast.ts              ← 新增:@babel/parser 薄封装 + helper 工具箱(API 沿用 vscode/src/ast.ts,内部改写到 babel;无 satisfies hack)
 extractor-ast.ts    ← 新增:在 AST 上实现全部静态提取(替代 extractor-static.ts)
 contract-ast.ts     ← 新增:从 vscode/src/contractAst.ts 移入(contract/flow/bootstrap 标记 AST)
 extractor-static.ts ← 删除(parity 验证通过后)
@@ -110,7 +112,7 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 ### 4.2 依赖变更
 
-`@glubean/scanner/package.json`:`dependencies` 由 `{}` 增加 `acorn`、`acorn-typescript`(必要时 `acorn-walk`,但 `ast.ts` 已自带 `walk`,可不引)。这是 scanner 第一个运行时依赖;均纯 JS。
+`@glubean/scanner/package.json`:`dependencies` 由 `{}` 增加 `@babel/parser`(~2–3MB,纯 JS,无原生二进制)。这是 scanner 第一个运行时依赖。`ast.ts` 自带 `walk`,不需 `@babel/traverse`/`@babel/types`。
 
 ### 4.3 vscode consolidation(爆炸半径)
 
@@ -177,7 +179,7 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 **每阶段两道 review 闸(owner 2026-06-06 定的新规则)**:实现 → ① 先起 **review subagent(Opus 4.8,exhaustive/xhigh brief)反复收敛到干净** → ② 再 **`codex review` 收敛到零** → vitest 绿 → commit。与 [[condition_switch_unlimited_codex_rounds]] 一致:授权不限轮次。
 
-- **P0 — 落地 parser 与 helper**:scanner 加 `acorn`/`acorn-typescript` 依赖;移入 `ast.ts`(+ `satisfies` 兜底)并补单测(移植 vscode `ast` 相关测试)。新增 `@glubean/scanner/ast` 子路径。**不改任何提取行为**(extractor-static.ts 原样保留),纯加基础设施 → 低风险。
+- **P0 — 落地 parser 与 helper**:scanner 加 `@babel/parser` 依赖;新增 `ast.ts`(babel 薄封装 + helper,API 沿用 vscode)+ 单测。新增 `@glubean/scanner/ast` 子路径。**不改任何提取行为**(extractor-static.ts 原样保留),纯加基础设施 → 低风险。
 - **P1a — sdk 导出 flatten 纯函数**(§9.4):把 `flattenStepsForRegistry` 抽成 sdk 导出函数,运行时内部改调它(行为不变 + 测试锁);scanner 后续 import 复用。
 - **P1 — test 路径 AST 化**:实现 `extractor-ast.ts` 的 `extractFromSource` / `extractAliasesFromSource` / `isGlubeanFile` / `createStaticExtractor` / `extractPickExamples`(steps 用 P1a 的 sdk flatten);`static.ts` 切到它;**现有 138 测试不改全过** + 新增"正则做不到"的用例(§5.3,即 R2–R20 场景)。
 - **P2 — contract 路径 AST 化**:移入 `contract-ast.ts`,实现 AST 版 `extractContractCases`;scanner Phase 4 conformance(`ContractStaticMeta` 输出对齐;有真实差异则显式列出 + 测试)。
@@ -190,18 +192,15 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 ## 8. 风险与缓解
 
-1. **acorn-typescript 维护性 / 新语法滞后**:薄封装隔离(换 parser 改一处);`satisfies` 兜底已有;锁版本 + 测试覆盖现实 TS。
+1. **parser 维护 / 新语法**:`@babel/parser` 活跃维护、跟得上 TS;薄封装(`ast.ts`)隔离,换 parser 改一处。锁主版本 + 测试覆盖现实 TS。
 2. **输出漂移**:既有 conformance 测试(scanner 138 + vscode parser.test)不改全过为硬底线;`ContractStaticMeta`/`PickMeta` 这类被消费的输出做 golden 快照。
 3. **性能**:AST parse 比正则重,但 parse-only(不建 Program、不读 tsconfig、不碰 FS),量级是几百个小文件;P1 后跑一次基准(scan 一个真实 dogfood 项目)对比,设回归阈值。必要时按 `isGlubeanFile` 先门控再 parse。
 4. **跨仓版本耦合**(P3):scanner 是已发布包,vscode 依赖它。发版走 repo 的**协调发布**:`.github/workflows/publish.yml` 由 `v*` tag 触发(workflow 内部用 `pnpm publish` 自动把 `workspace:*` 转真实版本),**不是本地手动 `pnpm publish`**。P3 需要 scanner 新版时,流程是:bump 版本 → commit → 打 `v*` tag → push(让 CI 发布),再升 vscode 依赖;P3 之前 vscode 维持现状,不阻塞 P1/P2。
-5. **体积**:+~600KB 到 scanner 运行时依赖。consolidate 后 vscode **净减**(删掉自有 ~600KB 副本,改为共享),CLI/MCP 增 ~600KB(可接受,且远小于 typescript)。
+5. **体积**:`@babel/parser` ~2–3MB 到 scanner 运行时依赖(CLI/MCP +~2–3MB,远小于 typescript ~23MB)。P3 后 vscode 把自有 acorn(~600KB)换成共享 babel → bundle 约 +1.5–2MB,换来"现役维护 + 全 TS + 单一来源",可接受。
 6. **原生二进制**:无(纯 JS)。
-7. **`ast.ts` 已知限制(P0 两道 review 发现)**:
-   - **acorn-typescript 解析缺口(会抛 → P1 skip+warn)**:acorn-typescript(latest=1.4.13,**无更新版**、无原生 `satisfies`)解析不了的仅剩:① `<Foo>bar`(.ts 角括号类型断言,当 JSX 抛 "Unterminated JSX",**无 plugin 选项可关**——实测 `jsx:false`/`dts:true` 无效);② `<const T>`(TS 5.0 const 类型参数)。Glubean 用 `expr as T`,这两者几乎不用。**硬要求:P1 的 `extractFromSource` 必须把 `parseSource` 抛错当"不可解析 → 跳过 + warn",绝不 crash**(现正则 extractor 从不抛,这是 P1 新增 crash 面)。已加测试锁定。
-   - **`normalizeSatisfies` 判别按"前一个 token 是否值结尾"**:操作符是 `<值表达式> satisfies <类型>`,所以 `satisfies` 是操作符 **iff 前一个 significant token 结束一个值**(`) ] } " ' \` !` 或普通标识符/值关键字 `this`/`true`…),且不是 `.` 成员访问、不是引入名字/表达式的关键字(`return`/`function`/`const`/`new`/…)。这样名为 `satisfies` 的标识符在任意位置(`satisfies(x)`/`satisfies<T>()`/`satisfies.foo`/`satisfies + 1`/`export { satisfies as x }`)都**不被改写**(杜绝 corruption);而所有值操作数 + 任意类型形态(含 `(` 括号/函数类型)的操作符都被正确归一化。**关键教训**:旧实现按"后随字符"判别 → 静默改坏合法代码;corruption 比 skip 更糟,改用前向判别根治。已加测试锁"不改坏 + 操作符各形态都过"。
-   - **regex 字面量体**:`_doScan` 不跳过 regex body,体内字面 `satisfies` 会在归一化文本里被改写。**对提取不可见**(`parseSource` 保留原始 `text`;提取器不读 regex `.pattern`/`.source`)。defer,代码内留注释。
-   - **已修(P0 codex)**:`forEachExportedConst` 强制契约(跳过解构,callback 只见 Identifier);`hasLeadingMarker` 现能跨过夹在 marker 与节点间的其它注释、且拒绝把上一句的**行尾注释**当本节点的 leading marker(P2 contract/flow marker 依赖)。
-8. **包级 nit(非本方案引入,出 P0 范围)**:`tsconfig.build.json` 的 `declarationMap`/`sourceMap` 让发布的 `.d.ts.map`/`.js.map` 引用未发布的 `src`(`files:["dist"]`)。全包共性,后续单独清理(给 `files` 加 `src` 或发布时去 map)。
+7. **`ast.ts` 解析能力(@babel/parser)**:`satisfies` / `const` 类型参数 / 装饰器 / `.ts` 角括号断言 `<Foo>bar` / import attributes / `using` **全部原生解析**——acorn-typescript 时代的那一整类限制(以及 `normalizeSatisfies` 字符 hack)**全部消失**。残留:`parseSource` 仍可能在**真正非法的 TS** 或极冷门、未启用 babel plugin 的语法上抛错 → **P1 的 `extractFromSource` 仍须 try/catch 当"不可解析 → 跳过 + warn"**(现正则 extractor 从不抛,这是 P1 新增 crash 面,无论如何要兜)。已加测试锁定 satisfies/角括号/const-T/装饰器/import-attrs/using 都解析通过。
+   - **helper 契约(P0 codex 修)**:`forEachExportedConst` 跳过解构(callback 只见 Identifier);`hasLeadingMarker` 能跨过夹在 marker 与节点间的其它注释、且拒绝把上一句**行尾注释**当本节点 leading marker(P2 marker 依赖)。
+8. **包级 nit(非本方案引入,出 P0 范围)**:`tsconfig.build.json` 的 `declarationMap`/`sourceMap` 让发布的 `.d.ts.map`/`.js.map` 引用未发布的 `src`(`files:["dist"]`)。全包共性,后续单独清理。
 
 ---
 

@@ -31,8 +31,7 @@
     "access": "public"
   },
   "dependencies": {
-    "acorn": "^8.16.0",
-    "acorn-typescript": "^1.4.13"
+    "@babel/parser": "^7.29.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"
