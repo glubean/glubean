@@ -34,6 +34,16 @@ test("parseSource parses modern TS (satisfies / angle assertion / const T / deco
   expect(sf.comments.some((c) => c.text.includes("@contract"))).toBe(true);
 });
 
+test("parseSource handles both decorator placements (legacy + modern) and accessor fields", () => {
+  for (const src of [
+    "@dec export class A { constructor(@p x: string) {} }", // legacy: @dec-export + parameter decorator
+    "export @dec class B {}",                                // modern: decorator after export
+    "export class C { @dec accessor x = 1; }",               // accessor field + member decorator
+  ]) {
+    expect(() => parseSource(src)).not.toThrow();
+  }
+});
+
 test("an identifier named `satisfies` is preserved (call / member / operand)", () => {
   const sf = parseSource(
     [

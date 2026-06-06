@@ -59,16 +59,11 @@ export type AnyNode = {
 /** Parse TypeScript/JavaScript source into a {@link SourceFile}. */
 export function parseSource(content: string, filePath = "input.ts"): SourceFile {
   const jsx = filePath.endsWith(".tsx") || filePath.endsWith(".jsx");
-  const plugins: ParserPlugin[] = [
-    "typescript",
-    "decorators-legacy",
-    ["importAttributes", { deprecatedAssertSyntax: true }],
-  ];
-  if (jsx) plugins.push("jsx");
-
-  const file = parse(content, {
-    sourceType: "module",
-    plugins,
+  const base: ParserPlugin[] = ["typescript", ["importAttributes", { deprecatedAssertSyntax: true }]];
+  if (jsx) base.push("jsx");
+  const options = (decorators: ParserPlugin[]) => ({
+    sourceType: "module" as const,
+    plugins: [...base, ...decorators],
     ranges: true,
     allowImportExportEverywhere: true,
     allowAwaitOutsideFunction: true,
@@ -76,6 +71,23 @@ export function parseSource(content: string, filePath = "input.ts"): SourceFile 
     allowSuperOutsideMethod: true,
     allowUndeclaredExports: true,
   });
+
+  // Babel's `decorators` (stage-3) and `decorators-legacy` are mutually
+  // exclusive and cover different syntax: legacy handles experimental decorators
+  // (`@dec export class`), parameter decorators, and `accessor` fields; the
+  // modern one handles the post-export position (`export @dec class`). Try legacy
+  // first (the common experimentalDecorators ecosystem — Angular/Nest — and the
+  // only one with parameter decorators), fall back to modern for `export @dec`.
+  let file;
+  try {
+    file = parse(content, options(["decorators-legacy", "decoratorAutoAccessors"]));
+  } catch (legacyError) {
+    try {
+      file = parse(content, options([["decorators", { decoratorsBeforeExport: false }], "decoratorAutoAccessors"]));
+    } catch {
+      throw legacyError; // not a decorator-mode mismatch — surface the real error
+    }
+  }
 
   const comments: CommentInfo[] = (file.comments ?? []).map((c) => ({
     block: c.type === "CommentBlock",
