@@ -206,6 +206,68 @@ export const flow = test("nested-helper")
   ]);
 });
 
+// Fragment leaves are REAL steps (flattenStepsForRegistry recurses into them).
+test("extracts .group() fragment leaf steps", () => {
+  const content = `
+export const flow = test("g")
+  .group("setup", (b) => b.step("seed", async () => ({})).step("create", async () => ({})))
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "seed" }, { name: "create" }, { name: "verify" }]);
+});
+
+test("extracts .condition() then + else fragment leaves (incl. nested .poll)", () => {
+  const content = `
+export const flow = test("c")
+  .condition(
+    { predicate: (_c, s) => s.n === 1 },
+    (b) => b.step("a", async () => ({})).poll("b", async () => ({ ready: true }), { until: (c, r) => r.ready }),
+    (b) => b.step("c-else", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }, { name: "c-else" }]);
+});
+
+test("extracts .switchOn() value-mode case + default fragment leaves", () => {
+  const content = `
+export const flow = test("s")
+  .switchOn((_c, s) => s.status)(
+    [
+      { value: 200, then: (b) => b.step("ok", async () => ({})) },
+      { value: 404, then: (b) => b.poll("retry", async () => ({ ready: true }), { until: (c, r) => r.ready }) },
+    ],
+    (b) => b.step("def", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "ok" }, { name: "retry" }, { name: "def" }]);
+});
+
+test("extracts .switchCond() predicate-mode case + default fragment leaves", () => {
+  const content = `
+export const flow = test("sc")
+  .switchCond(
+    [{ when: (_c, s) => s.n === 1, then: (b) => b.step("x", async () => ({})) }],
+    (b) => b.step("sc-def", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "x" }, { name: "sc-def" }]);
+});
+
+test("a bracket inside a string/template in a step body does not desync the scan", () => {
+  const content = `
+export const flow = test("lit")
+  .step("first", async (ctx) => { ctx.log(")"); ctx.log("}"); })
+  .step("second", async (ctx) => { await ctx.http.get(\`/x/\${id}/y)\`); })
+  .step("third", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "first" }, { name: "second" }, { name: "third" }]);
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================

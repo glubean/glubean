@@ -309,37 +309,112 @@ function extractBuilderMeta(
   return parseMetaObject(obj);
 }
 
+/** Skip a '...' / "..." string starting at `i` (the quote); return index past it. */
+function skipString(s: string, i: number): number {
+  const q = s[i];
+  i++;
+  while (i < s.length && s[i] !== q) {
+    if (s[i] === "\\") i++;
+    i++;
+  }
+  return i + 1;
+}
+
+/** Skip a `...` template (incl. `${ code }`) starting at `i` (the backtick). */
+function skipTemplate(s: string, i: number): number {
+  i++;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "\\") { i += 2; continue; }
+    if (c === "`") return i + 1;
+    if (c === "$" && s[i + 1] === "{") {
+      i += 2;
+      let depth = 1;
+      while (i < s.length && depth > 0) {
+        const t = s[i];
+        if (t === '"' || t === "'") { i = skipString(s, i); continue; }
+        if (t === "`") { i = skipTemplate(s, i); continue; }
+        if (t === "{") depth++;
+        else if (t === "}") depth--;
+        i++;
+      }
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
 /**
- * Extract step names from `.step("name", ...)` / `.poll("name", ...)` chains
- * within `scope` (both are first-class leaf steps that emit step events at run
- * time; source order is preserved). `.poll(...)` is the test() bounded
- * poll-until step — without it, a poll-only or mixed test scanned statically
- * would have no step metadata, breaking step-index joins.
+ * Extract leaf step names from `.step("name", ...)` / `.poll("name", ...)` calls
+ * in a builder chain (`scope`), in source order. `.poll(...)` is the test()
+ * bounded poll-until step; both emit a step event at run time, so a poll-only or
+ * mixed test would otherwise have no/misaligned step metadata for step-index
+ * joins.
  *
- * Only TOP-LEVEL builder-chain calls count: bracket depth is tracked so a
- * `.step(...)` / `.poll(...)` nested inside an argument or callback body — e.g.
- * a step whose body calls `client.poll("job")` — is NOT mistaken for a step
- * (the runner emits no step event for it).
+ * The set of leaves must match `flattenStepsForRegistry` (sdk builder.ts):
+ *   - `.group(id, b => …)` / `.use(b => …)` and the branch fragments of
+ *     `.condition` / `.switchCond` / `.switchOn` contribute their nested
+ *     `.step()`/`.poll()` as REAL leaves → those bodies still collect.
+ *   - the bodies of `.step` / `.poll` / `.setup` / `.teardown` are opaque user
+ *     code → a helper call there (e.g. `client.poll("job")`) is NOT a leaf.
+ * Bracket depth is tracked literal/comment-aware so a `)`/`}`/`]` inside a
+ * string, template, or comment cannot desync the scan.
+ *
+ * Known limit: a predicate/lens function (condition spec.predicate, switchCond
+ * `when`, switchOn lens) shares the fragment-collecting scope, so a literal
+ * `.step("x")`/`.poll("x")` call inside such a predicate would be counted. This
+ * mirrors the original `.step`-only scan's symmetric behavior and does not occur
+ * in practice (predicates return booleans/scalars, not builder chains).
  */
+const FRAGMENT_METHODS = new Set(["group", "use", "condition", "switchCond", "switchOn"]);
+const OPAQUE_METHODS = new Set(["step", "poll", "setup", "teardown"]);
+
 function extractSteps(scope: string): { name: string }[] {
   const steps: { name: string }[] = [];
-  const leaf = /^\.\s*(?:step|poll)\s*\(\s*(['"])([^'"]+)\1/;
-  let depth = 0;
+  // One flag per open bracket: does a leaf .step()/.poll() at this depth count?
+  // The base frame (the builder chain itself) collects; fragment methods force
+  // collect, opaque-body methods force suppress, everything else inherits.
+  const collects: boolean[] = [true];
+  const collecting = () => collects[collects.length - 1];
+  const methodCall = /^\.\s*([A-Za-z_$][\w$]*)\s*\(/;
+  const leafName = /^\s*(['"])([^'"]+)\1/;
+
+  const n = scope.length;
   let i = 0;
-  while (i < scope.length) {
+  while (i < n) {
     const c = scope[i];
-    if (c === "(" || c === "{" || c === "[") { depth++; i++; continue; }
-    if (c === ")" || c === "}" || c === "]") { depth--; i++; continue; }
-    if (depth === 0 && c === ".") {
-      const m = leaf.exec(scope.slice(i));
+    if (c === '"' || c === "'") { i = skipString(scope, i); continue; }
+    if (c === "`") { i = skipTemplate(scope, i); continue; }
+    if (c === "/" && scope[i + 1] === "/") {
+      i += 2;
+      while (i < n && scope[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && scope[i + 1] === "*") {
+      i += 2;
+      while (i < n && !(scope[i] === "*" && scope[i + 1] === "/")) i++;
+      i = Math.min(i + 2, n);
+      continue;
+    }
+    if (c === ".") {
+      const m = methodCall.exec(scope.slice(i));
       if (m) {
-        steps.push({ name: m[2] });
-        // Jump to this call's opening paren so the loop counts it and descends
-        // into the arguments (depth > 0), where nested calls won't match.
-        i += scope.slice(i).indexOf("(");
+        const method = m[1];
+        if ((method === "step" || method === "poll") && collecting()) {
+          const nameM = leafName.exec(scope.slice(i + m[0].length));
+          if (nameM) steps.push({ name: nameM[2] });
+        }
+        i += m[0].length - 1; // land on the "("
+        collects.push(
+          FRAGMENT_METHODS.has(method) ? true : OPAQUE_METHODS.has(method) ? false : collecting(),
+        );
+        i++; // consume the "("
         continue;
       }
     }
+    if (c === "(" || c === "{" || c === "[") { collects.push(collecting()); i++; continue; }
+    if (c === ")" || c === "}" || c === "]") { if (collects.length > 1) collects.pop(); i++; continue; }
     i++;
   }
   return steps;
@@ -395,14 +470,28 @@ function parseTestDeclaration(
     const chainStart = callCloseIndex + 1;
     let depth = 0;
     let chainEnd = rest.length;
-    for (let i = chainStart; i < rest.length; i++) {
+    // Literal/comment-aware so a `)`/`}`/`]`/`;` inside a string, template, or
+    // comment in a step body cannot desync depth and truncate the chain early.
+    let i = chainStart;
+    while (i < rest.length) {
       const c = rest[i];
+      if (c === '"' || c === "'") { i = skipString(rest, i); continue; }
+      if (c === "`") { i = skipTemplate(rest, i); continue; }
+      if (c === "/" && rest[i + 1] === "/") {
+        i += 2;
+        while (i < rest.length && rest[i] !== "\n") i++;
+        continue;
+      }
+      if (c === "/" && rest[i + 1] === "*") {
+        i += 2;
+        while (i < rest.length && !(rest[i] === "*" && rest[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
       if (c === "(" || c === "{" || c === "[") depth++;
       else if (c === ")" || c === "}" || c === "]") depth--;
-      else if (c === ";" && depth === 0) {
-        chainEnd = i;
-        break;
-      }
+      else if (c === ";" && depth === 0) { chainEnd = i; break; }
+      i++;
     }
     builderChainScope = rest.substring(chainStart, chainEnd);
   }
