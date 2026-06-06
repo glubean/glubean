@@ -137,3 +137,35 @@ export const t = test("poll-nonbool")
   expect(r.success).toBe(false);
   expect(polls(r.events)[0].error).toMatch(/boolean/);
 });
+
+test("a throwing out-mapper fails the poll via the normal path (no dangling step)", async () => {
+  const src = `
+import { test } from "@glubean/sdk";
+export const t = test("poll-out-throw")
+  .setup(async () => ({ v: 0 }))
+  .poll("commit", async () => ({ ready: true }), {
+    until: (ctx, res) => res.ready === true,
+    timeout: 5000,
+    out: () => { throw new Error("out-mapper boom"); },
+  });
+`;
+  const r = await run(src, "poll-out-throw");
+  expect(r.success).toBe(false);
+  const p = polls(r.events);
+  expect(p).toHaveLength(1);
+  // The exit predicate WAS satisfied — the failure is the out-mapper, not exhaustion.
+  expect(p[0].satisfied).toBe(true);
+  expect(p[0].exhausted).toBe(false);
+  expect(p[0].error).toMatch(/out-mapper boom/);
+  // The throw fails the step through the normal path: a matching failed step_end,
+  // carrying the error. (Without the fix it escaped, leaving a dangling step.)
+  const end = stepEnds(r.events).find((e) => e.name === "commit");
+  expect(end?.status).toBe("failed");
+  expect(end?.error).toMatch(/out-mapper boom/);
+  // No dangling step: every started step has a matching step_end.
+  const started = r.events
+    .filter((e): e is Extract<TimelineEvent, { type: "step_start" }> => e.type === "step_start")
+    .map((e) => e.name);
+  const ended = stepEnds(r.events).map((e) => e.name);
+  expect(ended).toEqual(expect.arrayContaining(started));
+});

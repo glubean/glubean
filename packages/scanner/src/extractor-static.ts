@@ -310,11 +310,15 @@ function extractBuilderMeta(
 }
 
 /**
- * Extract step names from `.step("name", ...)` or `.step('name', ...)` chains within `scope`.
+ * Extract step names from `.step("name", ...)` / `.poll("name", ...)` chains
+ * within `scope` (both are first-class leaf steps that emit step events at run
+ * time; a single regex keeps them in source order). `.poll(...)` is the test()
+ * bounded poll-until step — without this, a poll-only or mixed test scanned
+ * statically would have no step metadata, breaking step-index joins.
  */
 function extractSteps(scope: string): { name: string }[] {
   const steps: { name: string }[] = [];
-  const stepPattern = /\.step\(\s*(['"])([^'"]+)\1/g;
+  const stepPattern = /\.(?:step|poll)\(\s*(['"])([^'"]+)\1/g;
   let m;
   while ((m = stepPattern.exec(scope)) !== null) {
     steps.push({ name: m[2] });

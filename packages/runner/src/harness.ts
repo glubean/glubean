@@ -2150,8 +2150,15 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
                 if (done) {
                   satisfied = true;
                   if (poll.out) {
-                    const next = poll.out(state, lastRes);
-                    if (next !== undefined) state = next;
+                    // A throwing out-mapper must fail the poll through the normal
+                    // path (poll event + step_end + ctx reset below), not escape
+                    // and leave a dangling started step — like fn/until errors.
+                    try {
+                      const next = poll.out(state, lastRes);
+                      if (next !== undefined) state = next;
+                    } catch (err) {
+                      pollError = err instanceof Error ? err.message : String(err);
+                    }
                   }
                   break;
                 }

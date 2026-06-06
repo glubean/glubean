@@ -142,6 +142,36 @@ export const flow = test("my-flow")
   expect(result[0].steps).toEqual([{ name: "step one" }, { name: "step two" }]);
 });
 
+test("extracts .poll() as a leaf step, interleaved with .step() in source order", () => {
+  const content = `
+export const flow = test("poll-flow")
+  .step("kick off", async (ctx) => {})
+  .poll("await-job", async () => ({ ready: true }), { until: (ctx, res) => res.ready, every: 1 })
+  .step("verify", async (ctx) => {});
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  expect(result[0].id).toBe("poll-flow");
+  // `.poll(...)` is a first-class leaf step at run time, so static scan must
+  // emit step metadata for it — in source order, so step-index joins line up.
+  expect(result[0].steps).toEqual([
+    { name: "kick off" },
+    { name: "await-job" },
+    { name: "verify" },
+  ]);
+});
+
+test("extracts a poll-only builder test (.poll with no .step)", () => {
+  const content = `
+export const flow = test("poll-only")
+  .poll("await-job", async () => ({ ready: true }), { until: (ctx, res) => res.ready });
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  expect(result[0].id).toBe("poll-only");
+  expect(result[0].steps).toEqual([{ name: "await-job" }]);
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================
