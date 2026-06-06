@@ -33,14 +33,41 @@ export const a = 1, b = 2;
 const c = 3;
 export let d = 4;
 export const { e } = obj;
+export const [f] = arr;
 `;
   const sf = parseSource(src);
   const names: string[] = [];
+  // No test-side filter: forEachExportedConst itself must skip destructuring,
+  // so every `decl.id` reaching the callback is an Identifier.
   forEachExportedConst(sf, (_stmt, decl) => {
-    const id = decl.id as AnyNode | undefined;
-    if (id?.type === "Identifier") names.push(id.name as string);
+    expect((decl.id as AnyNode).type).toBe("Identifier");
+    names.push((decl.id as AnyNode).name as string);
   });
-  expect(names).toEqual(["a", "b"]);
+  expect(names).toEqual(["a", "b"]); // c (not exported), d (let), {e}/[f] (destructured) excluded
+});
+
+test("normalizeSatisfies preserves `satisfies` used as an export-renamed identifier", () => {
+  // `export { satisfies as sat }` — `satisfies` is an identifier, not the operator.
+  const src = "const satisfies = 1; export { satisfies as sat };";
+  expect(() => parseSource(src)).not.toThrow();
+});
+
+test("normalizeSatisfies rewrites the operator even when the TYPE starts with `(`", () => {
+  // `x satisfies (a:number)=>void` is the operator with a parenthesized/function
+  // type; acorn-typescript can't parse raw `satisfies`, so it must be normalized.
+  // A genuine call to an identifier named `satisfies` must NOT be rewritten.
+  expect(() => parseSource("export const a = (x satisfies (n: number) => void);")).not.toThrow();
+  expect(() => parseSource("export const b = (x satisfies (Foo | Bar));")).not.toThrow();
+  expect(() => parseSource("function satisfies(y) { return y; } export const c = satisfies(1);")).not.toThrow();
+});
+
+test("parseSource throws on .ts angle-bracket type assertions (known acorn-typescript limit)", () => {
+  // acorn-typescript always treats `<...>` as JSX; `<Foo>bar` cannot be parsed
+  // (no plugin toggle fixes it). Glubean code uses `expr as T`. This locks the
+  // limitation so extractors (P1+) wrap parseSource in try/catch (skip + warn).
+  expect(() => parseSource("export const x = <Foo>bar;")).toThrow();
+  // The recommended form parses fine:
+  expect(() => parseSource("export const x = bar as Foo;")).not.toThrow();
 });
 
 test("hasLeadingMarker detects an immediately-preceding // @marker only", () => {

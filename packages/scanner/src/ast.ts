@@ -225,15 +225,36 @@ function _doScan(src: string, start: number, stopOnBrace: boolean, out: string[]
       let j = i + 9;
       while (j < src.length && (src[j] === " " || src[j] === "\t")) j++;
       const next = src[j] ?? "";
+      // The next identifier word — `satisfies as X` is an export/import rename
+      // (`export { satisfies as sat }`), NOT the operator (a type never begins
+      // with the `as` keyword), so don't rewrite the identifier there.
+      const nextWord = src.slice(j).match(/^[A-Za-z_$][\w$]*/)?.[0];
+      // A following `(` is ambiguous: a call to an identifier named `satisfies`
+      // (`satisfies(x)` → keep) vs the operator whose TYPE starts with `(` —
+      // a parenthesized/function type (`x satisfies (a: number) => void` →
+      // rewrite). Disambiguate by whether the PRECEDING token ends a value
+      // (then `(` opens a type), since `satisfies` here is guaranteed not to be
+      // part of a larger identifier (boundary checked above).
+      let parenOpensType = false;
+      if (next === "(") {
+        let pi = i - 1;
+        while (pi >= 0 && (src[pi] === " " || src[pi] === "\t" || src[pi] === "\n" || src[pi] === "\r")) pi--;
+        const prevSig = src[pi] ?? "";
+        parenOpensType =
+          prevSig === ")" || prevSig === "]" || prevSig === "}" ||
+          prevSig === '"' || prevSig === "'" || prevSig === "`" ||
+          _IDENT_CONT.test(prevSig);
+      }
       const isOperator =
         next !== ":" &&
         next !== "=" &&
-        next !== "(" &&
+        (next !== "(" || parenOpensType) &&
         next !== "," &&
         next !== ";" &&
         next !== ")" &&
         next !== "]" &&
         next !== "}" &&
+        nextWord !== "as" &&
         src[i - 1] !== ".";
       if (isOperator) {
         out.push(_SATISFIES_SUB);
@@ -252,12 +273,16 @@ function _doScan(src: string, start: number, stopOnBrace: boolean, out: string[]
 export function parseSource(content: string, filePath = "input.ts"): SourceFile {
   const comments: AcornComment[] = [];
 
-  // acorn-typescript handles `.ts` AND `.tsx` source. For `.js` / `.mjs`
-  // the TS plugin still parses cleanly (TS is a superset). The script
-  // type only matters for JSX disambiguation, which we don't currently
-  // surface anywhere — but reserve the option to switch parsers later.
+  // acorn-typescript handles `.ts` / `.tsx` / `.js` / `.mjs` (TS is a superset).
+  // Known parser limitation: acorn-typescript always treats `<...>` as JSX, so a
+  // .ts ANGLE-BRACKET type assertion (`<Foo>bar`) throws ("Unterminated JSX") —
+  // there is no plugin option to disable this (verified: jsx:false / dts:true
+  // don't help). Glubean code uses `expr as T` (not `<T>expr`), so this is a
+  // non-issue in practice; `tsPlugin({ jsx: false })` isn't available, so callers
+  // (extractors) MUST treat a `parseSource` throw as "unparseable → skip file
+  // with a warning", never a crash. Tracked in docs/08 §8.
   const isJsx = filePath.endsWith(".tsx") || filePath.endsWith(".jsx");
-  void isJsx; // currently no JSX handling — acorn-typescript reads it fine
+  void isJsx; // reserved for a future parser swap that can toggle JSX
 
   const normalized = normalizeSatisfies(content);
 
@@ -297,6 +322,10 @@ export function forEachExportedConst(
     const declarators = (declaration as AnyNode).declarations as AnyNode[] | undefined;
     if (!declarators) continue;
     for (const declarator of declarators) {
+      // Enforce the contract: skip destructuring (`export const { x } = ...` /
+      // `[a] = ...`) so callers can assume `declarator.id` is an Identifier.
+      const id = (declarator as AnyNode).id as AnyNode | undefined;
+      if (id?.type !== "Identifier") continue;
       cb(statement, declarator);
     }
   }
