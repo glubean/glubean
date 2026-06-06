@@ -416,17 +416,21 @@ export function extractFlows(content: string): FlowStaticMeta[] {
 }
 
 /**
- * Find the Glubean flow call in a chain: `contract.flow(...)` (member on the
- * `contract` namespace) or a direct `flow(...)` (the imported builder). Does NOT
- * match an arbitrary `.flow(...)` on some other object (e.g. `otherLib.flow(...)`),
- * which the runtime would not recognize as a flow.
+ * Find the Glubean flow call in a chain: `contract.flow(...)` — a `.flow` member
+ * on the `contract` namespace. Does NOT match an arbitrary `.flow(...)` on some
+ * other object (`otherLib.flow(...)`) nor a bare `flow(...)`, which the runtime
+ * would not recognize as a flow.
+ *
+ * Like `findContractCall` / the former regex, this keys off the literal name
+ * `contract` and does not resolve `import { contract as x }` aliases — a known,
+ * consistent limitation across the contract + flow static extractors (real code
+ * uses `contract.flow(...)`).
  */
 function findFlowCall(init: AnyNode): AnyNode | undefined {
   let node: AnyNode | undefined = unwrapExpression(init);
   while (node && node.type === "CallExpression") {
     const callee = unwrapExpression(node.callee as AnyNode);
     if (!callee) break;
-    if (callee.type === "Identifier" && callee.name === "flow") return node; // direct flow("id")
     if (callee.type === "MemberExpression" && callee.computed !== true) {
       const object = callee.object as AnyNode;
       const property = callee.property as AnyNode;
