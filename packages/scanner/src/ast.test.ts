@@ -52,29 +52,62 @@ test("normalizeSatisfies preserves `satisfies` used as an export-renamed identif
   expect(() => parseSource(src)).not.toThrow();
 });
 
-test("a `satisfies` identifier followed by `(` is never rewritten (no corruption)", () => {
-  // Rewriting `satisfies(` would corrupt valid code. These must keep the
-  // identifier `satisfies` (callee / function name), NOT become `as`.
+test("an identifier named `satisfies` is never rewritten (no corruption) in any position", () => {
+  // The discriminator is the PRECEDING token, so `satisfies` used as a name —
+  // call, generic call, member, operand, after a keyword — keeps its identity.
+  const src = [
+    "function satisfies(y) { return y; }",
+    "export const c = () => { return satisfies(1); };", // after `return`
+    "export const d = satisfies.foo;",                   // member
+    "export const e = satisfies + 1;",                   // operand
+  ].join("\n");
   const callees: string[] = [];
-  const sf = parseSource("function satisfies(y) { return y; }\nexport const c = () => { return satisfies(1); };");
+  const members: string[] = [];
+  const sf = parseSource(src);
   walk(sf.program as AnyNode, (n) => {
     if (n.type === "CallExpression") {
       const callee = (n as AnyNode).callee as AnyNode;
       if (callee.type === "Identifier") callees.push(callee.name as string);
     }
+    if (n.type === "MemberExpression") {
+      const obj = (n as AnyNode).object as AnyNode;
+      if (obj.type === "Identifier") members.push(obj.name as string);
+    }
   });
-  expect(callees).toEqual(["satisfies"]); // not "as" (would be corruption)
-  // The common Glubean operator form (identifier/generic type) IS normalized:
-  expect(() => parseSource("export const v = ({ a: 1 } satisfies Record<string, number>);")).not.toThrow();
+  expect(callees).toEqual(["satisfies"]); // not "as"
+  expect(members).toEqual(["satisfies"]); // satisfies.foo intact
 });
 
-test("parseSource throws on syntax acorn-typescript can't parse (known limits → P1 skip+warn)", () => {
-  // All degrade to parseSource throwing; extractors (P1+) wrap in try/catch.
-  expect(() => parseSource("export const x = <Foo>bar;")).toThrow();          // angle-bracket assertion (JSX)
-  expect(() => parseSource("export const y = (z satisfies (n: number) => void);")).toThrow(); // satisfies + paren/function TYPE
-  // The recommended/normal forms parse fine:
-  expect(() => parseSource("export const x = bar as Foo;")).not.toThrow();
-  expect(() => parseSource("export const y = (z satisfies Foo);")).not.toThrow();
+test("the satisfies OPERATOR is normalized for all value operands + type shapes", () => {
+  // Preceded by a value → operator → rewritten so acorn-typescript can parse it.
+  for (const s of [
+    "export const a = ({ x: 1 } satisfies Record<string, number>);", // } + generic type (common Glubean form)
+    "export const b = (x satisfies (n: number) => void);",            // ident + parenthesized/function type
+    "export const c = (arr[0] satisfies (A | B));",                   // ] + union
+    "export const d = (check(y) satisfies Foo);",                     // ) operand
+    "export const e = (h! satisfies Bar);",                           // ! non-null operand
+    "export const f = (this satisfies Spec);",                        // value-keyword operand
+  ]) {
+    expect(() => parseSource(s)).not.toThrow();
+  }
+});
+
+test("parseSource throws only on syntax acorn-typescript genuinely can't parse (→ P1 skip+warn)", () => {
+  expect(() => parseSource("export const x = <Foo>bar;")).toThrow();   // angle-bracket assertion (JSX ambiguity)
+  expect(() => parseSource("export const x = bar as Foo;")).not.toThrow(); // recommended form is fine
+});
+
+test("hasLeadingMarker: matches across intervening comments, rejects trailing comments", () => {
+  // Marker followed by a description comment before the export → still matches.
+  const a = parseSource("// @flow\n// a description\nexport const f = 1;");
+  let an: AnyNode | undefined;
+  forEachExportedConst(a, (s) => { an = s; });
+  expect(hasLeadingMarker(a, an!, "flow")).toBe(true);
+  // Marker as a TRAILING comment on the previous statement → not this node's.
+  const b = parseSource("const prev = 1; // @flow\nexport const g = 2;");
+  let bn: AnyNode | undefined;
+  forEachExportedConst(b, (s) => { bn = s; });
+  expect(hasLeadingMarker(b, bn!, "flow")).toBe(false);
 });
 
 test("hasLeadingMarker detects an immediately-preceding // @marker only", () => {

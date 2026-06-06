@@ -79,6 +79,24 @@ const _SATISFIES_SUB = "as       "; // "as" + 7 spaces = 9 chars, same as "satis
 // non-ASCII identifier characters (e.g. `satisfiesπ`) as a word boundary.
 const _IDENT_CONT = /[\p{ID_Continue}$‌‍]/u;
 
+// Keywords that, when they are the token immediately before `satisfies`, mean
+// `satisfies` is NOT the operator's left operand: either an expression/value
+// follows the keyword (so `satisfies` is a callee/name being used) or the keyword
+// introduces a binding name. Rewriting `satisfies` after any of these would
+// corrupt valid code (`return satisfies(1)`, `function satisfies(){}`,
+// `const satisfies = …`, `new satisfies()`). Value keywords (`this`/`true`/
+// `false`/`null`/`super`) are intentionally ABSENT — they end a value, so
+// `this satisfies T` is the operator and is rewritten.
+const _NON_VALUE_BEFORE = new Set([
+  // expression-introducing
+  "return", "typeof", "yield", "await", "delete", "void", "new", "in", "of",
+  "instanceof", "throw", "case", "do", "else", "default", "extends",
+  // declaration / binding-name introducers
+  "function", "class", "const", "let", "var", "interface", "type", "enum",
+  "namespace", "module", "import", "export", "declare", "abstract", "async",
+  "get", "set", "static", "public", "private", "protected", "readonly",
+]);
+
 function normalizeSatisfies(src: string): string {
   if (!src.includes("satisfies")) return src;
   const out: string[] = [];
@@ -205,15 +223,19 @@ function _doScan(src: string, start: number, stopOnBrace: boolean, out: string[]
 
     // --- `satisfies` operator: replace only in operator position ----------
     //
-    // Operator position: between an expression and a type.
-    // Non-operator uses to preserve:
-    //   { satisfies: value }  — property key  → nextSignificant is ":"
-    //   const satisfies = …   — identifier    → nextSignificant is "="
-    //   satisfies(…)          — function call → nextSignificant is "("
-    //   [satisfies, …]        — list element  → nextSignificant is "," / "]"
-    //   obj.satisfies         — member access → preceded by "."
-    // `\uXXXX` / `\u{...}` after `satisfies` extends the identifier — e.g.
-    // `satisfiesπ` is a single identifier and must not be rewritten.
+    // The operator is `<value-expression> satisfies <type>`. It is the operator
+    // IFF the PRECEDING significant token ENDS A VALUE — that is the only
+    // reliable discriminator, because an identifier named `satisfies` (a valid,
+    // if unusual, name) can appear in arbitrarily many *following* contexts
+    // (`satisfies(x)`, `satisfies<T>()`, `satisfies.foo`, `satisfies + 1`,
+    // `export { satisfies as x }`, …). Keying off the following token (the old
+    // approach) silently CORRUPTS those. A value ends with `) ] } " ' ` !` or a
+    // plain identifier/value-keyword; it does NOT end with `.` (member access)
+    // or a keyword that introduces a name/expression (`return`, `function`,
+    // `const`, `new`, …) — after those, `satisfies` is a name/callee, not the
+    // operator.
+    // `\uXXXX` / `\u{...}` after `satisfies` extends the identifier
+    // (`satisfiesπ` is one identifier) and must not be rewritten.
     const afterIsUnicodeEscape =
       src[i + 9] === "\\" && src[i + 10] === "u";
     if (
@@ -222,36 +244,26 @@ function _doScan(src: string, start: number, stopOnBrace: boolean, out: string[]
       !_IDENT_CONT.test(src[i + 9] ?? " ") &&
       !afterIsUnicodeEscape
     ) {
-      let j = i + 9;
-      while (j < src.length && (src[j] === " " || src[j] === "\t")) j++;
-      const next = src[j] ?? "";
-      // The next identifier word — `satisfies as X` is an export/import rename
-      // (`export { satisfies as sat }`), NOT the operator (a type never begins
-      // with the `as` keyword), so don't rewrite the identifier there.
-      const nextWord = src.slice(j).match(/^[A-Za-z_$][\w$]*/)?.[0];
-      // A following `(` is left as a NON-operator (never rewritten): it's a call
-      // to / declaration of an identifier named `satisfies` (`satisfies(x)`,
-      // `function satisfies(...)`, a method `satisfies()`), all of which parse
-      // fine as-is. The rare operator form whose TYPE starts with `(`
-      // (`x satisfies (a: number) => void`) is therefore NOT normalized and will
-      // throw — accepted as a known acorn-typescript limitation (docs/08 §8;
-      // degrades to P1 skip+warn). This is deliberate: trying to disambiguate the
-      // `(` case by surrounding tokens silently CORRUPTS valid code (e.g.
-      // `return satisfies(1)`, `function satisfies(){}`), which is worse than a
-      // skipped file. Glubean uses `} satisfies Spec<...>` (identifier type),
-      // which IS normalized correctly.
-      const isOperator =
-        next !== ":" &&
-        next !== "=" &&
-        next !== "(" &&
-        next !== "," &&
-        next !== ";" &&
-        next !== ")" &&
-        next !== "]" &&
-        next !== "}" &&
-        nextWord !== "as" &&
-        src[i - 1] !== ".";
-      if (isOperator) {
+      let pi = i - 1;
+      while (pi >= 0 && (src[pi] === " " || src[pi] === "\t" || src[pi] === "\n" || src[pi] === "\r")) pi--;
+      const prevSig = src[pi] ?? "";
+      let prevEndsValue = false;
+      if (
+        prevSig === ")" || prevSig === "]" || prevSig === "}" ||
+        prevSig === '"' || prevSig === "'" || prevSig === "`" || prevSig === "!"
+      ) {
+        prevEndsValue = true;
+      } else if (prevSig !== "." && _IDENT_CONT.test(prevSig)) {
+        // Previous token is a word: it ends a value (a variable / literal /
+        // value-keyword like `this`/`true`) UNLESS it is a keyword that
+        // introduces a name or expression, after which `satisfies` is itself a
+        // name/callee (not the operator) and must be left alone.
+        let wi = pi;
+        while (wi >= 0 && _IDENT_CONT.test(src[wi] ?? "")) wi--;
+        const prevWord = src.slice(wi + 1, pi + 1);
+        prevEndsValue = !_NON_VALUE_BEFORE.has(prevWord);
+      }
+      if (prevEndsValue) {
         out.push(_SATISFIES_SUB);
         i += 9;
         continue;
@@ -351,7 +363,13 @@ export function hasLeadingMarker(source: SourceFile, node: AnyNode, marker: stri
   for (let i = candidates.length - 1; i >= 0; i--) {
     const comment = candidates[i]!;
     if (!/^\s*$/.test(source.text.slice(comment.end, cursor))) break; // code between → block ended
-    if (!comment.block && re.test(comment.text)) return true;
+    if (!comment.block && re.test(comment.text)) {
+      // Must be a LEADING comment (its own line), not a trailing comment on the
+      // previous statement (`const prev = 1; // @flow`) which would otherwise be
+      // mis-attached to this node.
+      const lineStart = source.text.lastIndexOf("\n", comment.start - 1) + 1;
+      if (/^\s*$/.test(source.text.slice(lineStart, comment.start))) return true;
+    }
     cursor = comment.start;
   }
   return false;
