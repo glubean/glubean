@@ -824,6 +824,17 @@ export const addProduct = test.pick(examples)(
   expect(picks[0].keys).toBeNull();
 });
 
+test("extractPickExamples detects a typed (as/satisfies) loader assignment", () => {
+  // The TS wrapper sits around the whole `await from*(...)` initializer.
+  const content = `
+const examples = await fromDir.merge("./data/add-product/") as Record<string, unknown>;
+export const addProduct = test.pick(examples)("add-product-$_pick", async (ctx, body) => {});`;
+  const picks = extractPickExamples(content);
+  expect(picks.length).toBe(1);
+  expect(picks[0].dataSource).toEqual({ type: "dir-merge", path: "./data/add-product/" });
+  expect(picks[0].keys).toBeNull();
+});
+
 test("extractPickExamples detects JSON import", () => {
   const content = `
 import examples from "../data/create-user.json" with { type: "json" };

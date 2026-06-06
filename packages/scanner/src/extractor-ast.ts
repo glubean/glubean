@@ -414,9 +414,10 @@ function buildDataSources(source: { program: AnyNode }): Map<string, { type: Pic
     if (node.type === "VariableDeclarator") {
       const id = node.id as AnyNode | undefined;
       if (id?.type !== "Identifier") return;
-      let init = node.init as AnyNode | undefined;
-      if (init?.type === "AwaitExpression") init = init.argument as AnyNode;
-      const call = unwrapExpression(init);
+      // Strip TS wrappers (`as`/`satisfies`/`!`) that may sit around the whole
+      // initializer (`await from*(...) as T`) before reading the await/call.
+      let call = unwrapExpression(node.init as AnyNode | undefined);
+      if (call?.type === "AwaitExpression") call = unwrapExpression(call.argument as AnyNode);
       if (call?.type !== "CallExpression") return;
       const loader = classifyLoader(call);
       if (loader) map.set(id.name as string, loader);
