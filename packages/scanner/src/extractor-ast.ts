@@ -399,30 +399,43 @@ function classifyLoader(call: AnyNode): { type: PickLoaderType; path: string } |
 /** Map a variable name → its data source: default `.json` imports + `await from*(...)` loaders. */
 function buildDataSources(source: { program: AnyNode }): Map<string, { type: PickLoaderType; path: string }> {
   const map = new Map<string, { type: PickLoaderType; path: string }>();
-  walk(source.program, (node) => {
-    if (node.type === "ImportDeclaration") {
-      const importPath = (node.source as AnyNode | undefined)?.value;
+  // TOP-LEVEL bindings only (in source order, last-wins): a top-level
+  // `test.pick(examples)` references the module-level `examples`, not a
+  // same-named binding shadowed inside a nested function/block.
+  const body = (source.program.body as AnyNode[] | undefined) ?? [];
+  for (const statement of body) {
+    if (statement.type === "ImportDeclaration") {
+      const importPath = (statement.source as AnyNode | undefined)?.value;
       if (typeof importPath === "string" && importPath.endsWith(".json")) {
-        for (const sp of (node.specifiers as AnyNode[] | undefined) ?? []) {
+        for (const sp of (statement.specifiers as AnyNode[] | undefined) ?? []) {
           if (sp.type === "ImportDefaultSpecifier" && (sp.local as AnyNode)?.type === "Identifier") {
             map.set((sp.local as AnyNode).name as string, { type: "json-import", path: importPath });
           }
         }
       }
-      return;
+      continue;
     }
-    if (node.type === "VariableDeclarator") {
-      const id = node.id as AnyNode | undefined;
-      if (id?.type !== "Identifier") return;
-      // Strip TS wrappers (`as`/`satisfies`/`!`) that may sit around the whole
-      // initializer (`await from*(...) as T`) before reading the await/call.
-      let call = unwrapExpression(node.init as AnyNode | undefined);
+    // `const x = …` or `export const x = …`
+    const varDecl =
+      statement.type === "VariableDeclaration"
+        ? statement
+        : statement.type === "ExportNamedDeclaration" &&
+            (statement.declaration as AnyNode | undefined)?.type === "VariableDeclaration"
+          ? (statement.declaration as AnyNode)
+          : undefined;
+    if (!varDecl) continue;
+    for (const declarator of (varDecl.declarations as AnyNode[] | undefined) ?? []) {
+      const id = declarator.id as AnyNode | undefined;
+      if (id?.type !== "Identifier") continue;
+      // Strip TS wrappers (`as`/`satisfies`/`!`) around the whole initializer
+      // (`await from*(...) as T`) before reading the await/call.
+      let call = unwrapExpression(declarator.init as AnyNode | undefined);
       if (call?.type === "AwaitExpression") call = unwrapExpression(call.argument as AnyNode);
-      if (call?.type !== "CallExpression") return;
+      if (call?.type !== "CallExpression") continue;
       const loader = classifyLoader(call);
       if (loader) map.set(id.name as string, loader);
     }
-  });
+  }
   return map;
 }
 
