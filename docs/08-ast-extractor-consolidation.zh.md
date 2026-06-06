@@ -196,6 +196,8 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 4. **跨仓版本耦合**(P3):scanner 是已发布包,vscode 依赖它。发版走 repo 的**协调发布**:`.github/workflows/publish.yml` 由 `v*` tag 触发(workflow 内部用 `pnpm publish` 自动把 `workspace:*` 转真实版本),**不是本地手动 `pnpm publish`**。P3 需要 scanner 新版时,流程是:bump 版本 → commit → 打 `v*` tag → push(让 CI 发布),再升 vscode 依赖;P3 之前 vscode 维持现状,不阻塞 P1/P2。
 5. **体积**:+~600KB 到 scanner 运行时依赖。consolidate 后 vscode **净减**(删掉自有 ~600KB 副本,改为共享),CLI/MCP 增 ~600KB(可接受,且远小于 typescript)。
 6. **原生二进制**:无(纯 JS)。
+7. **`ast.ts` 已知限制(P0 review 发现,vscode 原版即有)**:`normalizeSatisfies`/`_doScan` 不跳过 **regex 字面量体**,正则体内的字面 `satisfies` 会在归一化文本里被改写。**对当前/计划中的提取不可见**(`parseSource` 保留原始 `text`;提取器读字符串实参/对象属性/调用结构,不读 regex `.pattern`/`.source`)。若将来有提取器要读 regex body,在 `_doScan` 加 regex-literal skip 分支(按前一个 significant token 做 regex-vs-division)。当前**有依据 defer**,代码内已留注释。
+8. **包级 nit(非本方案引入,出 P0 范围)**:`tsconfig.build.json` 的 `declarationMap`/`sourceMap` 让发布的 `.d.ts.map`/`.js.map` 引用未发布的 `src`(`files:["dist"]`)。全包共性,后续单独清理(给 `files` 加 `src` 或发布时去 map)。
 
 ---
 

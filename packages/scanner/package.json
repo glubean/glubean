@@ -12,6 +12,11 @@
       "types": "./dist/static.d.ts",
       "import": "./dist/static.js",
       "default": "./dist/static.js"
+    },
+    "./ast": {
+      "types": "./dist/ast.d.ts",
+      "import": "./dist/ast.js",
+      "default": "./dist/ast.js"
     }
   },
   "files": [
@@ -24,6 +29,10 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "acorn": "^8.16.0",
+    "acorn-typescript": "^1.4.13"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"
