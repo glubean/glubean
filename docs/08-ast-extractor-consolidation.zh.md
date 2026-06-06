@@ -183,10 +183,10 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 - ~~**P1a — sdk 导出 flatten**~~:**取消**(§9.4 修正)——会违反 scanner 的零-sdk-依赖原则;flatten 留 scanner 本地。
 - **P1 — test 路径 AST 化**:实现 `extractor-ast.ts` 的 `extractFromSource` / `extractAliasesFromSource` / `isGlubeanFile` / `createStaticExtractor` / `extractPickExamples`(`steps[]` 用 scanner 本地 flatten,镜像 sdk 规则 + 测试锁);`static.ts` 切到它;**现有 138 测试不改全过** + 新增"正则做不到"的用例(§5.3 + 现代 TS 语法)。`extractFromSource` 必须 try/catch `parseSource`(§8.7:不可解析 → 跳过 + warn,绝不 crash)。
 - **P2 — contract 路径 AST 化**:移入 `contract-ast.ts`,实现 AST 版 `extractContractCases`;scanner Phase 4 conformance(`ContractStaticMeta` 输出对齐;有真实差异则显式列出 + 测试)。
-- **P3 — consolidate vscode**:vscode 改 import 指向 `@glubean/scanner`,删自有 `ast.ts`/`contractAst.ts`;`dataDrivenRows.ts` 用共享 helper;vscode `parser.test.ts` 跨仓全过。需 scanner 发版 + vscode 升依赖(发版走 §8 风险4 的 `v*` tag CI)。
-- **P4 — 删除正则**:parity 全绿后删 `extractor-static.ts`;清理死代码(`stripComments`/`findMatching` 等若无引用)。
+- **P4 — 删除正则**(✅ 已完成,在 P3 之前做):正则提取函数全删,`extractor-static.ts` 瘦成 guards+types(1130→280)。AST 是 scanner 唯一提取路径。
+- **P3 — consolidate vscode**(⏳ 未做,跨仓 + 需发版):见 §12 执行手册。
 
-每阶段独立可提交、可回滚;P1/P2 完成即拿到"100% 替代正则(scanner 侧)";P3/P4 完成"全仓单一来源"。
+**P0–P2+P1-pick+P4 已完成**(scanner 侧 100% 替代正则,scanner 151 + cli 291 + mcp 31 全绿,各阶段 codex 零)。P3 是跨仓 + 发版门控的独立后续。
 
 ---
 
@@ -233,3 +233,29 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 - **AST 解锁**:从源码、**不执行**地抽出**结构**——`.step`/`.poll`/`.group`/`.condition`/`switchOn`/`switchCond` 的嵌套 + case/default 分支、contract case 明细、控制流形状。→ no-exec、快、安全的投影:VSCode 测试树展开嵌套结构、CodeLens 标注分支/轮询、coverage/可视化不跑就能画。
 - **边界**:AST 只看语法,看不到运行时值;运行时计算的 id/schema、循环/spread 生成的 cases 投影不了(这正是 contract/flow 走动态 import 的原因)。定位:**静态投影 = 快/安全的"大多数情况";运行时投影仍是动态部分的权威 fallback**,二者互补。
 - **落点**:届时 `ExportMeta.steps[]`(目前"只写不读")可升级成真正的结构化静态投影,第一个真实消费者是 VSCode 结构展示 / 可视化。**这是建立在本迁移之上的独立 feature,不在 P0–P4 范围**。
+
+---
+
+## 12. P3 执行手册(consolidate vscode + 去 marker)—— 未做,回来照这个干
+
+> 背景:vscode 仓在 `/Users/peisong/glubean/vscode`,**不是**本 monorepo 的 workspace 成员,通过**已发布的 npm `@glubean/scanner`**(当前装 `^0.3.0`,实装 0.3.0)依赖。它已把 test/pick 提取委托给 `@glubean/scanner/static`(`parser.ts`/`codeLensProvider.ts`/`diagnose.ts`),只有 contract/flow 的 **marker 提取**还在自有 `contractAst.ts`(acorn)。
+
+**为什么没在这次 session 做**:① 需要把 `@glubean/scanner@0.5.0` **发布到 npm**(对外、不可逆,走 `v*` tag CI)——owner 不在,不自作主张发版;② 需要 scanner **新增 flow 结构化提取器**(去 marker 用,现在只有 contract 的);③ 跨仓大改 + vscode 自己的测试/codex 闸。
+
+**前置(已就绪)**:scanner 本地已 bump 到 `0.5.0`(published 0.4.0 不含 `/ast`,必须发 0.5.0)。
+
+### 步骤
+1. **发布 scanner 0.5.0**:本 monorepo 根 commit 后,打 `v*` tag → push,`.github/workflows/publish.yml` 由 CI 发(见 memory `project_npm_token_source_zshrc`:canonical 路径是 tag→CI,不是本地 `pnpm publish`)。确认 `npm view @glubean/scanner@0.5.0 exports` 含 `./ast`。
+2. **scanner 新增 flow 提取器**(发版前一并做进 0.5.0):在 `extractor-ast.ts` 加 `extractFlows(content): FlowStaticMeta[]`——结构识别 `export const X = <fn>.flow("id")...`(`findPropertyCall(init,"flow")` 认 `.flow("id")`,meta 取 `.meta({...})`),产出 `exportName/line/flowId/skip`(对齐 vscode 现有 `AstFlow`)。**无 marker**(§9.5)。加 conformance 测试。
+3. **vscode 升依赖**:`@glubean/scanner` → `^0.5.0`,`pnpm install`(注意 frozen-lockfile,见 memory `project_pnpm_overrides_frozen_lockfile`)。
+4. **vscode 去 marker + 改结构识别**:
+   - contract:`parser.ts` 的 `extractMarkedContracts` 改用 scanner `extractContractCases`(结构、无 marker)。
+   - flow:`extractMarkedFlows` 改用 scanner 新 `extractFlows`(无 marker)。
+   - 删 `// @contract`/`// @flow` 强制;**行为变化**(§9.5):vscode 自动发现所有 contract/flow 导出(与 CLI 对齐)。
+   - 删 vscode 自有 `src/ast.ts` + `src/contractAst.ts`;若仍需 AST helper,`import ... from "@glubean/scanner/ast"`。`hasLeadingMarker` 随之退场(`contract.bootstrap` 是结构识别,不靠注释——确认 `extractBootstrapMarkers` 迁移或保留)。
+5. **保 CodeLens(§9.6 硬底线)**:`codeLensProvider.ts`/`diagnose.ts` 的 `PickMeta`(keys/line/dataSource)+ 各导出行号断言不改全过;contract/flow 的 Run lens 锚点用 scanner 返回的 `line`。
+6. **闸**:vscode `parser.test.ts` 全过 + `codex review --base <P2 之前>`(在 vscode 仓)收敛到零。
+
+### 验收
+- vscode 不再有 `// @contract`/`// @flow` 依赖;contract/flow/test/pick 全经 `@glubean/scanner`(单一来源);自有 ast/contractAst 删除。
+- CodeLens(含 pick 每 example、contract/flow Run)行为不变或更全;vscode 测试 + codex 全绿。
