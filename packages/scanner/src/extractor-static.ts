@@ -345,6 +345,81 @@ function skipTemplate(s: string, i: number): number {
   return i;
 }
 
+/** Skip a /regex/flags literal at `i` (the slash). Caller has decided it IS a regex. */
+function skipRegex(s: string, i: number): number {
+  i++; // past opening /
+  let inClass = false;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "\\") { i += 2; continue; }
+    if (c === "\n") return i; // unterminated — bail
+    if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (c === "/" && !inClass) { i++; break; }
+    i++;
+  }
+  while (i < s.length && /[a-z]/i.test(s[i])) i++; // flags
+  return i;
+}
+
+/**
+ * A `/` starts a regex literal (not division) when the previous significant
+ * token is not a value: not `)`/`]`, and not an identifier/number unless that
+ * identifier is a keyword taking an expression next (return, typeof, …).
+ */
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+  "do", "else", "yield", "await", "case",
+]);
+function regexStartsAt(s: string, i: number): boolean {
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(s[j])) j--;
+  if (j < 0) return true;
+  const p = s[j];
+  if (p === ")" || p === "]") return false;
+  if (/[A-Za-z0-9_$]/.test(p)) {
+    let k = j;
+    while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
+    return REGEX_PRECEDING_KEYWORDS.has(s.substring(k + 1, j + 1));
+  }
+  return true;
+}
+
+/** Skip balanced `<...>` type arguments at `i` (the `<`); -1 if unbalanced. */
+function skipAngles(s: string, i: number): number {
+  let depth = 0;
+  for (let j = i; j < s.length; j++) {
+    const c = s[j];
+    if (c === "<") depth++;
+    else if (c === ">") { depth--; if (depth === 0) return j + 1; }
+    else if (c === "\n") return -1;
+  }
+  return -1;
+}
+
+/**
+ * If `s[i]` starts a string, template, comment, or regex literal, return the
+ * index just past it; otherwise -1. Lets the chain/step scanners skip token
+ * content whose brackets must not affect bracket-depth tracking.
+ */
+function skipNonCode(s: string, i: number): number {
+  const c = s[i];
+  if (c === '"' || c === "'") return skipString(s, i);
+  if (c === "`") return skipTemplate(s, i);
+  if (c === "/" && s[i + 1] === "/") {
+    i += 2;
+    while (i < s.length && s[i] !== "\n") i++;
+    return i;
+  }
+  if (c === "/" && s[i + 1] === "*") {
+    i += 2;
+    while (i < s.length && !(s[i] === "*" && s[i + 1] === "/")) i++;
+    return Math.min(i + 2, s.length);
+  }
+  if (c === "/" && regexStartsAt(s, i)) return skipRegex(s, i);
+  return -1;
+}
+
 /**
  * Extract leaf step names from `.step("name", ...)` / `.poll("name", ...)` calls
  * in a builder chain (`scope`), in source order. `.poll(...)` is the test()
@@ -377,42 +452,40 @@ function extractSteps(scope: string): { name: string }[] {
   // collect, opaque-body methods force suppress, everything else inherits.
   const collects: boolean[] = [true];
   const collecting = () => collects[collects.length - 1];
-  // Optional `<...>` matches explicit type args on a generic call, e.g.
-  // `.poll<Result>(...)` / `.step<NewS>(...)` (same convention as the test<T>()
-  // call match), so the leaf is recognized and its body is treated as opaque.
-  const methodCall = /^\.\s*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/;
+  const methodName = /^\.\s*([A-Za-z_$][\w$]*)/;
   const leafName = /^\s*(['"])([^'"]+)\1/;
 
   const n = scope.length;
   let i = 0;
   while (i < n) {
+    const adv = skipNonCode(scope, i);
+    if (adv !== -1) { i = adv; continue; }
     const c = scope[i];
-    if (c === '"' || c === "'") { i = skipString(scope, i); continue; }
-    if (c === "`") { i = skipTemplate(scope, i); continue; }
-    if (c === "/" && scope[i + 1] === "/") {
-      i += 2;
-      while (i < n && scope[i] !== "\n") i++;
-      continue;
-    }
-    if (c === "/" && scope[i + 1] === "*") {
-      i += 2;
-      while (i < n && !(scope[i] === "*" && scope[i + 1] === "/")) i++;
-      i = Math.min(i + 2, n);
-      continue;
-    }
     if (c === ".") {
-      const m = methodCall.exec(scope.slice(i));
+      const m = methodName.exec(scope.slice(i));
       if (m) {
-        const method = m[1];
-        if ((method === "step" || method === "poll") && collecting()) {
-          const nameM = leafName.exec(scope.slice(i + m[0].length));
-          if (nameM) steps.push({ name: nameM[2] });
+        // Look past optional `<...>` generic type args to find the call's "(".
+        let j = i + m[0].length;
+        while (j < n && /\s/.test(scope[j])) j++;
+        if (scope[j] === "<") {
+          const a = skipAngles(scope, j);
+          if (a !== -1) j = a;
         }
-        i += m[0].length - 1; // land on the "("
-        collects.push(
-          FRAGMENT_METHODS.has(method) ? true : OPAQUE_METHODS.has(method) ? false : collecting(),
-        );
-        i++; // consume the "("
+        while (j < n && /\s/.test(scope[j])) j++;
+        if (scope[j] === "(") {
+          const method = m[1];
+          if ((method === "step" || method === "poll") && collecting()) {
+            const nameM = leafName.exec(scope.slice(j + 1));
+            if (nameM) steps.push({ name: nameM[2] });
+          }
+          collects.push(
+            FRAGMENT_METHODS.has(method) ? true : OPAQUE_METHODS.has(method) ? false : collecting(),
+          );
+          i = j + 1; // consume the "("
+          continue;
+        }
+        // A property access like `.length` (no call) — skip the name only.
+        i += m[0].length;
         continue;
       }
     }
@@ -473,24 +546,14 @@ function parseTestDeclaration(
     const chainStart = callCloseIndex + 1;
     let depth = 0;
     let chainEnd = rest.length;
-    // Literal/comment-aware so a `)`/`}`/`]`/`;` inside a string, template, or
-    // comment in a step body cannot desync depth and truncate the chain early.
+    // Literal/comment/regex-aware so a `)`/`}`/`]`/`;` inside a string, template,
+    // comment, or regex literal in a step body cannot desync depth and truncate
+    // the chain early.
     let i = chainStart;
     while (i < rest.length) {
+      const adv = skipNonCode(rest, i);
+      if (adv !== -1) { i = adv; continue; }
       const c = rest[i];
-      if (c === '"' || c === "'") { i = skipString(rest, i); continue; }
-      if (c === "`") { i = skipTemplate(rest, i); continue; }
-      if (c === "/" && rest[i + 1] === "/") {
-        i += 2;
-        while (i < rest.length && rest[i] !== "\n") i++;
-        continue;
-      }
-      if (c === "/" && rest[i + 1] === "*") {
-        i += 2;
-        while (i < rest.length && !(rest[i] === "*" && rest[i + 1] === "/")) i++;
-        i += 2;
-        continue;
-      }
       if (c === "(" || c === "{" || c === "[") depth++;
       else if (c === ")" || c === "}" || c === "]") depth--;
       else if (c === ";" && depth === 0) { chainEnd = i; break; }

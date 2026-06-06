@@ -279,6 +279,28 @@ export const flow = test("g-poll")
   expect(result[0].steps).toEqual([{ name: "kick" }, { name: "await" }, { name: "verify" }]);
 });
 
+test("a regex literal with brackets in a step body does not desync the scan", () => {
+  const content = `
+export const flow = test("rx")
+  .step("first", async (ctx) => { if (/\\)\\]/.test(ctx.x)) return; })
+  .step("second", async (ctx) => { return ctx.s.replace(/[{}]/g, ""); })
+  .step("third", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "first" }, { name: "second" }, { name: "third" }]);
+});
+
+test("extracts generic calls with nested type arguments", () => {
+  const content = `
+export const flow = test("ng")
+  .step<Array<{ id: string }>>("kick", async () => [])
+  .poll<Result<Foo>>("await", async () => ({ ready: true }), { until: (_c, r) => r.ready })
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "kick" }, { name: "await" }, { name: "verify" }]);
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================
