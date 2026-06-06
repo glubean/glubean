@@ -279,6 +279,26 @@ export const flow = test("g-poll")
   expect(result[0].steps).toEqual([{ name: "kick" }, { name: "await" }, { name: "verify" }]);
 });
 
+test("a division after an object literal in a step body is not read as a regex", () => {
+  const content = `
+export const flow = test("div")
+  .step("a", async () => { const x = { n: 1 } / 2; return x; })
+  .step("b", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }]);
+});
+
+test("a regex after a block close in a step body is still read as a regex", () => {
+  const content = `
+export const flow = test("blk")
+  .step("a", async (ctx) => { if (ctx.x) {} return /[)\\]]/.test(ctx.y); })
+  .step("b", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }]);
+});
+
 test("a regex literal with brackets in a step body does not desync the scan", () => {
   const content = `
 export const flow = test("rx")

@@ -371,12 +371,16 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
   "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
   "do", "else", "yield", "await", "case",
 ]);
-function regexStartsAt(s: string, i: number): boolean {
+function regexStartsAt(s: string, i: number, lastBraceWasObject: boolean): boolean {
   let j = i - 1;
   while (j >= 0 && /\s/.test(s[j])) j--;
   if (j < 0) return true;
   const p = s[j];
   if (p === ")" || p === "]") return false;
+  // `}` is ambiguous: it ends a block (→ a following `/` is a regex, e.g.
+  // `if (x) {} /re/`) or an object literal (→ division, e.g. `{ n: 1 } / 2`).
+  // The caller tracks which kind the most-recently-closed brace was.
+  if (p === "}") return !lastBraceWasObject;
   if (/[A-Za-z0-9_$]/.test(p)) {
     let k = j;
     while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
@@ -398,11 +402,34 @@ function skipAngles(s: string, i: number): number {
 }
 
 /**
+ * Decide whether the `{` at `at` opens an object literal (vs a block statement)
+ * from the previous significant token: a value-position `{` (after `( , [ = : ?`
+ * an operator, or `return`/`yield`) is an object literal; a `{` after `) } ; { >`
+ * (incl. `=> {`), at start, or after `else/try/finally/do` is a block.
+ */
+function isObjectBracePos(s: string, at: number): boolean {
+  let j = at - 1;
+  while (j >= 0 && /\s/.test(s[j])) j--;
+  if (j < 0) return false;
+  const p = s[j];
+  if (p === ")" || p === "}" || p === ";" || p === "{" || p === ">") return false;
+  if (/[A-Za-z0-9_$]/.test(p)) {
+    let k = j;
+    while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
+    return !BLOCK_KEYWORDS.has(s.substring(k + 1, j + 1));
+  }
+  return true;
+}
+const BLOCK_KEYWORDS = new Set(["else", "try", "finally", "do"]);
+
+/**
  * If `s[i]` starts a string, template, comment, or regex literal, return the
  * index just past it; otherwise -1. Lets the chain/step scanners skip token
- * content whose brackets must not affect bracket-depth tracking.
+ * content whose brackets must not affect bracket-depth tracking. `lastBraceObj`
+ * (whether the most-recently-closed `}` was an object literal) disambiguates a
+ * `/` following `}` between regex and division.
  */
-function skipNonCode(s: string, i: number): number {
+function skipNonCode(s: string, i: number, lastBraceObj: boolean): number {
   const c = s[i];
   if (c === '"' || c === "'") return skipString(s, i);
   if (c === "`") return skipTemplate(s, i);
@@ -416,7 +443,7 @@ function skipNonCode(s: string, i: number): number {
     while (i < s.length && !(s[i] === "*" && s[i + 1] === "/")) i++;
     return Math.min(i + 2, s.length);
   }
-  if (c === "/" && regexStartsAt(s, i)) return skipRegex(s, i);
+  if (c === "/" && regexStartsAt(s, i, lastBraceObj)) return skipRegex(s, i);
   return -1;
 }
 
@@ -452,13 +479,15 @@ function extractSteps(scope: string): { name: string }[] {
   // collect, opaque-body methods force suppress, everything else inherits.
   const collects: boolean[] = [true];
   const collecting = () => collects[collects.length - 1];
+  const braceObj: boolean[] = []; // per `{`: was it an object literal?
+  let lastBraceObj = false; // kind of the most-recently-closed `}`
   const methodName = /^\.\s*([A-Za-z_$][\w$]*)/;
   const leafName = /^\s*(['"])([^'"]+)\1/;
 
   const n = scope.length;
   let i = 0;
   while (i < n) {
-    const adv = skipNonCode(scope, i);
+    const adv = skipNonCode(scope, i, lastBraceObj);
     if (adv !== -1) { i = adv; continue; }
     const c = scope[i];
     if (c === ".") {
@@ -489,8 +518,10 @@ function extractSteps(scope: string): { name: string }[] {
         continue;
       }
     }
-    if (c === "(" || c === "{" || c === "[") { collects.push(collecting()); i++; continue; }
-    if (c === ")" || c === "}" || c === "]") { if (collects.length > 1) collects.pop(); i++; continue; }
+    if (c === "{") { collects.push(collecting()); braceObj.push(isObjectBracePos(scope, i)); i++; continue; }
+    if (c === "(" || c === "[") { collects.push(collecting()); i++; continue; }
+    if (c === "}") { if (collects.length > 1) collects.pop(); lastBraceObj = braceObj.pop() ?? false; i++; continue; }
+    if (c === ")" || c === "]") { if (collects.length > 1) collects.pop(); i++; continue; }
     i++;
   }
   return steps;
@@ -549,13 +580,17 @@ function parseTestDeclaration(
     // Literal/comment/regex-aware so a `)`/`}`/`]`/`;` inside a string, template,
     // comment, or regex literal in a step body cannot desync depth and truncate
     // the chain early.
+    const braceObj: boolean[] = [];
+    let lastBraceObj = false;
     let i = chainStart;
     while (i < rest.length) {
-      const adv = skipNonCode(rest, i);
+      const adv = skipNonCode(rest, i, lastBraceObj);
       if (adv !== -1) { i = adv; continue; }
       const c = rest[i];
-      if (c === "(" || c === "{" || c === "[") depth++;
-      else if (c === ")" || c === "}" || c === "]") depth--;
+      if (c === "{") { depth++; braceObj.push(isObjectBracePos(rest, i)); }
+      else if (c === "(" || c === "[") depth++;
+      else if (c === "}") { depth--; lastBraceObj = braceObj.pop() ?? false; }
+      else if (c === ")" || c === "]") depth--;
       else if (c === ";" && depth === 0) { chainEnd = i; break; }
       i++;
     }
