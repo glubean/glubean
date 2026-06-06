@@ -299,6 +299,53 @@ export const flow = test("blk")
   expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }]);
 });
 
+test("a .poll()/.step() call inside a condition predicate is not a step", () => {
+  const content = `
+export const flow = test("pred")
+  .condition(
+    { predicate: async (ctx) => { await client.poll("status"); return true; } },
+    (b) => b.step("then-a", async () => ({})),
+    (b) => b.step("else-a", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "then-a" }, { name: "else-a" }]);
+});
+
+test("a .poll()/.step() call inside a switchCond when-predicate is not a step", () => {
+  const content = `
+export const flow = test("when")
+  .switchCond(
+    [{ when: async (ctx) => { await client.poll("x"); return true; }, then: (b) => b.step("hit", async () => ({})) }],
+    (b) => b.step("def", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "hit" }, { name: "def" }]);
+});
+
+test("a .poll()/.step() call inside a switchOn lens is not a step", () => {
+  const content = `
+export const flow = test("lens")
+  .switchOn(async (ctx) => { await client.poll("x"); return 200; })(
+    [{ value: 200, then: (b) => b.step("ok", async () => ({})) }],
+    (b) => b.step("def", async () => ({})),
+  );
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "ok" }, { name: "def" }]);
+});
+
+test("a regex literal after throw in a step body does not desync the scan", () => {
+  const content = `
+export const flow = test("thr")
+  .step("a", async (ctx) => { if (ctx.bad) throw /\\}/; })
+  .step("b", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }]);
+});
+
 test("a regex literal with brackets in a step body does not desync the scan", () => {
   const content = `
 export const flow = test("rx")

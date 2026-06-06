@@ -369,7 +369,7 @@ function skipRegex(s: string, i: number): number {
  */
 const REGEX_PRECEDING_KEYWORDS = new Set([
   "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
-  "do", "else", "yield", "await", "case",
+  "do", "else", "yield", "await", "case", "throw",
 ]);
 function regexStartsAt(s: string, i: number, lastBraceWasObject: boolean): boolean {
   let j = i - 1;
@@ -476,22 +476,21 @@ function skipNonCode(s: string, i: number, lastBraceObj: boolean): number {
  * joins.
  *
  * The set of leaves must match `flattenStepsForRegistry` (sdk builder.ts):
- *   - `.group(id, b => …)` / `.use(b => …)` and the branch fragments of
- *     `.condition` / `.switchCond` / `.switchOn` contribute their nested
- *     `.step()`/`.poll()` as REAL leaves → those bodies still collect.
+ *   - `.group(id, b => …)` / `.use(b => …)` and the `then`/default branch
+ *     fragments of `.condition` / `.switchCond` / `.switchOn` contribute their
+ *     nested `.step()`/`.poll()` as REAL leaves → those bodies still collect.
  *   - the bodies of `.step` / `.poll` / `.setup` / `.teardown` are opaque user
  *     code → a helper call there (e.g. `client.poll("job")`) is NOT a leaf.
+ *   - a branch predicate/lens is opaque too: `.switchOn(lens)` is opaque (its
+ *     cases still collect via the curried second call), and the value of a
+ *     `predicate:` / `when:` property is suppressed — `flattenStepsForRegistry`
+ *     never includes them, and (with conditionAsync) they may call I/O helpers.
  * Bracket depth is tracked literal/comment-aware so a `)`/`}`/`]` inside a
- * string, template, or comment cannot desync the scan.
- *
- * Known limit: a predicate/lens function (condition spec.predicate, switchCond
- * `when`, switchOn lens) shares the fragment-collecting scope, so a literal
- * `.step("x")`/`.poll("x")` call inside such a predicate would be counted. This
- * mirrors the original `.step`-only scan's symmetric behavior and does not occur
- * in practice (predicates return booleans/scalars, not builder chains).
+ * string, template, comment, or regex literal cannot desync the scan.
  */
-const FRAGMENT_METHODS = new Set(["group", "use", "condition", "switchCond", "switchOn"]);
-const OPAQUE_METHODS = new Set(["step", "poll", "setup", "teardown"]);
+const FRAGMENT_METHODS = new Set(["group", "use", "condition", "switchCond"]);
+const OPAQUE_METHODS = new Set(["step", "poll", "setup", "teardown", "switchOn"]);
+const OPAQUE_PROPS = new Set(["predicate", "when"]);
 
 function extractSteps(scope: string): { name: string }[] {
   const steps: { name: string }[] = [];
@@ -499,11 +498,19 @@ function extractSteps(scope: string): { name: string }[] {
   // The base frame (the builder chain itself) collects; fragment methods force
   // collect, opaque-body methods force suppress, everything else inherits.
   const collects: boolean[] = [true];
-  const collecting = () => collects[collects.length - 1];
   const braceObj: boolean[] = []; // per `{`: was it an object literal?
   let lastBraceObj = false; // kind of the most-recently-closed `}`
+  // While a `predicate:`/`when:` property value is being scanned, suppress
+  // collection until we return to its bracket depth and hit `,`/`}` (or pop
+  // out). `-1` = not suppressing.
+  let suppressDepth = -1;
+  const collecting = () => suppressDepth === -1 && collects[collects.length - 1];
   const methodName = /^\.\s*([A-Za-z_$][\w$]*)/;
+  const word = /^[A-Za-z_$][\w$]*/;
   const leafName = /^\s*(['"])([^'"]+)\1/;
+  const clearSuppressIfPopped = () => {
+    if (suppressDepth !== -1 && collects.length < suppressDepth) suppressDepth = -1;
+  };
 
   const n = scope.length;
   let i = 0;
@@ -541,8 +548,21 @@ function extractSteps(scope: string): { name: string }[] {
     }
     if (c === "{") { collects.push(collecting()); braceObj.push(isObjectBracePos(scope, i)); i++; continue; }
     if (c === "(" || c === "[") { collects.push(collecting()); i++; continue; }
-    if (c === "}") { if (collects.length > 1) collects.pop(); lastBraceObj = braceObj.pop() ?? false; i++; continue; }
-    if (c === ")" || c === "]") { if (collects.length > 1) collects.pop(); i++; continue; }
+    if (c === "}") { if (collects.length > 1) collects.pop(); lastBraceObj = braceObj.pop() ?? false; clearSuppressIfPopped(); i++; continue; }
+    if (c === ")" || c === "]") { if (collects.length > 1) collects.pop(); clearSuppressIfPopped(); i++; continue; }
+    if (c === "," && suppressDepth === collects.length) { suppressDepth = -1; i++; continue; }
+    // A bare identifier: detect `predicate:` / `when:` keys to open an opaque
+    // value region (consuming the whole word also speeds the scan).
+    if (/[A-Za-z_$]/.test(c)) {
+      const w = word.exec(scope.slice(i))![0];
+      let k = i + w.length;
+      while (k < n && /\s/.test(scope[k])) k++;
+      if (suppressDepth === -1 && OPAQUE_PROPS.has(w) && scope[k] === ":") {
+        suppressDepth = collects.length;
+      }
+      i += w.length;
+      continue;
+    }
     i++;
   }
   return steps;
