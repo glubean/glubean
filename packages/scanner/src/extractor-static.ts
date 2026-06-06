@@ -446,7 +446,7 @@ function isObjectBracePos(s: string, at: number): boolean {
   }
   return true;
 }
-const BLOCK_KEYWORDS = new Set(["else", "try", "finally", "do"]);
+const BLOCK_KEYWORDS = new Set(["else", "try", "catch", "finally", "do"]);
 
 /**
  * If `s[i]` starts a string, template, comment, or regex literal, return the

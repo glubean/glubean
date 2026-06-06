@@ -336,6 +336,16 @@ export const flow = test("lens")
   expect(result[0].steps).toEqual([{ name: "ok" }, { name: "def" }]);
 });
 
+test("an optional catch block followed by a regex in a step body does not desync the scan", () => {
+  const content = `
+export const flow = test("catchrx")
+  .step("a", async (ctx) => { try { ctx.z(); } catch {} /[;}]/.test(ctx.y); })
+  .step("b", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "a" }, { name: "b" }]);
+});
+
 test("division of a keyword-named property in a step body is not read as a regex", () => {
   const content = `
 export const flow = test("kwprop")
