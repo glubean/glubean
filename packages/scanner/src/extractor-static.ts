@@ -526,21 +526,28 @@ const OPAQUE_PROPS = new Set(["predicate", "when"]);
 
 function extractSteps(scope: string): { name: string }[] {
   const steps: { name: string }[] = [];
-  // One flag per open bracket: does a leaf .step()/.poll() at this depth count?
-  // The base frame (the builder chain itself) collects; fragment methods force
-  // collect, opaque-body methods force suppress, everything else inherits.
+  // Per open bracket: a collecting flag (does a leaf .step()/.poll() here count?)
+  // and a kind ("obj" | "block" | "paren" | "arr"). The base frame (the builder
+  // chain itself) collects; opaque-body methods force suppress; every other call
+  // inherits the parent.
   const collects: boolean[] = [true];
-  const braceObj: boolean[] = []; // per `{`: was it an object literal?
-  let lastBraceObj = false; // kind of the most-recently-closed `}`
-  // While a `predicate:`/`when:` property value is being scanned, suppress
-  // collection until we return to its bracket depth and hit `,`/`}` (or pop
-  // out). `-1` = not suppressing.
+  const kinds: string[] = ["base"];
+  let lastBraceObj = false; // whether the most-recently-closed `}` was an object
+  // While a branch predicate (`predicate:`/`when:` value, or `predicate(…){…}`
+  // method shorthand) is scanned, suppress collection until we return to its
+  // bracket depth and hit `,`/`}` (or pop out). `-1` = not suppressing.
   let suppressDepth = -1;
   const collecting = () => suppressDepth === -1 && collects[collects.length - 1];
   const methodName = /^\.\s*([A-Za-z_$][\w$]*)/;
   const word = /^[A-Za-z_$][\w$]*/;
   const leafName = /^\s*(['"])([^'"]+)\1/;
-  const clearSuppressIfPopped = () => {
+  const push = (collect: boolean, kind: string) => { collects.push(collect); kinds.push(kind); };
+  const pop = () => {
+    if (collects.length > 1) {
+      collects.pop();
+      const k = kinds.pop();
+      if (k === "obj" || k === "block") lastBraceObj = k === "obj";
+    }
     if (suppressDepth !== -1 && collects.length < suppressDepth) suppressDepth = -1;
   };
 
@@ -570,7 +577,7 @@ function extractSteps(scope: string): { name: string }[] {
           // Opaque-body methods suppress their body; every other call (fragment
           // builders included) inherits the parent — so a fragment-named helper
           // inside an opaque body stays suppressed.
-          collects.push(OPAQUE_METHODS.has(method) ? false : collecting());
+          push(OPAQUE_METHODS.has(method) ? false : collecting(), "paren");
           i = j + 1; // consume the "("
           continue;
         }
@@ -579,21 +586,28 @@ function extractSteps(scope: string): { name: string }[] {
         continue;
       }
     }
-    if (c === "{") { collects.push(collecting()); braceObj.push(isObjectBracePos(scope, i)); i++; continue; }
-    if (c === "(" || c === "[") { collects.push(collecting()); i++; continue; }
-    if (c === "}") { if (collects.length > 1) collects.pop(); lastBraceObj = braceObj.pop() ?? false; clearSuppressIfPopped(); i++; continue; }
-    if (c === ")" || c === "]") { if (collects.length > 1) collects.pop(); clearSuppressIfPopped(); i++; continue; }
+    if (c === "{") { push(collecting(), isObjectBracePos(scope, i) ? "obj" : "block"); i++; continue; }
+    if (c === "(") { push(collecting(), "paren"); i++; continue; }
+    if (c === "[") { push(collecting(), "arr"); i++; continue; }
+    if (c === ")" || c === "]" || c === "}") { pop(); i++; continue; }
     if (c === "," && suppressDepth === collects.length) { suppressDepth = -1; i++; continue; }
     // A bare identifier: detect a `predicate`/`when` branch-predicate property —
-    // either `predicate:`/`when:` (value form) or `predicate(…){…}`/`when(…){…}`
-    // (object method shorthand) — to open an opaque value region. (Consuming the
-    // whole word also speeds the scan.) `w.when(…)` in the L2 predicate DSL is a
-    // method call caught by the `.` branch above, so it never reaches here.
+    // either `predicate:`/`when:` (value form) or `predicate(…){…}` (method
+    // shorthand) — but ONLY when directly inside an object literal (a branch-spec
+    // property position), so an ordinary call to a helper named `when()` inside a
+    // fragment block is not mistaken for a predicate. (Consuming the whole word
+    // also speeds the scan.) `w.when(…)` in the L2 predicate DSL is a `.`-method
+    // call caught by the `.` branch above.
     if (/[A-Za-z_$]/.test(c)) {
       const w = word.exec(scope.slice(i))![0];
       let k = i + w.length;
       while (k < n && /\s/.test(scope[k])) k++;
-      if (suppressDepth === -1 && OPAQUE_PROPS.has(w) && (scope[k] === ":" || scope[k] === "(")) {
+      if (
+        suppressDepth === -1 &&
+        OPAQUE_PROPS.has(w) &&
+        (scope[k] === ":" || scope[k] === "(") &&
+        kinds[kinds.length - 1] === "obj"
+      ) {
         suppressDepth = collects.length;
       }
       i += w.length;

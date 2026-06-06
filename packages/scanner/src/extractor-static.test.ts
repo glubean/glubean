@@ -371,6 +371,16 @@ export const flow = test("nested-frag")
   expect(result[0].steps).toEqual([{ name: "outer" }, { name: "verify" }]);
 });
 
+test("an ordinary when()/predicate() call inside a fragment block is not a predicate", () => {
+  const content = `
+export const flow = test("helper-when")
+  .use((b) => { when(); predicate(); return b.step("real", async () => ({})); })
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([{ name: "real" }, { name: "verify" }]);
+});
+
 test("a method-shorthand branch predicate body does not collect leaves", () => {
   const content = `
 export const flow = test("shorthand")
