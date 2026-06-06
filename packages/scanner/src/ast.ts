@@ -281,7 +281,10 @@ export function findPropertyCall(root: AnyNode, name: string): AnyNode | undefin
     if (!callee) break;
     if (callee.type === "MemberExpression") {
       const property = callee.property as AnyNode;
-      if (property.type === "Identifier" && property.name === name) return current;
+      // Non-computed `.name(...)` only — `obj[name](...)` is a dynamic access.
+      if (callee.computed !== true && property.type === "Identifier" && property.name === name) {
+        return current;
+      }
       current = unwrapExpression(callee.object as AnyNode);
     } else {
       current = callee;

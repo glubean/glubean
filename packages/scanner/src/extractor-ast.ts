@@ -104,7 +104,7 @@ function extractSteps(init: AnyNode): { name: string }[] {
   walk(init, (node) => {
     if (node.type !== "CallExpression") return;
     const callee = unwrapExpression(node.callee as AnyNode);
-    if (!callee || callee.type !== "MemberExpression") return;
+    if (!callee || callee.type !== "MemberExpression" || callee.computed === true) return;
     const property = callee.property as AnyNode;
     if (property.type !== "Identifier" || property.name !== "step") return;
     const args = (node.arguments as AnyNode[] | undefined) ?? [];
@@ -159,7 +159,9 @@ function parseTestDeclaration(
   } else if (headCallee.type === "CallExpression") {
     // Curried: `test.each(data)(...)` / `test.pick(examples)(...)`.
     const factoryCallee = unwrapExpression(headCallee.callee as AnyNode);
-    if (!factoryCallee || factoryCallee.type !== "MemberExpression") return undefined;
+    if (!factoryCallee || factoryCallee.type !== "MemberExpression" || factoryCallee.computed === true) {
+      return undefined;
+    }
     const object = factoryCallee.object as AnyNode;
     const property = factoryCallee.property as AnyNode;
     if (object.type !== "Identifier" || property.type !== "Identifier") return undefined;
@@ -254,7 +256,14 @@ function findContractCall(init: AnyNode): { protocol: string; call: AnyNode } | 
     if (callee.type === "MemberExpression") {
       const object = callee.object as AnyNode;
       const property = callee.property as AnyNode;
-      if (object.type === "Identifier" && object.name === "contract" && property.type === "Identifier") {
+      // Non-computed only: `contract.http(...)`, not `contract[protocol](...)`
+      // (a computed access' property is a variable, not a literal protocol name).
+      if (
+        callee.computed !== true &&
+        object.type === "Identifier" &&
+        object.name === "contract" &&
+        property.type === "Identifier"
+      ) {
         return { protocol: property.name as string, call: node };
       }
       node = unwrapExpression(object);

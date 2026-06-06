@@ -1207,6 +1207,15 @@ export const getUser = contract.graphql("get-user", {
   expect(result[0].cases.map((c) => c.key)).toEqual(["ok", "unauth"]);
 });
 
+test("extractContractCases — computed protocol access is not a literal contract", () => {
+  // `contract[protocol](...)` is dynamic — must NOT emit bogus protocol metadata.
+  const source = `
+const protocol = "http";
+export const c = contract[protocol]("c", { endpoint: "GET /c", cases: { ok: { expect: { status: 200 } } } });
+`;
+  expect(extractContractCases(source)).toEqual([]);
+});
+
 test("extractContractCases — no contracts returns empty", () => {
   const source = `
 import { test } from "@glubean/sdk";
