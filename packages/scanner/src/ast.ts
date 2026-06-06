@@ -73,17 +73,20 @@ export function parseSource(content: string, filePath = "input.ts"): SourceFile 
   });
 
   // Babel's `decorators` (stage-3) and `decorators-legacy` are mutually
-  // exclusive and cover different syntax: legacy handles experimental decorators
-  // (`@dec export class`), parameter decorators, and `accessor` fields; the
-  // modern one handles the post-export position (`export @dec class`). Try legacy
-  // first (the common experimentalDecorators ecosystem — Angular/Nest — and the
-  // only one with parameter decorators), fall back to modern for `export @dec`.
+  // exclusive. Legacy is the only mode with PARAMETER decorators (the common
+  // experimentalDecorators ecosystem — Angular/Nest); the modern mode (option
+  // omitted) accepts BOTH `@dec export class` and `export @dec class` placements
+  // but has no parameter decorators. Try legacy first (covers param decorators +
+  // `@dec export` + `accessor`); on a parse failure (e.g. a file using the
+  // post-export `export @dec` placement), retry with modern, which accepts both
+  // placements. The only combo neither parses — `export @dec` together with a
+  // parameter decorator — isn't valid under any single TS decorator config.
   let file;
   try {
     file = parse(content, options(["decorators-legacy", "decoratorAutoAccessors"]));
   } catch (legacyError) {
     try {
-      file = parse(content, options([["decorators", { decoratorsBeforeExport: false }], "decoratorAutoAccessors"]));
+      file = parse(content, options(["decorators", "decoratorAutoAccessors"]));
     } catch {
       throw legacyError; // not a decorator-mode mismatch — surface the real error
     }

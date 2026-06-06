@@ -39,6 +39,7 @@ test("parseSource handles both decorator placements (legacy + modern) and access
     "@dec export class A { constructor(@p x: string) {} }", // legacy: @dec-export + parameter decorator
     "export @dec class B {}",                                // modern: decorator after export
     "export class C { @dec accessor x = 1; }",               // accessor field + member decorator
+    "@dec export class A {}\nexport @dec class B {}",        // both placements mixed in one file
   ]) {
     expect(() => parseSource(src)).not.toThrow();
   }
