@@ -217,9 +217,10 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 ## 10. 验收标准
 
-- `extractor-static.ts` 删除;CLI / MCP / VSCode 全部走 AST 提取(单一来源)。
-- scanner 138 + vscode parser.test 不改全过;新增 R2–R20 场景测试全过。
-- `codex review` 在本工作线收敛到零 findings。
+- **正则提取函数删除**(`extractFromSource`/`extractContractCases`/`extractPickExamples`/`createStaticExtractor` + 私有 helper);`extractor-static.ts` 瘦身为 **guards + types**(`isGlubeanFile`/`extractAliasesFromSource` 仍正则——§9.x perf 决策——加 `PickMeta`/`Contract*StaticMeta` 类型),1130→280 行。CLI / MCP 经公开 API(`@glubean/scanner/static`,已 AST-backed)自动走 AST。**P0–P2+P1-pick+P4 done。**
+- VSCode 走 AST 属 **P3**(跨仓 `/Users/peisong/glubean/vscode` + 需 scanner 发版 `v*` tag);独立后续,不阻塞已完成部分。
+- scanner conformance(test/contract/pick 90+ 用例)repoint 到 AST 后**不改全过** + 现代 TS 用例全过(151 绿);vscode parser.test 在 P3 落地。
+- `codex review` 在本工作线收敛到零 findings(P0–P4 各阶段已达成)。
 - 一个真实 dogfood 项目的 `scan` 输出与回退前(baseline)对齐(被消费字段:tests 的 id/name/tags/meta、`ContractStaticMeta`、`PickMeta`),性能无显著回归。
 
 ---
