@@ -197,9 +197,10 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 5. **体积**:+~600KB 到 scanner 运行时依赖。consolidate 后 vscode **净减**(删掉自有 ~600KB 副本,改为共享),CLI/MCP 增 ~600KB(可接受,且远小于 typescript)。
 6. **原生二进制**:无(纯 JS)。
 7. **`ast.ts` 已知限制(P0 两道 review 发现)**:
-   - **acorn-typescript 解析缺口(会抛)**:`<Foo>bar`(.ts 角括号类型断言)和 `<const T>`(TS 5.0 const 类型参数)acorn-typescript 都解析不了(前者当 JSX 抛 "Unterminated JSX",**无 plugin 选项可关**——实测 `jsx:false`/`dts:true` 无效)。Glubean 用 `expr as T`、几乎不用这两者,实际不踩。**硬要求:P1 的 `extractFromSource` 必须把 `parseSource` 抛错当"该文件不可解析 → 跳过 + warn",绝不 crash**(现 scanner 的正则 extractor 从不抛,所以这是 P1 新增的 crash 面,必须兜)。已加测试锁定。
-   - **regex 字面量体**:`normalizeSatisfies`/`_doScan` 不跳过 regex body,体内字面 `satisfies` 会在归一化文本里被改写。**对提取不可见**(`parseSource` 保留原始 `text`;提取器读字符串实参/对象属性/调用结构,不读 regex `.pattern`/`.source`)。若将来要读 regex body,在 `_doScan` 加 regex-literal skip(按前一 significant token 做 regex-vs-division)。当前有依据 defer,代码内已留注释。
-   - **已修(P0 codex)**:`forEachExportedConst` 现强制契约(跳过解构 declarator,callback 只见 Identifier);`export { satisfies as X }` 不再被 normalize 误改写。
+   - **acorn-typescript 解析缺口(会抛 → P1 skip+warn)**:以下 acorn-typescript(latest=1.4.13,**无更新版**、无原生 `satisfies`)解析不了,统一**抛错**:① `<Foo>bar`(.ts 角括号类型断言,当 JSX 抛 "Unterminated JSX",**无 plugin 选项可关**——实测 `jsx:false`/`dts:true` 无效);② `<const T>`(TS 5.0 const 类型参数);③ **`satisfies` 操作符且类型以 `(` 开头**(括号/函数类型,如 `x satisfies (a:number)=>void`)——见下条原因。Glubean 用 `expr as T` 和 `} satisfies Spec<...>`(标识符/泛型类型),这三者几乎不用。**硬要求:P1 的 `extractFromSource` 必须把 `parseSource` 抛错当"该文件不可解析 → 跳过 + warn",绝不 crash**(现 scanner 正则 extractor 从不抛,这是 P1 新增 crash 面,必须兜)。已加测试锁定。
+   - **`normalizeSatisfies` 的 `satisfies(` 故意不改写**:`satisfies` 后跟 `(` 一律当**非操作符**(它是名为 `satisfies` 的标识符的调用/声明:`satisfies(x)`、`function satisfies(){}`、方法 `satisfies()`,都能正常解析)。代价:上面第③种括号/函数类型的操作符不会被归一化 → 抛(可接受)。**这是刻意权衡**:试图按前后 token 判别 `(` 会**静默改坏**合法代码(`return satisfies(1)`、`function satisfies(){}` 被改成 `as`),corruption 比 skip 更糟。已加测试锁"不改坏"。
+   - **regex 字面量体**:`_doScan` 不跳过 regex body,体内字面 `satisfies` 会在归一化文本里被改写。**对提取不可见**(`parseSource` 保留原始 `text`;提取器不读 regex `.pattern`/`.source`)。defer,代码内留注释。
+   - **已修(P0 codex)**:`forEachExportedConst` 强制契约(跳过解构 declarator,callback 只见 Identifier);`export { satisfies as X }` 不再被误改写;`hasLeadingMarker` 现能跨过夹在 marker 与节点间的其它注释(P2 contract/flow marker 依赖)。
 8. **包级 nit(非本方案引入,出 P0 范围)**:`tsconfig.build.json` 的 `declarationMap`/`sourceMap` 让发布的 `.d.ts.map`/`.js.map` 引用未发布的 `src`(`files:["dist"]`)。全包共性,后续单独清理(给 `files` 加 `src` 或发布时去 map)。
 
 ---

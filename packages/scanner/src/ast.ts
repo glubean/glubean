@@ -229,27 +229,21 @@ function _doScan(src: string, start: number, stopOnBrace: boolean, out: string[]
       // (`export { satisfies as sat }`), NOT the operator (a type never begins
       // with the `as` keyword), so don't rewrite the identifier there.
       const nextWord = src.slice(j).match(/^[A-Za-z_$][\w$]*/)?.[0];
-      // A following `(` is ambiguous: a call to an identifier named `satisfies`
-      // (`satisfies(x)` → keep) vs the operator whose TYPE starts with `(` —
-      // a parenthesized/function type (`x satisfies (a: number) => void` →
-      // rewrite). Disambiguate by whether the PRECEDING token ends a value
-      // (then `(` opens a type), since `satisfies` here is guaranteed not to be
-      // part of a larger identifier (boundary checked above).
-      let parenOpensType = false;
-      if (next === "(") {
-        let pi = i - 1;
-        while (pi >= 0 && (src[pi] === " " || src[pi] === "\t" || src[pi] === "\n" || src[pi] === "\r")) pi--;
-        const prevSig = src[pi] ?? "";
-        parenOpensType =
-          prevSig === ")" || prevSig === "]" || prevSig === "}" ||
-          prevSig === '"' || prevSig === "'" || prevSig === "`" ||
-          prevSig === "!" || // postfix non-null assertion ends a value (`x! satisfies (T)`)
-          _IDENT_CONT.test(prevSig);
-      }
+      // A following `(` is left as a NON-operator (never rewritten): it's a call
+      // to / declaration of an identifier named `satisfies` (`satisfies(x)`,
+      // `function satisfies(...)`, a method `satisfies()`), all of which parse
+      // fine as-is. The rare operator form whose TYPE starts with `(`
+      // (`x satisfies (a: number) => void`) is therefore NOT normalized and will
+      // throw — accepted as a known acorn-typescript limitation (docs/08 §8;
+      // degrades to P1 skip+warn). This is deliberate: trying to disambiguate the
+      // `(` case by surrounding tokens silently CORRUPTS valid code (e.g.
+      // `return satisfies(1)`, `function satisfies(){}`), which is worse than a
+      // skipped file. Glubean uses `} satisfies Spec<...>` (identifier type),
+      // which IS normalized correctly.
       const isOperator =
         next !== ":" &&
         next !== "=" &&
-        (next !== "(" || parenOpensType) &&
+        next !== "(" &&
         next !== "," &&
         next !== ";" &&
         next !== ")" &&
@@ -340,23 +334,25 @@ export function forEachExportedConst(
  */
 export function hasLeadingMarker(source: SourceFile, node: AnyNode, marker: string): boolean {
   const start = node.start;
-  // Walk comments backwards to find any immediately preceding `// @marker`.
-  // We only scan comments that end at-or-before the node start.
-  const candidates = source.comments.filter((c) => c.end <= start);
+  // Comments ending at-or-before the node, in source order.
+  const candidates = source.comments
+    .filter((c) => c.end <= start)
+    .sort((a, b) => a.start - b.start);
   if (candidates.length === 0) return false;
 
-  // Walk back from the node and verify everything between the comment
-  // and `start` is whitespace. If we hit non-whitespace, the comment is
-  // attached to a different node.
+  // Walk the contiguous leading comment block from the node upward: each comment
+  // counts as "leading" as long as everything between it and the previous thing
+  // toward the node (`cursor`) is whitespace. Other comments in the block don't
+  // break the chain — so `// @marker` followed by a description comment before
+  // the export still matches (contract: only comments/whitespace may sit
+  // between the marker and the node).
+  const re = new RegExp(String.raw`^\s*@${marker}\s*$`);
+  let cursor = start;
   for (let i = candidates.length - 1; i >= 0; i--) {
     const comment = candidates[i]!;
-    const between = source.text.slice(comment.end, start);
-    if (!/^\s*$/.test(between)) break; // earlier comments definitely won't match either
-
-    if (!comment.block) {
-      const re = new RegExp(String.raw`^\s*@${marker}\s*$`);
-      if (re.test(comment.text)) return true;
-    }
+    if (!/^\s*$/.test(source.text.slice(comment.end, cursor))) break; // code between → block ended
+    if (!comment.block && re.test(comment.text)) return true;
+    cursor = comment.start;
   }
   return false;
 }

@@ -52,27 +52,29 @@ test("normalizeSatisfies preserves `satisfies` used as an export-renamed identif
   expect(() => parseSource(src)).not.toThrow();
 });
 
-test("normalizeSatisfies rewrites the operator even when the TYPE starts with `(`", () => {
-  // `x satisfies (a:number)=>void` is the operator with a parenthesized/function
-  // type; acorn-typescript can't parse raw `satisfies`, so it must be normalized.
-  // A genuine call to an identifier named `satisfies` must NOT be rewritten.
-  expect(() => parseSource("export const a = (x satisfies (n: number) => void);")).not.toThrow();
-  expect(() => parseSource("export const b = (x satisfies (Foo | Bar));")).not.toThrow();
-  expect(() => parseSource("function satisfies(y) { return y; } export const c = satisfies(1);")).not.toThrow();
-  // Operand ends with a non-null assertion `!`, then a parenthesized/function type.
-  expect(() => parseSource("export const h = (handler! satisfies (x: string) => string);")).not.toThrow();
-  // Operand ends with `)` / `]` then a parenthesized type.
-  expect(() => parseSource("export const d = (check(a) satisfies (B));")).not.toThrow();
-  expect(() => parseSource("export const e = (arr[0] satisfies (B));")).not.toThrow();
+test("a `satisfies` identifier followed by `(` is never rewritten (no corruption)", () => {
+  // Rewriting `satisfies(` would corrupt valid code. These must keep the
+  // identifier `satisfies` (callee / function name), NOT become `as`.
+  const callees: string[] = [];
+  const sf = parseSource("function satisfies(y) { return y; }\nexport const c = () => { return satisfies(1); };");
+  walk(sf.program as AnyNode, (n) => {
+    if (n.type === "CallExpression") {
+      const callee = (n as AnyNode).callee as AnyNode;
+      if (callee.type === "Identifier") callees.push(callee.name as string);
+    }
+  });
+  expect(callees).toEqual(["satisfies"]); // not "as" (would be corruption)
+  // The common Glubean operator form (identifier/generic type) IS normalized:
+  expect(() => parseSource("export const v = ({ a: 1 } satisfies Record<string, number>);")).not.toThrow();
 });
 
-test("parseSource throws on .ts angle-bracket type assertions (known acorn-typescript limit)", () => {
-  // acorn-typescript always treats `<...>` as JSX; `<Foo>bar` cannot be parsed
-  // (no plugin toggle fixes it). Glubean code uses `expr as T`. This locks the
-  // limitation so extractors (P1+) wrap parseSource in try/catch (skip + warn).
-  expect(() => parseSource("export const x = <Foo>bar;")).toThrow();
-  // The recommended form parses fine:
+test("parseSource throws on syntax acorn-typescript can't parse (known limits → P1 skip+warn)", () => {
+  // All degrade to parseSource throwing; extractors (P1+) wrap in try/catch.
+  expect(() => parseSource("export const x = <Foo>bar;")).toThrow();          // angle-bracket assertion (JSX)
+  expect(() => parseSource("export const y = (z satisfies (n: number) => void);")).toThrow(); // satisfies + paren/function TYPE
+  // The recommended/normal forms parse fine:
   expect(() => parseSource("export const x = bar as Foo;")).not.toThrow();
+  expect(() => parseSource("export const y = (z satisfies Foo);")).not.toThrow();
 });
 
 test("hasLeadingMarker detects an immediately-preceding // @marker only", () => {
