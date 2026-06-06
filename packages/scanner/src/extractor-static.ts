@@ -446,6 +446,51 @@ function isObjectBracePos(s: string, at: number): boolean {
 }
 const BLOCK_KEYWORDS = new Set(["else", "try", "catch", "finally", "do"]);
 
+/** Extract the single builder parameter name of an arrow whose `=>` is at `eqIdx`. */
+function arrowParam(s: string, eqIdx: number): string | null {
+  let j = eqIdx - 1;
+  while (j >= 0 && /\s/.test(s[j])) j--;
+  if (s[j] === ")") {
+    let depth = 0;
+    let k = j;
+    for (; k >= 0; k--) {
+      if (s[k] === ")") depth++;
+      else if (s[k] === "(") { depth--; if (depth === 0) break; }
+    }
+    const m = s.substring(k + 1, j).match(/[A-Za-z_$][\w$]*/);
+    return m ? m[0] : null;
+  }
+  if (j >= 0 && /[A-Za-z0-9_$]/.test(s[j])) {
+    let k = j;
+    while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
+    return s.substring(k + 1, j + 1);
+  }
+  return null;
+}
+
+/**
+ * Whether the receiver of a `.step()`/`.poll()` at `dotIdx` is a builder — only
+ * then is it a leaf (runtime adds a step only for calls on the TestBuilder /
+ * fragment builder). True when the receiver is a chained call `)`, the start of
+ * the chain, or a known fragment-builder parameter; false for a helper receiver
+ * like `client.poll(...)` or a property access `x.b.step(...)`.
+ */
+function isBuilderReceiver(s: string, dotIdx: number, params: { name: string }[]): boolean {
+  let j = dotIdx - 1;
+  while (j >= 0 && /\s/.test(s[j])) j--;
+  if (j < 0 || s[j] === ")") return true;
+  if (/[A-Za-z0-9_$]/.test(s[j])) {
+    let k = j;
+    while (k >= 0 && /[A-Za-z0-9_$]/.test(s[k])) k--;
+    let b = k;
+    while (b >= 0 && /\s/.test(s[b])) b--;
+    if (s[b] === ".") return false; // `x.b.step` — `b` is a property of `x`, not a param
+    const name = s.substring(k + 1, j + 1);
+    return params.some((p) => p.name === name);
+  }
+  return false;
+}
+
 /**
  * Forward lexer cursor: `st.i` is the scan position and `st.ev` tracks whether
  * the previous significant token ends a value (so the next `/` is division, not
@@ -536,6 +581,9 @@ function extractSteps(scope: string): { name: string }[] {
   // (`(b) => b.step(...)`); a leaf at that exact depth collects. Block-body
   // arrows (`(b) => { ... }`) collect via their `{` frame instead.
   const exprArrows: number[] = [];
+  // In-scope fragment-builder parameter names (with the depth they were bound at,
+  // for pruning) — a leaf only counts when called on one of these (or chained).
+  const params: { name: string; depth: number }[] = [];
   let nextBraceCollects = false; // an upcoming `=> {` block body collects
   let nextParenIsFrag = false; // an upcoming `(` is switchOn's curried cases call
   // While a `predicate:`/`when:` branch-predicate value is scanned, suppress
@@ -558,6 +606,7 @@ function extractSteps(scope: string): { name: string }[] {
     if (collects.length > 1) { collects.pop(); fragArgs.pop(); kinds.pop(); }
     if (suppressDepth !== -1 && collects.length < suppressDepth) suppressDepth = -1;
     while (exprArrows.length > 0 && exprArrows[exprArrows.length - 1] > collects.length) exprArrows.pop();
+    while (params.length > 0 && params[params.length - 1].depth > collects.length) params.pop();
     return closed;
   };
 
@@ -573,6 +622,8 @@ function extractSteps(scope: string): { name: string }[] {
     // collects — block bodies via the next `{`, expression bodies via exprArrows.
     if (c === "=" && scope[i + 1] === ">") {
       if (suppressDepth === -1 && fragArgs[fragArgs.length - 1]) {
+        const pname = arrowParam(scope, i);
+        if (pname) params.push({ name: pname, depth: collects.length });
         let p = i + 2;
         while (p < n && /\s/.test(scope[p])) p++;
         if (scope[p] === "{") nextBraceCollects = true;
@@ -598,7 +649,11 @@ function extractSteps(scope: string): { name: string }[] {
           // A method is a real builder call only when the parent is collecting;
           // the same name in an opaque body is a user helper, not a fragment.
           const parentCollecting = collecting();
-          if ((method === "step" || method === "poll") && parentCollecting) {
+          if (
+            (method === "step" || method === "poll") &&
+            parentCollecting &&
+            isBuilderReceiver(scope, i, params)
+          ) {
             const nameM = leafName.exec(scope.slice(j + 1));
             if (nameM) steps.push({ name: nameM[2] });
           }
@@ -646,6 +701,7 @@ function extractSteps(scope: string): { name: string }[] {
     if (c === ",") {
       if (suppressDepth === collects.length) suppressDepth = -1;
       if (exprArrows.length > 0 && exprArrows[exprArrows.length - 1] === collects.length) exprArrows.pop();
+      while (params.length > 0 && params[params.length - 1].depth === collects.length) params.pop();
       st.i++; st.ev = false; continue;
     }
     // A bare identifier: detect a `predicate`/`when` branch-predicate property —

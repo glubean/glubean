@@ -392,6 +392,25 @@ export const flow = test("nested-frag")
   expect(result[0].steps).toEqual([{ name: "outer" }, { name: "verify" }]);
 });
 
+test("inside a fragment callback, only calls on the builder param are leaves (not helpers)", () => {
+  const content = `
+export const flow = test("recv")
+  .group("g", (b) => { client.poll("job"); ctx.step("x"); return b.step("real", async () => ({})); })
+  .condition(
+    { predicate: () => true },
+    (b) => b.poll("p", async () => ({ ready: true }), { until: () => true }).step("after", async () => ({})),
+  )
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([
+    { name: "real" },
+    { name: "p" },
+    { name: "after" },
+    { name: "verify" },
+  ]);
+});
+
 test("a helper call in a fragment method's non-callback (spec/factory) arg is not a step", () => {
   const content = `
 export const flow = test("factoryarg")
