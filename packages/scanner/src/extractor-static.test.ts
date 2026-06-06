@@ -321,6 +321,25 @@ export const flow = test("ng")
   expect(result[0].steps).toEqual([{ name: "kick" }, { name: "await" }, { name: "verify" }]);
 });
 
+test("extracts generic calls whose type args contain arrows, string literals, or newlines", () => {
+  const content = `
+export const flow = test("ngx")
+  .step<() => string>("fn-type", async () => "x")
+  .step<{ op: ">" | "<" }>("str-type", async () => ({ op: ">" }))
+  .poll<
+    Array<number>
+  >("multiline", async () => [], { until: (_c, r) => r.length > 0 })
+  .step("verify", async () => {});
+`;
+  const result = extractFromSource(content);
+  expect(result[0].steps).toEqual([
+    { name: "fn-type" },
+    { name: "str-type" },
+    { name: "multiline" },
+    { name: "verify" },
+  ]);
+});
+
 // =============================================================================
 // test.each() — data-driven
 // =============================================================================

@@ -389,14 +389,24 @@ function regexStartsAt(s: string, i: number, lastBraceWasObject: boolean): boole
   return true;
 }
 
-/** Skip balanced `<...>` type arguments at `i` (the `<`); -1 if unbalanced. */
+/**
+ * Skip balanced `<...>` type arguments at `i` (the `<`); -1 if not a type-arg
+ * list. Handles nested generics (`Array<{ id }>>`), string/template literals
+ * whose `<`/`>` must not count, and function-type arrows (`() => T`) whose `>`
+ * belongs to `=>`, not the bracket. Spans newlines; bails on `;` (not a type).
+ */
 function skipAngles(s: string, i: number): number {
   let depth = 0;
-  for (let j = i; j < s.length; j++) {
+  let j = i;
+  while (j < s.length) {
     const c = s[j];
-    if (c === "<") depth++;
-    else if (c === ">") { depth--; if (depth === 0) return j + 1; }
-    else if (c === "\n") return -1;
+    if (c === '"' || c === "'") { j = skipString(s, j); continue; }
+    if (c === "`") { j = skipTemplate(s, j); continue; }
+    if (c === "=" && s[j + 1] === ">") { j += 2; continue; } // function-type arrow
+    if (c === "<") { depth++; j++; continue; }
+    if (c === ">") { depth--; j++; if (depth === 0) return j; continue; }
+    if (c === ";") return -1;
+    j++;
   }
   return -1;
 }
