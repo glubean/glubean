@@ -1462,6 +1462,16 @@ export const signupFlow = contract
   expect(flows[0].skip).toBeUndefined();
 });
 
+test("extractFlows supports the object overload flow({ id, skip })", () => {
+  const source = `
+export const f = contract.flow({ id: "obj-flow", skip: "wip" }).step("s", async () => {});
+`;
+  const flows = extractFlows(source);
+  expect(flows).toHaveLength(1);
+  expect(flows[0].flowId).toBe("obj-flow");
+  expect(flows[0].skip).toBe("wip");
+});
+
 test("extractFlows reads .meta({ skip }) and ignores non-flow exports", () => {
   const source = `
 export const skipped = contract.flow("later").meta({ skip: "not ready" }).step("s", async () => {});

@@ -2,7 +2,7 @@
 
 > 选型更新 2026-06-06:初稿定 acorn + acorn-typescript,后因其停更 2.5 年/不支持 `satisfies` 改用 **`@babel/parser`**(见 §2)。下文 acorn 相关段落多为背景/历史,实现以 §2 为准。
 
-状态:**P0–P2 + P1-pick + P4 已实施并 codex 收敛到零**(scanner 侧 100% AST 替代正则;scanner 151 + cli 291 + mcp 31 全绿)。**P3(vscode consolidation + 去 marker)未做** —— 跨仓 + 需发布 scanner 0.5.0,见 §12 执行手册。
+状态:**全部实施中并 codex 收敛**。scanner 侧(P0–P2+P1-pick+P4)100% AST 替代正则 + `extractFlows`,已发布 **@glubean/scanner@0.5.1**(scanner 155 + cli 291 + mcp 31 全绿)。**P3(vscode consolidation + 去 marker)进行中** —— vscode 已升 ^0.5.0、改结构提取、删自有 ast/contractAst marker 部分,见 §12。
 作者:peisong + Claude
 日期:2026-06-06
 影响包:`@glubean/scanner`(主)、`vscode`(consolidation 目标)、间接 `@glubean/cli` / `@glubean/mcp`
@@ -242,12 +242,12 @@ index.ts            ← 不变的对外签名;内部 re-export 切到 AST 实现
 
 **为什么没在这次 session 做**:① 需要把 `@glubean/scanner@0.5.0` **发布到 npm**(对外、不可逆,走 `v*` tag CI)——owner 不在,不自作主张发版;② 需要 scanner **新增 flow 结构化提取器**(去 marker 用,现在只有 contract 的);③ 跨仓大改 + vscode 自己的测试/codex 闸。
 
-**前置(已就绪)**:scanner 本地已 bump 到 `0.5.0`(published 0.4.0 不含 `/ast`,必须发 0.5.0)。
+**已完成的前置**:scanner 已发布 **0.5.1**(含 `/ast` + AST 提取器 + `extractFlows`,支持 `flow(string|FlowMeta)` 两种重载 + 案例级 `deprecated`)。`extractFlows` 已实现并测试(§步骤 2 完成)。
 
 ### 步骤
-1. **发布 scanner 0.5.0**:本 monorepo 根 commit 后,打 `v*` tag → push,`.github/workflows/publish.yml` 由 CI 发(见 memory `project_npm_token_source_zshrc`:canonical 路径是 tag→CI,不是本地 `pnpm publish`)。确认 `npm view @glubean/scanner@0.5.0 exports` 含 `./ast`。
-2. **scanner 新增 flow 提取器**(发版前一并做进 0.5.0):在 `extractor-ast.ts` 加 `extractFlows(content): FlowStaticMeta[]`——结构识别 `export const X = <fn>.flow("id")...`(`findPropertyCall(init,"flow")` 认 `.flow("id")`,meta 取 `.meta({...})`),产出 `exportName/line/flowId/skip`(对齐 vscode 现有 `AstFlow`)。**无 marker**(§9.5)。加 conformance 测试。
-3. **vscode 升依赖**:`@glubean/scanner` → `^0.5.0`,`pnpm install`(注意 frozen-lockfile,见 memory `project_pnpm_overrides_frozen_lockfile`)。
+1. ✅ **scanner 0.5.1 已发布**(本地 `pnpm publish`,scanner 无 `workspace:*` 依赖)。如需重发走 `v*` tag → CI(见 memory `project_npm_token_source_zshrc`)。
+2. ✅ **scanner `extractFlows` 已实现**(`extractor-ast.ts`,结构识别 `.flow("id")` / `.flow({id,skip})`,无 marker,§9.5)。
+3. ✅ **vscode 升依赖** `^0.5.0` + `pnpm install`(0.5.1 已装)。
 4. **vscode 去 marker + 改结构识别**:
    - contract:`parser.ts` 的 `extractMarkedContracts` 改用 scanner `extractContractCases`(结构、无 marker)。
    - flow:`extractMarkedFlows` 改用 scanner 新 `extractFlows`(无 marker)。

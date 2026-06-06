@@ -394,14 +394,20 @@ export function extractFlows(content: string): FlowStaticMeta[] {
 
     const flowCall = findPropertyCall(init, "flow");
     if (!flowCall) return;
-    const flowId = stringFromExpression((flowCall.arguments as AnyNode[] | undefined)?.[0]);
-    if (flowId === undefined) return;
+    // `flow(idOrMeta: string | FlowMeta)` — string id or `{ id, skip, ... }`.
+    const flowArg = (flowCall.arguments as AnyNode[] | undefined)?.[0];
+    const flowMetaObj = objectFromExpression(flowArg);
+    const flowId = stringFromExpression(flowArg) ?? (flowMetaObj && stringProperty(flowMetaObj, "id"));
+    if (!flowId) return;
 
+    // skip may come from the flow-meta object overload or a chained `.meta({ skip })`.
     const metaCall = findPropertyCall(init, "meta");
     const metaObj = metaCall
       ? objectFromExpression((metaCall.arguments as AnyNode[] | undefined)?.[0])
       : undefined;
-    const skip = metaObj ? stringProperty(metaObj, "skip") : undefined;
+    const skip =
+      (flowMetaObj && stringProperty(flowMetaObj, "skip")) ??
+      (metaObj ? stringProperty(metaObj, "skip") : undefined);
 
     const meta: FlowStaticMeta = { exportName, line: lineOf(statement), flowId };
     if (skip !== undefined) meta.skip = skip;
