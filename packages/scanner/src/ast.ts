@@ -243,6 +243,7 @@ function _doScan(src: string, start: number, stopOnBrace: boolean, out: string[]
         parenOpensType =
           prevSig === ")" || prevSig === "]" || prevSig === "}" ||
           prevSig === '"' || prevSig === "'" || prevSig === "`" ||
+          prevSig === "!" || // postfix non-null assertion ends a value (`x! satisfies (T)`)
           _IDENT_CONT.test(prevSig);
       }
       const isOperator =

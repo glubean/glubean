@@ -59,6 +59,11 @@ test("normalizeSatisfies rewrites the operator even when the TYPE starts with `(
   expect(() => parseSource("export const a = (x satisfies (n: number) => void);")).not.toThrow();
   expect(() => parseSource("export const b = (x satisfies (Foo | Bar));")).not.toThrow();
   expect(() => parseSource("function satisfies(y) { return y; } export const c = satisfies(1);")).not.toThrow();
+  // Operand ends with a non-null assertion `!`, then a parenthesized/function type.
+  expect(() => parseSource("export const h = (handler! satisfies (x: string) => string);")).not.toThrow();
+  // Operand ends with `)` / `]` then a parenthesized type.
+  expect(() => parseSource("export const d = (check(a) satisfies (B));")).not.toThrow();
+  expect(() => parseSource("export const e = (arr[0] satisfies (B));")).not.toThrow();
 });
 
 test("parseSource throws on .ts angle-bracket type assertions (known acorn-typescript limit)", () => {
