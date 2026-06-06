@@ -498,7 +498,7 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
             exportName: contract.exportName,
             id: `${contract.contractId}.${c.key}`,
             name: `${contract.endpoint} — ${c.key}`,
-            skip: !!c.deferred,
+            skip: !!c.deferred || !!c.deprecated,
             only: false,
             tags: [],
             requires: c.requires,

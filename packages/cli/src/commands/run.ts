@@ -568,6 +568,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
                 requires: caseItem.requires,
                 defaultRun: caseItem.defaultRun,
                 deferred: caseItem.deferred,
+                deprecated: caseItem.deprecated,
                 kind: "contract",
               },
             });
