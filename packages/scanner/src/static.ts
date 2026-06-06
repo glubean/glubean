@@ -29,8 +29,14 @@ export {
   extractFromSource,
   extractContractCases,
   extractPickExamples,
+  extractFlows,
 } from "./extractor-ast.js";
 export { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
 
 export type { ExportMeta } from "./types.js";
-export type { ContractCaseStaticMeta, ContractStaticMeta, PickMeta } from "./extractor-static.js";
+export type {
+  ContractCaseStaticMeta,
+  ContractStaticMeta,
+  FlowStaticMeta,
+  PickMeta,
+} from "./extractor-static.js";

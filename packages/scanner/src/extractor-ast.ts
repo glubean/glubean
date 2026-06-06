@@ -28,7 +28,7 @@ import {
   type AnyNode,
 } from "./ast.js";
 import type { ExportMeta } from "./types.js";
-import type { ContractCaseStaticMeta, ContractStaticMeta, PickMeta } from "./extractor-static.js";
+import type { ContractCaseStaticMeta, ContractStaticMeta, FlowStaticMeta, PickMeta } from "./extractor-static.js";
 import { resolveDataPath } from "./data-path.js";
 
 const BASE_FNS = new Set(["test", "task"]);
@@ -364,6 +364,44 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
     const feature = stringProperty(spec, "feature");
     if (feature !== undefined) meta.feature = feature;
 
+    results.push(meta);
+  });
+  return results;
+}
+
+/**
+ * Structural (marker-free) flow extraction: every `export const X = <fn>.flow("id")…`
+ * → `FlowStaticMeta`. Replaces vscode's `// @flow`-gated extractMarkedFlows — AST
+ * recognizes the `.flow("id")` call shape directly, so no magic comment is needed
+ * (aligns vscode discovery with the CLI, which never required markers). Returns []
+ * on parse error.
+ */
+export function extractFlows(content: string): FlowStaticMeta[] {
+  let source;
+  try {
+    source = parseSource(content);
+  } catch {
+    return [];
+  }
+  const results: FlowStaticMeta[] = [];
+  forEachExportedConst(source, (statement, declaration) => {
+    const exportName = (declaration.id as AnyNode | undefined)?.name as string | undefined;
+    const init = declaration.init as AnyNode | undefined;
+    if (!exportName || !init) return;
+
+    const flowCall = findPropertyCall(init, "flow");
+    if (!flowCall) return;
+    const flowId = stringFromExpression((flowCall.arguments as AnyNode[] | undefined)?.[0]);
+    if (flowId === undefined) return;
+
+    const metaCall = findPropertyCall(init, "meta");
+    const metaObj = metaCall
+      ? objectFromExpression((metaCall.arguments as AnyNode[] | undefined)?.[0])
+      : undefined;
+    const skip = metaObj ? stringProperty(metaObj, "skip") : undefined;
+
+    const meta: FlowStaticMeta = { exportName, line: lineOf(statement), flowId };
+    if (skip !== undefined) meta.skip = skip;
     results.push(meta);
   });
   return results;
