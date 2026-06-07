@@ -266,11 +266,12 @@ function _acceptTypeTests() {
     out: (s) => s,
   });
 
-  // Without accept → res is the primary CaseOutput (unknown for HTTP) →
-  // `.status` is not accessible without a narrow.
+  // Without accept → res is the primary CaseOutput: for HTTP that is now
+  // `HttpFlowCaseOutput` (ApplyCaseOutput marker), so `res.status` is accessible
+  // directly (no narrow needed). `res.body` is typed from the case's `expect.schema`
+  // when present, else `unknown`.
   fb.step(ref, {
     out: (s, res) => {
-      // @ts-expect-error res is unknown without accept; must narrow first
       const n: number = res.status;
       void n;
       return s;
