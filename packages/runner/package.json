@@ -1,6 +1,6 @@
 {
   "name": "@glubean/runner",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "glubeanRunnerProtocol": "1",
   "glubeanRunnerProtocolMinimum": "1",
