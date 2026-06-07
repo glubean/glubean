@@ -1229,13 +1229,41 @@ export const c = contract.http("c", {
   expect(extractContractCases(source)[0].cases[0].deprecated).toBe("use v2");
 });
 
-test("extractContractCases — computed protocol access is not a literal contract", () => {
-  // `contract[protocol](...)` is dynamic — must NOT emit bogus protocol metadata.
+test("extractContractCases — narrow (default) ignores .with()/custom factories (fail-closed)", () => {
+  // Default narrow: only literal contract.<protocol>(...). Scoped/custom forms
+  // are NOT statically extracted — the CLI fails closed + requires runtime import.
+  const source = `
+const stableApi = contract.http.with({ baseUrl: "x" });
+export const a = stableApi("get-user", { endpoint: "GET /u", cases: { ok: { expect: { status: 200 } } } });
+export const b = contract.http.with({ baseUrl: "y" })("create", { endpoint: "POST /c", cases: { ok: { expect: { status: 201 } } } });
+`;
+  expect(extractContractCases(source)).toEqual([]);
+});
+
+test("extractContractCases — broad: contract.http.with() scoped instances + custom factories", () => {
+  // { broad: true } (VSCode discovery): duck-type ANY <factory>("id", { cases }).
+  const source = `
+const stableApi = contract.http.with({ baseUrl: "x" });
+export const a = stableApi("get-user", { endpoint: "GET /u", cases: { ok: { expect: { status: 200 } } } });
+export const b = contract.http.with({ baseUrl: "y" })("create", { endpoint: "POST /c", cases: { ok: { expect: { status: 201 } } } });
+`;
+  const result = extractContractCases(source, { broad: true });
+  expect(result.map((c) => c.contractId).sort()).toEqual(["create", "get-user"]);
+  // protocol derived from contract.http.with → "http"; custom factory → "" (unknown).
+  expect(result.find((c) => c.contractId === "create")?.protocol).toBe("http");
+  expect(result.find((c) => c.contractId === "get-user")?.protocol).toBe("");
+});
+
+test("extractContractCases — computed protocol: narrow ignores, broad detects with unknown protocol", () => {
   const source = `
 const protocol = "http";
 export const c = contract[protocol]("c", { endpoint: "GET /c", cases: { ok: { expect: { status: 200 } } } });
 `;
-  expect(extractContractCases(source)).toEqual([]);
+  expect(extractContractCases(source)).toEqual([]); // narrow: not a literal contract.<protocol>
+  const broad = extractContractCases(source, { broad: true });
+  expect(broad).toHaveLength(1);
+  expect(broad[0].contractId).toBe("c");
+  expect(broad[0].protocol).toBe(""); // computed → no literal protocol
 });
 
 test("extractContractCases — no contracts returns empty", () => {

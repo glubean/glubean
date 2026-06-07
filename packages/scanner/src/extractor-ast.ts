@@ -248,26 +248,46 @@ export function extractFromSource(content: string, customFns?: string[]): Export
   return results;
 }
 
-/** Find the `contract.<protocol>(...)` call in a chain (object named `contract`). */
-function findContractCall(init: AnyNode): { protocol: string; call: AnyNode } | undefined {
+/**
+ * Find the contract call in a chain.
+ *
+ * - **narrow** (default): only the literal `contract.<protocol>("id", { … })`
+ *   direct form — the regex-faithful behavior the CLI/scanner depend on. The
+ *   scanner deliberately "fails closed" on scoped/custom forms (warns + requires
+ *   runtime import) rather than emit incomplete static metadata for upload (see
+ *   the graphql README "Phase 1 limitations" + GraphQL RFR).
+ * - **broad** (opt-in, for VSCode discovery): DUCK-TYPE any
+ *   `<factory>("id", { …cases… })` — `contract.http.with(defaults)(...)` scoped
+ *   instances, custom `stableApi(...)` factories, etc. (cookbook/demo use these
+ *   heavily). `protocol` is best-effort (derived from a `contract.<X>` segment;
+ *   "" when unknown).
+ */
+function findContractCall(init: AnyNode, broad: boolean): { protocol: string; call: AnyNode } | undefined {
   let node: AnyNode | undefined = unwrapExpression(init);
   while (node && node.type === "CallExpression") {
     const callee = unwrapExpression(node.callee as AnyNode);
     if (!callee) break;
-    if (callee.type === "MemberExpression") {
+
+    if (broad) {
+      // Duck-type: (string id, object literal carrying `cases`).
+      const args = node.arguments as AnyNode[] | undefined;
+      const id = stringFromExpression(args?.[0]);
+      const spec = objectFromExpression(args?.[1]);
+      if (id !== undefined && spec && objectProperty(spec, "cases")) {
+        return { protocol: deriveProtocol(callee), call: node };
+      }
+    } else if (callee.type === "MemberExpression" && callee.computed !== true) {
+      // Narrow: literal `contract.<protocol>(...)`.
       const object = callee.object as AnyNode;
       const property = callee.property as AnyNode;
-      // Non-computed only: `contract.http(...)`, not `contract[protocol](...)`
-      // (a computed access' property is a variable, not a literal protocol name).
-      if (
-        callee.computed !== true &&
-        object.type === "Identifier" &&
-        object.name === "contract" &&
-        property.type === "Identifier"
-      ) {
+      if (object.type === "Identifier" && object.name === "contract" && property.type === "Identifier") {
         return { protocol: property.name as string, call: node };
       }
-      node = unwrapExpression(object);
+    }
+
+    // Descend the chain toward the head.
+    if (callee.type === "MemberExpression") {
+      node = unwrapExpression(callee.object as AnyNode);
     } else if (callee.type === "CallExpression") {
       node = callee;
     } else {
@@ -275,6 +295,26 @@ function findContractCall(init: AnyNode): { protocol: string; call: AnyNode } | 
     }
   }
   return undefined;
+}
+
+/** Best-effort protocol from a `contract.<X>` segment in a callee chain; "" if none. */
+function deriveProtocol(callee: AnyNode): string {
+  let c: AnyNode | undefined = unwrapExpression(callee);
+  while (c) {
+    if (c.type === "MemberExpression" && c.computed !== true) {
+      const object = c.object as AnyNode;
+      const property = c.property as AnyNode;
+      if (object.type === "Identifier" && object.name === "contract" && property.type === "Identifier") {
+        return property.name as string; // contract.<X>
+      }
+      c = unwrapExpression(object); // e.g. contract.http.with → descend to contract.http
+    } else if (c.type === "CallExpression") {
+      c = unwrapExpression(c.callee as AnyNode); // .with(defaults) → its callee
+    } else {
+      break;
+    }
+  }
+  return "";
 }
 
 const _REQUIRES = new Set(["headless", "browser", "out-of-band"]);
@@ -326,13 +366,21 @@ function readCases(casesObj: AnyNode): ContractCaseStaticMeta[] {
 }
 
 /**
- * AST replacement for the regex `extractContractCases`. Extracts
- * `contract.<protocol>("id", { endpoint, description, feature, cases })` exports
- * → `ContractStaticMeta[]` (same fields the regex set: contract id/exportName/
- * line/endpoint/protocol/description/feature + per-case key/line/description/
- * expectStatus/deferred/requires/defaultRun/given). Returns [] on parse error.
+ * Extract `<factory>("id", { endpoint, description, feature, cases })` contract
+ * exports → `ContractStaticMeta[]` (contract id/exportName/line/endpoint/protocol/
+ * description/feature + per-case key/line/description/expectStatus/deferred/
+ * deprecated/requires/defaultRun/given). Returns [] on parse error.
+ *
+ * @param opts.broad - When true, duck-type ANY factory (scoped `.with()` /
+ *   custom `*Api`) for discovery (VSCode). Default false: only the literal
+ *   `contract.<protocol>(...)` form, so the CLI/scanner upload path keeps its
+ *   deliberate "fail closed on scoped/custom forms" discipline.
  */
-export function extractContractCases(content: string): ContractStaticMeta[] {
+export function extractContractCases(
+  content: string,
+  opts?: { broad?: boolean },
+): ContractStaticMeta[] {
+  const broad = opts?.broad === true;
   let source;
   try {
     source = parseSource(content);
@@ -345,7 +393,7 @@ export function extractContractCases(content: string): ContractStaticMeta[] {
     const init = declaration.init as AnyNode | undefined;
     if (!exportName || !init) return;
 
-    const found = findContractCall(init);
+    const found = findContractCall(init, broad);
     if (!found) return;
     const args = (found.call.arguments as AnyNode[] | undefined) ?? [];
     const contractId = stringFromExpression(args[0]);

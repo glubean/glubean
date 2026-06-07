@@ -2,7 +2,7 @@
 
 > 选型更新 2026-06-06:初稿定 acorn + acorn-typescript,后因其停更 2.5 年/不支持 `satisfies` 改用 **`@babel/parser`**(见 §2)。下文 acorn 相关段落多为背景/历史,实现以 §2 为准。
 
-状态:**scanner 侧完成(P0–P2+P1-pick+P4)+ 已发布 `@glubean/scanner@0.5.1`**(157 + cli 291 + mcp 31 全绿,各阶段 codex 零)。**P3(vscode consolidation + 去 marker)尝试后回退** —— 撞上一个真实阻塞:vscode 的合约检测是**宽口径鸭子类型**(任意 `<factory>("id",{cases})`,含 `.with()` scoped 实例 + `stableApi`/`orderApi` 等自定义工厂,cookbook/demo 实际大量使用),而 scanner 的 `extractContractCases` 是**窄口径**(忠于正则的 `contract.<protocol>`)。直接 consolidate 会**回退** vscode 的合约发现。这是个需要 **owner 拍板的产品决策**(是否把 scanner 静态合约检测放宽到鸭子类型,牵涉 CLI/MCP 元数据 + `protocol` 字段语义 + 此前 codex 提的 computed-protocol),不擅自改。详见 §12。vscode 已回退到工作态(99 测试全绿,scanner 0.3.0)。
+状态:**scanner 侧完成(P0–P2+P1-pick+P4)+ 合约检测放宽(opt-in)+ 已发布 `@glubean/scanner@0.5.2`**(159 + cli 291 + mcp 31 全绿,各阶段 codex 零)。owner 已决策**放宽**:`extractContractCases(content, { broad: true })` 鸭子类型认任意 `<factory>("id",{cases})`(`.with()` scoped + 自定义 `*Api` 工厂),供 **VSCode 发现**用;**默认仍窄口径**(`contract.<protocol>`),保住 CLI/scanner 的"对 scoped/custom 形式 fail-closed"既定纪律(graphql README/RFR 背书)。**P3 vscode 落地(改用 `{broad:true}` + 去 marker + 删自有 ast/contractAst + 迁移 vscode 测试)仍待做**(跨仓 + vscode 测试需按新行为迁移),详见 §12。vscode 当前在工作态(99 测试全绿,scanner 0.3.0)。
 作者:peisong + Claude
 日期:2026-06-06
 影响包:`@glubean/scanner`(主)、`vscode`(consolidation 目标)、间接 `@glubean/cli` / `@glubean/mcp`
