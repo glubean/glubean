@@ -1219,6 +1219,15 @@ export const getUser = contract.graphql("get-user", {
   expect(result[0].cases.map((c) => c.key)).toEqual(["ok", "unauth"]);
 });
 
+test("extractContractCases — preserves reference/shorthand case keys (value not inline object)", () => {
+  const source = `
+const ok = defineHttpCase({ expect: { status: 200 } });
+export const c = contract.http("c", { endpoint: "GET /c", cases: { ok, notFound: shared } });
+`;
+  const cases = extractContractCases(source)[0].cases;
+  expect(cases.map((x) => x.key)).toEqual(["ok", "notFound"]); // keys kept even as references
+});
+
 test("extractContractCases — reads case-level deprecated", () => {
   const source = `
 export const c = contract.http("c", {

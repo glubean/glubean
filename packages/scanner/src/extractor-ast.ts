@@ -327,8 +327,15 @@ function readCases(casesObj: AnyNode): ContractCaseStaticMeta[] {
   for (const property of properties) {
     if (property.type !== "ObjectProperty") continue;
     const key = propertyNameText(property);
+    if (key === undefined) continue;
     const body = objectFromExpression(property.value as AnyNode);
-    if (key === undefined || !body) continue;
+    if (!body) {
+      // Reference / shorthand case value (`cases: { ok }` or `ok: sharedCase`):
+      // the case body isn't an inline object, so per-case fields can't be read,
+      // but the KEY is still a real case — preserve it (VSCode discovery needs it).
+      out.push({ key, line: lineOf((property.key as AnyNode) ?? (property.value as AnyNode)) });
+      continue;
+    }
 
     const meta: ContractCaseStaticMeta = { key, line: lineOf(property.value as AnyNode) };
 
