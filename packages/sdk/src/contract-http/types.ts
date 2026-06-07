@@ -141,6 +141,16 @@ export type HttpStaticBody =
  * don't need the factory; the runtime invariants are unaffected either
  * way (this is a typing improvement only).
  *
+ * **Typed flow `res.body`**: to get a typed response in a `.step`/`.poll` lens
+ * (`res.body: T` instead of `unknown`), the case's response type must reach
+ * `.case(k)`. Declare it via the SECOND generic — `defineHttpCase<Needs, T>(...)`
+ * — or omit BOTH generics and let it infer from `expect.schema`
+ * (`defineHttpCase({ ..., expect: { schema } })`). The `defineHttpCase<Needs>`
+ * form (Needs explicit, response omitted) leaves `res.body: unknown`: TS does not
+ * infer the response generic once `Needs` is supplied, and the `Needs` generic is
+ * required for the action-field drift-locking — so the two can't both be inferred.
+ * Pass the response generic when you want it typed.
+ *
  * @example
  * ```ts
  * import { defineHttpCase } from "@glubean/sdk";
@@ -164,19 +174,9 @@ export type HttpStaticBody =
  *
  * @param c The case spec to validate. Returned verbatim.
  */
-// Form 1: response type declared explicitly via the second generic.
-export function defineHttpCase<Needs, T>(c: ContractCase<T, Needs>): ContractCase<T, Needs>;
-// Form 2: response type INFERRED from the case literal's `expect.schema`. `const C`
-// captures the literal (so `expect.schema: SchemaLike<T>` survives) even when
-// `Needs` is given explicitly — otherwise a `defineHttpCase<Needs>(...)` call
-// would drop the response type to `unknown` (TS doesn't infer a defaulted generic
-// once any type arg is supplied). This keeps the recommended needs-path typed for
-// flow lenses (InferHttpCaseResponse).
-export function defineHttpCase<
-  Needs = void,
-  const C extends ContractCase<unknown, Needs> = ContractCase<unknown, Needs>,
->(c: C): C;
-export function defineHttpCase(c: unknown): unknown {
+export function defineHttpCase<Needs = void, T = unknown>(
+  c: ContractCase<T, Needs>,
+): ContractCase<T, Needs> {
   return c;
 }
 
@@ -459,7 +459,11 @@ export type HttpProtocolContract<Cases extends Record<string, ContractCase<any, 
  * `contract.http.with("name", defaults)`.
  */
 export interface HttpContractFactory {
-  <Cases extends Record<string, ContractCase<any, any>>>(
+  // `const Cases` preserves each case's literal type (esp. a pre-typed
+  // `defineHttpCase(...)` case's `expect.schema` response) through the `api(id,
+  // {cases})` call — without it the cases object widens to `ContractCase<any,any>`
+  // and `.case(k)` → flow `res.body` falls back to `unknown`.
+  <const Cases extends Record<string, ContractCase<any, any>>>(
     id: string,
     spec: HttpContractSpec<Cases>,
   ): HttpProtocolContract<Cases>;
