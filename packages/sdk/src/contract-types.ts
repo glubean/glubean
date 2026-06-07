@@ -697,7 +697,7 @@ export interface ProtocolContract<
     key: K,
   ): ContractCaseRef<
     InferCaseInput<Cases[K]>,
-    InferOutput<PayloadSchemas>,
+    ApplyCaseOutput<PayloadSchemas, Cases[K]>,
     InferAcceptKey<PayloadSchemas>,
     InferRawOutcome<PayloadSchemas, InferOutput<PayloadSchemas>>
   >;
@@ -740,6 +740,39 @@ export type InferCaseInput<C> = C extends {
 
 /** Adapter-defined helper: extract the "case output" shape from PayloadSchemas. */
 export type InferOutput<_PayloadSchemas> = unknown;
+
+/**
+ * Per-case flow `CaseOutput` (the type of `res` in a `.step`/`.poll` `out`/`until`
+ * lens, sans `accept`). Adapters that carry a `__caseOutputShape` marker on their
+ * `PayloadSchemas` (HTTP = `HttpFlowCaseOutput`) get that shape with its `body`
+ * replaced by THIS case's validated response (`ExtractCaseResponse`); adapters
+ * without the marker fall back to `InferOutput`. Computed INSIDE the base `.case()`
+ * (not a subtype override) so HTTP contracts stay assignable to the base
+ * `ProtocolContract` while still typing `res.body` per case.
+ */
+export type ApplyCaseOutput<PayloadSchemas, Case> = PayloadSchemas extends {
+  readonly __caseOutputShape?: infer Shape;
+}
+  ? [unknown] extends [Shape]
+    ? InferOutput<PayloadSchemas>
+    : Shape extends { body: unknown }
+      ? Omit<Shape, "body"> & { body: ExtractCaseResponse<Case> }
+      : InferOutput<PayloadSchemas>
+  : InferOutput<PayloadSchemas>;
+
+/**
+ * A case's validated response body — ONLY from a PRESENT `expect.schema` (matched
+ * as required, not `schema?:`). A docs-only `expect.example`, an explicit response
+ * generic with no schema value, or any schema-less case stays `unknown`, so a flow
+ * lens never types a body the runtime didn't validate.
+ */
+export type ExtractCaseResponse<Case> = Case extends {
+  expect: { schema: SchemaLike<infer S> };
+}
+  ? [unknown] extends [S]
+    ? unknown
+    : S
+  : unknown;
 
 /**
  * Adapter-defined helper: the element type of a step's `accept` list (the

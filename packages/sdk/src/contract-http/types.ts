@@ -14,6 +14,7 @@ import type { HttpClient, SchemaLike, TestContext } from "../types.js";
 import type {
   BaseCaseSpec,
   Extensions,
+  ProtocolContract,
 } from "../contract-types.js";
 
 // =============================================================================
@@ -141,14 +142,16 @@ export type HttpStaticBody =
  * don't need the factory; the runtime invariants are unaffected either
  * way (this is a typing improvement only).
  *
- * **Typed flow `res.body`**: to get a typed response in a `.step`/`.poll` lens
- * (`res.body: T` instead of `unknown`), call with NO explicit generics —
- * `defineHttpCase({ ..., expect: { schema } })` (Form A). That captures the case
- * literal, so its `expect.schema` presence is visible and the flow lens types
- * `res.body` from the schema — and ONLY from a real schema (a docs-only
- * `expect.example` does not). The explicit `<Needs>` / `<Needs, T>` forms (Form B)
- * keep the action-field drift-locking but return the nominal `ContractCase<T,
- * Needs>`, which erases schema presence, so `res.body` stays `unknown` there.
+ * **Typed flow `res.body`**: a `.step`/`.poll` lens types `res.body` from a case's
+ * `expect.schema` (core's `ApplyCaseOutput`/`ExtractCaseResponse`) when the case is
+ * written as an INLINE literal in the spec (`api(id, { cases: { ok: { ...,
+ * expect: { schema } } } })`) — the literal keeps the `schema` key visible, and
+ * ONLY a real schema types it (a docs-only `expect.example` does not).
+ * `defineHttpCase(...)` returns the nominal `ContractCase<T, Needs>` (which erases
+ * schema presence for drift-locking), so a case routed through it leaves flow
+ * `res.body` as `unknown` — that's the trade for its compile-time case-shape +
+ * needs-drift checks. Use inline cases for typed flow lenses; use `defineHttpCase`
+ * when you want the action-field drift guard.
  *
  * @example
  * ```ts
@@ -173,17 +176,9 @@ export type HttpStaticBody =
  *
  * @param c The case spec to validate. Returned verbatim.
  */
-// Form A (no explicit generics): capture the case LITERAL via `const C` so its
-// `expect.schema` PRESENCE survives — the only form that yields a typed, SOUND flow
-// `res.body` (typed iff a real response schema exists; see InferHttpCaseResponse).
-// Listed first so a bare `defineHttpCase({...})` picks it.
-export function defineHttpCase<const C extends ContractCase<unknown, unknown>>(c: C): C;
-// Form B (explicit `<Needs>` / `<Needs, T>`): keeps the Needs-locking generic for
-// drift-checking action fields. Returns the nominal `ContractCase<T, Needs>`, which
-// does NOT record schema presence — so flow `res.body` stays `unknown` here (use
-// Form A for a typed response). Back-compat for existing call sites.
-export function defineHttpCase<Needs, T = unknown>(c: ContractCase<T, Needs>): ContractCase<T, Needs>;
-export function defineHttpCase(c: unknown): unknown {
+export function defineHttpCase<Needs = void, T = unknown>(
+  c: ContractCase<T, Needs>,
+): ContractCase<T, Needs> {
   return c;
 }
 
@@ -308,14 +303,16 @@ export interface HttpPayloadSchemas {
   security?: HttpSecurityScheme;
 
   /**
-   * Type-only markers read by core's `InferAcceptKey` / `InferRawOutcome` hooks
-   * so a flow step's `accept` is typed as `number` (status) and, when present,
-   * `out`'s `res` becomes the raw `HttpFlowCaseOutput`. NEVER set at runtime —
-   * they exist purely so core stays protocol-agnostic while HTTP supplies the
-   * concrete types.
+   * Type-only markers read by core's `InferAcceptKey` / `InferRawOutcome` /
+   * `ApplyCaseOutput` hooks so a flow step's `accept` is typed as `number`
+   * (status), `out`'s `res` becomes the raw `HttpFlowCaseOutput` under `accept`,
+   * and the primary `out`/`until` `res` is `HttpFlowCaseOutput` with `body` typed
+   * from the case's `expect.schema`. NEVER set at runtime — they exist purely so
+   * core stays protocol-agnostic while HTTP supplies the concrete types.
    */
   readonly __acceptKey?: number;
   readonly __rawOutcome?: HttpFlowCaseOutput;
+  readonly __caseOutputShape?: HttpFlowCaseOutput;
 }
 
 /**
@@ -403,10 +400,10 @@ export type InferHttpOutput<_P = HttpPayloadSchemas> = {
 // Flow step output from HTTP adapter.executeCaseInFlow
 // =============================================================================
 
-export interface HttpFlowCaseOutput<Body = unknown> {
+export interface HttpFlowCaseOutput {
   status: number;
   headers: NormalizedHeaders;
-  body: Body;
+  body: unknown;
 }
 
 /**
@@ -415,48 +412,6 @@ export interface HttpFlowCaseOutput<Body = unknown> {
  * Used to type the flow lens `res.body` per-case (so `.step`/`.poll` lenses get
  * `res.body: T` instead of `unknown` — no cast needed).
  */
-// Type a flow's `res.body` ONLY from a PRESENT, validated `expect.schema`. The
-// `schema` key is matched as REQUIRED (not `schema?:`) so two unsound paths stay
-// `unknown`: (1) a case with a docs-only `expect.example` but no schema (the literal
-// simply lacks the `schema` key), and (2) a nominal `ContractCase<T, Needs>` (from
-// `defineHttpCase<Needs, T>`), whose `schema?:` is optional and so fails the
-// required match even though `T` is set. Only a literal that actually carries a
-// `schema` value (Form A `defineHttpCase({...})` or an inline case) types `res.body`.
-export type InferHttpCaseResponse<C> = C extends {
-  expect: { schema: SchemaLike<infer S> };
-}
-  ? [unknown] extends [S]
-    ? unknown
-    : S
-  : unknown;
-
-/**
- * HTTP-specialized ProtocolContract: same as the core contract, but `.case(k)`
- * carries the per-case response type into the flow `CaseOutput` so lens authors
- * get `res.body` typed from `expect.schema`. (The core `.case` leaves
- * `CaseOutput = unknown` because the output SHAPE is adapter-specific; HTTP wires
- * it here.) `accept`-mode still yields the raw `HttpFlowCaseOutput` (body
- * `unknown`) to force status narrowing before reading `body`.
- */
-export type HttpProtocolContract<Cases extends Record<string, ContractCase<any, any>>> = Omit<
-  import("../contract-types.js").ProtocolContract<
-    HttpContractSpec<Cases>,
-    HttpPayloadSchemas,
-    HttpContractMeta,
-    Cases
-  >,
-  "case"
-> & {
-  case<K extends keyof Cases & string>(
-    key: K,
-  ): import("../contract-types.js").ContractCaseRef<
-    import("../contract-types.js").InferCaseInput<Cases[K]>,
-    HttpFlowCaseOutput<InferHttpCaseResponse<Cases[K]>>,
-    import("../contract-types.js").InferAcceptKey<HttpPayloadSchemas>,
-    HttpFlowCaseOutput
-  >;
-};
-
 // =============================================================================
 // Factory types
 // =============================================================================
@@ -466,14 +421,14 @@ export type HttpProtocolContract<Cases extends Record<string, ContractCase<any, 
  * `contract.http.with("name", defaults)`.
  */
 export interface HttpContractFactory {
-  // `const Cases` preserves each case's literal type (esp. a pre-typed
-  // `defineHttpCase(...)` case's `expect.schema` response) through the `api(id,
-  // {cases})` call — without it the cases object widens to `ContractCase<any,any>`
-  // and `.case(k)` → flow `res.body` falls back to `unknown`.
+  // `const Cases` preserves each case's literal type — esp. an inline case's
+  // `expect.schema` — through the `api(id, {cases})` call. Without it the cases
+  // object widens to `ContractCase<any,any>` and core's `ApplyCaseOutput` (which
+  // reads `Cases[K].expect.schema`) falls back to `unknown` for flow `res.body`.
   <const Cases extends Record<string, ContractCase<any, any>>>(
     id: string,
     spec: HttpContractSpec<Cases>,
-  ): HttpProtocolContract<Cases>;
+  ): ProtocolContract<HttpContractSpec<Cases>, HttpPayloadSchemas, HttpContractMeta, Cases>;
   with(name: string, defaults: HttpContractDefaults): HttpContractFactory;
 }
 
