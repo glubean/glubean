@@ -142,14 +142,13 @@ export type HttpStaticBody =
  * way (this is a typing improvement only).
  *
  * **Typed flow `res.body`**: to get a typed response in a `.step`/`.poll` lens
- * (`res.body: T` instead of `unknown`), the case's response type must reach
- * `.case(k)`. Declare it via the SECOND generic — `defineHttpCase<Needs, T>(...)`
- * — or omit BOTH generics and let it infer from `expect.schema`
- * (`defineHttpCase({ ..., expect: { schema } })`). The `defineHttpCase<Needs>`
- * form (Needs explicit, response omitted) leaves `res.body: unknown`: TS does not
- * infer the response generic once `Needs` is supplied, and the `Needs` generic is
- * required for the action-field drift-locking — so the two can't both be inferred.
- * Pass the response generic when you want it typed.
+ * (`res.body: T` instead of `unknown`), call with NO explicit generics —
+ * `defineHttpCase({ ..., expect: { schema } })` (Form A). That captures the case
+ * literal, so its `expect.schema` presence is visible and the flow lens types
+ * `res.body` from the schema — and ONLY from a real schema (a docs-only
+ * `expect.example` does not). The explicit `<Needs>` / `<Needs, T>` forms (Form B)
+ * keep the action-field drift-locking but return the nominal `ContractCase<T,
+ * Needs>`, which erases schema presence, so `res.body` stays `unknown` there.
  *
  * @example
  * ```ts
@@ -174,9 +173,17 @@ export type HttpStaticBody =
  *
  * @param c The case spec to validate. Returned verbatim.
  */
-export function defineHttpCase<Needs = void, T = unknown>(
-  c: ContractCase<T, Needs>,
-): ContractCase<T, Needs> {
+// Form A (no explicit generics): capture the case LITERAL via `const C` so its
+// `expect.schema` PRESENCE survives — the only form that yields a typed, SOUND flow
+// `res.body` (typed iff a real response schema exists; see InferHttpCaseResponse).
+// Listed first so a bare `defineHttpCase({...})` picks it.
+export function defineHttpCase<const C extends ContractCase<unknown, unknown>>(c: C): C;
+// Form B (explicit `<Needs>` / `<Needs, T>`): keeps the Needs-locking generic for
+// drift-checking action fields. Returns the nominal `ContractCase<T, Needs>`, which
+// does NOT record schema presence — so flow `res.body` stays `unknown` here (use
+// Form A for a typed response). Back-compat for existing call sites.
+export function defineHttpCase<Needs, T = unknown>(c: ContractCase<T, Needs>): ContractCase<T, Needs>;
+export function defineHttpCase(c: unknown): unknown {
   return c;
 }
 
@@ -408,12 +415,15 @@ export interface HttpFlowCaseOutput<Body = unknown> {
  * Used to type the flow lens `res.body` per-case (so `.step`/`.poll` lenses get
  * `res.body: T` instead of `unknown` — no cast needed).
  */
-// ONLY from `expect.schema` (the validated response). Deliberately NOT from the
-// nominal `ContractCase<T>` generic — that `T` also types `expect.example`, so a
-// schema-less case with a docs-only example would otherwise get a typed (but
-// UNVALIDATED) `res.body`. Schema-less cases stay `unknown`.
+// Type a flow's `res.body` ONLY from a PRESENT, validated `expect.schema`. The
+// `schema` key is matched as REQUIRED (not `schema?:`) so two unsound paths stay
+// `unknown`: (1) a case with a docs-only `expect.example` but no schema (the literal
+// simply lacks the `schema` key), and (2) a nominal `ContractCase<T, Needs>` (from
+// `defineHttpCase<Needs, T>`), whose `schema?:` is optional and so fails the
+// required match even though `T` is set. Only a literal that actually carries a
+// `schema` value (Form A `defineHttpCase({...})` or an inline case) types `res.body`.
 export type InferHttpCaseResponse<C> = C extends {
-  expect?: { schema?: SchemaLike<infer S> };
+  expect: { schema: SchemaLike<infer S> };
 }
   ? [unknown] extends [S]
     ? unknown
