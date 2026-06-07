@@ -2,7 +2,12 @@
 
 > 选型更新 2026-06-06:初稿定 acorn + acorn-typescript,后因其停更 2.5 年/不支持 `satisfies` 改用 **`@babel/parser`**(见 §2)。下文 acorn 相关段落多为背景/历史,实现以 §2 为准。
 
-状态:**scanner 侧完成(P0–P2+P1-pick+P4)+ 合约检测放宽(opt-in)+ 已发布 `@glubean/scanner@0.5.2`**(159 + cli 291 + mcp 31 全绿,各阶段 codex 零)。owner 已决策**放宽**:`extractContractCases(content, { broad: true })` 鸭子类型认任意 `<factory>("id",{cases})`(`.with()` scoped + 自定义 `*Api` 工厂),供 **VSCode 发现**用;**默认仍窄口径**(`contract.<protocol>`),保住 CLI/scanner 的"对 scoped/custom 形式 fail-closed"既定纪律(graphql README/RFR 背书)。**P3 vscode 落地(改用 `{broad:true}` + 去 marker + 删自有 ast/contractAst + 迁移 vscode 测试)仍待做**(跨仓 + vscode 测试需按新行为迁移),详见 §12。vscode 当前在工作态(99 测试全绿,scanner 0.3.0)。
+状态:**全部完成(P0–P4 + P3 vscode consolidation),codex 全清。**
+- scanner 侧 100% AST 替代正则 + `extractFlows` + 合约检测放宽(`{broad:true}` opt-in,默认窄口径保 CLI fail-closed 纪律)→ 发布 **`@glubean/scanner@0.5.2`**(159 测试)。
+- cli 291 / mcp 31 全绿(经公开 API 走 AST + `deprecated` 穿透)。
+- **runner 0.4.1 发布**(对齐 transitive scanner 0.5.2,杜绝混版)。
+- **P3 vscode 落地**:全静态提取走 `@glubean/scanner`(test/pick + contract `{broad:true}` + flow),去 `@contract`/`@flow` marker,删自有 `ast.ts`、`contractAst` 瘦成 bootstrap/cross-file、`dataDrivenRows` 改 babel 节点形状,删 acorn 依赖。vscode **442/443 测试过**(1 个失败是**既有的、与本次无关**的 snippets choice-placeholder 测试),tsc+esbuild 干净,**codex 清**。
+各阶段 codex 收敛到零(condition/switch 工作线授权不限轮次)。
 作者:peisong + Claude
 日期:2026-06-06
 影响包:`@glubean/scanner`(主)、`vscode`(consolidation 目标)、间接 `@glubean/cli` / `@glubean/mcp`
