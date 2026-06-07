@@ -386,11 +386,52 @@ export type InferHttpOutput<_P = HttpPayloadSchemas> = {
 // Flow step output from HTTP adapter.executeCaseInFlow
 // =============================================================================
 
-export interface HttpFlowCaseOutput {
+export interface HttpFlowCaseOutput<Body = unknown> {
   status: number;
   headers: NormalizedHeaders;
-  body: unknown;
+  body: Body;
 }
+
+/**
+ * Extract a case's primary response body type from its `expect.schema`
+ * (`SchemaLike<T>`). Falls back to `unknown` when the case declares no schema.
+ * Used to type the flow lens `res.body` per-case (so `.step`/`.poll` lenses get
+ * `res.body: T` instead of `unknown` — no cast needed).
+ */
+export type InferHttpCaseResponse<C> = C extends {
+  expect?: { schema?: SchemaLike<infer T> };
+}
+  ? [unknown] extends [T]
+    ? unknown
+    : T
+  : unknown;
+
+/**
+ * HTTP-specialized ProtocolContract: same as the core contract, but `.case(k)`
+ * carries the per-case response type into the flow `CaseOutput` so lens authors
+ * get `res.body` typed from `expect.schema`. (The core `.case` leaves
+ * `CaseOutput = unknown` because the output SHAPE is adapter-specific; HTTP wires
+ * it here.) `accept`-mode still yields the raw `HttpFlowCaseOutput` (body
+ * `unknown`) to force status narrowing before reading `body`.
+ */
+export type HttpProtocolContract<Cases extends Record<string, ContractCase<any, any>>> = Omit<
+  import("../contract-types.js").ProtocolContract<
+    HttpContractSpec<Cases>,
+    HttpPayloadSchemas,
+    HttpContractMeta,
+    Cases
+  >,
+  "case"
+> & {
+  case<K extends keyof Cases & string>(
+    key: K,
+  ): import("../contract-types.js").ContractCaseRef<
+    import("../contract-types.js").InferCaseInput<Cases[K]>,
+    HttpFlowCaseOutput<InferHttpCaseResponse<Cases[K]>>,
+    import("../contract-types.js").InferAcceptKey<HttpPayloadSchemas>,
+    HttpFlowCaseOutput
+  >;
+};
 
 // =============================================================================
 // Factory types
@@ -404,12 +445,7 @@ export interface HttpContractFactory {
   <Cases extends Record<string, ContractCase<any, any>>>(
     id: string,
     spec: HttpContractSpec<Cases>,
-  ): import("../contract-types.js").ProtocolContract<
-    HttpContractSpec<Cases>,
-    HttpPayloadSchemas,
-    HttpContractMeta,
-    Cases
-  >;
+  ): HttpProtocolContract<Cases>;
   with(name: string, defaults: HttpContractDefaults): HttpContractFactory;
 }
 
