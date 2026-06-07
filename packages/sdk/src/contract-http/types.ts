@@ -408,19 +408,16 @@ export interface HttpFlowCaseOutput<Body = unknown> {
  * Used to type the flow lens `res.body` per-case (so `.step`/`.poll` lenses get
  * `res.body: T` instead of `unknown` — no cast needed).
  */
+// ONLY from `expect.schema` (the validated response). Deliberately NOT from the
+// nominal `ContractCase<T>` generic — that `T` also types `expect.example`, so a
+// schema-less case with a docs-only example would otherwise get a typed (but
+// UNVALIDATED) `res.body`. Schema-less cases stay `unknown`.
 export type InferHttpCaseResponse<C> = C extends {
   expect?: { schema?: SchemaLike<infer S> };
 }
   ? [unknown] extends [S]
-    ? InferResponseFromGeneric<C> // schema typed `unknown` → try the nominal generic
-    : S
-  : InferResponseFromGeneric<C>;
-
-/** Fallback: read the response type off `ContractCase<T, Needs>`'s first generic. */
-type InferResponseFromGeneric<C> = C extends ContractCase<infer T, any>
-  ? [unknown] extends [T]
     ? unknown
-    : T
+    : S
   : unknown;
 
 /**
