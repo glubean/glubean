@@ -164,9 +164,19 @@ export type HttpStaticBody =
  *
  * @param c The case spec to validate. Returned verbatim.
  */
-export function defineHttpCase<Needs = void, T = unknown>(
-  c: ContractCase<T, Needs>,
-): ContractCase<T, Needs> {
+// Form 1: response type declared explicitly via the second generic.
+export function defineHttpCase<Needs, T>(c: ContractCase<T, Needs>): ContractCase<T, Needs>;
+// Form 2: response type INFERRED from the case literal's `expect.schema`. `const C`
+// captures the literal (so `expect.schema: SchemaLike<T>` survives) even when
+// `Needs` is given explicitly — otherwise a `defineHttpCase<Needs>(...)` call
+// would drop the response type to `unknown` (TS doesn't infer a defaulted generic
+// once any type arg is supplied). This keeps the recommended needs-path typed for
+// flow lenses (InferHttpCaseResponse).
+export function defineHttpCase<
+  Needs = void,
+  const C extends ContractCase<unknown, Needs> = ContractCase<unknown, Needs>,
+>(c: C): C;
+export function defineHttpCase(c: unknown): unknown {
   return c;
 }
 
@@ -399,8 +409,15 @@ export interface HttpFlowCaseOutput<Body = unknown> {
  * `res.body: T` instead of `unknown` — no cast needed).
  */
 export type InferHttpCaseResponse<C> = C extends {
-  expect?: { schema?: SchemaLike<infer T> };
+  expect?: { schema?: SchemaLike<infer S> };
 }
+  ? [unknown] extends [S]
+    ? InferResponseFromGeneric<C> // schema typed `unknown` → try the nominal generic
+    : S
+  : InferResponseFromGeneric<C>;
+
+/** Fallback: read the response type off `ContractCase<T, Needs>`'s first generic. */
+type InferResponseFromGeneric<C> = C extends ContractCase<infer T, any>
   ? [unknown] extends [T]
     ? unknown
     : T
