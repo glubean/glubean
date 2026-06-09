@@ -1821,6 +1821,63 @@ describe("workflow retry (§17 #7)", () => {
     expect(assertIdx).toBeLessThan(lastEnd);
   });
 
+  it("a replayed fatal validation on the terminal attempt fails the workflow — never rejects (codex R3)", async () => {
+    const { ctx, rec } = fakeBase();
+    // Mirror the REAL host ctx contract: validate aborts (throws) on a failed
+    // fatal validation — the replayed flush must not escape runWorkflow.
+    (ctx as { validate: unknown }).validate = (
+      _data: unknown,
+      _schema: unknown,
+      label?: string,
+      options?: { severity?: string },
+    ) => {
+      rec.validations++;
+      if (options?.severity === "fatal") {
+        throw new Error(`fatal validation failed: ${label ?? "data"}`);
+      }
+      return undefined;
+    };
+    const failingSchema = { safeParse: () => ({ success: false }) };
+    const wf = workflow("retry-fatal")
+      .setup(async () => ({}))
+      .action(
+        "fatal",
+        async (c) => {
+          c.validate({}, failingSchema as never, "shape", { severity: "fatal" });
+        },
+        { retry: { attempts: 2, reason: "replay-safe" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx); // must RESOLVE (failed), not reject
+    expect(res.status).toBe("failed");
+    expect(res.nodes[0].status).toBe("failed");
+    expect(rec.validations).toBeGreaterThan(0); // the terminal flush reached the host
+  });
+
+  it("aggregates opaque→trace promotion across attempts: an earlier attempt's trace counts (codex R3)", async () => {
+    const { ctx, rec } = fakeBase();
+    let calls = 0;
+    const wf = workflow("retry-grade")
+      .setup(async () => ({}))
+      .action(
+        "flaky",
+        async (c, s) => {
+          calls += 1;
+          if (calls === 1) {
+            c.trace(aTrace()); // structured evidence, then the attempt fails
+            throw new Error("boom");
+          }
+          return s; // final attempt passes with NO evidence
+        },
+        { retry: { attempts: 2, reason: "replay-safe" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(rec.traces).toHaveLength(1); // the first attempt's trace is on the host timeline
+    expect(res.nodes[0].grade).toBe("trace"); // …so the node summary must say trace, not opaque
+  });
+
   it("an exhausted retry flushes the LAST attempt's failed evidence (the verdict-deciding one)", async () => {
     const { ctx, rec } = fakeBase();
     let calls = 0;

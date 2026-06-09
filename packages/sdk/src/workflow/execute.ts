@@ -869,6 +869,24 @@ async function runLeafNode(
     // §17 #4), or attempt exhaustion.
     const isTerminal = (attempt: number, status: NodeStatus, error?: unknown): boolean =>
       status !== "failed" || error instanceof NodeTimeoutError || attempt >= maxAttempts;
+    // Replaying a buffered FATAL validation onto the real host ctx throws again
+    // (the host's validate aborts on fatal). That control flow is already spent —
+    // it failed the attempt at the original throw — so the replay's throw must
+    // not escape runNode/runWorkflow (codex S2.4c R3 P2). Evidence before the
+    // fatal entry has already replayed; nothing follows it (the attempt body
+    // stopped at the throw).
+    const safeFlush = (attemptCtx: { flushTo: (t: TestContext) => void }): void => {
+      try {
+        attemptCtx.flushTo(baseCtx);
+      } catch {
+        /* replayed fatal validation — already accounted in the attempt verdict */
+      }
+    };
+    // An earlier attempt's structured evidence (e.g. a trace before the throw)
+    // is VISIBLE on the host, so the node summary must reflect it: promotion is
+    // aggregated across attempts, not taken from the final one only (codex
+    // S2.4c R3 P2).
+    let promoted = false;
     for (let attempt = 1; ; attempt++) {
       // Buffer this attempt's pass/fail evidence; observability (traces, logs,
       // node_start/node_end events) passes straight through to the host.
@@ -882,16 +900,17 @@ async function runLeafNode(
         // host timeline (codex S2.4c R2 P2).
         beforeNodeEnd: (status, error) => {
           if (isTerminal(attempt, status, error)) {
-            attemptCtx.flushTo(baseCtx);
-            flushed = true;
+            flushed = true; // set first — a throwing replay still counts as flushed
+            safeFlush(attemptCtx);
           }
         },
       });
+      if (r.grade === "trace") promoted = true;
       if (isTerminal(attempt, r.status, r.error)) {
         // beforeNodeEnd already flushed on every runNode settle path; this is a
         // safety net for a future runNode path that misses the hook (flushTo
         // replays the buffer, so it must run at most once).
-        if (!flushed) attemptCtx.flushTo(baseCtx);
+        if (!flushed) safeFlush(attemptCtx);
         break;
       }
       // Non-final failed attempt: drop its buffered counts, log the retry
@@ -901,6 +920,9 @@ async function runLeafNode(
           `after failure — ${retry.reason}`,
       );
       if (retry.delay) await sleep(retry.delay);
+    }
+    if (promoted && r.grade === "opaque") {
+      r = { ...r, grade: "trace" }; // aggregate opaque→trace promotion across attempts (§17 #10)
     }
   }
   outcomes.push({ id: node.meta.id, status: r.status, grade: r.grade });
