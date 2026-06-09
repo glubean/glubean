@@ -334,7 +334,13 @@ export interface NodeRunResult {
   status: NodeStatus;
   /** Committed state. On failure this is the PRIOR state — a failed node does not
    * commit its return (§17 #13). On success: the body's return, or the prior state
-   * when the body returned void/undefined (§17 #2). */
+   * when the body returned void/undefined (§17 #2).
+   *
+   * §17 #14: state is treated as IMMUTABLE, but the executor does NOT clone it
+   * (perf). A body that mutates the LIVE state object in place takes effect
+   * IMMEDIATELY and is NOT isolated or rolled back on failure/timeout — commit-on-
+   * success governs the RETURN VALUE, not in-place writes. A node needing rollback
+   * safety MUST return a new object instead of mutating in place. */
   state: unknown;
   /** Runtime grade after evidence promotion (§17 #10). */
   grade: ProjectionGrade;
@@ -407,6 +413,14 @@ async function runContractCall(
           : "has no registered adapter (did you import its contract plugin package?)"),
     );
   }
+  // Third-party adapter veto: a protocol can reject specific cases from in-graph use
+  // (§17 #8, the validateCaseForFlow half — a third-party slot; built-in adapters
+  // don't implement it). Mirrors contract-core.ts:818.
+  adapter.validateCaseForFlow?.(
+    (node.ref.contract as { _spec?: unknown })._spec,
+    node.ref.caseKey,
+    node.ref.contractId,
+  );
 
   // Validate the logical input against the case's `needs` schema at the call
   // boundary, exactly as runFlow does (contract-core.ts:1402-1427) — JS/`as any`

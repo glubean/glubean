@@ -653,6 +653,26 @@ describe("runWorkflow — lifecycle + state threading", () => {
     expect(aborted).toBe(true); // signal-aware work in setup gets cancelled
   });
 
+  it("in-place mutation of live state is NOT rolled back on failure (§17 #14)", async () => {
+    const { ctx } = fakeBase();
+    let teardownState: unknown;
+    const wf = workflow("mutate-no-rollback")
+      .setup(async () => ({ obj: { v: 1 } }))
+      .check("mutate-then-fail", async (c, s: { obj: { v: number } }) => {
+        s.obj.v = 999; // in-place write on the LIVE committed state object
+        c.fail("boom"); // node fails — but the mutation already took effect
+      })
+      .teardown(async (_c, s) => {
+        teardownState = s;
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    // executor does NOT clone — the in-place write is immediate + not rolled back.
+    // (commit-on-success governs the RETURN value, not in-place writes.)
+    expect(teardownState).toEqual({ obj: { v: 999 } });
+  });
+
   it("compute returning a thenable fails the node — sync invariant (§17 #11) (codex S2.1 R4)", async () => {
     const { ctx } = fakeBase();
     const wf = workflow("compute-thenable")
@@ -707,6 +727,22 @@ describe("runWorkflow — contract-call dispatch", () => {
   afterEach(() => {
     __unregisterProtocolForTesting("wf-fake");
     __unregisterProtocolForTesting("wf-needs");
+    __unregisterProtocolForTesting("wf-veto");
+  });
+
+  it("honors a third-party adapter's validateCaseForFlow veto (§17 #8)", async () => {
+    contract.register("wf-veto", {
+      project: () => ({ cases: {} }),
+      executeCaseInFlow: async () => ({ ok: true }),
+      validateCaseForFlow: () => {
+        throw new Error("this case cannot run in a workflow");
+      },
+    } as never);
+    const { ctx } = fakeBase();
+    const ref = fakeRef<void>("c", "case", "wf-veto", "POST /x");
+    const wf = workflow("veto").call("do", ref).build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed"); // adapter veto fails the call node fast
   });
 
   it("validates call input against the case needs schema before the adapter (codex S2.1 R4)", async () => {
