@@ -1,5 +1,10 @@
 import type { ContractCaseRef } from "../contract-types.js";
 import type { TestContext } from "../types.js";
+import type {
+  BranchPredicate,
+  ExtractedPredicate,
+  OpaquePredicate,
+} from "../contract-flow-condition.js";
 
 /**
  * Glubean vNext `workflow` — types for the shared runtime node graph + its
@@ -140,11 +145,23 @@ export interface InlineProtocolNode {
   reserved?: never;
 }
 
-/** Declarative or runtime branch (Phase 3). */
-export interface BranchNode {
+/**
+ * 2-way branch (proposal §6.6). Runs ONLY the taken side's nodes; the non-taken
+ * side is emitted as `skipped` (§17 #6, first-match). The predicate reuses the flow
+ * condition model: an L2 declarative `BranchPredicate` (statically projectable →
+ * grade `full`) or an L1/L0 `OpaquePredicate` (runtime → grade `opaque`).
+ */
+export interface BranchNode<State = any> {
   kind: "branch";
   meta: NodeMeta;
-  reserved?: never;
+  /** Taken side selected by this predicate (L2 declarative, or L1/L0 opaque). */
+  when: BranchPredicate<State> | OpaquePredicate;
+  /** Author label — required for opaque predicates (projection / diagnostics). */
+  message?: string;
+  /** Nodes run when `when` holds. */
+  then: WorkflowNode[];
+  /** Nodes run otherwise (absent = empty else). */
+  else?: WorkflowNode[];
 }
 
 /** Bounded poll-until (Phase 3). */
@@ -172,7 +189,12 @@ export type WorkflowNode =
   | GroupNode;
 
 /** The node kinds the v1 builder can actually emit. */
-export type V1WorkflowNodeKind = "contract-call" | "action" | "check" | "compute";
+export type V1WorkflowNodeKind =
+  | "contract-call"
+  | "action"
+  | "check"
+  | "compute"
+  | "branch";
 
 export type WorkflowSetup<State> = (ctx: WorkflowContext) => State | Promise<State>;
 /**
@@ -227,6 +249,13 @@ export interface ProjectedWorkflowNode {
   note?: string;
   /** group children. */
   nodes?: ProjectedWorkflowNode[];
+  /** branch: the extracted predicate — an L2 declarative tree, or an opaque marker. */
+  when?: ExtractedPredicate;
+  /** branch: author label (required for opaque predicates). */
+  message?: string;
+  /** branch: projected `then` / `else` side nodes (only the taken side runs at runtime). */
+  then?: ProjectedWorkflowNode[];
+  else?: ProjectedWorkflowNode[];
 }
 
 export interface WorkflowProjection {

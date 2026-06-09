@@ -4,6 +4,7 @@ import { GlubeanSkipError } from "../types.js";
 import { contract, __unregisterProtocolForTesting } from "../contract-core.js";
 import type { ContractCaseRef } from "../contract-types.js";
 import { workflow } from "./builder.js";
+import { projectWorkflow } from "./project.js";
 import {
   makeNodeScope,
   promoteGrade,
@@ -879,6 +880,311 @@ describe("runWorkflow — contract-call dispatch", () => {
     const res = await runWorkflow(wf, ctx);
     expect(res.status).toBe("failed");
     expect(res.nodes[0].status).toBe("failed");
+  });
+});
+
+// --- runWorkflow: 2-way branch (§17 #6 only-taken, first-match) --------------
+
+describe("runWorkflow — branch (§17 #6)", () => {
+  it("declarative branch runs ONLY the taken (then) side; else is skipped", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("br-then")
+      .setup(async () => ({ flag: true, path: "none" }))
+      .branch("route", {
+        when: (w) => w.when((s: { flag: boolean }) => s.flag).eq(true),
+        then: (b) => b.action("a-then", async (_c, s) => ({ ...s, path: "then" })),
+        else: (b) => b.action("a-else", async (_c, s) => ({ ...s, path: "else" })),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect((res.state as { path: string }).path).toBe("then");
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toEqual({
+      route: "passed",
+      "a-then": "passed",
+      "a-else": "skipped",
+    });
+  });
+
+  it("declarative branch takes the else side when the predicate is false", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("br-else")
+      .setup(async () => ({ flag: false, path: "none" }))
+      .branch("route", {
+        when: (w) => w.when((s: { flag: boolean }) => s.flag).eq(true),
+        then: (b) => b.action("a-then", async (_c, s) => ({ ...s, path: "then" })),
+        else: (b) => b.action("a-else", async (_c, s) => ({ ...s, path: "else" })),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect((res.state as { path: string }).path).toBe("else");
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toMatchObject({
+      "a-then": "skipped",
+      "a-else": "passed",
+    });
+  });
+
+  it("runtime branch (whenRuntime) runs the taken side; threads state out of it", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("br-rt")
+      .setup(async () => ({ n: 5 }))
+      .branch("gate", {
+        whenRuntime: async (_c, s: { n: number }) => s.n > 3,
+        message: "n over threshold",
+        then: (b) => b.compute("mark", (s) => ({ ...s, taken: true })),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect((res.state as { taken?: boolean }).taken).toBe(true);
+  });
+
+  it("a failure inside the taken branch fail-stops the workflow", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("br-fail")
+      .setup(async () => ({ flag: true }))
+      .branch("route", {
+        when: (w) => w.when((s: { flag: boolean }) => s.flag).eq(true),
+        then: (b) => b.check("inner", async (c) => c.fail("boom")),
+      })
+      .action("after", async (_c, s) => s)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toMatchObject({
+      route: "failed",
+      inner: "failed",
+      after: "skipped",
+    });
+  });
+
+  it("a branch whose predicate throws fails the branch; both sides skipped", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("br-throw")
+      .setup(async () => ({}))
+      .branch("bad", {
+        whenRuntime: async () => {
+          throw new Error("pred boom");
+        },
+        message: "m",
+        then: (b) => b.action("t", async (_c, s) => s),
+        else: (b) => b.action("e", async (_c, s) => s),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toMatchObject({
+      bad: "failed",
+      t: "skipped",
+      e: "skipped",
+    });
+  });
+
+  it("branch grade: declarative → full, runtime → opaque (via projectWorkflow)", () => {
+    const declWf = workflow("g1")
+      .setup(async () => ({ x: 1 }))
+      .branch("b", {
+        when: (w) => w.when((s: { x: number }) => s.x).eq(1),
+        then: (b) => b.compute("c", (s) => s),
+      })
+      .build();
+    expect(projectWorkflow(declWf).nodes.find((n) => n.id === "b")!.grade).toBe("full");
+
+    const rtWf = workflow("g2")
+      .setup(async () => ({ x: 1 }))
+      .branch("b", {
+        whenRuntime: async () => true,
+        message: "m",
+        then: (b) => b.compute("c", (s) => s),
+      })
+      .build();
+    expect(projectWorkflow(rtWf).nodes.find((n) => n.id === "b")!.grade).toBe("opaque");
+  });
+
+  it("whenRuntime is projected as opaque L0 even for a non-async fn returning a Promise (codex S2.4a P2)", () => {
+    const wf = workflow("rt-l0")
+      .setup(async () => ({ x: 1 }))
+      .branch("b", {
+        // a NON-async fn that returns a Promise — must still project as may-do-async-IO.
+        whenRuntime: ((_c: unknown, _s: unknown) => Promise.resolve(true)) as never,
+        message: "m",
+        then: (b) => b.compute("c", (s) => s),
+      })
+      .build();
+    const when = projectWorkflow(wf).nodes.find((n) => n.id === "b")!.when as {
+      kind: string;
+      strictness?: string;
+      mayDoAsyncIO?: boolean;
+    };
+    expect(when.kind).toBe("opaque");
+    expect(when.strictness).toBe("L0");
+    expect(when.mayDoAsyncIO).toBe(true);
+  });
+
+  it("a non-boolean whenRuntime result fails the branch (no silent coercion) (codex S2.4a P2)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("rt-nonbool")
+      .setup(async () => ({}))
+      .branch("b", {
+        whenRuntime: (async () => "false") as never, // truthy string would wrongly pick `then`
+        message: "m",
+        then: (b) => b.action("t", async (_c, s) => s),
+        else: (b) => b.action("e", async (_c, s) => s),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.nodes.find((n) => n.id === "b")!.status).toBe("failed");
+  });
+
+  it("an opaque predicate emitting structured evidence promotes the branch grade opaque→trace (codex S2.4a P2)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("rt-trace")
+      .setup(async () => ({}))
+      .branch("b", {
+        whenRuntime: async (c) => {
+          c.trace(aTrace()); // structured evidence on the branch's scoped ctx
+          return true;
+        },
+        message: "m",
+        then: (b) => b.compute("c", (s) => s),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.nodes.find((n) => n.id === "b")!.grade).toBe("trace"); // promoted
+  });
+
+  it("emits branch children in authored (then-before-else) order regardless of which is taken (codex S2.4a P2)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("order")
+      .setup(async () => ({ flag: true }))
+      .branch("route", {
+        when: (w) => w.when((s: { flag: boolean }) => s.flag).eq(true),
+        then: (b) => b.action("then-node", async (_c, s) => s),
+        else: (b) => b.action("else-node", async (_c, s) => s),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    // even with `then` taken, the authored order is route, then-node, else-node.
+    expect(res.nodes.map((n) => n.id)).toEqual(["route", "then-node", "else-node"]);
+    expect(res.nodes.map((n) => n.status)).toEqual(["passed", "passed", "skipped"]);
+  });
+
+  it("a declarative branch with an opaque child stays full (decision projectable); child counted separately (codex S2.4a R4)", () => {
+    const wf = workflow("indep")
+      .setup(async () => ({ x: 1 }))
+      .branch("b", {
+        when: (w) => w.when((s: { x: number }) => s.x).eq(1), // declarative → full decision
+        then: (b) => b.action("a", async (_c, s) => s), // opaque child
+      })
+      .build();
+    const proj = projectWorkflow(wf);
+    expect(proj.nodes.find((n) => n.id === "b")!.grade).toBe("full"); // decision projectable
+    expect(proj.gradeSummary).toEqual({ full: 1, partial: 0, opaque: 1 }); // branch full + child opaque
+  });
+
+  it("gradeSummary counts the branch node plus its then/else children (codex S2.4a R3)", () => {
+    const wf = workflow("sum")
+      .setup(async () => ({ x: 1 }))
+      .branch("b", {
+        when: (w) => w.when((s: { x: number }) => s.x).eq(1), // L2 → full predicate
+        then: (b) => b.compute("c1", (s) => s).compute("c2", (s) => s), // 2 full children
+      })
+      .build();
+    // branch (full) + c1 (full) + c2 (full) = 3 full, none dropped.
+    expect(projectWorkflow(wf).gradeSummary).toEqual({ full: 3, partial: 0, opaque: 0 });
+  });
+
+  it("a branch predicate ctx.skip() skips the whole workflow, not fails it (codex S2.4a R5)", async () => {
+    const { ctx } = fakeBase();
+    let teardownRan = false;
+    const wf = workflow("br-skip")
+      .setup(async () => ({}))
+      .branch("gate", {
+        whenRuntime: async (c) => {
+          c.skip("precondition unavailable");
+          return true;
+        },
+        message: "m",
+        then: (b) => b.action("t", async (_c, s) => s),
+        else: (b) => b.action("e", async (_c, s) => s),
+      })
+      .teardown(async () => {
+        teardownRan = true;
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("skipped"); // NOT failed
+    expect(res.nodes.find((n) => n.id === "gate")!.status).toBe("skipped");
+    expect(res.nodes.filter((n) => n.id === "t" || n.id === "e").map((n) => n.status)).toEqual([
+      "skipped",
+      "skipped",
+    ]);
+    expect(teardownRan).toBe(true);
+  });
+
+  it("a branch predicate soft-failure then skip surfaces a phase-failure cause, not the skip (codex S2.4a R6)", async () => {
+    const { ctx } = fakeBase();
+    let cause: unknown;
+    const wf = workflow("br-fail-skip")
+      .setup(async () => ({}))
+      .branch("gate", {
+        whenRuntime: async (c) => {
+          c.expect(1).toBe(2, "soft fail");
+          c.skip("then skip");
+          return true;
+        },
+        message: "m",
+        then: (b) => b.action("t", async (_c, s) => s),
+      })
+      .teardown(async (_c, _s, cz) => {
+        cause = cz;
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(WorkflowPhaseFailedError); // NOT the skip
+    expect(cause).toBeInstanceOf(WorkflowPhaseFailedError);
+  });
+
+  it("an async then/else callback is rejected at build time (codex S2.4a R5)", () => {
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({ x: 1 }))
+        .branch("b", {
+          when: (w) => w.when((s: { x: number }) => s.x).eq(1),
+          // async callback would drop steps added after the await.
+          then: (async (b: unknown) => b) as never,
+        }),
+    ).toThrow(/must be synchronous/);
+  });
+
+  it("anonymous nodes in then/else get unique prefixed fallback ids (codex S2.4a R7)", () => {
+    const wf = workflow("uniq")
+      .setup(async () => ({ x: 1 }))
+      .branch("route", {
+        when: (w) => w.when((s: { x: number }) => s.x).eq(1),
+        then: (b) => b.compute({}, (s) => s), // anonymous → fallback id
+        else: (b) => b.compute({}, (s) => s), // anonymous → fallback id (must differ)
+      })
+      .build();
+    const proj = projectWorkflow(wf);
+    const branchNode = proj.nodes.find((n) => n.id === "route")!;
+    const thenId = branchNode.then![0].id;
+    const elseId = branchNode.else![0].id;
+    expect(thenId).toBe("route.then.node-0");
+    expect(elseId).toBe("route.else.node-0");
+    expect(thenId).not.toBe(elseId);
+  });
+
+  it("whenRuntime without a message throws at build time", () => {
+    expect(() =>
+      workflow("w").branch("b", {
+        whenRuntime: async () => true,
+        then: (b: unknown) => b,
+      } as never),
+    ).toThrow(/requires a non-empty `message`/);
   });
 });
 

@@ -6,5 +6,5 @@
  */
 export * from "./types.js";
 export { workflow } from "./builder.js";
-export type { WorkflowBuilder, CallBindings } from "./builder.js";
+export type { WorkflowBuilder, CallBindings, BranchOpts } from "./builder.js";
 export { projectWorkflow } from "./project.js";

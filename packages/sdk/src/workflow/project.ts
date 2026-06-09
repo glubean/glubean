@@ -1,5 +1,7 @@
+import { extractPredicate } from "../contract-flow-condition.js";
 import type {
   ActionNode,
+  BranchNode,
   CheckNode,
   ComputeNode,
   ContractCallNode,
@@ -66,6 +68,14 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
         (g: StaticGrade, c) => worst(g, staticGradeOf(c)),
         "full" as StaticGrade,
       );
+    case "branch":
+      // The branch node's grade reflects the projectability of its DECISION (the
+      // predicate) ONLY — L2 declarative → full, L1/L0 opaque → opaque. Children are
+      // graded + tallied independently, so folding them in here would double-count
+      // their opacity and hide a projectable branch decision (codex S2.4a R4).
+      return ((node as BranchNode).when as { kind?: unknown }).kind === "opaque"
+        ? "opaque"
+        : "full";
     default:
       return "opaque";
   }
@@ -117,6 +127,18 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
       const children = (node as GroupNode).nodes.map(projectNode);
       return { ...base, kind: "group", grade, nodes: children };
     }
+    case "branch": {
+      const b = node as BranchNode;
+      return {
+        ...base,
+        kind: "branch",
+        grade,
+        when: extractPredicate(b.when),
+        message: b.message,
+        then: b.then.map(projectNode),
+        else: b.else ? b.else.map(projectNode) : undefined,
+      };
+    }
     default:
       // Reserved forward kinds (inline-protocol / branch / poll) — not emitted by
       // the v1 builder; grade conservatively until their phase lands.
@@ -124,7 +146,10 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
   }
 }
 
-/** Roll grades up into the workflow-level summary (proposal §7.2), flattening groups. */
+/** Roll grades up into the workflow-level summary (proposal §7.2). A `group` is a
+ * display-only container → flattened (children counted, container not). A `branch`
+ * IS a real control-flow node (its predicate carries a grade) → counted AND its
+ * then/else children recursed into, so branch children aren't dropped (codex S2.4a R3). */
 function tallyGrades(
   nodes: ProjectedWorkflowNode[],
   acc: Record<StaticGrade, number>,
@@ -132,6 +157,10 @@ function tallyGrades(
   for (const n of nodes) {
     if (n.kind === "group" && n.nodes) {
       tallyGrades(n.nodes, acc);
+    } else if (n.kind === "branch") {
+      acc[n.grade] += 1; // the branch node itself
+      if (n.then) tallyGrades(n.then, acc);
+      if (n.else) tallyGrades(n.else, acc);
     } else {
       acc[n.grade] += 1;
     }

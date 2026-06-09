@@ -34,9 +34,12 @@ import type {
 import { GlubeanSkipError } from "../types.js";
 import { Expectation } from "../expect.js";
 import { getAdapter, validateNeedsOutput } from "../contract-core.js";
+import { evalPredicate } from "../contract-flow-condition.js";
+import type { BranchPredicate, OpaquePredicate } from "../contract-flow-condition.js";
 import { staticGradeOf } from "./project.js";
 import type {
   ActionNode,
+  BranchNode,
   CheckNode,
   ComputeNode,
   ContractCallNode,
@@ -642,23 +645,199 @@ function deriveLifecycleScope(base: TestContext): { scope: NodeScope; ac: AbortC
 }
 
 /**
- * Record nodes from `startIndex` onward as `skipped` (emit end-only — they never
- * started). Indexed by POSITION, not `meta.id`, so two nodes that accidentally
- * share an id both still get an outcome (the builder doesn't reject dup ids —
- * codex S2.1 R3 P3).
+ * Record nodes in `list` from `startIndex` onward as `skipped` (emit end-only — they
+ * never started). Indexed by POSITION, not `meta.id`, so two nodes that accidentally
+ * share an id both still get an outcome (the builder doesn't reject dup ids — codex
+ * S2.1 R3 P3). A skipped branch node is recorded as one `skipped` node (its sides are
+ * not expanded — they never ran).
  */
-function emitRemainingSkipped(
+function emitNodesSkipped(
   baseCtx: TestContext,
-  wf: Workflow,
-  nodes: WorkflowNodeOutcome[],
+  list: readonly WorkflowNode[],
+  outcomes: WorkflowNodeOutcome[],
   startIndex: number,
 ): void {
-  for (let i = startIndex; i < wf.nodes.length; i++) {
-    const node = wf.nodes[i];
+  for (let i = startIndex; i < list.length; i++) {
+    const node = list[i];
     const grade = staticGradeOf(node);
     emitNodeEnd(baseCtx, node, "skipped", grade, 0);
-    nodes.push({ id: node.meta.id, status: "skipped", grade });
+    outcomes.push({ id: node.meta.id, status: "skipped", grade });
   }
+}
+
+/** Outcome of running a node LIST (the top-level graph, or a branch side). */
+interface NodeListOutcome {
+  state: unknown;
+  status: "passed" | "failed" | "skipped";
+  /** Failure cause to thread to teardown (only when status === "failed"). */
+  cause?: unknown;
+}
+
+/** Is this `when` an L1/L0 opaque predicate (vs an L2 declarative `BranchPredicate`)? */
+function isOpaquePredicate(
+  when: BranchPredicate<unknown> | OpaquePredicate,
+): when is OpaquePredicate {
+  return (when as { kind?: unknown }).kind === "opaque";
+}
+
+/**
+ * Evaluate a branch predicate against state. L2 declarative → pure synchronous
+ * `evalPredicate` (reused from the flow condition model). L1/L0 opaque → run its fn
+ * under the branch's child ctx (it may read ctx + emit evidence; an L0 async fn is
+ * awaited). A non-boolean opaque result is coerced with Boolean().
+ */
+async function selectBranch(
+  node: BranchNode,
+  state: unknown,
+  ctx: WorkflowContext,
+): Promise<boolean> {
+  const when = node.when;
+  if (isOpaquePredicate(when)) {
+    const result = await when.fn(ctx, state);
+    if (typeof result !== "boolean") {
+      // The public type promises boolean; reject non-booleans rather than coercing
+      // (a `'false'` string or a forgotten return would silently pick `then`) — codex S2.4a P2.
+      throw new Error(
+        `workflow branch "${node.meta.id}": whenRuntime must return a boolean, got ${typeof result}`,
+      );
+    }
+    return result;
+  }
+  return evalPredicate(when as BranchPredicate<unknown>, state);
+}
+
+/** Run a single leaf (non-branch) node: runNode + push outcome + cause synthesis. */
+async function runLeafNode(
+  baseCtx: TestContext,
+  workflowId: string,
+  node: WorkflowNode,
+  state: unknown,
+  outcomes: WorkflowNodeOutcome[],
+): Promise<NodeListOutcome> {
+  const grade = staticGradeOf(node);
+  const r = await runNode(baseCtx, node, state, { staticGrade: grade });
+  outcomes.push({ id: node.meta.id, status: r.status, grade: r.grade });
+  if (r.status === "passed") return { state: r.state, status: "passed" };
+  if (r.status === "failed") {
+    return {
+      state,
+      status: "failed",
+      cause: r.error ?? new WorkflowPhaseFailedError(workflowId, `node "${node.meta.id}"`),
+    };
+  }
+  return { state, status: "skipped" }; // node ctx.skip()
+}
+
+/**
+ * Run a 2-way branch (§17 #6): evaluate the predicate (under a child ctx so an
+ * opaque predicate's evidence is attributed + quarantined), then run ONLY the taken
+ * side via runNodeList; the non-taken side is emitted as `skipped`. A predicate that
+ * throws or soft-fails fails the branch node (both sides skipped).
+ */
+async function runBranch(
+  baseCtx: TestContext,
+  workflowId: string,
+  node: BranchNode,
+  state: unknown,
+  outcomes: WorkflowNodeOutcome[],
+): Promise<NodeListOutcome> {
+  const grade = staticGradeOf(node);
+  const started = Date.now();
+  emitNodeStart(baseCtx, node);
+  // The branch node's own outcome precedes its children (tree order); the final
+  // status is set once the taken side settles.
+  const outcomeIndex = outcomes.length;
+  outcomes.push({ id: node.meta.id, status: "passed", grade });
+
+  const ac = new AbortController();
+  const scope = makeNodeScope(baseCtx, ac.signal);
+
+  const failBoth = (cause: unknown, error?: unknown): NodeListOutcome => {
+    ac.abort();
+    emitNodesSkipped(baseCtx, node.then, outcomes, 0);
+    if (node.else) emitNodesSkipped(baseCtx, node.else, outcomes, 0);
+    const g = promoteGrade(grade, scope); // a soft-failed predicate may have emitted evidence (§17 #10)
+    outcomes[outcomeIndex] = { id: node.meta.id, status: "failed", grade: g };
+    emitNodeEnd(baseCtx, node, "failed", g, Date.now() - started, error);
+    return { state, status: "failed", cause };
+  };
+
+  let taken: boolean;
+  try {
+    taken = await selectBranch(node, state, scope.ctx);
+  } catch (err) {
+    scope.seal();
+    if (err instanceof GlubeanSkipError && !scope.hasFailure()) {
+      // predicate ctx.skip() with no prior failure → skip the branch (→ whole
+      // workflow, like a node skip), NOT a failure (codex S2.4a R5).
+      ac.abort();
+      emitNodesSkipped(baseCtx, node.then, outcomes, 0);
+      if (node.else) emitNodesSkipped(baseCtx, node.else, outcomes, 0);
+      const g = promoteGrade(grade, scope);
+      outcomes[outcomeIndex] = { id: node.meta.id, status: "skipped", grade: g };
+      emitNodeEnd(baseCtx, node, "skipped", g, Date.now() - started);
+      return { state, status: "skipped" };
+    }
+    // a real throw, OR a soft-failure-then-skip → fail. A skip is never the cause;
+    // synthesize a phase failure (mirrors runNode/setup, codex S2.4a R6).
+    if (err instanceof GlubeanSkipError) {
+      return failBoth(new WorkflowPhaseFailedError(workflowId, `branch "${node.meta.id}" predicate`));
+    }
+    return failBoth(err, err);
+  }
+  if (scope.hasFailure()) {
+    // opaque predicate soft-failed (scoped assert/validate) — fail the branch.
+    scope.seal();
+    return failBoth(new WorkflowPhaseFailedError(workflowId, `branch "${node.meta.id}" predicate`));
+  }
+  scope.seal();
+
+  // Emit children in AUTHORED order (then before else regardless of which is taken):
+  // run the taken side, mark the other skipped — so outcomes/events align with the
+  // projected tree, not with which branch was selected (codex S2.4a P2).
+  let r: NodeListOutcome;
+  if (taken) {
+    r = await runNodeList(baseCtx, workflowId, node.then, state, outcomes);
+    if (node.else) emitNodesSkipped(baseCtx, node.else, outcomes, 0);
+  } else {
+    emitNodesSkipped(baseCtx, node.then, outcomes, 0);
+    r = node.else
+      ? await runNodeList(baseCtx, workflowId, node.else, state, outcomes)
+      : { state, status: "passed" };
+  }
+
+  // promote opaque→trace if the predicate emitted structured evidence, same as
+  // runNode (§17 #10; codex S2.4a P2).
+  const runtimeGrade = promoteGrade(grade, scope);
+  outcomes[outcomeIndex] = { id: node.meta.id, status: r.status, grade: runtimeGrade };
+  emitNodeEnd(baseCtx, node, r.status, runtimeGrade, Date.now() - started);
+  return r;
+}
+
+/**
+ * Run a node LIST with fail-stop / skip-stop + commit-on-success state threading
+ * (§17 #5/#13). Shared by the top-level graph and each branch side (recursion). A
+ * non-passed node stops the list; the rest are emitted `skipped`.
+ */
+async function runNodeList(
+  baseCtx: TestContext,
+  workflowId: string,
+  list: readonly WorkflowNode[],
+  state: unknown,
+  outcomes: WorkflowNodeOutcome[],
+): Promise<NodeListOutcome> {
+  for (let i = 0; i < list.length; i++) {
+    const node = list[i];
+    const r =
+      node.kind === "branch"
+        ? await runBranch(baseCtx, workflowId, node as BranchNode, state, outcomes)
+        : await runLeafNode(baseCtx, workflowId, node, state, outcomes);
+    state = r.state;
+    if (r.status === "passed") continue;
+    emitNodesSkipped(baseCtx, list, outcomes, i + 1); // rest of THIS list → skipped
+    return r;
+  }
+  return { state, status: "passed" };
 }
 
 /**
@@ -679,7 +858,7 @@ export async function runWorkflow<State = unknown>(
   // --- workflow-level skip: discoverable but NEVER executed — no setup, no nodes,
   // --- no teardown; every node reported skipped (codex S2.1 R2). ---
   if (wf.meta.skip !== undefined) {
-    emitRemainingSkipped(baseCtx, wf as Workflow, nodes, 0);
+    emitNodesSkipped(baseCtx, wf.nodes, nodes, 0);
     return { status: "skipped", state: undefined, nodes, error: undefined };
   }
 
@@ -710,7 +889,7 @@ export async function runWorkflow<State = unknown>(
       if (threw || softFailed) {
         ac.abort(); // failure/skip → cancel signal-aware work setup started (codex S2.1 R2)
         proceed = false;
-        emitRemainingSkipped(baseCtx, wf as Workflow, nodes, 0);
+        emitNodesSkipped(baseCtx, wf.nodes, nodes, 0);
         if (threw && setupError instanceof GlubeanSkipError && !softFailed) {
           // deliberate setup ctx.skip() with no prior failure → whole workflow
           // skipped, like a node skip (codex S2.1 R3 P2).
@@ -731,29 +910,17 @@ export async function runWorkflow<State = unknown>(
       }
     }
 
-    // --- walk nodes in authored order; fail-stop / skip-stop (§17 #5 basic) ---
+    // --- walk nodes in authored order; fail-stop / skip-stop (§17 #5 basic). The
+    // --- graph + each branch side share runNodeList (commit-on-success threading,
+    // --- §17 #13; node ctx.skip() → whole-workflow skip, mirrors harness.ts:1944). ---
     if (proceed) {
-      for (let i = 0; i < wf.nodes.length; i++) {
-        const node = wf.nodes[i];
-        const grade = staticGradeOf(node);
-        const r = await runNode(baseCtx, node, state, { staticGrade: grade });
-        nodes.push({ id: node.meta.id, status: r.status, grade: r.grade });
-        if (r.status === "passed") {
-          state = r.state; // commit-on-success (§17 #13)
-          continue;
-        }
-        if (r.status === "failed") {
-          failed = true;
-          // A soft-assertion/validation failure has no thrown `error`; synthesize a
-          // cause so teardown + the result carry a non-empty failure (codex S2.1 P2).
-          cause = r.error ?? new WorkflowPhaseFailedError(wf.meta.id, `node "${node.meta.id}"`);
-        } else {
-          // node ctx.skip() → the whole workflow is skipped (mirrors the runner's
-          // whole-test skip, harness.ts:1944). Not a failure (codex S2.1 R2).
-          skipped = true;
-        }
-        emitRemainingSkipped(baseCtx, wf as Workflow, nodes, i + 1); // rest skipped
-        break;
+      const r = await runNodeList(baseCtx, wf.meta.id, wf.nodes, state, nodes);
+      state = r.state;
+      if (r.status === "failed") {
+        failed = true;
+        cause = r.cause;
+      } else if (r.status === "skipped") {
+        skipped = true;
       }
     }
   } finally {
