@@ -1878,6 +1878,30 @@ describe("workflow retry (§17 #7)", () => {
     expect(res.nodes[0].grade).toBe("trace"); // …so the node summary must say trace, not opaque
   });
 
+  it("a DISCARDED attempt's assert-only evidence does not promote the grade (codex R4)", async () => {
+    const { ctx, rec } = fakeBase();
+    let calls = 0;
+    const wf = workflow("retry-no-claim")
+      .setup(async () => ({}))
+      .action(
+        "flaky",
+        async (c, s) => {
+          calls += 1;
+          if (calls === 1) {
+            c.assert(false, "buffered-and-dropped"); // never flushed (non-final failed attempt)
+            throw new Error("boom");
+          }
+          return s; // final attempt passes with NO evidence at all
+        },
+        { retry: { attempts: 2, reason: "replay-safe" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(rec.asserts).toEqual([]); // nothing reached the host…
+    expect(res.nodes[0].grade).toBe("opaque"); // …so the summary must not claim trace
+  });
+
   it("an exhausted retry flushes the LAST attempt's failed evidence (the verdict-deciding one)", async () => {
     const { ctx, rec } = fakeBase();
     let calls = 0;

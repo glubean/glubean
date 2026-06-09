@@ -882,15 +882,30 @@ async function runLeafNode(
         /* replayed fatal validation — already accounted in the attempt verdict */
       }
     };
-    // An earlier attempt's structured evidence (e.g. a trace before the throw)
-    // is VISIBLE on the host, so the node summary must reflect it: promotion is
-    // aggregated across attempts, not taken from the final one only (codex
-    // S2.4c R3 P2).
+    // Promotion aggregates across attempts, but ONLY from evidence that actually
+    // reached the host (codex S2.4c R3+R4 P2): pass-through trace/metric on ANY
+    // attempt counts (it is on the host timeline even when the attempt's buffered
+    // counts are dropped); buffered assert/validate counts only when FLUSHED —
+    // i.e. on the terminal attempt. A discarded attempt's assert-only "trace"
+    // grade must not promote the node summary: it would claim runtime evidence
+    // the host never saw.
     let promoted = false;
     for (let attempt = 1; ; attempt++) {
       // Buffer this attempt's pass/fail evidence; observability (traces, logs,
-      // node_start/node_end events) passes straight through to the host.
-      const attemptCtx = quarantinedCtx(baseCtx);
+      // node_start/node_end events) passes straight through to the host — via a
+      // probe that records whether any pass-through STRUCTURED evidence landed.
+      let passthroughStructured = false;
+      const probe = Object.assign(Object.create(baseCtx) as TestContext, {
+        trace: (t: Trace): void => {
+          passthroughStructured = true;
+          baseCtx.trace(t);
+        },
+        metric: (name: string, value: number, options?: unknown): void => {
+          passthroughStructured = true;
+          (baseCtx.metric as (...a: unknown[]) => void)(name, value, options);
+        },
+      });
+      const attemptCtx = quarantinedCtx(probe);
       let flushed = false;
       r = await runNode(attemptCtx, node, state, {
         staticGrade: grade,
@@ -905,8 +920,9 @@ async function runLeafNode(
           }
         },
       });
-      if (r.grade === "trace") promoted = true;
-      if (isTerminal(attempt, r.status, r.error)) {
+      const terminal = isTerminal(attempt, r.status, r.error);
+      if (passthroughStructured || (terminal && r.grade === "trace")) promoted = true;
+      if (terminal) {
         // beforeNodeEnd already flushed on every runNode settle path; this is a
         // safety net for a future runNode path that misses the hook (flushTo
         // replays the buffer, so it must run at most once).
