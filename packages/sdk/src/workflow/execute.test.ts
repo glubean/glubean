@@ -1783,6 +1783,44 @@ describe("workflow retry (§17 #7)", () => {
     expect(rec.logs.filter((l) => l.includes('retrying workflow node "flaky"'))).toHaveLength(2);
   });
 
+  it("flushes the terminal attempt's evidence INSIDE its bracket — before node_end (codex R2)", async () => {
+    const { ctx, rec } = fakeBase();
+    // Interleave asserts + events into one ordered log to check bracketing.
+    const order: string[] = [];
+    const baseAssert = ctx.assert.bind(ctx);
+    const baseEvent = ctx.event.bind(ctx);
+    (ctx as { assert: unknown }).assert = (...args: unknown[]) => {
+      order.push("assertion");
+      (baseAssert as (...a: unknown[]) => void)(...args);
+    };
+    (ctx as { event: unknown }).event = (ev: { type: string }) => {
+      order.push(ev.type);
+      baseEvent(ev as never);
+    };
+    let calls = 0;
+    const wf = workflow("retry-bracket")
+      .setup(async () => ({}))
+      .action(
+        "flaky",
+        async (c) => {
+          calls += 1;
+          c.assert(calls >= 2, `attempt-${calls}`);
+          if (calls < 2) throw new Error("boom");
+        },
+        { retry: { attempts: 2, reason: "replay-safe" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    // the flushed assertion must land BETWEEN the final attempt's start and end.
+    const lastStart = order.lastIndexOf(NODE_START_EVENT);
+    const lastEnd = order.lastIndexOf(NODE_END_EVENT);
+    const assertIdx = order.indexOf("assertion"); // only the terminal attempt's assert lands
+    expect(rec.asserts).toEqual([{ passed: true, message: "attempt-2" }]);
+    expect(assertIdx).toBeGreaterThan(lastStart);
+    expect(assertIdx).toBeLessThan(lastEnd);
+  });
+
   it("an exhausted retry flushes the LAST attempt's failed evidence (the verdict-deciding one)", async () => {
     const { ctx, rec } = fakeBase();
     let calls = 0;

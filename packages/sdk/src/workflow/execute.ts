@@ -386,6 +386,14 @@ export interface RunNodeOptions {
   timeoutMs?: number;
   /** Stamp this run's node_start/node_end events as attempt n of of (§17 #7). */
   attempt?: AttemptInfo;
+  /**
+   * Called with the settled verdict JUST BEFORE this run's node_end event is
+   * emitted — the retry wrapper uses it to flush the terminal attempt's buffered
+   * assert/validate evidence INSIDE the attempt bracket, so timeline grouping
+   * holds (codex S2.4c R2 P2). Runs after the scope is sealed; anything it emits
+   * goes straight to the base ctx.
+   */
+  beforeNodeEnd?: (status: NodeStatus, error?: unknown) => void;
 }
 
 function emitNodeStart(base: TestContext, node: WorkflowNode, attempt?: AttemptInfo): void {
@@ -674,11 +682,13 @@ export async function runNode(
       // Abort the signal too (as timeout/throw do) so any cooperative work the node
       // started observes the failure and stops — the WorkflowContext signal contract.
       if (!ac.signal.aborted) ac.abort();
+      opts.beforeNodeEnd?.("failed", undefined);
       emitNodeEnd(base, node, "failed", grade, Date.now() - started, undefined, opts.attempt);
       return { status: "failed", state, grade };
     }
     // Success: return REPLACES state; void/undefined PRESERVES it (§17 #2 / #13).
     const nextState = returned === undefined ? state : returned;
+    opts.beforeNodeEnd?.("passed", undefined);
     emitNodeEnd(base, node, "passed", grade, Date.now() - started, undefined, opts.attempt);
     return { status: "passed", state: nextState, grade };
   } catch (err) {
@@ -693,6 +703,7 @@ export async function runNode(
     // skip is preserved on `err` so the caller (runWorkflow, S2.1) can decide its
     // graph-level meaning (skip the rest vs. continue); runNode only classifies.
     if (err instanceof GlubeanSkipError && !scope.hasFailure()) {
+      opts.beforeNodeEnd?.("skipped", err);
       emitNodeEnd(base, node, "skipped", grade, Date.now() - started, undefined, opts.attempt);
       return { status: "skipped", state, grade, error: err };
     }
@@ -700,6 +711,7 @@ export async function runNode(
     // Drop the skip so runWorkflow synthesizes a proper phase-failure cause; a real
     // thrown error / timeout stays as the cause (codex S2.1 R4 P3).
     const failError = err instanceof GlubeanSkipError ? undefined : err;
+    opts.beforeNodeEnd?.("failed", failError);
     emitNodeEnd(base, node, "failed", grade, Date.now() - started, failError, opts.attempt);
     return { status: "failed", state, grade, error: failError };
   }
@@ -852,20 +864,34 @@ async function runLeafNode(
   if (!retry) {
     r = await runNode(baseCtx, node, state, { staticGrade: grade });
   } else {
+    // A failed attempt is terminal when it cannot/must not be replayed: a
+    // passed/skipped verdict (skip is control flow), a timeout (TERMINAL,
+    // §17 #4), or attempt exhaustion.
+    const isTerminal = (attempt: number, status: NodeStatus, error?: unknown): boolean =>
+      status !== "failed" || error instanceof NodeTimeoutError || attempt >= maxAttempts;
     for (let attempt = 1; ; attempt++) {
       // Buffer this attempt's pass/fail evidence; observability (traces, logs,
       // node_start/node_end events) passes straight through to the host.
       const attemptCtx = quarantinedCtx(baseCtx);
+      let flushed = false;
       r = await runNode(attemptCtx, node, state, {
         staticGrade: grade,
         attempt: { n: attempt, of: maxAttempts },
+        // Flush the verdict-deciding attempt's evidence BEFORE its node_end is
+        // emitted, so the assertions land INSIDE the attempt bracket on the
+        // host timeline (codex S2.4c R2 P2).
+        beforeNodeEnd: (status, error) => {
+          if (isTerminal(attempt, status, error)) {
+            attemptCtx.flushTo(baseCtx);
+            flushed = true;
+          }
+        },
       });
-      const terminal =
-        r.status !== "failed" || // passed/skipped — skip is control flow, never retried
-        r.error instanceof NodeTimeoutError || // timeout is TERMINAL (§17 #4)
-        attempt >= maxAttempts;
-      if (terminal) {
-        attemptCtx.flushTo(baseCtx); // the verdict-deciding attempt's evidence counts
+      if (isTerminal(attempt, r.status, r.error)) {
+        // beforeNodeEnd already flushed on every runNode settle path; this is a
+        // safety net for a future runNode path that misses the hook (flushTo
+        // replays the buffer, so it must run at most once).
+        if (!flushed) attemptCtx.flushTo(baseCtx);
         break;
       }
       // Non-final failed attempt: drop its buffered counts, log the retry
