@@ -610,3 +610,7 @@ export { installPlugin, listInstalledPlugins } from "./install-plugin.js";
 export { defineSession, session } from "./session.js";
 export { Expectation, ExpectFailError } from "./expect.js";
 export type { AssertEmitter, AssertionEmission, CustomMatchers, MatcherFn, MatcherResult } from "./expect.js";
+
+// vNext `workflow` authoring model (Phase 1). No backward compatibility — fresh,
+// self-consistent surface; see internal/40-discovery/proposals/contract-workflow-vnext.md.
+export * from "./workflow/index.js";
