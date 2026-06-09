@@ -116,12 +116,12 @@ async function runCleanupsLifo(
   }
 }
 
-function validateNeedsOutput(
+export function validateNeedsOutput(
   needsSchema: { safeParse?: unknown; parse?: unknown },
   value: unknown,
   ctx: {
     testId: string;
-    source: "bootstrap" | "explicit" | "flow" | "bootstrap-params";
+    source: "bootstrap" | "explicit" | "flow" | "bootstrap-params" | "workflow";
   },
 ): unknown {
   const sp = (needsSchema as { safeParse?: (d: unknown) => unknown }).safeParse;
@@ -137,6 +137,7 @@ function validateNeedsOutput(
       ctx.source === "bootstrap" ? "Bootstrap output"
       : ctx.source === "explicit" ? "Explicit input"
       : ctx.source === "bootstrap-params" ? "Bootstrap params"
+      : ctx.source === "workflow" ? "Workflow `in` output"
       : "Flow `in` output";
     const schemaLabel =
       ctx.source === "bootstrap-params" ? "params schema" : "needs schema";

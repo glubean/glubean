@@ -35,6 +35,42 @@ function worst(a: StaticGrade, b: StaticGrade): StaticGrade {
   return GRADE_RANK[a] >= GRADE_RANK[b] ? a : b;
 }
 
+/**
+ * The STATIC floor grade of one node — the single source of truth for grading,
+ * shared by `projectNode` (build-time view) and the executor (which feeds it to
+ * `runNode` as the floor the runtime may promote `opaque` → `trace`, §17 #10).
+ *
+ * - `contract-call` / `compute` → `full` (declared lens / pure transform).
+ *   TODO(lens-purity): downgrade a contract-call to `partial` when its in/out are
+ *   not pure lenses, once the flow normalizer's tracer is reused here.
+ * - `action` → `partial` if any `project` hint (reads/writes/note), else `opaque`.
+ * - `check`  → `partial` if a `project.asserts` hint, else `opaque`.
+ * - `group`  → worst child (a group is only as projectable as its weakest member).
+ * - reserved forward kinds (inline-protocol / branch / poll) → `opaque` until their phase.
+ */
+export function staticGradeOf(node: WorkflowNode): StaticGrade {
+  switch (node.kind) {
+    case "contract-call":
+    case "compute":
+      return "full";
+    case "action": {
+      const p = (node as ActionNode).project;
+      return p && (p.reads?.length || p.writes?.length || p.note) ? "partial" : "opaque";
+    }
+    case "check": {
+      const p = (node as CheckNode).project;
+      return p?.asserts ? "partial" : "opaque";
+    }
+    case "group":
+      return (node as GroupNode).nodes.reduce(
+        (g: StaticGrade, c) => worst(g, staticGradeOf(c)),
+        "full" as StaticGrade,
+      );
+    default:
+      return "opaque";
+  }
+}
+
 /** Common identity/meta fields lifted from a node's `NodeMeta` into its projection. */
 function metaFields(node: WorkflowNode): Pick<
   ProjectedWorkflowNode,
@@ -52,13 +88,14 @@ function metaFields(node: WorkflowNode): Pick<
 
 function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
   const base = metaFields(node);
+  const grade = staticGradeOf(node); // single grade source (shared with the executor)
   switch (node.kind) {
     case "contract-call": {
       const n = node as ContractCallNode;
       return {
         ...base,
         kind: "contract-call",
-        grade: "full",
+        grade,
         target: n.ref.target,
         protocol: n.ref.protocol,
         contractId: n.ref.contractId,
@@ -67,41 +104,23 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
       };
     }
     case "compute":
-      return { ...base, kind: "compute", grade: "full" };
+      return { ...base, kind: "compute", grade };
     case "action": {
       const p = (node as ActionNode).project;
-      const hasHint = !!(p && (p.reads?.length || p.writes?.length || p.note));
-      return {
-        ...base,
-        kind: "action",
-        grade: hasHint ? "partial" : "opaque",
-        reads: p?.reads,
-        writes: p?.writes,
-        note: p?.note,
-      };
+      return { ...base, kind: "action", grade, reads: p?.reads, writes: p?.writes, note: p?.note };
     }
     case "check": {
       const p = (node as CheckNode).project;
-      return {
-        ...base,
-        kind: "check",
-        grade: p?.asserts ? "partial" : "opaque",
-        reads: p?.reads,
-        asserts: p?.asserts,
-      };
+      return { ...base, kind: "check", grade, reads: p?.reads, asserts: p?.asserts };
     }
     case "group": {
       const children = (node as GroupNode).nodes.map(projectNode);
-      const grade = children.reduce(
-        (g: StaticGrade, c: ProjectedWorkflowNode) => worst(g, c.grade),
-        "full" as StaticGrade,
-      );
       return { ...base, kind: "group", grade, nodes: children };
     }
     default:
       // Reserved forward kinds (inline-protocol / branch / poll) — not emitted by
       // the v1 builder; grade conservatively until their phase lands.
-      return { ...base, kind: node.kind, grade: "opaque" };
+      return { ...base, kind: node.kind, grade };
   }
 }
 

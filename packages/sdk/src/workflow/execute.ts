@@ -33,11 +33,16 @@ import type {
 } from "../types.js";
 import { GlubeanSkipError } from "../types.js";
 import { Expectation } from "../expect.js";
+import { getAdapter, validateNeedsOutput } from "../contract-core.js";
+import { staticGradeOf } from "./project.js";
 import type {
   ActionNode,
   CheckNode,
+  ComputeNode,
+  ContractCallNode,
   ProjectionGrade,
   StaticGrade,
+  Workflow,
   WorkflowContext,
   WorkflowNode,
 } from "./types.js";
@@ -89,6 +94,41 @@ export class NodeTimeoutError extends Error {
     this.name = "NodeTimeoutError";
     this.nodeId = nodeId;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * A workflow phase (setup, or a node) FAILED via soft assertions/validation —
+ * nothing was thrown, so `runNode` has no `error` to report. The executor
+ * synthesizes this as the run's `cause` so teardown + the result carry a
+ * non-empty failure even for the pure soft-failure path (codex S2.1 P2).
+ */
+export class WorkflowPhaseFailedError extends Error {
+  readonly workflowId: string;
+  readonly phase: string;
+  constructor(workflowId: string, phase: string) {
+    super(`workflow "${workflowId}" ${phase} failed (soft assertion/validation)`);
+    this.name = "WorkflowPhaseFailedError";
+    this.workflowId = workflowId;
+    this.phase = phase;
+  }
+}
+
+/**
+ * A `compute` node returned a thenable — an async fn, or (the case the builder
+ * can't catch) a sync fn that returns a Promise. compute MUST be synchronous and
+ * I/O-free; the executor FAILS the node rather than committing the Promise as
+ * state, so async/I/O can't masquerade as a `full` pure transform (§17 #11).
+ */
+export class ComputeAsyncError extends Error {
+  readonly nodeId: string;
+  constructor(nodeId: string) {
+    super(
+      `workflow compute "${nodeId}" returned a thenable — compute must be ` +
+        `synchronous and I/O-free; use .action() for async work`,
+    );
+    this.name = "ComputeAsyncError";
+    this.nodeId = nodeId;
   }
 }
 
@@ -338,8 +378,106 @@ function emitNodeEnd(
   base.event({ type: NODE_END_EVENT, data });
 }
 
-/** Dispatch a node's body. S2.0 runs only the ctx-bearing async nodes. */
-function runBody(node: WorkflowNode, ctx: WorkflowContext, state: unknown): Promise<unknown> {
+/** True for a Promise or any Promise-like (`.then` is a function). */
+function isThenable(v: unknown): boolean {
+  return v != null && typeof (v as { then?: unknown }).then === "function";
+}
+
+/**
+ * Invoke a contract case IN-GRAPH (§17 #8). Independent of the flow engine
+ * (which gets deleted — plan fork a): dispatch through the PUBLIC adapter registry
+ * and call the protocol-neutral `executeCaseInFlow`, handing it the per-node child
+ * ctx + signal. `in` maps state → the case's logical input; `out` folds the raw
+ * response back into state (no `out` → response discarded, state preserved, like
+ * runFlow contract-core.ts:1625-1628). NOTE: `needs` validation + build-time
+ * flow-safety (port of contract-core.ts:818) land in S2.3 (§17 #8).
+ */
+async function runContractCall(
+  node: ContractCallNode,
+  ctx: WorkflowContext,
+  state: unknown,
+  scope: NodeScope,
+): Promise<unknown> {
+  const adapter = getAdapter(node.ref.protocol);
+  if (!adapter?.executeCaseInFlow) {
+    throw new Error(
+      `workflow call "${node.meta.id}": protocol "${node.ref.protocol}" ` +
+        (adapter
+          ? "does not implement executeCaseInFlow — it cannot be called in a workflow"
+          : "has no registered adapter (did you import its contract plugin package?)"),
+    );
+  }
+
+  // Validate the logical input against the case's `needs` schema at the call
+  // boundary, exactly as runFlow does (contract-core.ts:1402-1427) — JS/`as any`
+  // callers can't slip invalid inputs past the adapter, and Zod transforms/defaults
+  // apply (codex S2.1 R4 P2; this is the needs half of §17 #8, brought forward).
+  const contractSpec = (node.ref.contract as { _spec?: unknown })._spec as
+    | { cases?: Record<string, { needs?: unknown }> }
+    | undefined;
+  const needsSchema = contractSpec?.cases?.[node.ref.caseKey]?.needs;
+  const caseId = `${node.ref.contractId}.${node.ref.caseKey}`;
+  if (needsSchema && typeof node.in !== "function") {
+    throw new Error(
+      `workflow call "${node.meta.id}": case "${caseId}" declares \`needs\` but the ` +
+        `call has no \`in\` binding. Provide \`in: (state) => <logical input>\`.`,
+    );
+  }
+  let resolvedInputs = node.in ? node.in(state) : undefined;
+  // `in` is a PURE SYNCHRONOUS lens — reject a thenable so an async lens can't pass
+  // a Promise to the adapter as the logical input (mirrors out/compute; codex S2.1 R7).
+  if (isThenable(resolvedInputs)) {
+    throw new Error(
+      `workflow call "${node.meta.id}": \`in\` returned a thenable — in must be a ` +
+        `pure synchronous lens (state) => input; do async work in .action()`,
+    );
+  }
+  if (needsSchema) {
+    resolvedInputs = validateNeedsOutput(
+      needsSchema as { safeParse?: unknown; parse?: unknown },
+      resolvedInputs,
+      { testId: caseId, source: "workflow" },
+    );
+  }
+
+  const res = await adapter.executeCaseInFlow({
+    ctx,
+    // The adapter owns the contract's concrete spec type; the ref carries the live
+    // instance. Cast at this protocol-neutral seam (mirrors contract-core.ts:1431).
+    contract: node.ref.contract as never,
+    caseKey: node.ref.caseKey,
+    resolvedInputs,
+    ...(node.accept ? { accept: node.accept } : {}),
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  });
+  // If the adapter already recorded a soft failure (scoped expect/validate on a
+  // failing case), STOP before `out`: an out lens that assumes the validated success
+  // shape would throw and become the cause, masking the real validation failure.
+  // runNode then fails the node on hasFailure() with a synthesized cause (codex S2.1 R7).
+  if (scope.hasFailure()) {
+    return state; // preserve; the node fails on the recorded failure, not via `out`
+  }
+
+  // `out` REPLACES state; absent `out` returns undefined → §17 #2 preserves it.
+  // `out` is a PURE SYNCHRONOUS lens — reject a thenable result so async/I/O can't
+  // hide inside a `full`-graded call lens (mirrors compute, §17 #11; codex S2.1 R6).
+  const next = node.out ? node.out(state, res) : undefined;
+  if (isThenable(next)) {
+    throw new Error(
+      `workflow call "${node.meta.id}": \`out\` returned a thenable — out must be a ` +
+        `pure synchronous lens (state, res) => state; do async work in .action()`,
+    );
+  }
+  return next;
+}
+
+/** Dispatch a node's body to its kind-specific executor. */
+function runBody(
+  node: WorkflowNode,
+  ctx: WorkflowContext,
+  state: unknown,
+  scope: NodeScope,
+): Promise<unknown> {
   switch (node.kind) {
     case "action":
       return Promise.resolve((node as ActionNode).fn(ctx, state));
@@ -347,6 +485,19 @@ function runBody(node: WorkflowNode, ctx: WorkflowContext, state: unknown): Prom
       // A check returns void → it never changes state (resolve to `undefined` so
       // the caller's §17 #2 "void preserves" rule keeps the prior state).
       return Promise.resolve((node as CheckNode).fn(ctx, state)).then(() => undefined);
+    case "compute": {
+      // Pure synchronous transform; the return REPLACES state (§17 #2/#13). The
+      // builder rejects `async` compute syntactically; here we also catch a sync fn
+      // that RETURNS a thenable (JS / cast bypass) — fail the node, never commit the
+      // Promise as state (§17 #11).
+      const result = (node as ComputeNode).fn(state);
+      if (isThenable(result)) {
+        throw new ComputeAsyncError(node.meta.id);
+      }
+      return Promise.resolve(result);
+    }
+    case "contract-call":
+      return runContractCall(node as ContractCallNode, ctx, state, scope);
     default:
       throw new Error(
         `runNode: node kind "${node.kind}" is not implemented yet (lands in a later slice)`,
@@ -383,7 +534,7 @@ export async function runNode(
   };
 
   try {
-    const body = runBody(node, scope.ctx, state);
+    const body = runBody(node, scope.ctx, state, scope);
     const raced = hasTimeout
       ? Promise.race([
           body,
@@ -432,7 +583,189 @@ export async function runNode(
       emitNodeEnd(base, node, "skipped", grade, Date.now() - started);
       return { status: "skipped", state, grade, error: err };
     }
-    emitNodeEnd(base, node, "failed", grade, Date.now() - started, err);
-    return { status: "failed", state, grade, error: err };
+    // A skip thrown AFTER a soft failure is NOT the cause — the prior failure is.
+    // Drop the skip so runWorkflow synthesizes a proper phase-failure cause; a real
+    // thrown error / timeout stays as the cause (codex S2.1 R4 P3).
+    const failError = err instanceof GlubeanSkipError ? undefined : err;
+    emitNodeEnd(base, node, "failed", grade, Date.now() - started, failError);
+    return { status: "failed", state, grade, error: failError };
   }
+}
+
+// =============================================================================
+// runWorkflow — walk the graph: setup → nodes → teardown (§17 #1 / #5 / #13)
+// =============================================================================
+
+export interface WorkflowNodeOutcome {
+  id: string;
+  status: NodeStatus;
+  /** Runtime grade after evidence promotion (§17 #10). */
+  grade: ProjectionGrade;
+}
+
+export interface WorkflowRunResult {
+  /** `skipped` if the workflow opts out (meta.skip) or a node called `ctx.skip()`;
+   * `failed` if setup threw / soft-failed or a node failed; else `passed`. */
+  status: "passed" | "failed" | "skipped";
+  /** Last COMMITTED state — passed nodes commit, failed/skipped do not (§17 #13). */
+  state: unknown;
+  /** Per-node outcomes, authored order. */
+  nodes: WorkflowNodeOutcome[];
+  /** The primary cause that failed the run (the one teardown sees), if any. */
+  error?: unknown;
+}
+
+/**
+ * Derive a lifecycle (setup/teardown) child ctx + its `AbortController` — same
+ * per-node attribution + late-evidence quarantine as a graph node, AND the same
+ * failure-abort guarantee: the caller aborts the signal when the phase fails, so
+ * signal-aware async work the body started gets cancelled (codex S2.1 R2). No
+ * per-node timeout for this slice (§17 #4 timeout on setup/teardown lands later).
+ */
+function deriveLifecycleScope(base: TestContext): { scope: NodeScope; ac: AbortController } {
+  const ac = new AbortController();
+  return { scope: makeNodeScope(base, ac.signal), ac };
+}
+
+/**
+ * Record nodes from `startIndex` onward as `skipped` (emit end-only — they never
+ * started). Indexed by POSITION, not `meta.id`, so two nodes that accidentally
+ * share an id both still get an outcome (the builder doesn't reject dup ids —
+ * codex S2.1 R3 P3).
+ */
+function emitRemainingSkipped(
+  baseCtx: TestContext,
+  wf: Workflow,
+  nodes: WorkflowNodeOutcome[],
+  startIndex: number,
+): void {
+  for (let i = startIndex; i < wf.nodes.length; i++) {
+    const node = wf.nodes[i];
+    const grade = staticGradeOf(node);
+    emitNodeEnd(baseCtx, node, "skipped", grade, 0);
+    nodes.push({ id: node.meta.id, status: "skipped", grade });
+  }
+}
+
+/**
+ * Execute a built `Workflow` against a host `TestContext`. setup runs INSIDE the
+ * protected region so teardown ALWAYS runs — even when setup throws (§17 #1, the
+ * opposite of runFlow). Nodes run in authored order with fail-stop: a non-passed
+ * node stops the rest (emitted `skipped`). A node `ctx.skip()` skips the whole
+ * workflow (mirrors the runner's whole-test skip); `meta.skip` opts the workflow
+ * out entirely (discoverable, never executed). teardown sees the last committed
+ * state + the failing cause; a teardown that throws is logged and never masks it.
+ */
+export async function runWorkflow<State = unknown>(
+  wf: Workflow<State>,
+  baseCtx: TestContext,
+): Promise<WorkflowRunResult> {
+  const nodes: WorkflowNodeOutcome[] = [];
+
+  // --- workflow-level skip: discoverable but NEVER executed — no setup, no nodes,
+  // --- no teardown; every node reported skipped (codex S2.1 R2). ---
+  if (wf.meta.skip !== undefined) {
+    emitRemainingSkipped(baseCtx, wf as Workflow, nodes, 0);
+    return { status: "skipped", state: undefined, nodes, error: undefined };
+  }
+
+  let state: unknown;
+  let cause: unknown;
+  let failed = false;
+  let skipped = false; // setup or a node called ctx.skip() → the whole workflow is skipped
+
+  try {
+    // --- setup: an async lifecycle node, SELF-CONTAINED — its throw / ctx.skip() /
+    // --- soft-failure is classified here (no outer catch); on any non-success the
+    // --- graph is skipped and we stop before the node loop. ---
+    let proceed = true;
+    if (wf.setup) {
+      const { scope, ac } = deriveLifecycleScope(baseCtx);
+      let setupResult: unknown;
+      let setupError: unknown;
+      let threw = false;
+      try {
+        setupResult = await wf.setup(scope.ctx);
+      } catch (e) {
+        threw = true;
+        setupError = e;
+      } finally {
+        scope.seal();
+      }
+      const softFailed = scope.hasFailure();
+      if (threw || softFailed) {
+        ac.abort(); // failure/skip → cancel signal-aware work setup started (codex S2.1 R2)
+        proceed = false;
+        emitRemainingSkipped(baseCtx, wf as Workflow, nodes, 0);
+        if (threw && setupError instanceof GlubeanSkipError && !softFailed) {
+          // deliberate setup ctx.skip() with no prior failure → whole workflow
+          // skipped, like a node skip (codex S2.1 R3 P2).
+          skipped = true;
+        } else {
+          // a thrown error, or a soft failure (possibly then a skip) → run fails.
+          // A skip after a soft failure is NOT the cause (failure wins, mirroring the
+          // node path); use the real thrown error, else synthesize a phase failure —
+          // never surface the skip as the cause (codex S2.1 R5 P2).
+          failed = true;
+          cause =
+            setupError && !(setupError instanceof GlubeanSkipError)
+              ? setupError
+              : new WorkflowPhaseFailedError(wf.meta.id, "setup");
+        }
+      } else {
+        state = setupResult; // commit-on-success (§17 #13)
+      }
+    }
+
+    // --- walk nodes in authored order; fail-stop / skip-stop (§17 #5 basic) ---
+    if (proceed) {
+      for (let i = 0; i < wf.nodes.length; i++) {
+        const node = wf.nodes[i];
+        const grade = staticGradeOf(node);
+        const r = await runNode(baseCtx, node, state, { staticGrade: grade });
+        nodes.push({ id: node.meta.id, status: r.status, grade: r.grade });
+        if (r.status === "passed") {
+          state = r.state; // commit-on-success (§17 #13)
+          continue;
+        }
+        if (r.status === "failed") {
+          failed = true;
+          // A soft-assertion/validation failure has no thrown `error`; synthesize a
+          // cause so teardown + the result carry a non-empty failure (codex S2.1 P2).
+          cause = r.error ?? new WorkflowPhaseFailedError(wf.meta.id, `node "${node.meta.id}"`);
+        } else {
+          // node ctx.skip() → the whole workflow is skipped (mirrors the runner's
+          // whole-test skip, harness.ts:1944). Not a failure (codex S2.1 R2).
+          skipped = true;
+        }
+        emitRemainingSkipped(baseCtx, wf as Workflow, nodes, i + 1); // rest skipped
+        break;
+      }
+    }
+  } finally {
+    // --- teardown: ALWAYS runs (§17 #1), sees the last committed state + cause ---
+    if (wf.teardown) {
+      const { scope, ac } = deriveLifecycleScope(baseCtx);
+      let teardownThrew = false;
+      try {
+        await wf.teardown(scope.ctx, state as State | undefined, cause);
+      } catch (teardownErr) {
+        teardownThrew = true;
+        // Logged, NEVER masks the primary cause (§17 #1).
+        baseCtx.log?.(`workflow "${wf.meta.id}" teardown failed: ${String(teardownErr)}`);
+      } finally {
+        scope.seal();
+        // Abort on failure so signal-aware cleanup work is cancelled, mirroring the
+        // node/setup failure path (codex S2.1 R2).
+        if (teardownThrew || scope.hasFailure()) ac.abort();
+      }
+    }
+  }
+
+  return {
+    status: failed ? "failed" : skipped ? "skipped" : "passed",
+    state,
+    nodes,
+    error: cause,
+  };
 }
