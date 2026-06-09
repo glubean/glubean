@@ -164,11 +164,53 @@ export interface BranchNode<State = any> {
   else?: WorkflowNode[];
 }
 
-/** Bounded poll-until (Phase 3). */
-export interface PollNode {
+/**
+ * Opaque poll exit predicate (`untilRuntime`) — gets the per-node ctx, the raw
+ * attempt response, AND the workflow state (so a poll can wait for the response
+ * to reflect something already in state, e.g. `res.version >= state.lastSeen`).
+ * Like branch `whenRuntime`, the builder cannot statically prove synchronicity,
+ * so it is stored conservatively as L0 (`sync: false`); the runtime awaits it
+ * either way and rejects non-boolean results.
+ */
+export interface PollOpaqueUntil<State = any> {
+  kind: "opaque";
+  sync: boolean;
+  fn: (ctx: WorkflowContext, res: any, state: State) => boolean | Promise<boolean>;
+}
+
+/**
+ * Bounded poll-until (proposal §6.7, §17 #3): repeat ONE contract case until an
+ * exit predicate over the RESPONSE holds, bounded by a total wall-clock deadline
+ * and/or a finite per-attempt budget (validated at build time — a poll can never
+ * be unbounded). Attempt evidence is QUARANTINED per §17 #3: a probe's assertion
+ * noise and a timed-out orphan's late failures are discarded; the satisfying
+ * attempt and any in-budget deliberate failure are flushed. The poll node owns
+ * its own bounds (§17 #4) — it does not take the generic per-node timeout.
+ */
+export interface PollNode<State = any> {
   kind: "poll";
   meta: NodeMeta;
-  reserved?: never;
+  ref: ContractCaseRef;
+  /** Pure lens projecting workflow state → the case's logical input. */
+  in?: (state: State) => unknown;
+  /** Pure lens folding the SATISFYING response back into state (probes discarded). */
+  out?: (state: State, res: any) => State;
+  /** Accepted alternate outcome keys (e.g. HTTP statuses) — poll-on-status needs this. */
+  accept?: ReadonlyArray<string | number>;
+  /** Exit predicate — L2 declarative over the response (grade `full`) or opaque (`opaque`). */
+  until: BranchPredicate<any> | PollOpaqueUntil<State>;
+  /** Author label — required for opaque predicates (projection / diagnostics). */
+  message?: string;
+  /** Interval between attempts (ms); builder defaults it. */
+  every: number;
+  /** Multiplier applied to the interval after each attempt (1 = fixed); builder defaults it. */
+  backoff: number;
+  /** Total wall-clock bound (ms). */
+  timeoutMs?: number;
+  /** Per-attempt budget (ms) — required when `timeoutMs` is absent. */
+  perAttemptTimeoutMs?: number;
+  /** Max attempts (>= 1). */
+  maxAttempts?: number;
 }
 
 /** Grouping with its own execution/cleanup scope (Phase 4). */
@@ -194,7 +236,8 @@ export type V1WorkflowNodeKind =
   | "action"
   | "check"
   | "compute"
-  | "branch";
+  | "branch"
+  | "poll";
 
 export type WorkflowSetup<State> = (ctx: WorkflowContext) => State | Promise<State>;
 /**
@@ -251,11 +294,19 @@ export interface ProjectedWorkflowNode {
   nodes?: ProjectedWorkflowNode[];
   /** branch: the extracted predicate — an L2 declarative tree, or an opaque marker. */
   when?: ExtractedPredicate;
-  /** branch: author label (required for opaque predicates). */
+  /** branch/poll: author label (required for opaque predicates). */
   message?: string;
   /** branch: projected `then` / `else` side nodes (only the taken side runs at runtime). */
   then?: ProjectedWorkflowNode[];
   else?: ProjectedWorkflowNode[];
+  /** poll: the extracted exit predicate — L2 declarative over the response, or opaque. */
+  until?: ExtractedPredicate;
+  /** poll bounds (every/backoff always present; the rest as authored). */
+  every?: number;
+  backoff?: number;
+  timeoutMs?: number;
+  perAttemptTimeoutMs?: number;
+  maxAttempts?: number;
 }
 
 export interface WorkflowProjection {

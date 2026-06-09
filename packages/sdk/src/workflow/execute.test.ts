@@ -5,6 +5,7 @@ import { contract, __unregisterProtocolForTesting } from "../contract-core.js";
 import type { ContractCaseRef } from "../contract-types.js";
 import { workflow } from "./builder.js";
 import { projectWorkflow } from "./project.js";
+import { PollExhaustedError } from "../contract-flow-poll.js";
 import {
   makeNodeScope,
   promoteGrade,
@@ -15,6 +16,7 @@ import {
   ComputeAsyncError,
   NODE_START_EVENT,
   NODE_END_EVENT,
+  POLL_ATTEMPT_EVENT,
 } from "./execute.js";
 import type { ActionNode, CheckNode, WorkflowTeardown } from "./types.js";
 
@@ -1185,6 +1187,532 @@ describe("runWorkflow — branch (§17 #6)", () => {
         then: (b: unknown) => b,
       } as never),
     ).toThrow(/requires a non-empty `message`/);
+  });
+});
+
+// --- poll: build-time validation + projection (§6.7) -------------------------
+
+describe("workflow.poll() — build-time validation + projection", () => {
+  const ref = fakeRef<void, { status: string }>("job-api", "status", "wf-poll", "GET /job");
+
+  it("requires an exit predicate (until XOR untilRuntime)", () => {
+    expect(() =>
+      workflow("w").poll("p", ref, { maxAttempts: 3, perAttemptTimeout: 50 } as never),
+    ).toThrow(/requires an exit predicate/);
+  });
+
+  it("untilRuntime without a message throws at build time", () => {
+    expect(() =>
+      workflow("w").poll("p", ref, {
+        untilRuntime: async () => true,
+        maxAttempts: 3,
+        perAttemptTimeout: 50,
+      } as never),
+    ).toThrow(/requires a non-empty `message`/);
+  });
+
+  it("rejects a non-L2 declarative `until` (assertL2Predicate)", () => {
+    expect(() =>
+      workflow("w").poll("p", ref, {
+        until: (() => ({ kind: "opaque" })) as never,
+        maxAttempts: 3,
+        perAttemptTimeout: 50,
+      }),
+    ).toThrow(/poll/);
+  });
+
+  it("validates bounds at build time: a stop condition AND a finite attempt budget", () => {
+    const until = (w: never) =>
+      (w as { when: (f: (r: { status: string }) => string) => { eq: (v: string) => never } })
+        .when((r) => r.status)
+        .eq("done");
+    // no stop condition at all
+    expect(() => workflow("w").poll("p", ref, { until, perAttemptTimeout: 50 } as never)).toThrow(
+      /needs a stop condition/,
+    );
+    // maxAttempts-only — unbounded single attempt
+    expect(() => workflow("w").poll("p", ref, { until, maxAttempts: 3 } as never)).toThrow(
+      /not bounded/,
+    );
+  });
+
+  it("cannot be added after .teardown()", () => {
+    expect(() =>
+      workflow("w")
+        .teardown(async () => {})
+        .poll("p", ref, {
+          until: (w) => w.when((r: { status: string }) => r.status).eq("done"),
+          timeout: 1000,
+        }),
+    ).toThrow(/cannot be added after \.teardown\(\)/);
+  });
+
+  it("applies every/backoff defaults into the IR (every=1000, backoff=1)", () => {
+    const wf = workflow("w")
+      .poll("p", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("done"),
+        timeout: 5000,
+      })
+      .build();
+    expect(wf.nodes[0]).toMatchObject({ kind: "poll", every: 1000, backoff: 1 });
+  });
+
+  it("L2 poll projects full with the extracted until tree, call identity, and bounds", () => {
+    const wf = workflow("w")
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        accept: [200, 404] as never,
+        every: 250,
+        backoff: 2,
+        timeout: 30_000,
+        perAttemptTimeout: 5_000,
+        maxAttempts: 10,
+      })
+      .build();
+    const proj = projectWorkflow(wf);
+    expect(proj.nodes[0]).toMatchObject({
+      kind: "poll",
+      id: "wait",
+      grade: "full",
+      target: "GET /job",
+      protocol: "wf-poll",
+      contractId: "job-api",
+      caseKey: "status",
+      accept: [200, 404],
+      until: { kind: "compare", op: "eq", path: ["status"], value: "completed" },
+      every: 250,
+      backoff: 2,
+      timeoutMs: 30_000,
+      perAttemptTimeoutMs: 5_000,
+      maxAttempts: 10,
+    });
+    expect(proj.gradeSummary).toEqual({ full: 1, partial: 0, opaque: 0 }); // poll = ONE leaf grade
+  });
+
+  it("untilRuntime projects opaque L0 (may-do-async-IO) with its message", () => {
+    const wf = workflow("w")
+      .poll("wait", ref, {
+        untilRuntime: (_c, res: { status: string }) => res.status === "completed",
+        message: "job settles",
+        maxAttempts: 5,
+        perAttemptTimeout: 100,
+      })
+      .build();
+    const proj = projectWorkflow(wf);
+    expect(proj.nodes[0]).toMatchObject({
+      kind: "poll",
+      grade: "opaque",
+      until: { kind: "opaque", strictness: "L0", mayDoAsyncIO: true },
+      message: "job settles",
+    });
+    expect(proj.gradeSummary).toEqual({ full: 0, partial: 0, opaque: 1 });
+  });
+});
+
+// --- poll: executor (§17 #3) --------------------------------------------------
+
+describe("runWorkflow — poll (§17 #3)", () => {
+  afterEach(() => {
+    __unregisterProtocolForTesting("wf-poll");
+  });
+
+  /** Register a fake poll adapter whose responses are scripted per attempt. */
+  const registerPollAdapter = (
+    attemptFn: (args: {
+      attempt: number;
+      ctx: TestContext;
+      resolvedInputs: unknown;
+      accept?: unknown;
+      signal?: AbortSignal;
+    }) => Promise<unknown>,
+  ): { calls: () => number } => {
+    let attempt = 0;
+    contract.register("wf-poll", {
+      project: () => ({ cases: {} }),
+      executeCaseInFlow: async (args: {
+        ctx: TestContext;
+        resolvedInputs: unknown;
+        accept?: unknown;
+        signal?: AbortSignal;
+      }) => {
+        attempt += 1;
+        return attemptFn({ attempt, ...args });
+      },
+    } as never);
+    return { calls: () => attempt };
+  };
+
+  const ref = fakeRef<void, { status: string; n: number }>(
+    "job-api",
+    "status",
+    "wf-poll",
+    "GET /job",
+  );
+
+  it("satisfies on a later attempt: probes discarded, satisfying attempt flushed, out committed (§17 #3)", async () => {
+    const { ctx, rec } = fakeBase();
+    registerPollAdapter(async ({ attempt, ctx: c }) => {
+      // probe attempts emit pending-validation noise; the satisfying one passes.
+      if (attempt < 3) {
+        c.assert(false, `noise-${attempt}`); // quarantined → must be DISCARDED
+        return { status: "pending", n: attempt };
+      }
+      c.assert(true, "final ok"); // satisfying attempt → flushed
+      return { status: "completed", n: attempt };
+    });
+    const wf = workflow("poll-ok")
+      .setup(async () => ({ seen: 0 }))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        out: (s, r) => ({ ...s, seen: r.n }),
+        every: 1,
+        maxAttempts: 10,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.state).toEqual({ seen: 3 }); // out applied to the SATISFYING response
+    expect(res.nodes).toEqual([{ id: "wait", status: "passed", grade: "full" }]);
+    // probe noise discarded; only the satisfying attempt's assert landed.
+    expect(rec.asserts).toEqual([{ passed: true, message: "final ok" }]);
+    // attempt timeline: two probes then satisfied (§17 #9).
+    const attempts = rec.events.filter((e) => e.type === POLL_ATTEMPT_EVENT).map((e) => e.data);
+    expect(attempts.map((a) => a.outcome)).toEqual(["probe", "probe", "satisfied"]);
+    expect(attempts.map((a) => a.attempt)).toEqual([1, 2, 3]);
+  });
+
+  it("fails the node when the SATISFYING attempt's flushed evidence carries a failure; out NOT applied", async () => {
+    const { ctx, rec } = fakeBase();
+    registerPollAdapter(async ({ ctx: c }) => {
+      c.assert(false, "schema drift"); // flushed with the satisfying attempt
+      return { status: "completed", n: 1 };
+    });
+    const wf = workflow("poll-soft")
+      .setup(async () => ({ seen: 0 }))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        out: (s, r) => ({ ...s, seen: r.n }),
+        every: 1,
+        maxAttempts: 3,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(WorkflowPhaseFailedError);
+    expect(res.state).toEqual({ seen: 0 }); // commit-on-success: out NOT applied (§17 #13)
+    expect(rec.asserts).toEqual([{ passed: false, message: "schema drift" }]);
+  });
+
+  it("exhausts on maxAttempts: node failed with PollExhaustedError, rest skipped, probe noise discarded", async () => {
+    const { ctx, rec } = fakeBase();
+    const adapter = registerPollAdapter(async ({ ctx: c }) => {
+      c.assert(false, "still pending"); // every attempt is a probe → all discarded
+      return { status: "pending", n: 0 };
+    });
+    const wf = workflow("poll-max")
+      .setup(async () => ({ ok: true }))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        every: 1,
+        maxAttempts: 3,
+        perAttemptTimeout: 1000,
+      })
+      .action("after", async (_c, s) => s)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(PollExhaustedError);
+    expect((res.error as Error).message).toMatch(/maxAttempts reached/);
+    expect(adapter.calls()).toBe(3);
+    expect(res.state).toEqual({ ok: true }); // prior state stands
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toEqual({
+      wait: "failed",
+      after: "skipped",
+    });
+    expect(rec.asserts).toEqual([]); // discarded probe noise never lands (§17 #3)
+  });
+
+  it("exhausts when the next wait would cross the total timeout (no pointless sleep)", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async () => ({ status: "pending", n: 0 }));
+    const wf = workflow("poll-deadline")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        every: 5_000, // next wait crosses the 100ms deadline after attempt 1
+        timeout: 100,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect((res.error as Error).message).toMatch(/next wait would exceed timeout/);
+  });
+
+  it("a hung adapter is bounded by the per-attempt budget; the orphan's late fail is discarded", async () => {
+    const { ctx, rec } = fakeBase();
+    registerPollAdapter(async ({ ctx: c }) => {
+      await delay(60); // never finishes within the 15ms budget
+      c.fail("late orphan failure"); // buffered on the orphan's ctx → never flushed
+      return { status: "completed", n: 0 };
+    });
+    const wf = workflow("poll-hang")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        every: 1,
+        maxAttempts: 2,
+        perAttemptTimeout: 15,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(PollExhaustedError);
+    expect((res.error as Error).message).toMatch(/attempt budget/);
+    await delay(80); // let the orphan settle — its fail must NOT land
+    expect(rec.asserts).toEqual([]);
+  });
+
+  it("converts a signal-honoring adapter's AbortError into poll exhaustion (not a raw AbortError)", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(
+      ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            const e = new Error("aborted");
+            e.name = "AbortError";
+            reject(e);
+          });
+        }),
+    );
+    const wf = workflow("poll-abort")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        every: 1,
+        maxAttempts: 2,
+        perAttemptTimeout: 15,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(PollExhaustedError); // converted, with attempt count
+    expect((res.error as Error).message).toMatch(/attempt budget/);
+  });
+
+  it("an in-budget deliberate ctx.fail() in the adapter flushes and fails the poll (§17 #3)", async () => {
+    const { ctx, rec } = fakeBase();
+    registerPollAdapter(async ({ ctx: c }) => {
+      c.fail("resource gone");
+    });
+    const wf = workflow("poll-fail")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        every: 1,
+        maxAttempts: 5,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect((res.error as Error).message).toBe("resource gone");
+    expect(rec.asserts).toEqual([{ passed: false, message: "resource gone" }]); // flushed
+  });
+
+  it("a predicate ctx.skip() (no prior failure) skips the whole workflow", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async () => ({ status: "pending", n: 0 }));
+    let teardownRan = false;
+    const wf = workflow("poll-skip")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        untilRuntime: (c) => {
+          c.skip("feature disabled");
+          return true;
+        },
+        message: "m",
+        every: 1,
+        maxAttempts: 3,
+        perAttemptTimeout: 1000,
+      })
+      .teardown(async () => {
+        teardownRan = true;
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("skipped");
+    expect(res.nodes).toEqual([{ id: "wait", status: "skipped", grade: "opaque" }]);
+    expect(teardownRan).toBe(true);
+  });
+
+  it("a predicate soft-failure then skip surfaces a phase-failure cause, not the skip", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async () => ({ status: "pending", n: 0 }));
+    const wf = workflow("poll-fail-skip")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        untilRuntime: (c) => {
+          c.assert(false, "soft");
+          c.skip("then skip");
+          return true;
+        },
+        message: "m",
+        every: 1,
+        maxAttempts: 3,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(WorkflowPhaseFailedError); // NOT the skip
+  });
+
+  it("a non-boolean untilRuntime result fails the poll (no silent coercion)", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async () => ({ status: "pending", n: 0 }));
+    const wf = workflow("poll-nonbool")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        untilRuntime: (() => "false") as never, // truthy string would wrongly satisfy
+        message: "m",
+        every: 1,
+        maxAttempts: 3,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect((res.error as Error).message).toMatch(/untilRuntime must return a boolean/);
+  });
+
+  it("the until-predicate's traces are observability: always flushed, promote opaque→trace (§17 #3/#10)", async () => {
+    const { ctx, rec } = fakeBase();
+    registerPollAdapter(async ({ attempt }) => ({
+      status: attempt >= 2 ? "completed" : "pending",
+      n: attempt,
+    }));
+    const wf = workflow("poll-trace")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        untilRuntime: (c, r: { status: string }) => {
+          c.trace(aTrace()); // structured evidence from a PROBE evaluation too
+          return r.status === "completed";
+        },
+        message: "m",
+        every: 1,
+        maxAttempts: 5,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(rec.traces).toHaveLength(2); // one per evaluation, probe included
+    expect(res.nodes[0].grade).toBe("trace"); // opaque → trace promotion (§17 #10)
+  });
+
+  it("discarded probe evidence does NOT promote the grade (§17 #10)", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async ({ ctx: c }) => {
+      c.assert(false, "probe noise"); // quarantined + discarded every attempt
+      return { status: "pending", n: 0 };
+    });
+    const wf = workflow("poll-no-promote")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        untilRuntime: () => false,
+        message: "m",
+        every: 1,
+        maxAttempts: 2,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed"); // exhausted
+    expect(res.nodes[0].grade).toBe("opaque"); // discarded evidence never promotes
+  });
+
+  it("fails the poll when `out` returns a thenable (§17 #11)", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async () => ({ status: "completed", n: 1 }));
+    const wf = workflow("poll-out-thenable")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        out: (() => Promise.resolve({})) as never,
+        every: 1,
+        maxAttempts: 2,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect((res.error as Error).message).toMatch(/`out` returned a thenable/);
+  });
+
+  it("fails the poll when `in` returns a thenable (shared call-attempt path)", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async () => ({ status: "completed", n: 1 }));
+    const wf = workflow("poll-in-thenable")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        in: (() => Promise.resolve({})) as never,
+        untilRuntime: () => true,
+        message: "m",
+        every: 1,
+        maxAttempts: 2,
+        perAttemptTimeout: 1000,
+      } as never)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect((res.error as Error).message).toMatch(
+      /workflow poll "wait": `in` returned a thenable/,
+    );
+  });
+
+  it("passes accept + the per-attempt signal through to the adapter", async () => {
+    const { ctx } = fakeBase();
+    let sawAccept: unknown;
+    let sawSignal: unknown;
+    registerPollAdapter(async ({ accept, signal }) => {
+      sawAccept = accept;
+      sawSignal = signal;
+      return { status: "completed", n: 1 };
+    });
+    const wf = workflow("poll-passthrough")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        accept: [200, 404] as never,
+        every: 1,
+        maxAttempts: 2,
+        perAttemptTimeout: 1000,
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(sawAccept).toEqual([200, 404]);
+    expect(sawSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("an unbounded poll node smuggled past the builder fails fast at run time", async () => {
+    const { ctx } = fakeBase();
+    registerPollAdapter(async () => ({ status: "pending", n: 0 }));
+    const wf = workflow("poll-unbounded")
+      .setup(async () => ({}))
+      .poll("wait", ref, {
+        until: (w) => w.when((r: { status: string }) => r.status).eq("completed"),
+        timeout: 1000,
+      })
+      .build();
+    // strip the bounds after build (an `as any` / JS caller could hand this in).
+    (wf.nodes[0] as { timeoutMs?: number }).timeoutMs = undefined;
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect((res.error as Error).message).toMatch(/needs a stop condition/);
   });
 });
 

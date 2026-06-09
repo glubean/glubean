@@ -5,6 +5,7 @@ import type {
   OpaquePredicate,
   PredicateScope,
 } from "../contract-flow-condition.js";
+import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
 import type {
   ActionNode,
   ActionProjection,
@@ -15,6 +16,8 @@ import type {
   ContractCallNode,
   NodeMeta,
   NodeMetaInput,
+  PollNode,
+  PollOpaqueUntil,
   Workflow,
   WorkflowContext,
   WorkflowMeta,
@@ -45,6 +48,78 @@ export type BranchOpts<State> =
     };
 
 /**
+ * `.poll()` exit predicate (proposal §6.7) — a declarative `until` over the
+ * RESPONSE (L2, statically projectable → `full`) XOR a runtime `untilRuntime`
+ * (opaque, requires `message`; gets ctx + response + state). Mirrors branch's
+ * `when`/`whenRuntime` split: the two forms cannot share one key because both
+ * are functions and the builder cannot soundly tell them apart.
+ */
+export type PollUntil<State, Res> =
+  | {
+      until: (w: PredicateScope<Res>) => BranchPredicate<Res>;
+      untilRuntime?: never;
+      message?: string;
+    }
+  | {
+      until?: never;
+      untilRuntime: (
+        ctx: WorkflowContext,
+        res: Res,
+        state: State,
+      ) => boolean | Promise<boolean>;
+      message: string;
+    };
+
+/**
+ * `.poll()` bounds — validated at build time (`validatePollBounds`): a total
+ * stop condition (`timeout` | `maxAttempts`) AND a finite single-attempt budget
+ * (`timeout` | `perAttemptTimeout`) are BOTH required, so a poll can never hang
+ * unbounded. `every` defaults to 1s; `backoff` to 1 (fixed interval).
+ */
+export interface PollBounds {
+  /** Interval between attempts (ms). Default 1000. */
+  every?: number;
+  /** Multiplier applied to the interval after each attempt (>= 1). Default 1. */
+  backoff?: number;
+  /** Total wall-clock bound (ms). */
+  timeout?: number;
+  /** Per-attempt budget (ms) — required when `timeout` is absent. */
+  perAttemptTimeout?: number;
+  /** Max attempts (>= 1). */
+  maxAttempts?: number;
+}
+
+/** `.poll()` options when the polled case needs NO logical input. */
+export type PollOpts<
+  State,
+  NewState,
+  CaseOutput,
+  RawOutcome,
+  AcceptKey,
+  Accept extends ReadonlyArray<AcceptKey> = never,
+> = PollUntil<State, CallResponse<Accept, CaseOutput, RawOutcome>> &
+  PollBounds & {
+    /** Pure lens folding the SATISFYING response into the next state. */
+    out?: (state: State, res: CallResponse<Accept, CaseOutput, RawOutcome>) => NewState;
+    /** Accepted alternate outcome keys (poll-on-status needs this). */
+    accept?: Accept;
+  };
+
+/** `.poll()` options when the polled case REQUIRES input — `in` is mandatory. */
+export type PollOptsWithInput<
+  State,
+  NewState,
+  CaseInputs,
+  CaseOutput,
+  RawOutcome,
+  AcceptKey,
+  Accept extends ReadonlyArray<AcceptKey> = never,
+> = PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept> & {
+  /** Pure lens: workflow state → the case's logical input (required). */
+  in: (state: State) => CaseInputs;
+};
+
+/**
  * Normalize a step's first argument into a `NodeMeta`. A string is shorthand for
  * the node `id` (mirrors `workflow(id)`); an object is spread as-is. `id` falls
  * back to `name` then to a positional `${idPrefix}node-${index}`; `name` defaults
@@ -59,8 +134,8 @@ function normalizeNodeMeta(input: NodeMetaInput, index: number, idPrefix = ""): 
 
 /**
  * vNext `workflow()` authoring builder (Phase 1 surface). Emits the runtime node
- * graph (`./types`); execution + projection live elsewhere. Branch / poll /
- * group / use / each / pick come in later phases — the IR already reserves them.
+ * graph (`./types`); execution + projection live elsewhere. Group / use / each /
+ * pick come in later phases — the IR already reserves them.
  *
  * No backward compatibility: this is a fresh self-consistent surface (2026-06-09).
  */
@@ -167,6 +242,28 @@ export interface WorkflowBuilder<State> {
    * branch does not change the State type — sub-graph state writes apply at runtime.
    */
   branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): WorkflowBuilder<State>;
+  /**
+   * Bounded poll-until (§6.7, §17 #3): repeat ONE contract case until the exit
+   * predicate over the RESPONSE holds. Declarative `until` projects to `full`;
+   * runtime `untilRuntime` is opaque and needs a `message`. Bounds are validated
+   * at build time (total stop condition AND finite per-attempt budget). Probe
+   * attempts' assertion noise is quarantined; only the satisfying attempt's
+   * evidence (and any in-budget deliberate failure) lands on the run.
+   */
+  poll<
+    CaseInputs,
+    CaseOutput,
+    AcceptKey,
+    RawOutcome,
+    Accept extends ReadonlyArray<AcceptKey> = never,
+    NewState = State,
+  >(
+    idOrMeta: NodeMetaInput,
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    ...rest: [CaseInputs] extends [void]
+      ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
+      : [opts: PollOptsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
+  ): WorkflowBuilder<NewState>;
   /** Finalize into a `Workflow`. */
   build(): Workflow<State>;
 }
@@ -314,6 +411,81 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     };
     this._nodes.push(node as WorkflowNode);
     return this;
+  }
+
+  // Broad impl satisfies the interface's conditional-tuple signature; call sites
+  // type-check against the precise interface signature, not this one.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  poll(idOrMeta: NodeMetaInput, ref: ContractCaseRef, ...rest: any[]): any {
+    this.assertNoTeardown("poll");
+    const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+    const opts = rest[0] as
+      | (PollUntil<State, unknown> &
+          PollBounds & {
+            in?: (state: State) => unknown;
+            out?: (state: State, res: unknown) => unknown;
+            accept?: ReadonlyArray<string | number>;
+          })
+      | undefined;
+    // The type system requires opts (until XOR untilRuntime), but JS / `as any`
+    // callers can omit it — an exit-predicate-less poll would loop to exhaustion
+    // for nothing, so fail fast here.
+    if (!opts || (typeof opts.until !== "function" && typeof opts.untilRuntime !== "function")) {
+      throw new Error(
+        `workflow.poll() "${meta.id}" requires an exit predicate — \`until\` (declarative) or \`untilRuntime\``,
+      );
+    }
+    validatePollBounds(
+      {
+        timeout: opts.timeout,
+        maxAttempts: opts.maxAttempts,
+        perAttemptTimeout: opts.perAttemptTimeout,
+        every: opts.every,
+        backoff: opts.backoff,
+      },
+      meta.id,
+    );
+    const node: PollNode<State> = {
+      kind: "poll",
+      meta,
+      ref,
+      in: opts.in,
+      out: opts.out as PollNode<State>["out"],
+      accept: opts.accept,
+      until: this.buildPollUntil(opts),
+      message: opts.message,
+      every: opts.every ?? DEFAULT_EVERY_MS,
+      backoff: opts.backoff ?? 1,
+      timeoutMs: opts.timeout,
+      perAttemptTimeoutMs: opts.perAttemptTimeout,
+      maxAttempts: opts.maxAttempts,
+    };
+    this._nodes.push(node as WorkflowNode);
+    return this;
+  }
+
+  // Build the poll exit predicate: an L2 declarative tree over the RESPONSE
+  // (validated + projectable) or an opaque wrapper. Mirrors buildBranchPredicate,
+  // including the conservative `sync: false` (we cannot statically prove an
+  // untilRuntime fn is synchronous — codex S2.4a P2 applies identically here).
+  private buildPollUntil(
+    opts: PollUntil<State, unknown>,
+  ): BranchPredicate<unknown> | PollOpaqueUntil<State> {
+    if (opts.until) {
+      const pred = opts.until(predicateScope<unknown>());
+      assertL2Predicate(pred, "poll");
+      return pred;
+    }
+    if (typeof opts.message !== "string" || opts.message.length === 0) {
+      throw new Error(
+        "workflow.poll() with untilRuntime requires a non-empty `message`",
+      );
+    }
+    return {
+      kind: "opaque",
+      sync: false,
+      fn: opts.untilRuntime as PollOpaqueUntil<State>["fn"],
+    };
   }
 
   // Build the branch predicate: an L2 declarative tree (validated + projectable) or

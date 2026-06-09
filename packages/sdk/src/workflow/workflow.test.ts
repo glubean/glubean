@@ -234,5 +234,35 @@ function _compileTimeGuards(): void {
       return s;
     });
   // (async compute is rejected at RUNTIME — covered by the lifecycle-guard test.)
+
+  // .poll(): a case that REQUIRES input must not compile without `in`; the L2
+  // `until` and `out` lenses see the typed response.
+  const _pollRef = fakeRef<{ jobId: string }, { status: string }>("job", "get", "GET /job");
+  // @ts-expect-error — `in` is required because the case needs input
+  workflow("guard").poll("wait", _pollRef, {
+    until: (w) => w.when((r) => r.status).eq("done"),
+    timeout: 1000,
+  });
+  workflow("guard")
+    .setup(async () => ({ jobId: "j1" }))
+    .poll("wait", _pollRef, {
+      in: (s) => ({ jobId: s.jobId }),
+      until: (w) => w.when((r) => r.status).eq("done"), // r is the typed response
+      out: (s, res) => {
+        const _typed: { status: string } = res; // res === CaseOutput (no accept)
+        void _typed;
+        return s;
+      },
+      timeout: 1000,
+    });
+  // untilRuntime without a message must not compile.
+  workflow("guard")
+    .setup(async () => ({ jobId: "j1" }))
+    // @ts-expect-error — `message` is required with untilRuntime
+    .poll("wait", _pollRef, {
+      in: (s) => ({ jobId: s.jobId }),
+      untilRuntime: (_c, res: { status: string }) => res.status === "done",
+      timeout: 1000,
+    });
 }
 void _compileTimeGuards;

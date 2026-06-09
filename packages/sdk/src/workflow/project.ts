@@ -6,6 +6,7 @@ import type {
   ComputeNode,
   ContractCallNode,
   GroupNode,
+  PollNode,
   ProjectedWorkflowNode,
   StaticGrade,
   Workflow,
@@ -28,7 +29,9 @@ import type {
  * - `check`         → `partial` if a `project.asserts` hint, else `opaque`.
  * - `group`         → recurses; grade = worst child (a group is only as projectable
  *   as its least-projectable member).
- * - reserved kinds (inline-protocol / branch / poll) → `opaque` until their phase.
+ * - `branch`/`poll` → the DECISION predicate's grade (L2 declarative → `full`,
+ *   opaque → `opaque`); branch children are graded/tallied independently.
+ * - reserved kinds (inline-protocol) → `opaque` until their phase.
  */
 
 const GRADE_RANK: Record<StaticGrade, number> = { full: 0, partial: 1, opaque: 2 };
@@ -48,7 +51,8 @@ function worst(a: StaticGrade, b: StaticGrade): StaticGrade {
  * - `action` → `partial` if any `project` hint (reads/writes/note), else `opaque`.
  * - `check`  → `partial` if a `project.asserts` hint, else `opaque`.
  * - `group`  → worst child (a group is only as projectable as its weakest member).
- * - reserved forward kinds (inline-protocol / branch / poll) → `opaque` until their phase.
+ * - `branch`/`poll` → the decision/exit predicate's grade (children independent).
+ * - reserved forward kinds (inline-protocol) → `opaque` until their phase.
  */
 export function staticGradeOf(node: WorkflowNode): StaticGrade {
   switch (node.kind) {
@@ -74,6 +78,13 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
       // graded + tallied independently, so folding them in here would double-count
       // their opacity and hide a projectable branch decision (codex S2.4a R4).
       return ((node as BranchNode).when as { kind?: unknown }).kind === "opaque"
+        ? "opaque"
+        : "full";
+    case "poll":
+      // Same decision-only rule as branch: the poll's grade is its EXIT predicate's
+      // projectability (the call target is a declared contract ref either way).
+      // L2 declarative over the response → full; opaque untilRuntime → opaque.
+      return ((node as PollNode).until as { kind?: unknown }).kind === "opaque"
         ? "opaque"
         : "full";
     default:
@@ -139,9 +150,32 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         else: b.else ? b.else.map(projectNode) : undefined,
       };
     }
+    case "poll": {
+      const p = node as PollNode;
+      return {
+        ...base,
+        kind: "poll",
+        grade,
+        target: p.ref.target,
+        protocol: p.ref.protocol,
+        contractId: p.ref.contractId,
+        caseKey: p.ref.caseKey,
+        accept: p.accept,
+        // The opaque until's fn takes (ctx, res, state) — wider than the condition
+        // model's (ctx, state) — but extractPredicate only reads kind/sync, so the
+        // cast at this seam is sound (mirrors extractPollStep).
+        until: extractPredicate(p.until as Parameters<typeof extractPredicate>[0]),
+        message: p.message,
+        every: p.every,
+        backoff: p.backoff,
+        timeoutMs: p.timeoutMs,
+        perAttemptTimeoutMs: p.perAttemptTimeoutMs,
+        maxAttempts: p.maxAttempts,
+      };
+    }
     default:
-      // Reserved forward kinds (inline-protocol / branch / poll) — not emitted by
-      // the v1 builder; grade conservatively until their phase lands.
+      // Reserved forward kinds (inline-protocol) — not emitted by the v1 builder;
+      // grade conservatively until their phase lands.
       return { ...base, kind: node.kind, grade };
   }
 }

@@ -16,9 +16,11 @@
  *     events, runs the body under a per-node `AbortController`, and enforces a
  *     TERMINAL per-node timeout (no retry; §17 #4) that aborts the node (§17 #12).
  *
- * The pure-flow walk (setup/call/compute/teardown) lands in S2.1; branch/poll in
- * S2.4. `runNode` here executes only the `ctx`-bearing async nodes (action/check);
- * other kinds throw "not implemented yet" until their slice fills them in.
+ * On top of it: `runWorkflow` walks setup → nodes → teardown (S2.1); `runBranch`
+ * runs only the taken side (S2.4a, §17 #6); `runPollNode` is the bounded
+ * poll-until with per-attempt quarantine (S2.4b, §17 #3). Control-flow nodes
+ * (branch/poll) own their bracket/bounds and are dispatched by `runNodeList`,
+ * not `runNode`; remaining reserved kinds throw "not implemented yet".
  */
 
 import type {
@@ -36,6 +38,14 @@ import { Expectation } from "../expect.js";
 import { getAdapter, validateNeedsOutput } from "../contract-core.js";
 import { evalPredicate } from "../contract-flow-condition.js";
 import type { BranchPredicate, OpaquePredicate } from "../contract-flow-condition.js";
+import {
+  quarantinedCtx,
+  raceBudget,
+  validatePollBounds,
+  PollExhaustedError,
+  BACKOFF_CAP_MS,
+  DEFAULT_EVERY_MS,
+} from "../contract-flow-poll.js";
 import { staticGradeOf } from "./project.js";
 import type {
   ActionNode,
@@ -43,6 +53,9 @@ import type {
   CheckNode,
   ComputeNode,
   ContractCallNode,
+  NodeMeta,
+  PollNode,
+  PollOpaqueUntil,
   ProjectionGrade,
   StaticGrade,
   Workflow,
@@ -392,25 +405,36 @@ function isThenable(v: unknown): boolean {
   return v != null && typeof (v as { then?: unknown }).then === "function";
 }
 
+/** The node shape `executeCallAttempt` needs — both call and poll nodes match it. */
+interface CallLikeNode {
+  meta: NodeMeta;
+  ref: ContractCallNode["ref"];
+  in?: (state: any) => unknown;
+  accept?: ReadonlyArray<string | number>;
+}
+
 /**
- * Invoke a contract case IN-GRAPH (§17 #8). Independent of the flow engine
- * (which gets deleted — plan fork a): dispatch through the PUBLIC adapter registry
- * and call the protocol-neutral `executeCaseInFlow`, handing it the per-node child
- * ctx + signal. `in` maps state → the case's logical input; `out` folds the raw
- * response back into state (no `out` → response discarded, state preserved, like
- * runFlow contract-core.ts:1625-1628). NOTE: `needs` validation + build-time
- * flow-safety (port of contract-core.ts:818) land in S2.3 (§17 #8).
+ * Execute ONE in-graph contract-case invocation (§17 #8). Independent of the flow
+ * engine (which gets deleted — plan fork a): dispatch through the PUBLIC adapter
+ * registry and call the protocol-neutral `executeCaseInFlow`. Covers the adapter
+ * lookup, the third-party `validateCaseForFlow` veto (mirrors contract-core.ts:818),
+ * the `needs` validation at the call boundary (contract-core.ts:1402-1427 parity;
+ * codex S2.1 R4 P2), and the `in` lens (PURE SYNCHRONOUS — thenables rejected,
+ * codex S2.1 R7). Shared by `.call` (one shot, node signal) and `.poll` (one
+ * invocation per attempt, per-attempt budget signal + quarantined ctx).
  */
-async function runContractCall(
-  node: ContractCallNode,
-  ctx: WorkflowContext,
+async function executeCallAttempt(
+  kind: "call" | "poll",
+  node: CallLikeNode,
+  ctx: TestContext,
   state: unknown,
-  scope: NodeScope,
+  signal: AbortSignal | undefined,
 ): Promise<unknown> {
+  const label = `workflow ${kind} "${node.meta.id}"`;
   const adapter = getAdapter(node.ref.protocol);
   if (!adapter?.executeCaseInFlow) {
     throw new Error(
-      `workflow call "${node.meta.id}": protocol "${node.ref.protocol}" ` +
+      `${label}: protocol "${node.ref.protocol}" ` +
         (adapter
           ? "does not implement executeCaseInFlow — it cannot be called in a workflow"
           : "has no registered adapter (did you import its contract plugin package?)"),
@@ -418,17 +442,13 @@ async function runContractCall(
   }
   // Third-party adapter veto: a protocol can reject specific cases from in-graph use
   // (§17 #8, the validateCaseForFlow half — a third-party slot; built-in adapters
-  // don't implement it). Mirrors contract-core.ts:818.
+  // don't implement it).
   adapter.validateCaseForFlow?.(
     (node.ref.contract as { _spec?: unknown })._spec,
     node.ref.caseKey,
     node.ref.contractId,
   );
 
-  // Validate the logical input against the case's `needs` schema at the call
-  // boundary, exactly as runFlow does (contract-core.ts:1402-1427) — JS/`as any`
-  // callers can't slip invalid inputs past the adapter, and Zod transforms/defaults
-  // apply (codex S2.1 R4 P2; this is the needs half of §17 #8, brought forward).
   const contractSpec = (node.ref.contract as { _spec?: unknown })._spec as
     | { cases?: Record<string, { needs?: unknown }> }
     | undefined;
@@ -436,16 +456,14 @@ async function runContractCall(
   const caseId = `${node.ref.contractId}.${node.ref.caseKey}`;
   if (needsSchema && typeof node.in !== "function") {
     throw new Error(
-      `workflow call "${node.meta.id}": case "${caseId}" declares \`needs\` but the ` +
-        `call has no \`in\` binding. Provide \`in: (state) => <logical input>\`.`,
+      `${label}: case "${caseId}" declares \`needs\` but the ` +
+        `${kind} has no \`in\` binding. Provide \`in: (state) => <logical input>\`.`,
     );
   }
   let resolvedInputs = node.in ? node.in(state) : undefined;
-  // `in` is a PURE SYNCHRONOUS lens — reject a thenable so an async lens can't pass
-  // a Promise to the adapter as the logical input (mirrors out/compute; codex S2.1 R7).
   if (isThenable(resolvedInputs)) {
     throw new Error(
-      `workflow call "${node.meta.id}": \`in\` returned a thenable — in must be a ` +
+      `${label}: \`in\` returned a thenable — in must be a ` +
         `pure synchronous lens (state) => input; do async work in .action()`,
     );
   }
@@ -457,7 +475,7 @@ async function runContractCall(
     );
   }
 
-  const res = await adapter.executeCaseInFlow({
+  return adapter.executeCaseInFlow({
     ctx,
     // The adapter owns the contract's concrete spec type; the ref carries the live
     // instance. Cast at this protocol-neutral seam (mirrors contract-core.ts:1431).
@@ -465,8 +483,23 @@ async function runContractCall(
     caseKey: node.ref.caseKey,
     resolvedInputs,
     ...(node.accept ? { accept: node.accept } : {}),
-    ...(ctx.signal ? { signal: ctx.signal } : {}),
+    ...(signal ? { signal } : {}),
   });
+}
+
+/**
+ * Invoke a contract case IN-GRAPH for a `.call` node: one `executeCallAttempt`
+ * under the node's ctx + signal, then the `out` lens. `in` maps state → the
+ * case's logical input; `out` folds the raw response back into state (no `out`
+ * → response discarded, state preserved, like runFlow contract-core.ts:1625-1628).
+ */
+async function runContractCall(
+  node: ContractCallNode,
+  ctx: WorkflowContext,
+  state: unknown,
+  scope: NodeScope,
+): Promise<unknown> {
+  const res = await executeCallAttempt("call", node, ctx, state, ctx.signal);
   // If the adapter already recorded a soft failure (scoped expect/validate on a
   // failing case), STOP before `out`: an out lens that assumes the validated success
   // shape would throw and become the cause, masking the real validation failure.
@@ -515,6 +548,13 @@ function runBody(
     }
     case "contract-call":
       return runContractCall(node as ContractCallNode, ctx, state, scope);
+    case "branch":
+    case "poll":
+      // Control-flow nodes own their bracket/bounds — runNodeList dispatches them
+      // to runBranch / runPollNode directly, never through runNode.
+      throw new Error(
+        `runNode: "${node.kind}" nodes run via the node-list dispatcher, not runNode`,
+      );
     default:
       throw new Error(
         `runNode: node kind "${node.kind}" is not implemented yet (lands in a later slice)`,
@@ -814,6 +854,290 @@ async function runBranch(
   return r;
 }
 
+// =============================================================================
+// runPollNode — bounded poll-until with per-attempt quarantine (§17 #3, §6.7)
+// =============================================================================
+
+/** Per-attempt timeline event (§17 #9 "poll attempt timeline"). Rides the generic
+ * `ctx.event` channel like node_start/node_end; emitted through the NODE scope, so
+ * it is observability (never promotes the grade) and is quarantined after seal. */
+export const POLL_ATTEMPT_EVENT = "workflow:poll_attempt";
+
+export interface PollAttemptEventData {
+  nodeId: string;
+  attempt: number;
+  /** `satisfied` — until held; `probe` — until not yet; `failed` — the attempt
+   * threw / exceeded its budget (the poll node fails). */
+  outcome: "satisfied" | "probe" | "failed";
+  durationMs: number;
+  [k: string]: unknown;
+}
+
+function emitPollAttempt(
+  ctx: WorkflowContext,
+  node: PollNode,
+  attempt: number,
+  outcome: PollAttemptEventData["outcome"],
+  durationMs: number,
+): void {
+  const data: PollAttemptEventData = {
+    nodeId: node.meta.id,
+    attempt,
+    outcome,
+    durationMs: Math.round(durationMs),
+  };
+  ctx.event({ type: POLL_ATTEMPT_EVENT, data });
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Evaluate the poll exit predicate. L2 declarative reads the RESPONSE (shared
+ * `evalPredicate`, subject = response — the single predicate engine, same as
+ * branch). An opaque `untilRuntime` gets `(ctx, res, state)` and is awaited; a
+ * non-boolean result is rejected (same rule + wording as branch `whenRuntime`).
+ * Deliberately NOT the flow's `evalPollExit`: that helper's error text names the
+ * legacy `pollFn`/`pollAsync` API, which is deleted before release (no-compat).
+ */
+async function evalUntil(
+  node: PollNode,
+  response: unknown,
+  ctx: TestContext,
+  state: unknown,
+): Promise<boolean> {
+  const until = node.until;
+  if ((until as { kind?: unknown }).kind === "opaque") {
+    // The quarantined predicate ctx prototype-chains to the node scope's ctx, so
+    // `signal` and observability resolve through it — the WorkflowContext cast is
+    // sound at runtime (same seam as the branch predicate).
+    const result = await (until as PollOpaqueUntil).fn(
+      ctx as WorkflowContext,
+      response,
+      state,
+    );
+    if (typeof result !== "boolean") {
+      throw new Error(
+        `workflow poll "${node.meta.id}": untilRuntime must return a boolean, got ${typeof result}`,
+      );
+    }
+    return result;
+  }
+  return evalPredicate(until as BranchPredicate<unknown>, response);
+}
+
+/**
+ * The bounded attempt loop — a port of the flow's `runPollStep`
+ * (contract-core.ts:1449-1569) onto the workflow node scope. Each attempt runs
+ * request + exit predicate in their own quarantined ctxs over `scope.ctx`
+ * (§17 #3):
+ *   - satisfy (until=true)    → flush reqCtx, return the response (caller applies `out`);
+ *   - probe (until=false)     → DISCARD reqCtx (pending validation noise);
+ *   - in-budget fail/throw    → flush the throwing ctx (the deliberate failure lands), rethrow;
+ *   - orphan (budget timeout) → DISCARD that ctx (a timed-out attempt cannot corrupt the run);
+ *   - exhaust (any bound)     → throw PollExhaustedError (the node fails).
+ * The predicate ctx is flushed after EVERY in-budget evaluation — its traces and
+ * deliberate asserts are observability/intent, not probe noise (§17 #3). Both the
+ * request and the predicate are budget-raced, so the loop is bounded even when
+ * the adapter ignores `signal`.
+ */
+async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promise<unknown> {
+  const label = node.meta.id;
+  // Runtime bound guard — the builder validates at construction, but `as any` /
+  // JS callers can hand the executor an unbounded poll node. Fail fast instead of
+  // looping forever (mirrors runPollStep's guard).
+  validatePollBounds(
+    {
+      timeout: node.timeoutMs,
+      maxAttempts: node.maxAttempts,
+      perAttemptTimeout: node.perAttemptTimeoutMs,
+      every: node.every,
+      backoff: node.backoff,
+    },
+    label,
+  );
+  // Defaults for as-any/JS callers — the builder already applies them (a missing
+  // `every` would hot-loop; `delay * undefined` is NaN).
+  const everyMs = node.every ?? DEFAULT_EVERY_MS;
+  const backoffFactor = node.backoff ?? 1;
+  const now = (): number => performance.now();
+  const start = now();
+  const deadline = node.timeoutMs !== undefined ? start + node.timeoutMs : Infinity;
+  const perAttempt = node.perAttemptTimeoutMs ?? Infinity;
+  let attempt = 0;
+  let delay = everyMs;
+  let lastRes: unknown;
+
+  for (;;) {
+    attempt += 1;
+    const remainingTotal = deadline - now();
+    if (remainingTotal <= 0) {
+      throw new PollExhaustedError(label, attempt - 1, "total timeout reached before next attempt");
+    }
+    const attemptBudget = Math.min(perAttempt, remainingTotal); // build-time validation ⇒ finite
+    const attemptStart = now();
+
+    // Request: quarantined ctx + per-attempt abort signal; budget-raced so a
+    // non-honoring adapter can't block past the budget.
+    const attemptAc = new AbortController();
+    let budgetAborted = false;
+    const budgetTimer = Number.isFinite(attemptBudget)
+      ? setTimeout(() => {
+          budgetAborted = true;
+          attemptAc.abort();
+        }, Math.max(0, attemptBudget))
+      : undefined;
+    const reqCtx = quarantinedCtx(scope.ctx);
+    const exhausted = (): PollExhaustedError =>
+      new PollExhaustedError(label, attempt, `attempt budget ${Math.round(attemptBudget)}ms exceeded`);
+    try {
+      lastRes = await raceBudget(
+        executeCallAttempt("poll", node, reqCtx, state, attemptAc.signal),
+        attemptBudget,
+        exhausted,
+      );
+    } catch (err) {
+      // A signal-honoring adapter (HTTP) rejects with AbortError when OUR budget
+      // timer fired — convert it to the poll exhaustion error (with the attempt
+      // count) rather than leaking a raw AbortError.
+      const isBudgetAbort =
+        budgetAborted && err instanceof Error && err.name === "AbortError";
+      // A budget timeout discards this attempt's ctx (orphan); a genuine request
+      // error (incl. fatal validation / ctx.fail in the adapter) is in-budget —
+      // flush its buffered effects (the failure assertion lands) then fail the poll.
+      if (!isBudgetAbort && !(err instanceof PollExhaustedError)) reqCtx.flushTo(scope.ctx);
+      emitPollAttempt(scope.ctx, node, attempt, "failed", now() - attemptStart);
+      throw isBudgetAbort ? exhausted() : err;
+    } finally {
+      if (budgetTimer) clearTimeout(budgetTimer);
+    }
+
+    // A sync-heavy request the timer couldn't preempt may have overrun — re-check.
+    if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
+    if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
+
+    // Exit predicate — quarantined ctx, budget-raced, flushed only on in-budget completion.
+    const predBudget = Math.min(deadline - now(), perAttempt - (now() - attemptStart));
+    const predCtx = quarantinedCtx(scope.ctx);
+    let done: boolean;
+    try {
+      done = await raceBudget(
+        evalUntil(node, lastRes, predCtx, state),
+        Math.max(0, predBudget),
+        () => new PollExhaustedError(label, attempt, "exit-predicate budget exceeded"),
+      );
+    } catch (err) {
+      // Timed-out predicate orphan → discard predCtx. An in-budget predicate that
+      // threw (ctx.fail / ctx.skip / a thrown error) → flush its buffered effects
+      // (the failure assertion lands) then propagate (the poll fails / skips).
+      if (!(err instanceof PollExhaustedError)) predCtx.flushTo(scope.ctx);
+      emitPollAttempt(scope.ctx, node, attempt, "failed", now() - attemptStart);
+      throw err;
+    }
+    if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
+    if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
+    predCtx.flushTo(scope.ctx); // in-budget: the user's deliberate skip/fail/assert count (§17 #3)
+
+    if (done) {
+      reqCtx.flushTo(scope.ctx); // satisfying attempt: final-response validation failures surface
+      emitPollAttempt(scope.ctx, node, attempt, "satisfied", now() - attemptStart);
+      return lastRes;
+    }
+    // probe (not satisfied): reqCtx discarded (pending validation noise).
+    emitPollAttempt(scope.ctx, node, attempt, "probe", now() - attemptStart);
+
+    if (node.maxAttempts && attempt >= node.maxAttempts) {
+      throw new PollExhaustedError(label, attempt, "maxAttempts reached");
+    }
+    // A wait that would cross the deadline is pointless — fail now, don't sleep.
+    if (Number.isFinite(deadline) && now() + delay >= deadline) {
+      throw new PollExhaustedError(label, attempt, "next wait would exceed timeout");
+    }
+    await sleep(delay);
+    delay = Math.min(delay * backoffFactor, BACKOFF_CAP_MS);
+  }
+}
+
+/**
+ * Run a poll node (§17 #3): a leaf with its OWN bounds (it does not take the
+ * generic per-node timeout, §17 #4) — so like branch it owns its bracket instead
+ * of going through runNode. The loop runs under the node scope; quarantine policy
+ * is layered: per-attempt buffered ctxs (flush/discard, §17 #3) over the node
+ * scope (late-evidence seal, §17 #12). On satisfy the `out` lens folds the
+ * response into state (commit-on-success, §17 #13); on exhaustion / a deliberate
+ * in-budget failure the node fails; a predicate/adapter `ctx.skip()` with no
+ * prior failure skips the node (→ whole workflow, same as every other node).
+ */
+async function runPollNode(
+  baseCtx: TestContext,
+  workflowId: string,
+  node: PollNode,
+  state: unknown,
+  outcomes: WorkflowNodeOutcome[],
+): Promise<NodeListOutcome> {
+  const staticGrade = staticGradeOf(node);
+  const started = Date.now();
+  emitNodeStart(baseCtx, node);
+
+  const ac = new AbortController();
+  const scope = makeNodeScope(baseCtx, ac.signal);
+
+  let status: NodeStatus;
+  let nextState = state;
+  let cause: unknown;
+  let errForEvent: unknown;
+  try {
+    const res = await pollLoop(node, state, scope);
+    if (scope.hasFailure()) {
+      // The satisfying attempt's flushed evidence (or an earlier in-budget
+      // predicate assert) recorded a soft failure → the node fails and `out` is
+      // NOT applied (an out lens assumes the validated success shape — same rule
+      // as runContractCall, codex S2.1 R7).
+      status = "failed";
+      cause = new WorkflowPhaseFailedError(workflowId, `poll "${node.meta.id}"`);
+    } else {
+      // `out` REPLACES state; absent/void `out` preserves it (§17 #2). Reject a
+      // thenable so async/I/O can't hide inside the lens (§17 #11; mirrors call).
+      const next = node.out ? node.out(state, res) : undefined;
+      if (isThenable(next)) {
+        throw new Error(
+          `workflow poll "${node.meta.id}": \`out\` returned a thenable — out must be a ` +
+            `pure synchronous lens (state, res) => state; do async work in .action()`,
+        );
+      }
+      nextState = next === undefined ? state : next;
+      status = "passed";
+    }
+  } catch (err) {
+    if (err instanceof GlubeanSkipError && !scope.hasFailure()) {
+      // deliberate ctx.skip() (predicate or adapter, in-budget, no prior failure)
+      // → skip the poll (→ whole workflow), NOT a failure.
+      status = "skipped";
+    } else if (err instanceof GlubeanSkipError) {
+      // skip AFTER a soft failure → the failure wins; never surface the skip.
+      status = "failed";
+      cause = new WorkflowPhaseFailedError(workflowId, `poll "${node.meta.id}"`);
+    } else {
+      status = "failed";
+      cause = err;
+      errForEvent = err;
+    }
+  }
+
+  // Seal BEFORE aborting (abort listeners that emit must be quarantined too —
+  // same ordering as runNode's timeout path). Abort on any non-success so
+  // signal-aware work the node started observes it; a passed poll's attempts are
+  // already settled (per-attempt signals own in-flight aborts).
+  scope.seal();
+  if (status !== "passed" && !ac.signal.aborted) ac.abort();
+
+  const grade = promoteGrade(staticGrade, scope);
+  outcomes.push({ id: node.meta.id, status, grade });
+  emitNodeEnd(baseCtx, node, status, grade, Date.now() - started, errForEvent);
+  if (status === "passed") return { state: nextState, status };
+  if (status === "failed") return { state, status, cause };
+  return { state, status };
+}
+
 /**
  * Run a node LIST with fail-stop / skip-stop + commit-on-success state threading
  * (§17 #5/#13). Shared by the top-level graph and each branch side (recursion). A
@@ -831,7 +1155,9 @@ async function runNodeList(
     const r =
       node.kind === "branch"
         ? await runBranch(baseCtx, workflowId, node as BranchNode, state, outcomes)
-        : await runLeafNode(baseCtx, workflowId, node, state, outcomes);
+        : node.kind === "poll"
+          ? await runPollNode(baseCtx, workflowId, node as PollNode, state, outcomes)
+          : await runLeafNode(baseCtx, workflowId, node, state, outcomes);
     state = r.state;
     if (r.status === "passed") continue;
     emitNodesSkipped(baseCtx, list, outcomes, i + 1); // rest of THIS list → skipped
