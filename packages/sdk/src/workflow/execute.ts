@@ -805,13 +805,24 @@ async function selectBranch(
 /**
  * Run a single leaf (non-control-flow) node: runNode + push outcome + cause
  * synthesis. Explicit-intent retry (§17 #7) lives HERE: each attempt is a FULL
- * runNode bracket (fresh scope + abort + attempt-stamped node_start/node_end),
- * and every attempt's evidence emits — nothing is quarantined (the opposite
- * policy from poll, §17 #3; a masked flaky call should be VISIBLE in the
- * timeline). Each attempt re-reads the same last-committed state (a failed
- * attempt commits nothing, §17 #13). Never retried: a passed/skipped attempt
- * (skip is control flow), and a timeout (TERMINAL, §17 #4). check/compute
- * cannot carry retry — a check failure must never replay a prior action.
+ * runNode bracket (fresh scope + abort + attempt-stamped node_start/node_end).
+ *
+ * Attempt-evidence policy (§17 #7, codex S2.4c R1 P2): the run's pass/fail
+ * counters belong to the FINAL attempt only — a retried-and-passed node must
+ * not leave failed assertion/validation counts on the host ctx (the shipped
+ * step retry resets per-attempt counters the same way; otherwise a host
+ * summary computed from assertion events contradicts the node verdict). So a
+ * retrying node buffers each attempt's pass/fail evidence (`quarantinedCtx`)
+ * and flushes ONLY the attempt that decides the verdict: the passing/skipping
+ * attempt, the terminal-timeout attempt, or the last exhausted attempt. A
+ * non-final failed attempt stays VISIBLE — its attempt-stamped node_end
+ * (failed, with the error), its traces/logs/metrics, and a retry log line all
+ * pass through; only its buffered assert/validate COUNTS are dropped.
+ *
+ * Each attempt re-reads the same last-committed state (a failed attempt
+ * commits nothing, §17 #13). Never retried: a passed/skipped attempt (skip is
+ * control flow), and a timeout (TERMINAL, §17 #4). check/compute cannot carry
+ * retry — a check failure must never replay a prior action.
  */
 async function runLeafNode(
   baseCtx: TestContext,
@@ -838,15 +849,33 @@ async function runLeafNode(
     }
   }
   const maxAttempts = retry?.attempts ?? 1;
-  for (let attempt = 1; ; attempt++) {
-    r = await runNode(baseCtx, node, state, {
-      staticGrade: grade,
-      ...(retry ? { attempt: { n: attempt, of: maxAttempts } } : {}),
-    });
-    if (r.status !== "failed") break; // passed/skipped — skip is control flow, never retried
-    if (r.error instanceof NodeTimeoutError) break; // timeout is TERMINAL (§17 #4)
-    if (attempt >= maxAttempts) break;
-    if (retry?.delay) await sleep(retry.delay);
+  if (!retry) {
+    r = await runNode(baseCtx, node, state, { staticGrade: grade });
+  } else {
+    for (let attempt = 1; ; attempt++) {
+      // Buffer this attempt's pass/fail evidence; observability (traces, logs,
+      // node_start/node_end events) passes straight through to the host.
+      const attemptCtx = quarantinedCtx(baseCtx);
+      r = await runNode(attemptCtx, node, state, {
+        staticGrade: grade,
+        attempt: { n: attempt, of: maxAttempts },
+      });
+      const terminal =
+        r.status !== "failed" || // passed/skipped — skip is control flow, never retried
+        r.error instanceof NodeTimeoutError || // timeout is TERMINAL (§17 #4)
+        attempt >= maxAttempts;
+      if (terminal) {
+        attemptCtx.flushTo(baseCtx); // the verdict-deciding attempt's evidence counts
+        break;
+      }
+      // Non-final failed attempt: drop its buffered counts, log the retry
+      // (mirrors the shipped step-retry log line), wait, go again.
+      baseCtx.log?.(
+        `retrying workflow node "${node.meta.id}" (${attempt + 1}/${maxAttempts}) ` +
+          `after failure — ${retry.reason}`,
+      );
+      if (retry.delay) await sleep(retry.delay);
+    }
   }
   outcomes.push({ id: node.meta.id, status: r.status, grade: r.grade });
   if (r.status === "passed") return { state: r.state, status: "passed" };

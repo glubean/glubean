@@ -51,9 +51,12 @@ export interface WorkflowMeta {
  * Explicit-intent retry (§17 #7) — `call` + `action` ONLY (never check/compute:
  * a `check` failure must never replay a prior action's side effect). NOT a blind
  * `retries` knob: `reason` is REQUIRED and documents WHY replay is safe —
- * idempotency is the author's responsibility. Every attempt emits its evidence
- * (attempt-stamped node_start/node_end brackets; nothing is quarantined — the
- * opposite policy from poll, §17 #3). A node `timeout` is TERMINAL and is never
+ * idempotency is the author's responsibility. Every attempt stays VISIBLE
+ * (attempt-stamped node_start/node_end brackets, traces, a retry log line), but
+ * the run's pass/fail COUNTERS belong to the final, verdict-deciding attempt
+ * only — a non-final failed attempt's assert/validate counts are dropped, so a
+ * retried-and-passed node cannot fail the host run (mirrors the shipped step
+ * retry's per-attempt counter reset). A node `timeout` is TERMINAL and is never
  * retried (§17 #4); a `ctx.skip()` is control flow and is never retried either.
  */
 export interface RetryMeta {

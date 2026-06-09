@@ -1741,7 +1741,7 @@ describe("workflow retry (§17 #7)", () => {
     ).toThrow(/retry\.reason is required/);
   });
 
-  it("retries a failing action and commits the passing attempt; every attempt's evidence emits", async () => {
+  it("retries a failing action and commits the passing attempt; counters belong to the final attempt", async () => {
     const { ctx, rec } = fakeBase();
     let calls = 0;
     const wf = workflow("retry-action")
@@ -1763,13 +1763,11 @@ describe("workflow retry (§17 #7)", () => {
     expect(res.state).toEqual({ base: 1, calls: 3 }); // passing attempt's return committed
     // grade: the asserts are structured evidence → opaque promotes to trace (§17 #10)
     expect(res.nodes).toEqual([{ id: "flaky", status: "passed", grade: "trace" }]);
-    // every attempt's evidence is VISIBLE (§17 #7) — two failed asserts + the pass.
-    expect(rec.asserts).toEqual([
-      { passed: false, message: "attempt-1" },
-      { passed: false, message: "attempt-2" },
-      { passed: true, message: "attempt-3" },
-    ]);
-    // attempt-stamped brackets: 3 start/end pairs for the same node id.
+    // pass/fail counters belong to the FINAL attempt only (codex S2.4c R1 P2): a
+    // retried-and-passed node leaves NO failed assertion on the host ctx — a host
+    // summary computed from assertion events must agree with the node verdict.
+    expect(rec.asserts).toEqual([{ passed: true, message: "attempt-3" }]);
+    // …but the failed attempts stay VISIBLE: attempt-stamped brackets + retry logs.
     const starts = rec.events.filter(
       (e) => e.type === NODE_START_EVENT && e.data.nodeId === "flaky",
     );
@@ -1782,6 +1780,28 @@ describe("workflow retry (§17 #7)", () => {
       [3, 3],
     ]);
     expect(ends.map((e) => e.data.status)).toEqual(["failed", "failed", "passed"]);
+    expect(rec.logs.filter((l) => l.includes('retrying workflow node "flaky"'))).toHaveLength(2);
+  });
+
+  it("an exhausted retry flushes the LAST attempt's failed evidence (the verdict-deciding one)", async () => {
+    const { ctx, rec } = fakeBase();
+    let calls = 0;
+    const wf = workflow("retry-exhaust")
+      .setup(async () => ({}))
+      .action(
+        "always-bad",
+        async (c) => {
+          calls += 1;
+          c.assert(false, `bad-${calls}`); // soft failure each attempt
+        },
+        { retry: { attempts: 2, reason: "replay-safe" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(calls).toBe(2);
+    // only the final attempt's failed assert lands on the host counters.
+    expect(rec.asserts).toEqual([{ passed: false, message: "bad-2" }]);
   });
 
   it("retries a failing contract call; exhausted attempts fail the node with the last error", async () => {
