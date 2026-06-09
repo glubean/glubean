@@ -1716,6 +1716,215 @@ describe("runWorkflow — poll (§17 #3)", () => {
   });
 });
 
+// --- retry: explicit-intent retry on call/action (§17 #7) ---------------------
+
+describe("workflow retry (§17 #7)", () => {
+  afterEach(() => {
+    __unregisterProtocolForTesting("wf-retry");
+  });
+
+  it("validates retry meta at build time: attempts >= 2, finite delay, required reason", () => {
+    const fn = async (_c: unknown, s: unknown) => s;
+    expect(() =>
+      workflow("w").action("a", fn as never, { retry: { attempts: 1, reason: "r" } }),
+    ).toThrow(/attempts must be an integer >= 2/);
+    expect(() =>
+      workflow("w").action("a", fn as never, { retry: { attempts: 2.5, reason: "r" } }),
+    ).toThrow(/attempts must be an integer >= 2/);
+    expect(() =>
+      workflow("w").action("a", fn as never, {
+        retry: { attempts: 2, delay: Number.POSITIVE_INFINITY, reason: "r" },
+      }),
+    ).toThrow(/delay must be a finite number >= 0/);
+    expect(() =>
+      workflow("w").action("a", fn as never, { retry: { attempts: 2, reason: "" } }),
+    ).toThrow(/retry\.reason is required/);
+  });
+
+  it("retries a failing action and commits the passing attempt; every attempt's evidence emits", async () => {
+    const { ctx, rec } = fakeBase();
+    let calls = 0;
+    const wf = workflow("retry-action")
+      .setup(async () => ({ base: 1 }))
+      .action(
+        "flaky",
+        async (c, s) => {
+          calls += 1;
+          c.assert(calls >= 3, `attempt-${calls}`);
+          if (calls < 3) throw new Error(`boom-${calls}`);
+          return { ...s, calls };
+        },
+        { retry: { attempts: 3, reason: "eventually consistent backend" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(calls).toBe(3);
+    expect(res.state).toEqual({ base: 1, calls: 3 }); // passing attempt's return committed
+    // grade: the asserts are structured evidence → opaque promotes to trace (§17 #10)
+    expect(res.nodes).toEqual([{ id: "flaky", status: "passed", grade: "trace" }]);
+    // every attempt's evidence is VISIBLE (§17 #7) — two failed asserts + the pass.
+    expect(rec.asserts).toEqual([
+      { passed: false, message: "attempt-1" },
+      { passed: false, message: "attempt-2" },
+      { passed: true, message: "attempt-3" },
+    ]);
+    // attempt-stamped brackets: 3 start/end pairs for the same node id.
+    const starts = rec.events.filter(
+      (e) => e.type === NODE_START_EVENT && e.data.nodeId === "flaky",
+    );
+    const ends = rec.events.filter(
+      (e) => e.type === NODE_END_EVENT && e.data.nodeId === "flaky",
+    );
+    expect(starts.map((e) => [e.data.attempt, e.data.attempts])).toEqual([
+      [1, 3],
+      [2, 3],
+      [3, 3],
+    ]);
+    expect(ends.map((e) => e.data.status)).toEqual(["failed", "failed", "passed"]);
+  });
+
+  it("retries a failing contract call; exhausted attempts fail the node with the last error", async () => {
+    let calls = 0;
+    contract.register("wf-retry", {
+      project: () => ({ cases: {} }),
+      executeCaseInFlow: async () => {
+        calls += 1;
+        throw new Error(`net-${calls}`);
+      },
+    } as never);
+    const { ctx } = fakeBase();
+    const ref = fakeRef<void>("c", "case", "wf-retry", "GET /x");
+    const wf = workflow("retry-call")
+      .setup(async () => ({}))
+      .call("fetch", ref, { retry: { attempts: 3, delay: 1, reason: "GET is idempotent" } })
+      .action("after", async (_c, s) => s)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(calls).toBe(3); // all attempts consumed
+    expect((res.error as Error).message).toBe("net-3"); // LAST attempt's error is the cause
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toEqual({
+      fetch: "failed",
+      after: "skipped",
+    });
+  });
+
+  it("each retry attempt re-reads the same last-committed state (§17 #13)", async () => {
+    const { ctx } = fakeBase();
+    const seen: number[] = [];
+    let calls = 0;
+    const wf = workflow("retry-state")
+      .setup(async () => ({ n: 10 }))
+      .action(
+        "bump",
+        async (_c, s: { n: number }) => {
+          calls += 1;
+          seen.push(s.n);
+          if (calls < 2) throw new Error("first fails AFTER returning nothing");
+          return { n: s.n + 1 };
+        },
+        { retry: { attempts: 2, reason: "replay-safe" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(seen).toEqual([10, 10]); // attempt 2 saw the same committed state, not attempt 1's draft
+    expect(res.state).toEqual({ n: 11 });
+  });
+
+  it("a timeout is TERMINAL — never retried even with retry configured (§17 #4)", async () => {
+    const { ctx, rec } = fakeBase();
+    let calls = 0;
+    // There is no builder surface for the per-node timeout yet, so pin the rule at
+    // the retry-loop boundary: a NodeTimeoutError-failed attempt must stop the loop.
+    const wf = workflow("retry-timeout")
+      .setup(async () => ({}))
+      .action(
+        "slow",
+        async () => {
+          calls += 1;
+          throw new NodeTimeoutError("slow", 5);
+        },
+        { retry: { attempts: 3, reason: "should never replay a timeout" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(calls).toBe(1); // ONE attempt — timeout never retried
+    expect(res.error).toBeInstanceOf(NodeTimeoutError);
+    const ends = rec.events.filter(
+      (e) => e.type === NODE_END_EVENT && e.data.nodeId === "slow",
+    );
+    expect(ends).toHaveLength(1);
+  });
+
+  it("a ctx.skip() is control flow — never retried; the workflow skips", async () => {
+    const { ctx } = fakeBase();
+    let calls = 0;
+    const wf = workflow("retry-skip")
+      .setup(async () => ({}))
+      .action(
+        "gate",
+        async (c) => {
+          calls += 1;
+          c.skip("feature off");
+        },
+        { retry: { attempts: 3, reason: "irrelevant" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("skipped");
+    expect(calls).toBe(1);
+  });
+
+  it("an invalid retry smuggled past the builder fails the node fast at run time", async () => {
+    const { ctx } = fakeBase();
+    let calls = 0;
+    const wf = workflow("retry-smuggled")
+      .setup(async () => ({}))
+      .action("a", async (_c, s) => {
+        calls += 1;
+        return s;
+      })
+      .build();
+    (wf.nodes[0] as { retry?: unknown }).retry = { attempts: Infinity, reason: "r" };
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(calls).toBe(0); // never looped
+    expect((res.error as Error).message).toMatch(/attempts must be an integer >= 2/);
+  });
+
+  it("a check failure never replays a prior action (§17 #7) — fail-stop, no re-run", async () => {
+    const { ctx } = fakeBase();
+    let actionRuns = 0;
+    const wf = workflow("no-replay")
+      .setup(async () => ({}))
+      .action("side-effect", async (_c, s) => {
+        actionRuns += 1;
+        return s;
+      })
+      .check("verify", async (c) => c.fail("not what we wanted"))
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(actionRuns).toBe(1); // the action ran exactly once — the check's failure did not replay it
+  });
+
+  it("retry intent is projectable: projected call/action carry {attempts, delay, reason}", () => {
+    const ref = fakeRef<void>("c", "case", "wf-retry", "GET /x");
+    const wf = workflow("retry-proj")
+      .call("fetch", ref, { retry: { attempts: 3, delay: 50, reason: "GET is idempotent" } })
+      .action("act", async (_c, s) => s, {
+        retry: { attempts: 2, reason: "token mint is replay-safe" },
+      })
+      .build();
+    const proj = projectWorkflow(wf);
+    expect(proj.nodes[0].retry).toEqual({ attempts: 3, delay: 50, reason: "GET is idempotent" });
+    expect(proj.nodes[1].retry).toEqual({ attempts: 2, reason: "token mint is replay-safe" });
+  });
+});
+
 // --- Compile-time guard: teardown type debt (§17 #1) -------------------------
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function _teardownTypeGuard(): void {

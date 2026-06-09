@@ -57,6 +57,7 @@ import type {
   PollNode,
   PollOpaqueUntil,
   ProjectionGrade,
+  RetryMeta,
   StaticGrade,
   Workflow,
   WorkflowContext,
@@ -82,6 +83,10 @@ export interface NodeStartEventData {
   nodeId: string;
   kind: WorkflowNode["kind"];
   name: string;
+  /** Set on a retrying node (§17 #7): which attempt this bracket is (1-based). */
+  attempt?: number;
+  /** Set on a retrying node (§17 #7): the configured total attempts. */
+  attempts?: number;
   [k: string]: unknown;
 }
 
@@ -94,6 +99,10 @@ export interface NodeEndEventData {
   grade: ProjectionGrade;
   durationMs: number;
   error?: string;
+  /** Set on a retrying node (§17 #7): which attempt this bracket is (1-based). */
+  attempt?: number;
+  /** Set on a retrying node (§17 #7): the configured total attempts. */
+  attempts?: number;
   [k: string]: unknown;
 }
 
@@ -364,19 +373,31 @@ export interface NodeRunResult {
   error?: unknown;
 }
 
+/** Attempt label for a retrying node's events (§17 #7): `n` of `of`. */
+export interface AttemptInfo {
+  n: number;
+  of: number;
+}
+
 export interface RunNodeOptions {
   /** Static floor grade for this node (from the projector); promoted per §17 #10. */
   staticGrade: StaticGrade;
   /** Per-node terminal timeout (ms). Omit / non-finite = unbounded (§17 #4). */
   timeoutMs?: number;
+  /** Stamp this run's node_start/node_end events as attempt n of of (§17 #7). */
+  attempt?: AttemptInfo;
 }
 
-function emitNodeStart(base: TestContext, node: WorkflowNode): void {
+function emitNodeStart(base: TestContext, node: WorkflowNode, attempt?: AttemptInfo): void {
   const data: NodeStartEventData = {
     nodeId: node.meta.id,
     kind: node.kind,
     name: node.meta.name ?? node.meta.id,
   };
+  if (attempt) {
+    data.attempt = attempt.n;
+    data.attempts = attempt.of;
+  }
   base.event({ type: NODE_START_EVENT, data });
 }
 
@@ -387,6 +408,7 @@ function emitNodeEnd(
   grade: ProjectionGrade,
   durationMs: number,
   error?: unknown,
+  attempt?: AttemptInfo,
 ): void {
   const data: NodeEndEventData = {
     nodeId: node.meta.id,
@@ -397,7 +419,41 @@ function emitNodeEnd(
     durationMs,
   };
   if (error !== undefined) data.error = error instanceof Error ? error.message : String(error);
+  if (attempt) {
+    data.attempt = attempt.n;
+    data.attempts = attempt.of;
+  }
   base.event({ type: NODE_END_EVENT, data });
+}
+
+/**
+ * Validate an explicit-intent retry (§17 #7). `attempts` must be an integer >= 2
+ * (1 attempt is "no retry" — omit `retry` instead), `delay` finite >= 0, and
+ * `reason` a non-empty statement of why replay is safe. Called by the builder at
+ * construction AND by the executor before looping (an `as any`/JS caller could
+ * smuggle an invalid retry — e.g. `attempts: Infinity` — past the types).
+ */
+export function validateRetryMeta(retry: RetryMeta, stepLabel: string): void {
+  if (!Number.isInteger(retry.attempts) || retry.attempts < 2) {
+    throw new Error(
+      `workflow step "${stepLabel}": retry.attempts must be an integer >= 2 ` +
+        `(1 attempt is no retry — omit \`retry\`); got ${String(retry.attempts)}`,
+    );
+  }
+  if (
+    retry.delay !== undefined &&
+    (typeof retry.delay !== "number" || !Number.isFinite(retry.delay) || retry.delay < 0)
+  ) {
+    throw new Error(
+      `workflow step "${stepLabel}": retry.delay must be a finite number >= 0; got ${String(retry.delay)}`,
+    );
+  }
+  if (typeof retry.reason !== "string" || retry.reason.length === 0) {
+    throw new Error(
+      `workflow step "${stepLabel}": retry.reason is required — state why replaying ` +
+        `this step is safe (idempotency is the author's responsibility, §17 #7)`,
+    );
+  }
 }
 
 /** True for a Promise or any Promise-like (`.then` is a function). */
@@ -578,7 +634,7 @@ export async function runNode(
   const scope = makeNodeScope(base, ac.signal);
   const started = Date.now();
 
-  emitNodeStart(base, node);
+  emitNodeStart(base, node, opts.attempt);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const hasTimeout = opts.timeoutMs != null && Number.isFinite(opts.timeoutMs);
@@ -618,12 +674,12 @@ export async function runNode(
       // Abort the signal too (as timeout/throw do) so any cooperative work the node
       // started observes the failure and stops — the WorkflowContext signal contract.
       if (!ac.signal.aborted) ac.abort();
-      emitNodeEnd(base, node, "failed", grade, Date.now() - started);
+      emitNodeEnd(base, node, "failed", grade, Date.now() - started, undefined, opts.attempt);
       return { status: "failed", state, grade };
     }
     // Success: return REPLACES state; void/undefined PRESERVES it (§17 #2 / #13).
     const nextState = returned === undefined ? state : returned;
-    emitNodeEnd(base, node, "passed", grade, Date.now() - started);
+    emitNodeEnd(base, node, "passed", grade, Date.now() - started, undefined, opts.attempt);
     return { status: "passed", state: nextState, grade };
   } catch (err) {
     settle();
@@ -637,14 +693,14 @@ export async function runNode(
     // skip is preserved on `err` so the caller (runWorkflow, S2.1) can decide its
     // graph-level meaning (skip the rest vs. continue); runNode only classifies.
     if (err instanceof GlubeanSkipError && !scope.hasFailure()) {
-      emitNodeEnd(base, node, "skipped", grade, Date.now() - started);
+      emitNodeEnd(base, node, "skipped", grade, Date.now() - started, undefined, opts.attempt);
       return { status: "skipped", state, grade, error: err };
     }
     // A skip thrown AFTER a soft failure is NOT the cause — the prior failure is.
     // Drop the skip so runWorkflow synthesizes a proper phase-failure cause; a real
     // thrown error / timeout stays as the cause (codex S2.1 R4 P3).
     const failError = err instanceof GlubeanSkipError ? undefined : err;
-    emitNodeEnd(base, node, "failed", grade, Date.now() - started, failError);
+    emitNodeEnd(base, node, "failed", grade, Date.now() - started, failError, opts.attempt);
     return { status: "failed", state, grade, error: failError };
   }
 }
@@ -746,7 +802,17 @@ async function selectBranch(
   return evalPredicate(when as BranchPredicate<unknown>, state);
 }
 
-/** Run a single leaf (non-branch) node: runNode + push outcome + cause synthesis. */
+/**
+ * Run a single leaf (non-control-flow) node: runNode + push outcome + cause
+ * synthesis. Explicit-intent retry (§17 #7) lives HERE: each attempt is a FULL
+ * runNode bracket (fresh scope + abort + attempt-stamped node_start/node_end),
+ * and every attempt's evidence emits — nothing is quarantined (the opposite
+ * policy from poll, §17 #3; a masked flaky call should be VISIBLE in the
+ * timeline). Each attempt re-reads the same last-committed state (a failed
+ * attempt commits nothing, §17 #13). Never retried: a passed/skipped attempt
+ * (skip is control flow), and a timeout (TERMINAL, §17 #4). check/compute
+ * cannot carry retry — a check failure must never replay a prior action.
+ */
 async function runLeafNode(
   baseCtx: TestContext,
   workflowId: string,
@@ -755,7 +821,33 @@ async function runLeafNode(
   outcomes: WorkflowNodeOutcome[],
 ): Promise<NodeListOutcome> {
   const grade = staticGradeOf(node);
-  const r = await runNode(baseCtx, node, state, { staticGrade: grade });
+  const retry =
+    node.kind === "contract-call" || node.kind === "action"
+      ? (node as ContractCallNode | ActionNode).retry
+      : undefined;
+  // Re-validate at run time: an `as any`/JS caller could smuggle e.g.
+  // `attempts: Infinity` past the builder — fail the node fast, don't loop.
+  let r: NodeRunResult;
+  if (retry) {
+    try {
+      validateRetryMeta(retry, node.meta.id);
+    } catch (err) {
+      outcomes.push({ id: node.meta.id, status: "failed", grade });
+      emitNodeEnd(baseCtx, node, "failed", grade, 0, err);
+      return { state, status: "failed", cause: err };
+    }
+  }
+  const maxAttempts = retry?.attempts ?? 1;
+  for (let attempt = 1; ; attempt++) {
+    r = await runNode(baseCtx, node, state, {
+      staticGrade: grade,
+      ...(retry ? { attempt: { n: attempt, of: maxAttempts } } : {}),
+    });
+    if (r.status !== "failed") break; // passed/skipped — skip is control flow, never retried
+    if (r.error instanceof NodeTimeoutError) break; // timeout is TERMINAL (§17 #4)
+    if (attempt >= maxAttempts) break;
+    if (retry?.delay) await sleep(retry.delay);
+  }
   outcomes.push({ id: node.meta.id, status: r.status, grade: r.grade });
   if (r.status === "passed") return { state: r.state, status: "passed" };
   if (r.status === "failed") {

@@ -47,6 +47,24 @@ export interface WorkflowMeta {
   only?: boolean;
 }
 
+/**
+ * Explicit-intent retry (§17 #7) — `call` + `action` ONLY (never check/compute:
+ * a `check` failure must never replay a prior action's side effect). NOT a blind
+ * `retries` knob: `reason` is REQUIRED and documents WHY replay is safe —
+ * idempotency is the author's responsibility. Every attempt emits its evidence
+ * (attempt-stamped node_start/node_end brackets; nothing is quarantined — the
+ * opposite policy from poll, §17 #3). A node `timeout` is TERMINAL and is never
+ * retried (§17 #4); a `ctx.skip()` is control flow and is never retried either.
+ */
+export interface RetryMeta {
+  /** Total attempts, an integer >= 2 (1 attempt is "no retry" — omit `retry`). */
+  attempts: number;
+  /** Delay between attempts (ms, finite >= 0). Default 0. */
+  delay?: number;
+  /** REQUIRED statement of why replay is safe (e.g. "GET is idempotent"). */
+  reason: string;
+}
+
 /** Projection hints for an opaque `.action()` (raise its grade to `partial`). */
 export interface ActionProjection {
   reads?: string[];
@@ -108,6 +126,8 @@ export interface ContractCallNode<State = any> {
   out?: (state: State, res: any) => State;
   /** Accepted alternate outcome keys (e.g. HTTP statuses) to branch on. */
   accept?: ReadonlyArray<string | number>;
+  /** Explicit-intent retry (§17 #7). */
+  retry?: RetryMeta;
 }
 
 /** Arbitrary async state-producing glue. Grade `partial` w/ hints else `opaque`. */
@@ -116,6 +136,8 @@ export interface ActionNode<State = any> {
   meta: NodeMeta;
   fn: (ctx: WorkflowContext, state: State) => State | void | Promise<State | void>;
   project?: ActionProjection;
+  /** Explicit-intent retry (§17 #7). */
+  retry?: RetryMeta;
 }
 
 /** Arbitrary assertion that may not map to a contract case. */
@@ -307,6 +329,8 @@ export interface ProjectedWorkflowNode {
   timeoutMs?: number;
   perAttemptTimeoutMs?: number;
   maxAttempts?: number;
+  /** call/action: explicit-intent retry (§17 #7) — intent is projectable. */
+  retry?: RetryMeta;
 }
 
 export interface WorkflowProjection {

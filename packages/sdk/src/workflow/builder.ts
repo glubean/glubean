@@ -6,6 +6,7 @@ import type {
   PredicateScope,
 } from "../contract-flow-condition.js";
 import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
+import { validateRetryMeta } from "./execute.js";
 import type {
   ActionNode,
   ActionProjection,
@@ -18,6 +19,7 @@ import type {
   NodeMetaInput,
   PollNode,
   PollOpaqueUntil,
+  RetryMeta,
   Workflow,
   WorkflowContext,
   WorkflowMeta,
@@ -162,6 +164,8 @@ export interface CallBindings<
   out?: (state: State, res: CallResponse<Accept, CaseOutput, RawOutcome>) => NewState;
   /** Accepted alternate outcome keys to branch on (adapter-specific; HTTP: statuses). */
   accept?: Accept;
+  /** Explicit-intent retry (§17 #7) — `reason` is required (documents why replay is safe). */
+  retry?: RetryMeta;
 }
 
 /** Step bindings when the called case REQUIRES input — `in` is mandatory. */
@@ -213,12 +217,12 @@ export interface WorkflowBuilder<State> {
   action(
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => Promise<void>,
-    opts?: { project?: ActionProjection },
+    opts?: { project?: ActionProjection; retry?: RetryMeta },
   ): WorkflowBuilder<State>;
   action<NewState>(
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => Promise<NewState>,
-    opts?: { project?: ActionProjection },
+    opts?: { project?: ActionProjection; retry?: RetryMeta },
   ): WorkflowBuilder<NewState>;
   /** Arbitrary assertion (graded partial w/ asserts hint, else opaque/trace). */
   check(
@@ -319,20 +323,24 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   call(idOrMeta: NodeMetaInput, ref: ContractCaseRef, ...rest: any[]): any {
     this.assertNoTeardown("call");
+    const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
     const bindings = rest[0] as
       | {
           in?: (state: State) => unknown;
           out?: (state: State, res: unknown) => unknown;
           accept?: ReadonlyArray<string | number>;
+          retry?: RetryMeta;
         }
       | undefined;
+    if (bindings?.retry) validateRetryMeta(bindings.retry, meta.id);
     const node: ContractCallNode<State> = {
       kind: "contract-call",
-      meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
+      meta,
       ref,
       in: bindings?.in,
       out: bindings?.out as ContractCallNode<State>["out"],
       accept: bindings?.accept,
+      retry: bindings?.retry,
     };
     this._nodes.push(node as WorkflowNode);
     return this;
@@ -343,14 +351,17 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   action(
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => Promise<unknown>,
-    opts?: { project?: ActionProjection },
+    opts?: { project?: ActionProjection; retry?: RetryMeta },
   ): any {
     this.assertNoTeardown("action");
+    const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+    if (opts?.retry) validateRetryMeta(opts.retry, meta.id);
     const node: ActionNode<State> = {
       kind: "action",
-      meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
+      meta,
       fn: fn as ActionNode<State>["fn"],
       project: opts?.project,
+      retry: opts?.retry,
     };
     this._nodes.push(node as WorkflowNode);
     return this;

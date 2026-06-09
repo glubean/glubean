@@ -122,13 +122,23 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         contractId: n.ref.contractId,
         caseKey: n.ref.caseKey,
         accept: n.accept,
+        retry: n.retry,
       };
     }
     case "compute":
       return { ...base, kind: "compute", grade };
     case "action": {
-      const p = (node as ActionNode).project;
-      return { ...base, kind: "action", grade, reads: p?.reads, writes: p?.writes, note: p?.note };
+      const a = node as ActionNode;
+      const p = a.project;
+      return {
+        ...base,
+        kind: "action",
+        grade,
+        reads: p?.reads,
+        writes: p?.writes,
+        note: p?.note,
+        retry: a.retry,
+      };
     }
     case "check": {
       const p = (node as CheckNode).project;
