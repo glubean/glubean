@@ -72,6 +72,20 @@ export interface NodeMeta {
 /** First-arg of every step: a string id shorthand, or a full `NodeMeta`. */
 export type NodeMetaInput = string | (Partial<NodeMeta> & { id?: string });
 
+/**
+ * The `ctx` every workflow node body (setup / action / check / teardown)
+ * receives: a `TestContext` plus a per-node `AbortSignal` (§17 #12). The signal
+ * fires when the node times out or fails; cooperative bodies and protocol
+ * adapters observe it to bail early. Because arbitrary async cannot be force
+ * cancelled, the real guarantee is not cancellation but QUARANTINE: any evidence
+ * a body emits AFTER its node has settled is dropped, never reaching the run
+ * (so a body that ignores `signal` still cannot leak late assertions/traces).
+ */
+export interface WorkflowContext extends TestContext {
+  /** Per-node abort signal — fires on this node's timeout/failure (§17 #12). */
+  readonly signal: AbortSignal;
+}
+
 // ---------------------------------------------------------------------------
 // Runtime node graph (the single IR both `workflow()` and — later — legacy
 // lowering target). Nodes carry live fns/refs; the executor walks them and the
@@ -95,7 +109,7 @@ export interface ContractCallNode<State = any> {
 export interface ActionNode<State = any> {
   kind: "action";
   meta: NodeMeta;
-  fn: (ctx: TestContext, state: State) => State | void | Promise<State | void>;
+  fn: (ctx: WorkflowContext, state: State) => State | void | Promise<State | void>;
   project?: ActionProjection;
 }
 
@@ -103,7 +117,7 @@ export interface ActionNode<State = any> {
 export interface CheckNode<State = any> {
   kind: "check";
   meta: NodeMeta;
-  fn: (ctx: TestContext, state: State) => void | Promise<void>;
+  fn: (ctx: WorkflowContext, state: State) => void | Promise<void>;
   project?: CheckProjection;
 }
 
@@ -160,10 +174,17 @@ export type WorkflowNode =
 /** The node kinds the v1 builder can actually emit. */
 export type V1WorkflowNodeKind = "contract-call" | "action" | "check" | "compute";
 
-export type WorkflowSetup<State> = (ctx: TestContext) => State | Promise<State>;
+export type WorkflowSetup<State> = (ctx: WorkflowContext) => State | Promise<State>;
+/**
+ * Cleanup — ALWAYS runs (§17 #1), even when setup threw. On a setup failure the
+ * graph never produced a state, so `state` is `undefined` and `cause` carries the
+ * error that aborted the run (otherwise `undefined`). A teardown that itself
+ * throws is logged and NEVER masks the primary `cause`.
+ */
 export type WorkflowTeardown<State> = (
-  ctx: TestContext,
-  state: State,
+  ctx: WorkflowContext,
+  state: State | undefined,
+  cause?: unknown,
 ) => void | Promise<void>;
 
 /** A built workflow — the authored artifact the executor/projector consume. */

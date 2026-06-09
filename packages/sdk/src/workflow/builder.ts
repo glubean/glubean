@@ -1,5 +1,4 @@
 import type { ContractCaseRef } from "../contract-types.js";
-import type { TestContext } from "../types.js";
 import type {
   ActionNode,
   ActionProjection,
@@ -10,6 +9,7 @@ import type {
   NodeMeta,
   NodeMetaInput,
   Workflow,
+  WorkflowContext,
   WorkflowMeta,
   WorkflowNode,
   WorkflowSetup,
@@ -107,18 +107,18 @@ export interface WorkflowBuilder<State> {
    */
   action(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: TestContext, state: State) => Promise<void>,
+    fn: (ctx: WorkflowContext, state: State) => Promise<void>,
     opts?: { project?: ActionProjection },
   ): WorkflowBuilder<State>;
   action<NewState>(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: TestContext, state: State) => Promise<NewState>,
+    fn: (ctx: WorkflowContext, state: State) => Promise<NewState>,
     opts?: { project?: ActionProjection },
   ): WorkflowBuilder<NewState>;
   /** Arbitrary assertion (graded partial w/ asserts hint, else opaque/trace). */
   check(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: TestContext, state: State) => void | Promise<void>,
+    fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
     opts?: { project?: CheckProjection },
   ): WorkflowBuilder<State>;
   /**
@@ -205,7 +205,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   action(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: TestContext, state: State) => Promise<unknown>,
+    fn: (ctx: WorkflowContext, state: State) => Promise<unknown>,
     opts?: { project?: ActionProjection },
   ): any {
     this.assertNoTeardown("action");
@@ -221,7 +221,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
 
   check(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: TestContext, state: State) => void | Promise<void>,
+    fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
     opts?: { project?: CheckProjection },
   ): WorkflowBuilder<State> {
     this.assertNoTeardown("check");
