@@ -331,7 +331,7 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     await expect(
       ((skipping as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(ctx),
     ).rejects.toMatchObject({ name: "SkipError" });
-    expect(skips).toEqual(['workflow "verdict-skip" skipped']);
+    expect(skips).toEqual(["feature off"]); // the authored runtime reason survives (codex S2.5 R6)
 
     const deferred = workflow({ id: "deferred-wf", skip: "not ready" }).compute("c", (s) => s).build();
     expect(((deferred as unknown as Test[])[0].meta as { deferred?: string }).deferred).toBe("not ready");

@@ -767,6 +767,10 @@ export interface WorkflowRunResult {
   nodes: WorkflowNodeOutcome[];
   /** The primary cause that failed the run (the one teardown sees), if any. */
   error?: unknown;
+  /** Why the run skipped: the user-authored ctx.skip(reason) (setup/node/
+   * branch-predicate/poll), or `meta.skip`. Only set when status === "skipped"
+   * (codex S2.5 R6 — the host's skipped status must keep the authored reason). */
+  skipReason?: string;
 }
 
 /**
@@ -808,6 +812,8 @@ interface NodeListOutcome {
   status: "passed" | "failed" | "skipped";
   /** Failure cause to thread to teardown (only when status === "failed"). */
   cause?: unknown;
+  /** The user-authored ctx.skip(reason), preserved to the run result (codex S2.5 R6). */
+  skipReason?: string;
 }
 
 /** Is this `when` an L1/L0 opaque predicate (vs an L2 declarative `BranchPredicate`)? */
@@ -988,7 +994,12 @@ async function runLeafNode(
       cause: r.error ?? new WorkflowPhaseFailedError(workflowId, `node "${node.meta.id}"`),
     };
   }
-  return { state, status: "skipped" }; // node ctx.skip()
+  // node ctx.skip() — preserve the authored reason (codex S2.5 R6).
+  return {
+    state,
+    status: "skipped",
+    skipReason: r.error instanceof GlubeanSkipError ? r.error.reason : undefined,
+  };
 }
 
 /**
@@ -1039,7 +1050,7 @@ async function runBranch(
       const g = promoteGrade(grade, scope);
       outcomes[outcomeIndex] = { id: node.meta.id, status: "skipped", grade: g };
       emitNodeEnd(baseCtx, node, "skipped", g, Date.now() - started);
-      return { state, status: "skipped" };
+      return { state, status: "skipped", skipReason: err.reason };
     }
     // a real throw, OR a soft-failure-then-skip → fail. A skip is never the cause;
     // synthesize a phase failure (mirrors runNode/setup, codex S2.4a R6).
@@ -1308,6 +1319,7 @@ async function runPollNode(
   let nextState = state;
   let cause: unknown;
   let errForEvent: unknown;
+  let skipReason: string | undefined;
   try {
     const res = await pollLoop(node, state, scope);
     if (scope.hasFailure()) {
@@ -1335,6 +1347,7 @@ async function runPollNode(
       // deliberate ctx.skip() (predicate or adapter, in-budget, no prior failure)
       // → skip the poll (→ whole workflow), NOT a failure.
       status = "skipped";
+      skipReason = err.reason;
     } else if (err instanceof GlubeanSkipError) {
       // skip AFTER a soft failure → the failure wins; never surface the skip.
       status = "failed";
@@ -1358,7 +1371,7 @@ async function runPollNode(
   emitNodeEnd(baseCtx, node, status, grade, Date.now() - started, errForEvent);
   if (status === "passed") return { state: nextState, status };
   if (status === "failed") return { state, status, cause };
-  return { state, status };
+  return { state, status, skipReason };
 }
 
 /**
@@ -1408,13 +1421,20 @@ export async function runWorkflow<State = unknown>(
   // --- no teardown; every node reported skipped (codex S2.1 R2). ---
   if (wf.meta.skip !== undefined) {
     emitNodesSkipped(baseCtx, wf.nodes, nodes, 0);
-    return { status: "skipped", state: undefined, nodes, error: undefined };
+    return {
+      status: "skipped",
+      state: undefined,
+      nodes,
+      error: undefined,
+      skipReason: wf.meta.skip,
+    };
   }
 
   let state: unknown;
   let cause: unknown;
   let failed = false;
   let skipped = false; // setup or a node called ctx.skip() → the whole workflow is skipped
+  let skipReason: string | undefined; // the authored ctx.skip(reason) (codex S2.5 R6)
 
   try {
     // --- setup: an async lifecycle node, SELF-CONTAINED — its throw / ctx.skip() /
@@ -1443,6 +1463,7 @@ export async function runWorkflow<State = unknown>(
           // deliberate setup ctx.skip() with no prior failure → whole workflow
           // skipped, like a node skip (codex S2.1 R3 P2).
           skipped = true;
+          skipReason = setupError.reason;
         } else {
           // a thrown error, or a soft failure (possibly then a skip) → run fails.
           // A skip after a soft failure is NOT the cause (failure wins, mirroring the
@@ -1470,6 +1491,7 @@ export async function runWorkflow<State = unknown>(
         cause = r.cause;
       } else if (r.status === "skipped") {
         skipped = true;
+        skipReason = r.skipReason;
       }
     }
   } finally {
@@ -1497,5 +1519,6 @@ export async function runWorkflow<State = unknown>(
     state,
     nodes,
     error: cause,
+    ...(skipped && skipReason !== undefined ? { skipReason } : {}),
   };
 }

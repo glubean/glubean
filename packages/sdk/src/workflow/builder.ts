@@ -681,7 +681,9 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         // R1 P2). The skipped verdict then skips the wrapped test below.
         const result = await runWorkflow(handle, ctx);
         if (result.status === "skipped") {
-          ctx.skip(meta.skip ?? `workflow "${meta.id}" skipped`);
+          // Prefer the user-authored runtime ctx.skip(reason) (codex S2.5 R6),
+          // then the authored meta.skip, then a generic fallback.
+          ctx.skip(result.skipReason ?? meta.skip ?? `workflow "${meta.id}" skipped`);
         }
         if (result.status === "failed") {
           throw result.error ?? new WorkflowPhaseFailedError(meta.id, "workflow");
