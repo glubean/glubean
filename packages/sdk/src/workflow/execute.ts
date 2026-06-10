@@ -394,6 +394,19 @@ export interface RunNodeOptions {
    * goes straight to the base ctx.
    */
   beforeNodeEnd?: (status: NodeStatus, error?: unknown) => void;
+  /**
+   * Adjust the runtime grade before it is reported — applied to BOTH the
+   * node_end event and the returned result, so they always agree. The retry
+   * wrapper uses it to tie opaque→trace promotion to HOST-VISIBLE evidence
+   * across attempts: the scope's structured flag cannot distinguish
+   * pass-through traces from buffered (possibly-discarded) assert counts, and
+   * an earlier attempt's promotion must survive into the terminal bracket
+   * (§17 #10; codex S2.5 R5 P2).
+   */
+  adjustGrade?: (
+    computed: ProjectionGrade,
+    info: { structured: boolean; status: NodeStatus; error?: unknown },
+  ) => ProjectionGrade;
 }
 
 function emitNodeStart(base: TestContext, node: WorkflowNode, attempt?: AttemptInfo): void {
@@ -642,6 +655,20 @@ export async function runNode(
   const scope = makeNodeScope(base, ac.signal);
   const started = Date.now();
 
+  // One grade per settle path, shared by the node_end event AND the result so
+  // they always agree; `adjustGrade` lets the retry wrapper tie promotion to
+  // host-visible evidence (codex S2.5 R5 P2). Called only after settle().
+  const finalGrade = (status: NodeStatus, error?: unknown): ProjectionGrade => {
+    const computed = promoteGrade(opts.staticGrade, scope);
+    return opts.adjustGrade
+      ? opts.adjustGrade(computed, {
+          structured: scope.emittedStructuredEvidence(),
+          status,
+          error,
+        })
+      : computed;
+  };
+
   emitNodeStart(base, node, opts.attempt);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -676,18 +703,19 @@ export async function runNode(
     const returned = await raced;
     settle();
 
-    const grade = promoteGrade(opts.staticGrade, scope);
     if (scope.hasFailure()) {
       // Body resolved but a soft assertion failed → node fails, no commit (§17 #13).
       // Abort the signal too (as timeout/throw do) so any cooperative work the node
       // started observes the failure and stops — the WorkflowContext signal contract.
       if (!ac.signal.aborted) ac.abort();
+      const grade = finalGrade("failed");
       opts.beforeNodeEnd?.("failed", undefined);
       emitNodeEnd(base, node, "failed", grade, Date.now() - started, undefined, opts.attempt);
       return { status: "failed", state, grade };
     }
     // Success: return REPLACES state; void/undefined PRESERVES it (§17 #2 / #13).
     const nextState = returned === undefined ? state : returned;
+    const grade = finalGrade("passed");
     opts.beforeNodeEnd?.("passed", undefined);
     emitNodeEnd(base, node, "passed", grade, Date.now() - started, undefined, opts.attempt);
     return { status: "passed", state: nextState, grade };
@@ -696,13 +724,13 @@ export async function runNode(
     // Ensure the body's signal fires even on a thrown (non-timeout) failure, so a
     // dangling async leg observes the abort.
     if (!ac.signal.aborted) ac.abort();
-    const grade = promoteGrade(opts.staticGrade, scope);
     // `ctx.skip()` is control flow, not a failure: a node that deliberately skips
     // (and had no earlier failed assertion) settles `skipped`, NOT `failed` — a
     // failed assertion before the skip still wins (mirrors harness.ts:2297). The
     // skip is preserved on `err` so the caller (runWorkflow, S2.1) can decide its
     // graph-level meaning (skip the rest vs. continue); runNode only classifies.
     if (err instanceof GlubeanSkipError && !scope.hasFailure()) {
+      const grade = finalGrade("skipped", err);
       opts.beforeNodeEnd?.("skipped", err);
       emitNodeEnd(base, node, "skipped", grade, Date.now() - started, undefined, opts.attempt);
       return { status: "skipped", state, grade, error: err };
@@ -711,6 +739,7 @@ export async function runNode(
     // Drop the skip so runWorkflow synthesizes a proper phase-failure cause; a real
     // thrown error / timeout stays as the cause (codex S2.1 R4 P3).
     const failError = err instanceof GlubeanSkipError ? undefined : err;
+    const grade = finalGrade("failed", failError);
     opts.beforeNodeEnd?.("failed", failError);
     emitNodeEnd(base, node, "failed", grade, Date.now() - started, failError, opts.attempt);
     return { status: "failed", state, grade, error: failError };
@@ -886,9 +915,11 @@ async function runLeafNode(
     // reached the host (codex S2.4c R3+R4 P2): pass-through trace/metric on ANY
     // attempt counts (it is on the host timeline even when the attempt's buffered
     // counts are dropped); buffered assert/validate counts only when FLUSHED —
-    // i.e. on the terminal attempt. A discarded attempt's assert-only "trace"
-    // grade must not promote the node summary: it would claim runtime evidence
-    // the host never saw.
+    // i.e. on the terminal attempt. The adjustment is applied INSIDE runNode (via
+    // adjustGrade) so each attempt's node_end event and the final outcome carry
+    // the same host-visible grade — a discarded attempt's assert-only "trace"
+    // must not show anywhere, and an earlier attempt's pass-through promotion
+    // must survive into the terminal bracket (codex S2.5 R5 P2).
     let promoted = false;
     for (let attempt = 1; ; attempt++) {
       // Buffer this attempt's pass/fail evidence; observability (traces, logs,
@@ -919,10 +950,19 @@ async function runLeafNode(
             safeFlush(attemptCtx);
           }
         },
+        adjustGrade: (computed, info) => {
+          if (grade !== "opaque") return computed; // only opaque→trace exists (§17 #10)
+          const terminal = isTerminal(attempt, info.status, info.error);
+          // Host-visible structured evidence: a pass-through trace/metric (this
+          // or any earlier attempt), or — only when this attempt's buffers flush
+          // (terminal) — its scope-recorded assert/validate evidence.
+          const hostVisible =
+            promoted || passthroughStructured || (terminal && info.structured);
+          return hostVisible ? "trace" : "opaque";
+        },
       });
-      const terminal = isTerminal(attempt, r.status, r.error);
-      if (passthroughStructured || (terminal && r.grade === "trace")) promoted = true;
-      if (terminal) {
+      if (passthroughStructured) promoted = true;
+      if (isTerminal(attempt, r.status, r.error)) {
         // beforeNodeEnd already flushed on every runNode settle path; this is a
         // safety net for a future runNode path that misses the hook (flushTo
         // replays the buffer, so it must run at most once).
@@ -937,9 +977,7 @@ async function runLeafNode(
       );
       if (retry.delay) await sleep(retry.delay);
     }
-    if (promoted && r.grade === "opaque") {
-      r = { ...r, grade: "trace" }; // aggregate opaque→trace promotion across attempts (§17 #10)
-    }
+    // r.grade already carries the cross-attempt host-visible promotion (adjustGrade).
   }
   outcomes.push({ id: node.meta.id, status: r.status, grade: r.grade });
   if (r.status === "passed") return { state: r.state, status: "passed" };

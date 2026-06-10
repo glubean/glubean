@@ -1876,6 +1876,12 @@ describe("workflow retry (§17 #7)", () => {
     expect(res.status).toBe("passed");
     expect(rec.traces).toHaveLength(1); // the first attempt's trace is on the host timeline
     expect(res.nodes[0].grade).toBe("trace"); // …so the node summary must say trace, not opaque
+    // …and the TERMINAL node_end agrees — the timeline is what runner/Cloud
+    // consume, so the promotion must survive into it (codex S2.5 R5).
+    const ends = rec.events.filter(
+      (e) => e.type === NODE_END_EVENT && e.data.nodeId === "flaky",
+    );
+    expect(ends.at(-1)?.data.grade).toBe("trace");
   });
 
   it("a DISCARDED attempt's assert-only evidence does not promote the grade (codex R4)", async () => {
@@ -1900,6 +1906,12 @@ describe("workflow retry (§17 #7)", () => {
     expect(res.status).toBe("passed");
     expect(rec.asserts).toEqual([]); // nothing reached the host…
     expect(res.nodes[0].grade).toBe("opaque"); // …so the summary must not claim trace
+    // …and no attempt bracket claims it either: the discarded attempt's node_end
+    // must say opaque too, not just the final outcome (codex S2.5 R5).
+    const ends = rec.events.filter(
+      (e) => e.type === NODE_END_EVENT && e.data.nodeId === "flaky",
+    );
+    expect(ends.map((e) => e.data.grade)).toEqual(["opaque", "opaque"]);
   });
 
   it("an exhausted retry flushes the LAST attempt's failed evidence (the verdict-deciding one)", async () => {
