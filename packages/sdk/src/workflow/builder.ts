@@ -620,6 +620,17 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     if (child._setup || child._teardown) {
       throw new Error("workflow.branch() then/else cannot declare setup/teardown");
     }
+    // A poisoned child holds a half-authored side (the callback caught an
+    // authoring error on it) — accepting its nodes would smuggle the partial
+    // graph past the parent's poison protection (codex S2.5 R4 P2). This throw
+    // runs inside the parent's authoring() wrapper, so the parent poisons too.
+    if (child._poisoned !== undefined) {
+      const causeMsg =
+        child._poisoned instanceof Error ? child._poisoned.message : String(child._poisoned);
+      throw new Error(
+        `workflow.branch() then/else side is half-authored — a sub-builder call failed: ${causeMsg}`,
+      );
+    }
     return child._nodes.slice();
   }
 

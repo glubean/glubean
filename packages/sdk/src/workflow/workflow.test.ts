@@ -271,6 +271,29 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     expect(() => b.build()).toThrow(/earlier authoring call failed/); // explicit build refuses too
   });
 
+  it("a caught authoring error on a branch SUB-builder poisons the parent (codex S2.5 R4 P2)", async () => {
+    expect(() =>
+      workflow("poisoned-side")
+        .setup(async () => ({ x: 1 }))
+        .branch("route", {
+          when: (w) => w.when((s: { x: number }) => s.x).eq(1),
+          then: (b) => {
+            try {
+              (b as unknown as { poll: (...a: unknown[]) => unknown }).poll("bad", {}, {
+                untilRuntime: () => true,
+                message: "m",
+              }); // invalid bounds — caught by the author
+            } catch {
+              /* swallowed */
+            }
+            return b.compute("ok", (s) => s); // the side is half-authored anyway
+          },
+        }),
+    ).toThrow(/half-authored/);
+    await Promise.resolve();
+    expect(getRegistry().some((r) => r.id === "poisoned-side")).toBe(false);
+  });
+
   it("rejects mutation after build() — the registered graph would silently diverge", () => {
     const b = workflow("frozen").compute("c", (s) => s);
     b.build();
