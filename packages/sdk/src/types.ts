@@ -2638,6 +2638,14 @@ export interface RegisteredTestMeta {
     steps: import("./contract-types.js").FlowRegistryStep[];
     setupDynamic?: true;
   };
+
+  /**
+   * vNext workflow metadata (set by `workflow(...).build()`). Mutually
+   * exclusive with `contract`/`flow`. The full JSON-safe graded projection
+   * (proposal §7) — scanner/Cloud/agents read node grades, call identity,
+   * branch predicates, and poll bounds from here without importing the SDK.
+   */
+  workflow?: import("./workflow/types.js").WorkflowProjection;
 }
 
 // =============================================================================

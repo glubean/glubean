@@ -1,5 +1,5 @@
 import type { ContractCaseRef } from "../contract-types.js";
-import type { TestContext } from "../types.js";
+import type { Test, TestContext } from "../types.js";
 import type {
   BranchPredicate,
   ExtractedPredicate,
@@ -285,6 +285,16 @@ export interface Workflow<State = any> {
   readonly teardown?: WorkflowTeardown<State>;
   readonly nodes: readonly WorkflowNode[];
 }
+
+/**
+ * What `workflow(...).build()` actually returns (S2.5 discovery): the Workflow
+ * IR fields AND a one-element `Test[]` whose simple test executes the graph via
+ * `runWorkflow` — the same array-handle shape as `contract.flow()`'s
+ * FlowContract, so the runner's existing array/`isTest` resolution discovers
+ * and executes it with no special casing. `runWorkflow`/`projectWorkflow`
+ * consume it directly (it IS a `Workflow`).
+ */
+export type BuiltWorkflow<State = any> = Workflow<State> & ReadonlyArray<Test>;
 
 // ---------------------------------------------------------------------------
 // Projection (JSON-safe, graded) — what scanner / Cloud / agents read.

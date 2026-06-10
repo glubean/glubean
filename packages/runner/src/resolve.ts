@@ -109,6 +109,28 @@ export function isFlowBuilder(
   );
 }
 
+/**
+ * Type guard — check if a value is an un-built vNext `WorkflowBuilder`
+ * (from `workflow(id)...`).
+ *
+ * The builder carries `__glubean_type === "workflow-builder"` and a `build()`
+ * method that returns a `BuiltWorkflow` (a one-element `Test[]` that also
+ * carries the workflow IR fields — same dual shape as `FlowContract`).
+ */
+export function isWorkflowBuilder(
+  obj: unknown,
+): obj is {
+  __glubean_type: "workflow-builder";
+  build(): Test<unknown>[];
+} {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    (obj as Record<string, unknown>).__glubean_type === "workflow-builder" &&
+    typeof (obj as Record<string, unknown>).build === "function"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Auto-resolve helpers
 // ---------------------------------------------------------------------------
@@ -118,12 +140,15 @@ export function isFlowBuilder(
  * If the value is an `EachBuilder`, call `.build()` to get a `Test[]`.
  * If the value is a `FlowBuilder`, call `.build()` to get a `FlowContract`
  * (array-extending Test[] with a `_flow` projection carrier).
+ * If the value is a vNext `WorkflowBuilder`, call `.build()` to get a
+ * `BuiltWorkflow` (array-extending Test[] carrying the workflow IR).
  * Otherwise return as-is.
  */
 export function autoResolve(value: unknown): unknown {
   if (isTestBuilder(value)) return value.build();
   if (isEachBuilder(value)) return value.build();
   if (isFlowBuilder(value)) return value.build();
+  if (isWorkflowBuilder(value)) return value.build();
   return value;
 }
 

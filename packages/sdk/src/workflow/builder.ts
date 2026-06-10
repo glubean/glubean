@@ -6,11 +6,15 @@ import type {
   PredicateScope,
 } from "../contract-flow-condition.js";
 import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
-import { validateRetryMeta } from "./execute.js";
+import { registerTest } from "../internal.js";
+import type { Test, TestContext } from "../types.js";
+import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
+import { projectWorkflow } from "./project.js";
 import type {
   ActionNode,
   ActionProjection,
   BranchNode,
+  BuiltWorkflow,
   CheckNode,
   CheckProjection,
   ComputeNode,
@@ -20,7 +24,6 @@ import type {
   PollNode,
   PollOpaqueUntil,
   RetryMeta,
-  Workflow,
   WorkflowContext,
   WorkflowMeta,
   WorkflowNode,
@@ -268,29 +271,50 @@ export interface WorkflowBuilder<State> {
       ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
       : [opts: PollOptsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
   ): WorkflowBuilder<NewState>;
-  /** Finalize into a `Workflow`. */
-  build(): Workflow<State>;
+  /**
+   * Finalize into a `BuiltWorkflow`: the Workflow IR + a one-element `Test[]`
+   * (a simple test that executes the graph via `runWorkflow`), registered for
+   * discovery. Idempotent — repeat calls return the same handle. The builder
+   * auto-builds on a microtask (mirrors `contract.flow()`), so an exported,
+   * never-built builder is still discovered and registered.
+   */
+  build(): BuiltWorkflow<State>;
 }
 
 class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
+  /** Discovery marker — the runner's resolver auto-builds exported builders. */
+  readonly __glubean_type = "workflow-builder";
+
   private _meta: WorkflowMeta;
   private _setup?: WorkflowSetup<any>;
   private _teardown?: WorkflowTeardown<any>;
   private readonly _nodes: WorkflowNode[] = [];
+  private _built?: BuiltWorkflow<State>;
 
   constructor(
     meta: WorkflowMeta,
     private readonly _idPrefix = "",
+    /** Child builders (branch/poll sub-graphs) never finalize/register. */
+    isChild = false,
   ) {
     this._meta = meta;
+    // Auto-finalize via microtask (mirrors contract.flow()/TestBuilder): an
+    // exported, never-built workflow still registers for discovery.
+    if (!isChild) {
+      queueMicrotask(() => {
+        if (!this._built) this.build();
+      });
+    }
   }
 
   meta(meta: Omit<Partial<WorkflowMeta>, "id">): WorkflowBuilder<State> {
+    this.assertNotBuilt("meta");
     this._meta = { ...this._meta, ...meta, id: this._meta.id };
     return this;
   }
 
   setup<S>(fn: WorkflowSetup<S>): WorkflowBuilder<S> {
+    this.assertNotBuilt("setup");
     // setup runs first at execution, so authoring it after a node OR after
     // teardown would make the advertised state type dishonest (codex slice-1 P2).
     if (this._nodes.length > 0 || this._teardown) {
@@ -303,13 +327,25 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   }
 
   teardown(fn: WorkflowTeardown<State>): WorkflowBuilder<State> {
+    this.assertNotBuilt("teardown");
     this._teardown = fn;
     return this;
+  }
+
+  // A finalized workflow is immutable — its Test/registry entry already
+  // captured the graph; a later mutation would be silently dropped.
+  private assertNotBuilt(method: string): void {
+    if (this._built) {
+      throw new Error(
+        `workflow.${method}() called after build() — the workflow is already finalized`,
+      );
+    }
   }
 
   // teardown receives the FINAL state, so no step may follow it (else its
   // callback is authored against a stale state type) (codex slice-1 P2).
   private assertNoTeardown(method: string): void {
+    this.assertNotBuilt(method);
     if (this._teardown) {
       throw new Error(
         `workflow.${method}() cannot be added after .teardown() — teardown must be the last step`,
@@ -534,7 +570,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     fn: (b: WorkflowBuilder<State>) => unknown,
     idPrefix: string,
   ): WorkflowNode[] {
-    const child = new WorkflowBuilderImpl<State>({ id: this._meta.id }, idPrefix);
+    const child = new WorkflowBuilderImpl<State>({ id: this._meta.id }, idPrefix, true);
     const result = fn(child);
     // An async then/else callback would snapshot child._nodes BEFORE its post-await
     // steps are added — silently dropping them. Reject thenables (codex S2.4a R5).
@@ -550,14 +586,65 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return child._nodes.slice();
   }
 
-  build(): Workflow<State> {
-    return {
-      __glubean_type: "workflow",
-      meta: this._meta,
+  build(): BuiltWorkflow<State> {
+    if (this._built) return this._built; // idempotent — one Test, one registration
+    const meta = this._meta;
+
+    // The single simple Test that executes the graph (mirrors the flow's
+    // wrapping, contract-core.ts:1236). The WORKFLOW VERDICT is authoritative:
+    // a failed run rethrows its cause (a thrown-node failure leaves no failed
+    // assertion on the host, so the test must fail via the error); a skipped
+    // run skips the test (whole-workflow skip, matching the harness contract).
+    const wfTest: Test = {
+      meta: {
+        id: meta.id,
+        name: meta.name ?? meta.id,
+        ...(meta.tags ? { tags: meta.tags } : {}),
+        ...(meta.description ? { description: meta.description } : {}),
+        // `WorkflowMeta.skip: string` (the reason) → `TestMeta.deferred: string`
+        // mirrors the flow convention so reporters render the reason consistently.
+        ...(meta.skip !== undefined ? { deferred: meta.skip } : {}),
+        ...(meta.only !== undefined ? { only: meta.only } : {}),
+      },
+      type: "simple",
+      fn: async (ctx: TestContext) => {
+        // Belt-and-suspenders: runtime skip in case the runner didn't filter on
+        // meta.deferred (e.g. an explicit target bypassing skip filters).
+        if (meta.skip) ctx.skip(meta.skip);
+        const result = await runWorkflow(handle, ctx);
+        if (result.status === "skipped") {
+          ctx.skip(`workflow "${meta.id}" skipped`);
+        }
+        if (result.status === "failed") {
+          throw result.error ?? new WorkflowPhaseFailedError(meta.id, "workflow");
+        }
+      },
+    };
+
+    // The handle IS both the Workflow IR (runWorkflow/projectWorkflow consume it
+    // directly) and a one-element Test[] (the runner's array resolution discovers
+    // it) — the same dual shape as contract.flow()'s FlowContract.
+    const handle = Object.assign([wfTest], {
+      __glubean_type: "workflow" as const,
+      meta,
       setup: this._setup,
       teardown: this._teardown,
       nodes: this._nodes.slice(),
-    };
+    }) as unknown as BuiltWorkflow<State>;
+
+    // Register for scanner discovery with the full graded projection (§7) —
+    // scanner/Cloud/agents read grades + call identity without executing.
+    registerTest({
+      id: meta.id,
+      name: meta.name ?? meta.id,
+      type: "simple",
+      ...(meta.tags ? { tags: meta.tags } : {}),
+      ...(meta.description ? { description: meta.description } : {}),
+      workflow: projectWorkflow(handle),
+    });
+
+    this._built = handle;
+    return handle;
   }
 }
 

@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ContractCaseRef } from "../contract-types.js";
+import { getRegistry } from "../internal.js";
+import type { Test, TestContext } from "../types.js";
 import { workflow } from "./builder.js";
 import { projectWorkflow } from "./project.js";
 import type { Workflow, ActionNode, CheckNode } from "./types.js";
@@ -180,6 +182,114 @@ describe("projectWorkflow() static grades", () => {
     const proj = projectWorkflow(onlyReads);
     expect((proj.nodes[0]).grade).toBe("partial"); // action: reads hint counts
     expect((proj.nodes[1]).grade).toBe("opaque"); // check: reads alone is not asserts
+  });
+});
+
+// --- S2.5 discovery: build() finalizes into a registered Test handle ----------
+
+/** Minimal ctx double for driving the wrapped Test fn directly. */
+function fnCtx(): { ctx: TestContext; skips: string[] } {
+  const skips: string[] = [];
+  const ctx = {
+    assert: () => {},
+    validate: () => undefined,
+    trace: () => {},
+    metric: () => {},
+    event: () => {},
+    log: () => {},
+    warn: () => {},
+    action: () => {},
+    skip: (reason?: string): never => {
+      skips.push(reason ?? "");
+      const e = new Error(reason ?? "skipped");
+      e.name = "SkipError";
+      throw e;
+    },
+  } as unknown as TestContext;
+  return { ctx, skips };
+}
+
+describe("workflow build() — discovery handle (S2.5)", () => {
+  it("returns a dual handle: the Workflow IR AND a one-element simple Test[]", () => {
+    const wf = workflow("dual")
+      .setup(async () => ({ n: 1 }))
+      .compute("bump", (s) => ({ n: s.n + 1 }))
+      .build();
+    // Workflow IR face (executor/projector consume it directly)
+    expect(wf.__glubean_type).toBe("workflow");
+    expect(wf.nodes.map((n) => n.kind)).toEqual(["compute"]);
+    // Test[] face (runner array resolution discovers it)
+    expect(Array.isArray(wf)).toBe(true);
+    const t = (wf as unknown as Test[])[0];
+    expect(t.type).toBe("simple");
+    expect(t.meta).toMatchObject({ id: "dual", name: "dual" });
+    expect(typeof t.fn).toBe("function");
+  });
+
+  it("is idempotent and registers ONCE with the graded projection", () => {
+    const b = workflow({ id: "registered", name: "Registered", tags: ["wf"] }).compute(
+      "c",
+      (s) => s,
+    );
+    const first = b.build();
+    expect(b.build()).toBe(first); // same handle
+    const entries = getRegistry().filter((r) => r.id === "registered");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: "Registered", type: "simple", tags: ["wf"] });
+    expect(entries[0].workflow).toMatchObject({
+      id: "registered",
+      gradeSummary: { full: 1, partial: 0, opaque: 0 },
+    });
+    expect(entries[0].workflow!.nodes[0]).toMatchObject({ id: "c", kind: "compute", grade: "full" });
+  });
+
+  it("auto-builds on a microtask so an exported, never-built builder still registers", async () => {
+    workflow("auto-built").compute("c", (s) => s); // never .build()
+    await Promise.resolve(); // flush the microtask queue
+    expect(getRegistry().some((r) => r.id === "auto-built")).toBe(true);
+  });
+
+  it("rejects mutation after build() — the registered graph would silently diverge", () => {
+    const b = workflow("frozen").compute("c", (s) => s);
+    b.build();
+    expect(() => b.compute("late", (s) => s)).toThrow(/after build\(\)/);
+    expect(() => b.teardown(async () => {})).toThrow(/after build\(\)/);
+    expect(() => b.meta({ name: "x" })).toThrow(/after build\(\)/);
+  });
+
+  it("the wrapped Test fn maps the workflow verdict: passed resolves, failed throws the cause", async () => {
+    const ok = workflow("verdict-ok")
+      .setup(async () => ({}))
+      .compute("c", (s) => s)
+      .build();
+    await expect(((ok as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(fnCtx().ctx))
+      .resolves.toBeUndefined();
+
+    const bad = workflow("verdict-bad")
+      .setup(async () => ({}))
+      .action("boom", async () => {
+        throw new Error("kaput");
+      })
+      .build();
+    await expect(((bad as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(fnCtx().ctx))
+      .rejects.toThrow("kaput");
+  });
+
+  it("a skipped workflow run skips the wrapped test; meta.skip maps to TestMeta.deferred", async () => {
+    const skipping = workflow("verdict-skip")
+      .setup(async () => ({}))
+      .action("gate", async (c) => {
+        c.skip("feature off");
+      })
+      .build();
+    const { ctx, skips } = fnCtx();
+    await expect(
+      ((skipping as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(ctx),
+    ).rejects.toMatchObject({ name: "SkipError" });
+    expect(skips).toEqual(['workflow "verdict-skip" skipped']);
+
+    const deferred = workflow({ id: "deferred-wf", skip: "not ready" }).compute("c", (s) => s).build();
+    expect(((deferred as unknown as Test[])[0].meta as { deferred?: string }).deferred).toBe("not ready");
   });
 });
 
