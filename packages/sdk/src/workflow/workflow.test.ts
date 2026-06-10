@@ -249,6 +249,18 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     expect(getRegistry().some((r) => r.id === "auto-built")).toBe(true);
   });
 
+  it("a branch sub-builder cannot build() — no bogus registry entry (codex S2.5 R2 P2)", () => {
+    expect(() =>
+      workflow("parent")
+        .setup(async () => ({ x: 1 }))
+        .branch("route", {
+          when: (w) => w.when((s: { x: number }) => s.x).eq(1),
+          then: (b) => (b.compute("c", (s) => s) as unknown as { build: () => unknown }).build(),
+        }),
+    ).toThrow(/cannot be called on a branch\/poll sub-builder/);
+    expect(getRegistry().filter((r) => r.id === "parent")).toHaveLength(0); // nothing registered
+  });
+
   it("rejects mutation after build() — the registered graph would silently diverge", () => {
     const b = workflow("frozen").compute("c", (s) => s);
     b.build();

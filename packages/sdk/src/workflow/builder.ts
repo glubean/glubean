@@ -295,12 +295,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     meta: WorkflowMeta,
     private readonly _idPrefix = "",
     /** Child builders (branch/poll sub-graphs) never finalize/register. */
-    isChild = false,
+    private readonly _isChild = false,
   ) {
     this._meta = meta;
     // Auto-finalize via microtask (mirrors contract.flow()/TestBuilder): an
     // exported, never-built workflow still registers for discovery.
-    if (!isChild) {
+    if (!_isChild) {
       queueMicrotask(() => {
         if (!this._built) this.build();
       });
@@ -587,6 +587,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   }
 
   build(): BuiltWorkflow<State> {
+    // A branch/poll sub-builder is not an independent workflow: building one
+    // would register a bogus top-level entry under the parent id carrying only
+    // the side's nodes (codex S2.5 R2 P2). The sub-graph belongs to its parent.
+    if (this._isChild) {
+      throw new Error(
+        "workflow.build() cannot be called on a branch/poll sub-builder — " +
+          "return the builder chain from the callback instead",
+      );
+    }
     if (this._built) return this._built; // idempotent — one Test, one registration
     const meta = this._meta;
 
