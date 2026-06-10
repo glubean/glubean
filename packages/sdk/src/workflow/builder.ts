@@ -608,12 +608,13 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       },
       type: "simple",
       fn: async (ctx: TestContext) => {
-        // Belt-and-suspenders: runtime skip in case the runner didn't filter on
-        // meta.deferred (e.g. an explicit target bypassing skip filters).
-        if (meta.skip) ctx.skip(meta.skip);
+        // No early meta.skip exit here: runWorkflow owns the meta.skip branch
+        // and emits each authored node as `skipped` — an explicitly-run
+        // deferred workflow keeps its per-node timeline evidence (codex S2.5
+        // R1 P2). The skipped verdict then skips the wrapped test below.
         const result = await runWorkflow(handle, ctx);
         if (result.status === "skipped") {
-          ctx.skip(`workflow "${meta.id}" skipped`);
+          ctx.skip(meta.skip ?? `workflow "${meta.id}" skipped`);
         }
         if (result.status === "failed") {
           throw result.error ?? new WorkflowPhaseFailedError(meta.id, "workflow");

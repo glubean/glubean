@@ -31,12 +31,15 @@ import type { ExportMeta } from "./types.js";
 import type { ContractCaseStaticMeta, ContractStaticMeta, FlowStaticMeta, PickMeta } from "./extractor-static.js";
 import { resolveDataPath } from "./data-path.js";
 
-const BASE_FNS = new Set(["test", "task"]);
+// `workflow` is the vNext graph authoring factory (@glubean/sdk workflow());
+// its build() wraps the graph in a simple Test, so a `workflow("id")...` export
+// is a runnable test for discovery purposes (S2.5).
+const BASE_FNS = new Set(["test", "task", "workflow"]);
 
 /** Whether a factory identifier name is a recognized test/task function. */
 function isTestFnName(name: string, customFns?: Set<string>): boolean {
   if (customFns) return customFns.has(name);
-  // Convention fallback: test | task | *Test | *Task (capitalized suffix).
+  // Convention fallback: test | task | workflow | *Test | *Task (capitalized suffix).
   return BASE_FNS.has(name) || /(?:Test|Task)$/.test(name);
 }
 

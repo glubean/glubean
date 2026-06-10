@@ -291,6 +291,28 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     const deferred = workflow({ id: "deferred-wf", skip: "not ready" }).compute("c", (s) => s).build();
     expect(((deferred as unknown as Test[])[0].meta as { deferred?: string }).deferred).toBe("not ready");
   });
+
+  it("an explicitly-run deferred workflow keeps per-node skipped evidence (codex S2.5 R1 P2)", async () => {
+    const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+    const { ctx, skips } = fnCtx();
+    (ctx as { event: unknown }).event = (ev: { type: string; data?: Record<string, unknown> }) => {
+      events.push(ev);
+    };
+    const wf = workflow({ id: "deferred-run", skip: "not ready" })
+      .compute("a", (s) => s)
+      .compute("b", (s) => s)
+      .build();
+    await expect(
+      ((wf as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(ctx),
+    ).rejects.toMatchObject({ name: "SkipError" });
+    expect(skips).toEqual(["not ready"]); // the meta.skip reason, not a generic one
+    // runWorkflow ran first: every authored node emitted a skipped node_end.
+    const ends = events.filter((e) => e.type === "workflow:node_end");
+    expect(ends.map((e) => [e.data?.nodeId, e.data?.status])).toEqual([
+      ["a", "skipped"],
+      ["b", "skipped"],
+    ]);
+  });
 });
 
 // Compile-time guards (codex slice-1 P2). Wrapped in a never-called function so

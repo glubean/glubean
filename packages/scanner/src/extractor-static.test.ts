@@ -47,6 +47,36 @@ export const healthCheck = test("health-check", async (ctx) => {
 });
 
 // =============================================================================
+// vNext workflow — discovered as a runnable test (S2.5)
+// =============================================================================
+
+test("extracts a workflow() export (built or not) as a runnable test", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+export const signup = workflow("signup-journey")
+  .meta({ name: "Signup Journey", tags: ["journey"] })
+  .setup(async () => ({ email: "a@b.c" }))
+  .action("seed", async (ctx, s) => s)
+  .check("verify", async (ctx, s) => {})
+  .build();
+
+export const unbuilt = workflow({ id: "wf-unbuilt", tags: ["journey"] })
+  .compute("derive", (s) => s);
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(2);
+  expect(result[0]).toMatchObject({
+    type: "test",
+    id: "signup-journey",
+    exportName: "signup",
+    name: "Signup Journey",
+    tags: ["journey"],
+  });
+  expect(result[1]).toMatchObject({ type: "test", id: "wf-unbuilt", exportName: "unbuilt" });
+});
+
+// =============================================================================
 // Simple test — TestMeta object
 // =============================================================================
 
@@ -747,13 +777,14 @@ export const real = test.extend({ page: fixture });
 test("extractFromSource with customFns matches non-convention names", () => {
   const content = `
 export const login = scenario("login-flow", async (ctx) => {});
-export const checkout = workflow({ id: "checkout", tags: ["e2e"] }, async (ctx) => {});
+export const checkout = journey({ id: "checkout", tags: ["e2e"] }, async (ctx) => {});
 `;
-  // Without customFns: convention fallback doesn't match "scenario" or "workflow"
+  // Without customFns: convention fallback doesn't match "scenario" or "journey"
+  // (`workflow` itself is a BASE_FN since S2.5 — covered by its own test above).
   expect(extractFromSource(content).length).toBe(0);
 
   // With customFns: explicit match
-  const result = extractFromSource(content, ["scenario", "workflow"]);
+  const result = extractFromSource(content, ["scenario", "journey"]);
   expect(result.length).toBe(2);
   expect(result[0].id).toBe("login-flow");
   expect(result[1].id).toBe("checkout");
