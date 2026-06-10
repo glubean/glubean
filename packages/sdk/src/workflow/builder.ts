@@ -290,6 +290,8 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   private _teardown?: WorkflowTeardown<any>;
   private readonly _nodes: WorkflowNode[] = [];
   private _built?: BuiltWorkflow<State>;
+  /** The first authoring error, if any — a poisoned builder never finalizes. */
+  private _poisoned?: unknown;
 
   constructor(
     meta: WorkflowMeta,
@@ -299,37 +301,60 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   ) {
     this._meta = meta;
     // Auto-finalize via microtask (mirrors contract.flow()/TestBuilder): an
-    // exported, never-built workflow still registers for discovery.
+    // exported, never-built workflow still registers for discovery. A poisoned
+    // builder (a chained call threw) must NOT auto-build — registering the
+    // partial graph would leak a phantom workflow into discovery when the
+    // author caught the error (codex S2.5 R3 P2).
     if (!_isChild) {
       queueMicrotask(() => {
-        if (!this._built) this.build();
+        if (!this._built && this._poisoned === undefined) this.build();
       });
     }
   }
 
+  // Wraps every authoring mutator: a throw from validation (invalid poll
+  // bounds, sub-builder build(), …) leaves the graph half-authored, so it
+  // poisons the builder — build()/auto-build then refuse instead of
+  // registering the partial graph (codex S2.5 R3 P2). A post-build mutation
+  // throw does NOT poison: the registered graph is complete and stays valid.
+  private authoring<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (e) {
+      if (!this._built) this._poisoned ??= e;
+      throw e;
+    }
+  }
+
   meta(meta: Omit<Partial<WorkflowMeta>, "id">): WorkflowBuilder<State> {
-    this.assertNotBuilt("meta");
-    this._meta = { ...this._meta, ...meta, id: this._meta.id };
-    return this;
+    return this.authoring(() => {
+      this.assertNotBuilt("meta");
+      this._meta = { ...this._meta, ...meta, id: this._meta.id };
+      return this;
+    });
   }
 
   setup<S>(fn: WorkflowSetup<S>): WorkflowBuilder<S> {
-    this.assertNotBuilt("setup");
-    // setup runs first at execution, so authoring it after a node OR after
-    // teardown would make the advertised state type dishonest (codex slice-1 P2).
-    if (this._nodes.length > 0 || this._teardown) {
-      throw new Error(
-        "workflow.setup() must be called before any step (call/action/check/compute) or teardown",
-      );
-    }
-    this._setup = fn;
-    return this as unknown as WorkflowBuilder<S>;
+    return this.authoring(() => {
+      this.assertNotBuilt("setup");
+      // setup runs first at execution, so authoring it after a node OR after
+      // teardown would make the advertised state type dishonest (codex slice-1 P2).
+      if (this._nodes.length > 0 || this._teardown) {
+        throw new Error(
+          "workflow.setup() must be called before any step (call/action/check/compute) or teardown",
+        );
+      }
+      this._setup = fn;
+      return this as unknown as WorkflowBuilder<S>;
+    });
   }
 
   teardown(fn: WorkflowTeardown<State>): WorkflowBuilder<State> {
-    this.assertNotBuilt("teardown");
-    this._teardown = fn;
-    return this;
+    return this.authoring(() => {
+      this.assertNotBuilt("teardown");
+      this._teardown = fn;
+      return this;
+    });
   }
 
   // A finalized workflow is immutable — its Test/registry entry already
@@ -358,28 +383,30 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   // interface signature, not this one.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   call(idOrMeta: NodeMetaInput, ref: ContractCaseRef, ...rest: any[]): any {
-    this.assertNoTeardown("call");
-    const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
-    const bindings = rest[0] as
-      | {
-          in?: (state: State) => unknown;
-          out?: (state: State, res: unknown) => unknown;
-          accept?: ReadonlyArray<string | number>;
-          retry?: RetryMeta;
-        }
-      | undefined;
-    if (bindings?.retry) validateRetryMeta(bindings.retry, meta.id);
-    const node: ContractCallNode<State> = {
-      kind: "contract-call",
-      meta,
-      ref,
-      in: bindings?.in,
-      out: bindings?.out as ContractCallNode<State>["out"],
-      accept: bindings?.accept,
-      retry: bindings?.retry,
-    };
-    this._nodes.push(node as WorkflowNode);
-    return this;
+    return this.authoring(() => {
+      this.assertNoTeardown("call");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      const bindings = rest[0] as
+        | {
+            in?: (state: State) => unknown;
+            out?: (state: State, res: unknown) => unknown;
+            accept?: ReadonlyArray<string | number>;
+            retry?: RetryMeta;
+          }
+        | undefined;
+      if (bindings?.retry) validateRetryMeta(bindings.retry, meta.id);
+      const node: ContractCallNode<State> = {
+        kind: "contract-call",
+        meta,
+        ref,
+        in: bindings?.in,
+        out: bindings?.out as ContractCallNode<State>["out"],
+        accept: bindings?.accept,
+        retry: bindings?.retry,
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
   }
 
   // Broad impl satisfies both action overloads; call sites use the interface.
@@ -389,18 +416,20 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     fn: (ctx: WorkflowContext, state: State) => Promise<unknown>,
     opts?: { project?: ActionProjection; retry?: RetryMeta },
   ): any {
-    this.assertNoTeardown("action");
-    const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
-    if (opts?.retry) validateRetryMeta(opts.retry, meta.id);
-    const node: ActionNode<State> = {
-      kind: "action",
-      meta,
-      fn: fn as ActionNode<State>["fn"],
-      project: opts?.project,
-      retry: opts?.retry,
-    };
-    this._nodes.push(node as WorkflowNode);
-    return this;
+    return this.authoring(() => {
+      this.assertNoTeardown("action");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      if (opts?.retry) validateRetryMeta(opts.retry, meta.id);
+      const node: ActionNode<State> = {
+        kind: "action",
+        meta,
+        fn: fn as ActionNode<State>["fn"],
+        project: opts?.project,
+        retry: opts?.retry,
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
   }
 
   check(
@@ -408,107 +437,115 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
     opts?: { project?: CheckProjection },
   ): WorkflowBuilder<State> {
-    this.assertNoTeardown("check");
-    const node: CheckNode<State> = {
-      kind: "check",
-      meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
-      fn: fn as CheckNode<State>["fn"],
-      project: opts?.project,
-    };
-    this._nodes.push(node as WorkflowNode);
-    return this;
+    return this.authoring(() => {
+      this.assertNoTeardown("check");
+      const node: CheckNode<State> = {
+        kind: "check",
+        meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
+        fn: fn as CheckNode<State>["fn"],
+        project: opts?.project,
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
   }
 
   // Broad impl returns `any` to satisfy the interface's conditional return type.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   compute(idOrMeta: NodeMetaInput, fn: (state: State) => unknown): any {
-    this.assertNoTeardown("compute");
-    // Catch the common async case here (compute is modeled/projected as a
-    // synchronous `full` transform; an async fn would store a Promise-returning
-    // fn — codex slice-1 P2). A sync fn that still RETURNS a promise
-    // (`() => Promise.resolve(x)`) can't be caught at build time (the fn isn't
-    // invoked here); TODO(executor): thenable-check the compute result at run
-    // time and fail the node.
-    if (fn?.constructor?.name === "AsyncFunction") {
-      throw new Error(
-        "workflow.compute() must be synchronous — use .action() for async work",
-      );
-    }
-    const node: ComputeNode<State> = {
-      kind: "compute",
-      meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
-      fn: fn as unknown as ComputeNode<State>["fn"],
-    };
-    this._nodes.push(node as WorkflowNode);
-    return this;
+    return this.authoring(() => {
+      this.assertNoTeardown("compute");
+      // Catch the common async case here (compute is modeled/projected as a
+      // synchronous `full` transform; an async fn would store a Promise-returning
+      // fn — codex slice-1 P2). A sync fn that still RETURNS a promise
+      // (`() => Promise.resolve(x)`) can't be caught at build time (the fn isn't
+      // invoked here); TODO(executor): thenable-check the compute result at run
+      // time and fail the node.
+      if (fn?.constructor?.name === "AsyncFunction") {
+        throw new Error(
+          "workflow.compute() must be synchronous — use .action() for async work",
+        );
+      }
+      const node: ComputeNode<State> = {
+        kind: "compute",
+        meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
+        fn: fn as unknown as ComputeNode<State>["fn"],
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
   }
 
   branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): WorkflowBuilder<State> {
-    this.assertNoTeardown("branch");
-    const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
-    // Prefix each side's anonymous-fallback ids with the branch id + side so the
-    // flat outcome/projection ids stay unique (codex S2.4a R7).
-    const node: BranchNode<State> = {
-      kind: "branch",
-      meta,
-      when: this.buildBranchPredicate(opts),
-      message: opts.message,
-      then: this.collectSubNodes(opts.then, `${meta.id}.then.`),
-      else: opts.else ? this.collectSubNodes(opts.else, `${meta.id}.else.`) : undefined,
-    };
-    this._nodes.push(node as WorkflowNode);
-    return this;
+    return this.authoring(() => {
+      this.assertNoTeardown("branch");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      // Prefix each side's anonymous-fallback ids with the branch id + side so the
+      // flat outcome/projection ids stay unique (codex S2.4a R7).
+      const node: BranchNode<State> = {
+        kind: "branch",
+        meta,
+        when: this.buildBranchPredicate(opts),
+        message: opts.message,
+        then: this.collectSubNodes(opts.then, `${meta.id}.then.`),
+        else: opts.else ? this.collectSubNodes(opts.else, `${meta.id}.else.`) : undefined,
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
   }
 
   // Broad impl satisfies the interface's conditional-tuple signature; call sites
   // type-check against the precise interface signature, not this one.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   poll(idOrMeta: NodeMetaInput, ref: ContractCaseRef, ...rest: any[]): any {
-    this.assertNoTeardown("poll");
-    const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
-    const opts = rest[0] as
-      | (PollUntil<State, unknown> &
-          PollBounds & {
-            in?: (state: State) => unknown;
-            out?: (state: State, res: unknown) => unknown;
-            accept?: ReadonlyArray<string | number>;
-          })
-      | undefined;
-    // The type system requires opts (until XOR untilRuntime), but JS / `as any`
-    // callers can omit it — an exit-predicate-less poll would loop to exhaustion
-    // for nothing, so fail fast here.
-    if (!opts || (typeof opts.until !== "function" && typeof opts.untilRuntime !== "function")) {
-      throw new Error(
-        `workflow.poll() "${meta.id}" requires an exit predicate — \`until\` (declarative) or \`untilRuntime\``,
+    return this.authoring(() => {
+      this.assertNoTeardown("poll");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      const opts = rest[0] as
+        | (PollUntil<State, unknown> &
+            PollBounds & {
+              in?: (state: State) => unknown;
+              out?: (state: State, res: unknown) => unknown;
+              accept?: ReadonlyArray<string | number>;
+            })
+        | undefined;
+      // The type system requires opts (until XOR untilRuntime), but JS / `as any`
+      // callers can omit it — an exit-predicate-less poll would loop to exhaustion
+      // for nothing, so fail fast here.
+      if (!opts || (typeof opts.until !== "function" && typeof opts.untilRuntime !== "function")) {
+        throw new Error(
+          `workflow.poll() "${meta.id}" requires an exit predicate — \`until\` (declarative) or \`untilRuntime\``,
+        );
+      }
+      validatePollBounds(
+        {
+          timeout: opts.timeout,
+          maxAttempts: opts.maxAttempts,
+          perAttemptTimeout: opts.perAttemptTimeout,
+          every: opts.every,
+          backoff: opts.backoff,
+        },
+        meta.id,
       );
-    }
-    validatePollBounds(
-      {
-        timeout: opts.timeout,
+      const node: PollNode<State> = {
+        kind: "poll",
+        meta,
+        ref,
+        in: opts.in,
+        out: opts.out as PollNode<State>["out"],
+        accept: opts.accept,
+        until: this.buildPollUntil(opts),
+        message: opts.message,
+        every: opts.every ?? DEFAULT_EVERY_MS,
+        backoff: opts.backoff ?? 1,
+        timeoutMs: opts.timeout,
+        perAttemptTimeoutMs: opts.perAttemptTimeout,
         maxAttempts: opts.maxAttempts,
-        perAttemptTimeout: opts.perAttemptTimeout,
-        every: opts.every,
-        backoff: opts.backoff,
-      },
-      meta.id,
-    );
-    const node: PollNode<State> = {
-      kind: "poll",
-      meta,
-      ref,
-      in: opts.in,
-      out: opts.out as PollNode<State>["out"],
-      accept: opts.accept,
-      until: this.buildPollUntil(opts),
-      message: opts.message,
-      every: opts.every ?? DEFAULT_EVERY_MS,
-      backoff: opts.backoff ?? 1,
-      timeoutMs: opts.timeout,
-      perAttemptTimeoutMs: opts.perAttemptTimeout,
-      maxAttempts: opts.maxAttempts,
-    };
-    this._nodes.push(node as WorkflowNode);
-    return this;
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
   }
 
   // Build the poll exit predicate: an L2 declarative tree over the RESPONSE
@@ -597,6 +634,16 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       );
     }
     if (this._built) return this._built; // idempotent — one Test, one registration
+    // A poisoned builder holds a half-authored graph (a chained call threw and
+    // the author caught it) — registering/executing it would be a phantom
+    // workflow (codex S2.5 R3 P2).
+    if (this._poisoned !== undefined) {
+      const causeMsg =
+        this._poisoned instanceof Error ? this._poisoned.message : String(this._poisoned);
+      throw new Error(
+        `workflow "${this._meta.id}" cannot build — an earlier authoring call failed: ${causeMsg}`,
+      );
+    }
     const meta = this._meta;
 
     // The single simple Test that executes the graph (mirrors the flow's

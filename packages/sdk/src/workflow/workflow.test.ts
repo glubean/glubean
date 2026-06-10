@@ -261,6 +261,16 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     expect(getRegistry().filter((r) => r.id === "parent")).toHaveLength(0); // nothing registered
   });
 
+  it("a caught authoring error poisons the builder — no phantom registration (codex S2.5 R3 P2)", async () => {
+    const b = workflow("poisoned").setup(async () => ({}));
+    expect(() =>
+      b.poll("bad", {} as never, { untilRuntime: () => true, message: "m" } as never),
+    ).toThrow(/needs a stop condition/); // the author catches this…
+    await Promise.resolve(); // …and the auto-build microtask must NOT register the partial graph
+    expect(getRegistry().some((r) => r.id === "poisoned")).toBe(false);
+    expect(() => b.build()).toThrow(/earlier authoring call failed/); // explicit build refuses too
+  });
+
   it("rejects mutation after build() — the registered graph would silently diverge", () => {
     const b = workflow("frozen").compute("c", (s) => s);
     b.build();

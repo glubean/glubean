@@ -467,6 +467,11 @@ test("isGlubeanFile detects JSR import with version", () => {
   expect(isGlubeanFile(content)).toBe(true);
 });
 
+test("isGlubeanFile recognizes a workflow import from a non-SDK module (S2.5)", () => {
+  const content = `import { workflow } from "./shared/factories";`;
+  expect(isGlubeanFile(content)).toBe(true);
+});
+
 test("isGlubeanFile detects JSR import without version", () => {
   const content = `import { test } from "jsr:@glubean/sdk";`;
   expect(isGlubeanFile(content)).toBe(true);

@@ -15,8 +15,10 @@
 // SDK import detection
 // ---------------------------------------------------------------------------
 
-/** Base function names that are always recognized. */
-const BASE_FNS = ["test", "task"];
+/** Base function names that are always recognized (`workflow` = vNext graph
+ * authoring, discovered as a runnable test — keep in sync with the AST
+ * extractor's BASE_FNS). */
+const BASE_FNS = ["test", "task", "workflow"];
 
 /** Direct SDK module import patterns. */
 const SDK_MODULE_PATTERNS = [
@@ -34,15 +36,15 @@ function escapeRegExp(s: string): string {
 /**
  * Build a regex alternation from function names: `"test|task|browserTest"`.
  * When no custom names are provided, falls back to a convention pattern
- * that matches `test`, `task`, `*Test`, and `*Task`.
+ * that matches `test`, `task`, `workflow`, `*Test`, and `*Task`.
  */
 function buildFnAlternation(customFns?: string[]): string {
   if (customFns && customFns.length > 0) {
     const all = [...new Set([...BASE_FNS, ...customFns])];
     return all.map(escapeRegExp).join("|");
   }
-  // Convention fallback: test | task | *Test | *Task
-  return "\\w*(?:Test|Task)|test|task";
+  // Convention fallback: test | task | workflow | *Test | *Task
+  return "\\w*(?:Test|Task)|test|task|workflow";
 }
 
 /**
