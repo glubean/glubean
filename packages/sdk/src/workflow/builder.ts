@@ -739,6 +739,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     // stringify to "1", and explicit labels can collide too (codex S2.8 R1 P2).
     const seenLabels = new Set<string>();
     for (const c of cases) {
+      // "default" is reserved: the fallback side collects under the same
+      // `${nodeId}.default.` prefix, so a case labeled "default" (e.g.
+      // `value: "default"`) would collide with it (codex S2.8 R2 P2).
+      if (c.label === "default") {
+        throw new Error(
+          `workflow.${method}() "${nodeId}": case label "default" is reserved for the ` +
+            `fallback side — give the case an explicit different \`label\``,
+        );
+      }
       if (seenLabels.has(c.label!)) {
         throw new Error(
           `workflow.${method}() "${nodeId}": duplicate case label "${c.label}" — ` +

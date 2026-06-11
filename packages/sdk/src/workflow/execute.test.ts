@@ -1296,6 +1296,16 @@ describe("runWorkflow — switch (addendum §9 #4)", () => {
           ],
         }),
     ).not.toThrow();
+    // "default" is reserved for the fallback side's id prefix (codex S2.8 R2).
+    expect(() =>
+      workflow("w4")
+        .setup(async () => ({ k: "default" }))
+        .switch("s", {
+          on: (s) => s.k,
+          cases: [{ value: "default", then: (b) => b.compute("c", (s) => s) }],
+          default: (b) => b.compute("d", (s) => s),
+        }),
+    ).toThrow(/label "default" is reserved/);
     // NaN never matches under === and is not JSON-safe.
     expect(() =>
       workflow("w3")
