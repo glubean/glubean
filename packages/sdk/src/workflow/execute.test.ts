@@ -1292,6 +1292,14 @@ describe("workflow.each (addendum §3)", () => {
     expect(entries.every((r) => r.workflow?.templateId === "par-$region")).toBe(true);
   });
 
+  it("workflow.pick REQUIRES $_pick in the template id (codex S2.12 R8)", () => {
+    expect(() =>
+      workflow.pick({ a: { currency: "USD" } }, 1)({ id: "checkout-$currency" } as never, (wf) =>
+        wf.setup(async () => ({})),
+      ),
+    ).toThrow(/must contain "\$_pick"/);
+  });
+
   it("workflow.pick selects examples and injects _pick (groupId always set)", () => {
     const members = workflow.pick(
       {

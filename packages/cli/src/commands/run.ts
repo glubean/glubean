@@ -1300,9 +1300,14 @@ export async function runCommand(
           }
           // vNext workflows ride the "flow" runnable kind, so they reach this
           // gate too — a branch/poll workflow gets the same refusal (codex
-          // S2.6 R9 P2).
+          // S2.6 R9 P2). A pick group's discovery entry carries the TEMPLATE
+          // id while runtime extraction yields concrete universe ids — gate
+          // on both (codex S2.12 R8 P2).
           for (const wf of extracted.workflows ?? []) {
-            if (workflowNodesHaveBranchOrPoll(wf.nodes)) ids.add(wf.id);
+            if (workflowNodesHaveBranchOrPoll(wf.nodes)) {
+              ids.add(wf.id);
+              if (wf.templateId) ids.add(wf.templateId);
+            }
           }
           branchIdsByFile.set(filePath, ids);
         } catch {

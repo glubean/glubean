@@ -1337,6 +1337,16 @@ function workflowPick<T extends Record<string, unknown>>(
   factory: WorkflowEachFactory<T & { _pick: string }>,
 ) => BuiltWorkflow[] {
   return (meta, factory) => {
+    // The template MUST embed the example key: it keeps member ids collision-
+    // free across examples AND it is the marker the CLI relies on to emit a
+    // single template entry for the group (codex S2.12 R8 P2 — a substring
+    // check is only sound because this invariant is enforced here).
+    if (typeof meta?.id !== "string" || !meta.id.includes("$_pick")) {
+      throw new Error(
+        `workflow.pick() "${meta?.id ?? ""}": the template id must contain "$_pick" ` +
+          `(the selected example's key), e.g. "checkout-$_pick"`,
+      );
+    }
     // Validate the one-structure contract across EVERY example, not just the
     // selected subset — otherwise different picks could publish different
     // projections under the same template across imports (codex S2.12 R3 P2).
