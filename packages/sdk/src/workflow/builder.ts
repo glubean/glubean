@@ -7,6 +7,7 @@ import type {
 } from "../contract-flow-condition.js";
 import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
 import { registerTest } from "../internal.js";
+import { interpolateTemplate, normalizeEachTable, selectPickExamples } from "../test/utils.js";
 import type { Test, TestContext } from "../types.js";
 import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
 import { projectWorkflow } from "./project.js";
@@ -1140,8 +1141,10 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
 
     // Pre-compute the graded projection ONCE; the registry entry and the
     // handle's `_projection` (the scanner's dep-free read, mirroring
-    // FlowContract._extracted — S2.6) share the same object.
+    // FlowContract._extracted — S2.6) share the same object. A data-driven
+    // member carries its template id (addendum §3: rows share ONE structure).
     const projection = projectWorkflow(handle);
+    if (meta.templateId) projection.templateId = meta.templateId;
     Object.assign(handle, { _projection: projection });
 
     // Register for scanner discovery with the full graded projection (§7) —
@@ -1152,6 +1155,8 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       type: "simple",
       ...(meta.tags ? { tags: meta.tags } : {}),
       ...(meta.description ? { description: meta.description } : {}),
+      ...(meta.groupId ? { groupId: meta.groupId } : {}),
+      ...(meta.parallel ? { parallel: true } : {}),
       workflow: projection,
     });
 
@@ -1160,8 +1165,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   }
 }
 
-/** Create a workflow builder. `id` is required (string or `WorkflowMeta`). */
-export function workflow(idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined> {
+function workflowFn(idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined> {
   const meta: WorkflowMeta =
     typeof idOrMeta === "string" ? { id: idOrMeta } : { ...idOrMeta };
   if (typeof meta.id !== "string" || meta.id.length === 0) {
@@ -1169,3 +1173,130 @@ export function workflow(idOrMeta: string | WorkflowMeta): WorkflowBuilder<undef
   }
   return new WorkflowBuilderImpl<undefined>(meta);
 }
+
+/**
+ * Template meta for `workflow.each` (addendum §3). `id` is a TEMPLATE — the
+ * engine interpolates `$field` / `$index` per row (the test.each engine,
+ * reused wholesale). The engine owns id templating / tagging / groupId; the
+ * factory only authors the body.
+ */
+export interface WorkflowEachMeta<T>
+  extends Omit<WorkflowMeta, "groupId" | "parallel" | "templateId"> {
+  /** Template id, e.g. "checkout-$region". */
+  id: string;
+  /** Row fields auto-tagged as `field:value` per member. */
+  tagFields?: string | ReadonlyArray<Extract<keyof T, string>>;
+  /** Members of this group may run in parallel. */
+  parallel?: boolean;
+  /** Keep only rows passing this predicate (applied before building). */
+  filter?: (row: T, index: number) => boolean;
+}
+
+/** The per-row authoring factory: the engine creates the builder (templated
+ * id + tags + groupId) and hands it in with the fully-typed row. */
+export type WorkflowEachFactory<T> = (
+  wf: WorkflowBuilder<undefined>,
+  row: T,
+) => unknown;
+
+function workflowEach<T extends Record<string, unknown>>(
+  table: readonly T[] | Record<string, T>,
+): (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>) => BuiltWorkflow[] {
+  const rows = normalizeEachTable(table);
+  return (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>): BuiltWorkflow[] => {
+    if (typeof meta?.id !== "string" || meta.id.length === 0) {
+      throw new Error("workflow.each(): a non-empty template id is required");
+    }
+    if (typeof factory !== "function") {
+      throw new Error(`workflow.each() "${meta.id}": a (wf, row) factory is required`);
+    }
+    const filtered = meta.filter
+      ? rows.filter((row, index) => meta.filter!(row as T, index))
+      : rows;
+    const tagFieldNames =
+      typeof meta.tagFields === "string" ? [meta.tagFields] : [...(meta.tagFields ?? [])];
+    const staticTags = meta.tags ?? [];
+    const isPick = filtered.length > 0 && "_pick" in filtered[0];
+    const hasGroup = isPick || meta.parallel === true;
+
+    // Addendum §3 binding rule 2 made executable: row data enters state ONLY
+    // via setup (or closure literals), so every row must project to ONE
+    // structure — identical canonicalHash, one version × N runs. A factory
+    // that shapes the GRAPH from the row (conditional nodes) breaks that
+    // contract and is rejected here, not silently shipped as N blobs.
+    let canonicalStructure: string | undefined;
+    let canonicalRowId: string | undefined;
+    const structureOf = (p: { nodes: unknown; gradeSummary: unknown }): string =>
+      JSON.stringify({ nodes: p.nodes, gradeSummary: p.gradeSummary });
+
+    return filtered.map((row, index) => {
+      const id = interpolateTemplate(meta.id, row, index);
+      const name = meta.name ? interpolateTemplate(meta.name, row, index) : id;
+      const dynamicTags = tagFieldNames
+        .map((field) => {
+          const value = (row as Record<string, unknown>)[field];
+          return value != null ? `${field}:${String(value)}` : null;
+        })
+        .filter((t): t is string => t !== null);
+      const allTags = [...staticTags, ...dynamicTags];
+
+      const builder = new WorkflowBuilderImpl<undefined>({
+        ...meta,
+        id,
+        name,
+        tags: allTags.length > 0 ? allTags : undefined,
+        templateId: meta.id, // every member carries the shared-structure marker
+        groupId: hasGroup ? meta.id : undefined,
+        parallel: meta.parallel === true ? true : undefined,
+      } as WorkflowMeta);
+      const result = factory(builder, row as T);
+      // An async factory would add nodes after we build — same hazard as an
+      // async branch side (codex S2.4a R5): reject thenables.
+      if (result && typeof (result as { then?: unknown }).then === "function") {
+        throw new Error(
+          `workflow.each() "${meta.id}": the factory must be synchronous — an async ` +
+            `factory loses any steps added after an await`,
+        );
+      }
+      const handle = builder.build();
+
+      const structure = structureOf(handle._projection);
+      if (canonicalStructure === undefined) {
+        canonicalStructure = structure;
+        canonicalRowId = id;
+      } else if (structure !== canonicalStructure) {
+        throw new Error(
+          `workflow.each() "${meta.id}": row ${index} ("${id}") projects a DIFFERENT ` +
+            `structure than "${canonicalRowId}" — all rows must share one projected shape ` +
+            `(addendum §3: row data enters state via setup only; don't shape the graph ` +
+            `from the row — use filter, or split into separate workflows)`,
+        );
+      }
+      return handle;
+    });
+  };
+}
+
+/**
+ * Example-selection over workflows — `workflow.pick` is to `workflow.each`
+ * what `test.pick` is to `test.each`: selects `count` examples (CLI `--pick`
+ * / GLUBEAN_PICK override preserved — same engine), injects `_pick` (usable
+ * as `$_pick` in the template id), and delegates.
+ */
+function workflowPick<T extends Record<string, unknown>>(
+  examples: Record<string, T>,
+  count = 1,
+): (
+  meta: WorkflowEachMeta<T & { _pick: string }>,
+  factory: WorkflowEachFactory<T & { _pick: string }>,
+) => BuiltWorkflow[] {
+  return workflowEach(selectPickExamples(examples, count));
+}
+
+/** Create a workflow builder. `id` is required (string or `WorkflowMeta`).
+ * `workflow.each(table)(metaTemplate, factory)` / `workflow.pick(examples)`
+ * author data-driven matrices (addendum §3). */
+export const workflow = Object.assign(workflowFn, {
+  each: workflowEach,
+  pick: workflowPick,
+});

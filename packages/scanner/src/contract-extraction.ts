@@ -316,6 +316,9 @@ export interface NormalizedWorkflowNode {
 /** Workflow projection as carried in metadata.json (mirror of WorkflowProjection). */
 export interface NormalizedWorkflowMeta {
   id: string;
+  /** Data-driven member (workflow.each/pick): the un-interpolated template id.
+   * Rows share ONE projected structure — only id/name/tags vary. */
+  templateId?: string;
   exportName: string;
   name?: string;
   description?: string;
@@ -1052,6 +1055,12 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
         // The projection is pre-computed by the SDK's build() (S2.6) — carry
         // it verbatim, stamped with the export name like flows are.
         workflows.push({ ...value._projection, exportName });
+      } else if (Array.isArray(value) && value.some(isBuiltWorkflow)) {
+        // workflow.each() exports a BuiltWorkflow[] (addendum §3) — collect
+        // every member's projection (rows share one structure; ids/tags vary).
+        for (const member of value) {
+          if (isBuiltWorkflow(member)) workflows.push({ ...member._projection, exportName });
+        }
       } else if (isProtocolContract(value)) {
         contracts.push(protocolContractToNormalized(value, exportName));
       } else if (isBootstrapAttachment(value)) {

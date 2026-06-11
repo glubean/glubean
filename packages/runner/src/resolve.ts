@@ -222,6 +222,12 @@ function collectTests(
       const resolvedItem = autoResolve(item);
       if (isTest(resolvedItem)) {
         out.push(toResolvedTest(exportName, resolvedItem));
+      } else if (Array.isArray(resolvedItem)) {
+        // One nesting level: workflow.each() returns BuiltWorkflow[] where
+        // each member is itself a one-element Test[] (the dual array handle).
+        for (const inner of resolvedItem) {
+          if (isTest(inner)) out.push(toResolvedTest(exportName, inner));
+        }
       }
     }
   }

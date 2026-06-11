@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { TestContext, Trace } from "../types.js";
 import { GlubeanSkipError } from "../types.js";
 import { contract, __unregisterProtocolForTesting } from "../contract-core.js";
+import { getRegistry as getRegistryForEach } from "../internal.js";
 import type { ContractCaseRef } from "../contract-types.js";
 import { workflow } from "./builder.js";
 import { projectWorkflow } from "./project.js";
@@ -1192,6 +1193,88 @@ describe("runWorkflow — branch (§17 #6)", () => {
         then: (b: unknown) => b,
       } as never),
     ).toThrow(/requires a non-empty `message`/);
+  });
+});
+
+// --- workflow.each / .pick: data-driven matrices (addendum §3) ----------------
+
+describe("workflow.each (addendum §3)", () => {
+  const regions = [
+    { region: "us", currency: "USD" },
+    { region: "eu", currency: "EUR" },
+    { region: "jp", currency: "JPY" },
+  ];
+
+  it("builds one member per row: templated ids, auto tags, shared structure, row via setup", async () => {
+    const members = workflow.each(regions)(
+      { id: "checkout-$region", tagFields: ["region"], tags: ["journey"] },
+      (wf, row) =>
+        wf
+          .setup(async () => ({ currency: row.currency }))
+          .compute("derive", (s) => ({ ...s, label: s.currency.toLowerCase() })),
+    );
+    expect(members.map((m) => m.meta.id)).toEqual(["checkout-us", "checkout-eu", "checkout-jp"]);
+    expect(members[1].meta.tags).toEqual(["journey", "region:eu"]);
+    // every member shares ONE projected structure; ids/template stamped
+    expect(members[0]._projection.templateId).toBe("checkout-$region");
+    const shapes = members.map((m) =>
+      JSON.stringify({ nodes: m._projection.nodes, gradeSummary: m._projection.gradeSummary }),
+    );
+    expect(new Set(shapes).size).toBe(1);
+    // row data flows through setup state at run time
+    const { ctx } = fakeBase();
+    const res = await runWorkflow(members[1], ctx);
+    expect(res.status).toBe("passed");
+    expect(res.state).toEqual({ currency: "EUR", label: "eur" });
+  });
+
+  it("filter drops rows before building; $index interpolates", () => {
+    const members = workflow.each(regions)(
+      { id: "row-$index", filter: (row) => row.region !== "eu" },
+      (wf) => wf.compute("c", (s) => s),
+    );
+    expect(members.map((m) => m.meta.id)).toEqual(["row-0", "row-1"]);
+  });
+
+  it("REJECTS a factory that shapes the graph from the row (one-structure contract)", () => {
+    expect(() =>
+      workflow.each(regions)({ id: "bad-$region" }, (wf, row) => {
+        const c = wf.setup(async () => ({}));
+        // graph shape depends on the row — N different structures
+        return row.region === "us" ? c.compute("extra", (s) => s) : c;
+      }),
+    ).toThrow(/DIFFERENT structure/);
+  });
+
+  it("rejects an async factory and a missing template id", () => {
+    expect(() =>
+      workflow.each(regions)({ id: "x-$region" }, (async (wf: unknown) => wf) as never),
+    ).toThrow(/must be synchronous/);
+    expect(() => workflow.each(regions)({ id: "" }, (wf) => wf)).toThrow(/template id/);
+  });
+
+  it("parallel sets the group: registry rows carry groupId + parallel", () => {
+    workflow.each(regions)(
+      { id: "par-$region", parallel: true },
+      (wf) => wf.compute("c", (s) => s),
+    );
+    const entries = getRegistryForEach().filter((r) => r.id.startsWith("par-"));
+    expect(entries).toHaveLength(3);
+    expect(entries.every((r) => r.groupId === "par-$region" && r.parallel === true)).toBe(true);
+    expect(entries.every((r) => r.workflow?.templateId === "par-$region")).toBe(true);
+  });
+
+  it("workflow.pick selects examples and injects _pick (groupId always set)", () => {
+    const members = workflow.pick(
+      {
+        alpha: { currency: "USD" },
+        beta: { currency: "EUR" },
+      },
+      2,
+    )({ id: "pick-$_pick" }, (wf, row) => wf.setup(async () => ({ c: row.currency })));
+    expect(members).toHaveLength(2);
+    expect(members.map((m) => m.meta.id).sort()).toEqual(["pick-alpha", "pick-beta"]);
+    expect(members[0].meta.groupId).toBe("pick-$_pick");
   });
 });
 

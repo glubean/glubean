@@ -277,3 +277,21 @@ export const wf = workflow("wf-http")
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+
+test("workflow.each members are discovered (nested array handle) and run with row state (addendum §3)", async () => {
+  const src = `
+import { workflow } from "@glubean/sdk";
+export const matrix = workflow.each([
+  { region: "us", currency: "USD" },
+  { region: "eu", currency: "EUR" },
+])(
+  { id: "wf-matrix-$region", tagFields: ["region"] },
+  (wf, row) =>
+    wf.setup(async () => ({ currency: row.currency }))
+      .check("verify", async (c, s) => { c.assert(s.currency.length === 3, "iso currency"); }),
+);
+`;
+  const r = await run(src, "wf-matrix-eu");
+  expect(r.success).toBe(true);
+  expect(nodeEnds(r.events).map((e) => [e.nodeId, e.status])).toEqual([["verify", "passed"]]);
+});

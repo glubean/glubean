@@ -45,6 +45,13 @@ export interface WorkflowMeta {
   skip?: string;
   /** Focus filter. */
   only?: boolean;
+  /** Data-driven member's un-interpolated template id (set by workflow.each/
+   * pick on EVERY member — the shared-structure marker, addendum §3). */
+  templateId?: string;
+  /** Trace-grouping id (set when pick/parallel — mirrors test.each's grouping). */
+  groupId?: string;
+  /** Members of the same group may run in parallel (workflow.each option). */
+  parallel?: boolean;
 }
 
 /**
@@ -420,6 +427,11 @@ export interface ProjectedWorkflowNode {
 
 export interface WorkflowProjection {
   id: string;
+  /** Data-driven member (workflow.each/pick): the un-interpolated template id.
+   * All rows share ONE projected structure — only id/name/tags vary — so a
+   * canonical hash over the structure is identical across rows (addendum §3:
+   * one version × N runs). */
+  templateId?: string;
   name?: string;
   description?: string;
   tags?: string[];
