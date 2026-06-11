@@ -107,19 +107,32 @@ export const branched = workflow("wf-branched")
 export const linear = workflow("wf-linear").compute("c", (s) => s).build();
 
 export const plain = test("plain-test", async (ctx) => { ctx.log("x"); });
+
+export const parked = workflow({ id: "wf-parked", skip: "not ready" })
+  .setup(async () => ({ ok: true }))
+  .branch("route", {
+    when: (w) => w.when((s) => s.ok).eq(true),
+    then: (b) => b.compute("c", (s) => s),
+  })
+  .build();
 `,
   );
   const discovered = await discoverTests(file);
   const byId = Object.fromEntries(
-    discovered.map((d) => [d.meta.id, [d.meta.kind, d.meta.workflowHasBranchOrPoll ?? false]]),
+    discovered.map((d) => [
+      d.meta.id,
+      [d.meta.kind, d.meta.workflowHasBranchOrPoll ?? false, d.meta.deferred],
+    ]),
   );
   // workflows ride the "flow" kind even in .test.ts (suite kinds:[flow] keeps
   // them); the branch flag is STATIC — the upload gate reads it without ever
-  // importing the test file (codex S2.6 R10 P2).
+  // importing the test file (codex S2.6 R10 P2). A skipped workflow carries
+  // its reason as `deferred` so the gate excludes it (codex R13).
   expect(byId).toEqual({
-    "wf-branched": ["flow", true],
-    "wf-linear": ["flow", false],
-    "plain-test": ["test", false],
+    "wf-branched": ["flow", true, undefined],
+    "wf-linear": ["flow", false, undefined],
+    "plain-test": ["test", false, undefined],
+    "wf-parked": ["flow", true, "not ready"],
   });
 });
 

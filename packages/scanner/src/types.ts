@@ -51,6 +51,12 @@ export interface ExportMeta {
    */
   workflow?: true;
   /**
+   * A workflow's `skip: "reason"` (WorkflowMeta.skip is a string; TestMeta.skip
+   * is boolean) — mirrors TestMeta.deferred so skipped workflows are excluded
+   * from the --upload branch/poll gate like deferred flows.
+   */
+  deferred?: string;
+  /**
    * Set when a `workflow(...)` chain contains a `.branch(`/`.poll(` call
    * (static AST detection) — drives the --upload fail-closed gate for
    * workflows in files the runtime extractor never imports (.test.ts).

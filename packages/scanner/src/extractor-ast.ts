@@ -51,6 +51,8 @@ interface MetaFields {
   timeout?: number;
   requires?: "headless" | "browser" | "out-of-band";
   defaultRun?: "always" | "opt-in";
+  /** A STRING `skip: "reason"` (WorkflowMeta.skip) — maps to deferred. */
+  deferred?: string;
 }
 
 /** Parse `{ id, name, tags, timeout, requires, defaultRun }` from a TestMeta object literal. */
@@ -60,6 +62,11 @@ function parseMetaObject(obj: AnyNode): MetaFields {
   if (id !== undefined) out.id = id;
   const name = stringProperty(obj, "name");
   if (name !== undefined) out.name = name;
+  // WorkflowMeta.skip is a string reason (TestMeta.skip is boolean — a string
+  // here only ever comes from a workflow). Carried as `deferred` so the
+  // upload gate can exclude skipped workflows (codex S2.6 R13 P2).
+  const skipReason = stringProperty(obj, "skip");
+  if (skipReason !== undefined) out.deferred = skipReason;
 
   const tagsProp = objectProperty(obj, "tags");
   if (tagsProp) {
@@ -233,6 +240,7 @@ function parseTestDeclaration(
   if (fields.timeout === undefined && bMeta.timeout !== undefined) fields.timeout = bMeta.timeout;
   if (fields.requires === undefined && bMeta.requires !== undefined) fields.requires = bMeta.requires;
   if (fields.defaultRun === undefined && bMeta.defaultRun !== undefined) fields.defaultRun = bMeta.defaultRun;
+  if (fields.deferred === undefined && bMeta.deferred !== undefined) fields.deferred = bMeta.deferred;
 
   if (fields.id === undefined) return undefined;
 
@@ -269,6 +277,11 @@ function parseTestDeclaration(
   // safely inspect (codex S2.6 R10 P2).
   if (isWorkflowFactory) {
     result.workflow = true;
+    // WorkflowMeta.skip (string reason) — surfaced so the upload gate can
+    // exclude skipped workflows like deferred flows (codex S2.6 R13 P2).
+    // Only emitted for workflows: TestMeta.skip is boolean, so a string skip
+    // never legitimately appears on a plain test.
+    if (fields.deferred !== undefined) result.deferred = fields.deferred;
     // Inspect ONLY the builder chain's own method names — descending callee
     // objects like chainHead does, never the call ARGUMENTS — so a user
     // callback body calling e.g. `client.poll()` cannot false-positive a

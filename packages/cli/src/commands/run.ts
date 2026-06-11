@@ -693,6 +693,9 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         // .flow.ts, or kinds:[test, flow].
         kind: m.workflow ? "flow" : "test",
         ...(m.workflowHasBranchOrPoll ? { workflowHasBranchOrPoll: true } : {}),
+        // WorkflowMeta.skip reason → deferred, so a skipped branch/poll
+        // workflow doesn't abort --upload (codex S2.6 R13 P2).
+        ...(m.deferred !== undefined ? { deferred: m.deferred } : {}),
       },
     };
   });
@@ -1211,7 +1214,14 @@ export async function runCommand(
           // Exclude EVERY test-file suffix (.test.ts/.js/.mjs/…), not just the
           // .ts one classifyGlubeanFile knows: re-extraction imports the file,
           // and test files must never be runtime-imported (codex S2.6 R12 P2).
-          .filter((p) => classifyGlubeanFile(p) !== "test" && !basename(p).includes(".test.")),
+          // Suffix-anchored so a runtime-extractable `checkout.test.flow.ts`
+          // is NOT excluded (codex R13: it classifies as flow and must be
+          // re-extracted for its branch/poll nodes).
+          .filter(
+            (p) =>
+              classifyGlubeanFile(p) !== "test" &&
+              !/\.test\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(basename(p)),
+          ),
       );
       for (const filePath of extractableFiles) {
         try {
