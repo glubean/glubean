@@ -159,7 +159,11 @@ function chainHead(init: AnyNode): AnyNode | undefined {
  * top level — branch sides etc. are flagged by the outer `.branch(` on the
  * chain — while runtime callbacks may declare shadowing locals (`const wf =
  * ...` inside an action) that must not leak into the scan (codex S2.12 R4). */
-function walkSameScope(node: AnyNode, cb: (n: AnyNode) => void): void {
+function walkSameScope(
+  node: AnyNode,
+  cb: (n: AnyNode) => void,
+  onNestedFn?: (fn: AnyNode) => void,
+): void {
   cb(node);
   for (const key of Object.keys(node)) {
     const value = (node as Record<string, unknown>)[key];
@@ -172,9 +176,10 @@ function walkSameScope(node: AnyNode, cb: (n: AnyNode) => void): void {
         child.type === "FunctionExpression" ||
         child.type === "FunctionDeclaration"
       ) {
-        return; // nested scope — stop here
+        onNestedFn?.(child); // nested scope — the caller decides what to do
+        return;
       }
-      walkSameScope(child, cb);
+      walkSameScope(child, cb, onNestedFn);
     };
     if (Array.isArray(value)) value.forEach(visit);
     else visit(value);
@@ -418,24 +423,66 @@ function parseTestDeclaration(
               }
             }
           });
-          walkSameScope(factory.body as AnyNode, (n) => {
-            if (hasBranchOrPoll || n.type !== "CallExpression") return;
-            const callee = unwrapExpression(n.callee as AnyNode);
-            if (!callee || callee.type !== "MemberExpression" || callee.computed === true) return;
-            const property = callee.property as AnyNode;
-            if (
-              property.type !== "Identifier" ||
-              !BRANCH_FAMILY_METHODS.has(property.name as string)
-            ) {
-              return;
+          // Recursive, SHADOW-AWARE scan: a nested closure capturing the
+          // builder (`const make = () => wf.branch(...)`) must flag
+          // (codex S2.12 R12 P2), while a runtime callback REDECLARING the
+          // name (`const wf = makeClient(); wf.poll()`) must not (R4). A
+          // local declaration shadows a builder name unless its initializer
+          // itself roots at an unshadowed builder (then it's still the chain).
+          const scanScope = (scopeBody: AnyNode, shadowed: ReadonlySet<string>): void => {
+            const nestedFns: AnyNode[] = [];
+            walkSameScope(
+              scopeBody,
+              (n) => {
+                if (hasBranchOrPoll || n.type !== "CallExpression") return;
+                const callee = unwrapExpression(n.callee as AnyNode);
+                if (!callee || callee.type !== "MemberExpression" || callee.computed === true) {
+                  return;
+                }
+                const property = callee.property as AnyNode;
+                if (
+                  property.type !== "Identifier" ||
+                  !BRANCH_FAMILY_METHODS.has(property.name as string)
+                ) {
+                  return;
+                }
+                // Root the receiver chain: only calls whose chain bottoms out
+                // at an UNSHADOWED builder name count.
+                const root = rootOf(callee.object as AnyNode);
+                if (
+                  root?.type === "Identifier" &&
+                  builderNames.has(root.name as string) &&
+                  !shadowed.has(root.name as string)
+                ) {
+                  hasBranchOrPoll = true;
+                }
+              },
+              (fn) => nestedFns.push(fn),
+            );
+            for (const fn of nestedFns) {
+              const childShadow = new Set(shadowed);
+              const params = (fn.params as AnyNode[] | undefined) ?? [];
+              for (const param of params) {
+                if (param.type === "Identifier" && builderNames.has(param.name as string)) {
+                  childShadow.add(param.name as string);
+                }
+              }
+              const body = fn.body as AnyNode;
+              walkSameScope(body, (n) => {
+                if (n.type !== "VariableDeclarator") return;
+                const id = n.id as AnyNode | undefined;
+                if (id?.type !== "Identifier" || !builderNames.has(id.name as string)) return;
+                const initRoot = rootOf(n.init as AnyNode | undefined);
+                const initIsBuilder =
+                  initRoot?.type === "Identifier" &&
+                  builderNames.has(initRoot.name as string) &&
+                  !childShadow.has(initRoot.name as string);
+                if (!initIsBuilder) childShadow.add(id.name as string);
+              });
+              scanScope(body, childShadow);
             }
-            // Root the receiver chain: only calls whose chain bottoms out at
-            // the factory's builder parameter (or a local alias of it) count.
-            const root = rootOf(callee.object as AnyNode);
-            if (root?.type === "Identifier" && builderNames.has(root.name as string)) {
-              hasBranchOrPoll = true;
-            }
-          });
+          };
+          scanScope(factory.body as AnyNode, new Set());
         }
       }
     }

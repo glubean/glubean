@@ -133,6 +133,36 @@ export const clean = workflow.each([{ region: "us" }])(
   });
 });
 
+test("a nested closure capturing the builder is flagged; redeclared names stay clean (S2.12 R12)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+// closure HIDES the branch — must flag
+export const hidden = workflow.each([{ region: "us" }])(
+  { id: "hi-$region" },
+  (wf, row) => {
+    const make = () => wf.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+    return make();
+  },
+);
+
+// nested callback REDECLARES the name with a foreign value — must NOT flag
+export const redeclared = workflow.each([{ region: "us" }])(
+  { id: "re-$region" },
+  (wf, row) =>
+    wf.setup(async () => ({}))
+      .action("probe", async (ctx, s) => {
+        const wf = makeClient();
+        await wf.poll();
+        return s;
+      }),
+);
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
+});
+
 test("ASSIGNED builder aliases are tracked too (S2.12 R10)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
