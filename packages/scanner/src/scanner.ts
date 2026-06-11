@@ -353,6 +353,17 @@ export class Scanner {
     // entries inside `attachments[]`. We also call it on .flow.ts files so
     // single-file flow modules are picked up. vNext workflows (S2.6) live on
     // the result's first-class `workflows[]` — same files, same import.
+    //
+    // DELIBERATE: `.test.ts` files are NOT imported here — that is the
+    // scanner's core safety invariant (the static path never executes user
+    // test code; a test file's top-level side effects are arbitrary). A
+    // workflow exported from `.test.ts` is still discovered and runnable via
+    // the static extractor; it just carries no graded projection in metadata.
+    // Authors who want the projection move the workflow to a `.flow.ts` —
+    // the same "safe-to-import declaration file" contract contracts/flows
+    // already rely on. (A future run-time backfill — the runner imports test
+    // files safely inside its sandbox — could lift this without breaking the
+    // invariant; that is a runner-protocol slice, not a scan-time one.)
     const flows: NormalizedFlowMeta[] = [];
     const workflows: NormalizedWorkflowMeta[] = [];
     const allFlowSourceFiles = [...flowFiles, ...contractFiles]; // contract files can also export flows

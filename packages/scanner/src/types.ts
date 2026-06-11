@@ -107,6 +107,9 @@ export interface BundleMetadata {
    * vNext workflow projections (S2.6) — the JSON-safe graded node view read
    * off `BuiltWorkflow._projection` for workflows exported from runtime-
    * extractable files (.flow.ts / .contract.ts). Consumed by Cloud/agents.
+   * A workflow authored in `.test.ts` is discovered/runnable but carries no
+   * projection here — the scanner never imports test files (safety
+   * invariant); move it to a `.flow.ts` to get the graded projection.
    */
   workflows?: NormalizedWorkflowMeta[];
 }
