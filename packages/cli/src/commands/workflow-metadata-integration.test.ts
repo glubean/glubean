@@ -138,40 +138,6 @@ export const parked = workflow({ id: "wf-parked", skip: "not ready" })
   });
 });
 
-test("workflow.pick: scan metadata is the FULL example universe (deterministic); discovery emits ONE template entry", async () => {
-  const dir = join(FIXTURE_ROOT, "4");
-  await mkdir(dir, { recursive: true });
-  const file = join(dir, "picky.flow.ts");
-  await writeFile(
-    file,
-    `
-import { workflow } from "@glubean/sdk";
-export const picky = workflow.pick({
-  alpha: { currency: "USD" },
-  beta: { currency: "EUR" },
-  gamma: { currency: "JPY" },
-}, 1)(
-  { id: "picky-$_pick" },
-  (wf, row) => wf.setup(async () => ({ c: row.currency })).compute("derive", (s) => s),
-);
-`,
-  );
-  // metadata: all three examples, every scan — not this import's random pick
-  const scanResult = await scan(dir);
-  const ids = (scanResult.workflows ?? []).map((w) => w.id).sort();
-  expect(ids).toEqual(["picky-alpha", "picky-beta", "picky-gamma"]);
-  const again = await scan(dir);
-  expect((again.workflows ?? []).map((w) => w.id).sort()).toEqual(ids); // deterministic
-
-  // discovery: one TEMPLATE entry — the harness's template expansion (B1)
-  // resolves it to the execution import's current members.
-  const discovered = await discoverTests(file);
-  const pickEntries = discovered.filter((d) => d.meta.id.includes("picky"));
-  expect(pickEntries).toHaveLength(1);
-  expect(pickEntries[0].meta.id).toBe("picky-$_pick");
-  expect(pickEntries[0].meta.kind).toBe("flow");
-});
-
 test("workflow.each over an OBJECT table with $_pick in the id stays concrete (not a pick group)", async () => {
   const dir = join(FIXTURE_ROOT, "5");
   await mkdir(dir, { recursive: true });

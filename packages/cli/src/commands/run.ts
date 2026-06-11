@@ -584,64 +584,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     // suites declaring `kinds: [flow]` mean "run the graph orchestrators in
     // these files" — no new user-facing kinds enum until flow is deleted.
     // WorkflowMeta.skip → deferred mirrors the SDK's own Test wrapping.
-    // workflow.pick members are THIS import's random selection — the runner
-    // imports again and may select differently. Emit ONE template entry per
-    // pick group; the harness's canonical template expansion (B1) resolves it
-    // to the execution import's CURRENT members (codex S2.12 R6 P2). Template
-    // metadata is built from GROUP-level fields: tags = the intersection
-    // across members (tagFields adds row-specific tags that must not gate the
-    // whole group) and `only` is preserved if ANY member carries it
-    // (codex S2.12 R7 P2).
-    const pickGroups = new Map<
-      string,
-      {
-        exportName: string;
-        description?: string;
-        skip?: string;
-        groupId?: string;
-        parallel?: boolean;
-        only?: boolean;
-        tags?: string[];
-      }
-    >();
     for (const wf of result.workflows) {
-      // explicit pick marker — an each over an object table can legitimately
-      // use $_pick in its id while staying deterministic (codex S2.12 R9 P2).
-      if (!wf.pick || !wf.templateId) continue;
-      const existing = pickGroups.get(wf.templateId);
-      if (!existing) {
-        pickGroups.set(wf.templateId, {
-          exportName: wf.exportName,
-          description: wf.description,
-          skip: wf.skip,
-          groupId: wf.groupId,
-          parallel: wf.parallel,
-          only: wf.only,
-          tags: wf.tags ? [...wf.tags] : undefined,
-        });
-      } else {
-        if (wf.only) existing.only = true;
-        existing.tags = existing.tags?.filter((t) => wf.tags?.includes(t));
-      }
-    }
-    for (const [templateId, g] of pickGroups) {
-      results.push({
-        exportName: g.exportName,
-        meta: {
-          id: templateId,
-          name: templateId,
-          description: g.description,
-          tags: g.tags && g.tags.length > 0 ? g.tags : undefined,
-          only: g.only,
-          deferred: g.skip,
-          ...(g.groupId ? { groupId: g.groupId } : {}),
-          ...(g.parallel ? { parallel: true } : {}),
-          kind: "flow",
-        },
-      });
-    }
-    for (const wf of result.workflows) {
-      if (wf.pick && wf.templateId) continue; // grouped above
       results.push({
         exportName: wf.exportName,
         meta: {
@@ -1302,14 +1245,9 @@ export async function runCommand(
           }
           // vNext workflows ride the "flow" runnable kind, so they reach this
           // gate too — a branch/poll workflow gets the same refusal (codex
-          // S2.6 R9 P2). A pick group's discovery entry carries the TEMPLATE
-          // id while runtime extraction yields concrete universe ids — gate
-          // on both (codex S2.12 R8 P2).
+          // S2.6 R9 P2).
           for (const wf of extracted.workflows ?? []) {
-            if (workflowNodesHaveBranchOrPoll(wf.nodes)) {
-              ids.add(wf.id);
-              if (wf.templateId) ids.add(wf.templateId);
-            }
+            if (workflowNodesHaveBranchOrPoll(wf.nodes)) ids.add(wf.id);
           }
           branchIdsByFile.set(filePath, ids);
         } catch {

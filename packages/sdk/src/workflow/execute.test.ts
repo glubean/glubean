@@ -1256,23 +1256,6 @@ describe("workflow.each (addendum §3)", () => {
     expect(getRegistryForEach().some((r) => r.id.startsWith("halfreg-"))).toBe(false);
   });
 
-  it("workflow.pick validates the one-structure contract across ALL examples (codex R3)", () => {
-    // even with count=1 (single selected member), a structurally-diverging
-    // example elsewhere in the map must fail the build.
-    expect(() =>
-      workflow.pick(
-        {
-          a: { kind: "plain" },
-          b: { kind: "fancy" },
-        },
-        1,
-      )({ id: "pickv-$_pick" }, (wf, row) => {
-        const c = wf.setup(async () => ({}));
-        return row.kind === "fancy" ? c.compute("extra", (s) => s) : c;
-      }),
-    ).toThrow(/DIFFERENT structure/);
-    expect(getRegistryForEach().some((r) => r.id.startsWith("pickv-"))).toBe(false);
-  });
 
   it("row-dependent LIFECYCLE presence is rejected (codex R15)", () => {
     expect(() =>
@@ -1310,37 +1293,7 @@ describe("workflow.each (addendum §3)", () => {
     expect(entries.every((r) => r.workflow?.templateId === "par-$region")).toBe(true);
   });
 
-  it("pick filter applies BEFORE selection — discovery and execution share one eligible set (codex R10)", () => {
-    // with the only eligible example being "b", selection can never land on
-    // the filtered-out "a" and return zero members.
-    for (let i = 0; i < 5; i++) {
-      const members = workflow.pick(
-        { a: { ok: false }, b: { ok: true } },
-        1,
-      )(
-        { id: "pf-$_pick", filter: (row) => (row as { ok: boolean }).ok },
-        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
-      );
-      expect(members.map((m) => m.meta.id)).toEqual(["pf-b"]);
-      const universe = (members as unknown as { _pickUniverse: Array<{ meta: { id: string } }> })
-        ._pickUniverse;
-      expect(universe.map((m) => m.meta.id)).toEqual(["pf-b"]); // same eligible set
-    }
-  });
 
-  it("pick members ARE universe handles — a $index template cannot diverge (codex R11)", () => {
-    const members = workflow.pick(
-      { a: { v: 1 }, b: { v: 2 }, c: { v: 3 } },
-      2,
-    )({ id: "ix-$_pick-$index" }, (wf, row) => wf.setup(async () => ({ v: row.v })));
-    const universe = (members as unknown as { _pickUniverse: Array<{ meta: { id: string } }> })
-      ._pickUniverse;
-    expect(universe.map((m) => m.meta.id)).toEqual(["ix-a-0", "ix-b-1", "ix-c-2"]);
-    // every runnable member is the SAME handle as its universe entry
-    for (const m of members) {
-      expect(universe.includes(m as never)).toBe(true);
-    }
-  });
 
   it("object-table workflow.each does NOT gain grouping metadata (codex R11)", () => {
     const members = workflow.each({ alpha: { v: 1 }, beta: { v: 2 } })(
@@ -1350,100 +1303,25 @@ describe("workflow.each (addendum §3)", () => {
     expect(members.map((m) => m.meta.id)).toEqual(["ot-alpha", "ot-beta"]);
     for (const m of members) {
       expect(m.meta.groupId).toBeUndefined(); // deterministic — no group
-      expect(m._projection.pick).toBeUndefined();
     }
   });
 
-  it("an EXPLICIT pick naming only filtered-out examples runs NOTHING, never a random row (codex R16)", () => {
-    const prev = process.env.GLUBEAN_PICK;
-    process.env.GLUBEAN_PICK = "a";
-    try {
-      const members = workflow.pick({ a: { ok: false }, b: { ok: true } }, 1)(
-        { id: "xp-$_pick", filter: (row) => (row as { ok: boolean }).ok },
-        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
-      );
-      expect(members).toHaveLength(0); // NOT a silent fallback to "b"
-      // the universe still advertises the eligible examples
-      const universe = (members as unknown as { _pickUniverse: Array<{ meta: { id: string } }> })
-        ._pickUniverse;
-      expect(universe.map((m) => m.meta.id)).toEqual(["xp-b"]);
-    } finally {
-      if (prev === undefined) delete process.env.GLUBEAN_PICK;
-      else process.env.GLUBEAN_PICK = prev;
-    }
-  });
 
-  it("explicit multi-pick runs in SELECTED order, not table order (codex R18)", () => {
-    const prev = process.env.GLUBEAN_PICK;
-    process.env.GLUBEAN_PICK = "beta,alpha";
-    try {
-      const members = workflow.pick({ alpha: { v: 1 }, beta: { v: 2 } }, 2)(
-        { id: "so-$_pick" },
-        (wf, row) => wf.setup(async () => ({ v: row.v })),
-      );
-      expect(members.map((m) => m.meta.id)).toEqual(["so-beta", "so-alpha"]);
-    } finally {
-      if (prev === undefined) delete process.env.GLUBEAN_PICK;
-      else process.env.GLUBEAN_PICK = prev;
-    }
-  });
 
-  it("a prototype-key example name cannot defeat the filtered-override check (codex R19)", () => {
-    const prev = process.env.GLUBEAN_PICK;
-    process.env.GLUBEAN_PICK = "constructor";
-    try {
-      const members = workflow.pick(
-        { constructor: { ok: false }, other: { ok: true } } as Record<string, { ok: boolean }>,
-        1,
-      )(
-        { id: "pk-$_pick", filter: (row) => (row as { ok: boolean }).ok },
-        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
-      );
-      expect(members).toHaveLength(0); // NOT a random fallback to "other"
-    } finally {
-      if (prev === undefined) delete process.env.GLUBEAN_PICK;
-      else process.env.GLUBEAN_PICK = prev;
-    }
-  });
 
-  it("a GLOB pick matching only filtered-out examples also runs nothing (codex R17)", () => {
-    const prev = process.env.GLUBEAN_PICK;
-    process.env.GLUBEAN_PICK = "us-*";
-    try {
-      const members = workflow.pick(
-        { "us-east": { ok: false }, "eu-west": { ok: true } },
-        1,
-      )(
-        { id: "gp-$_pick", filter: (row) => (row as { ok: boolean }).ok },
-        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
-      );
-      expect(members).toHaveLength(0); // glob hit only ineligible examples
-    } finally {
-      if (prev === undefined) delete process.env.GLUBEAN_PICK;
-      else process.env.GLUBEAN_PICK = prev;
-    }
-  });
 
-  it("a pick whose filter excludes EVERY example yields an empty matrix, not a crash (codex R13)", () => {
-    const members = workflow.pick({ a: { ok: false } }, 1)(
-      { id: "ef-$_pick", filter: (row) => (row as { ok: boolean }).ok },
-      (wf, row) => wf.setup(async () => ({ ok: row.ok })),
-    );
-    expect(members).toHaveLength(0);
-    expect(
-      (members as unknown as { _pickUniverse: unknown[] })._pickUniverse,
-    ).toEqual([]);
-  });
 
   it("engine-owned grouping fields cannot be forged or overwritten (codex R21)", () => {
-    // factory cannot strip the pick marker via .meta() (as-any included)
-    const members = workflow.pick({ a: { v: 1 } }, 1)({ id: "lk-$_pick" }, (wf, row) =>
-      (wf.meta({ pickGroup: false, groupId: "forged" } as never) as never as typeof wf).setup(
-        async () => ({ v: row.v }),
-      ),
+    // factory cannot overwrite engine grouping via .meta() (as-any included)
+    const members = workflow.each([{ v: 1 }])(
+      { id: "lk-$index", parallel: true },
+      (wf, row) =>
+        (wf.meta({ groupId: "forged", parallel: false } as never) as never as typeof wf).setup(
+          async () => ({ v: row.v }),
+        ),
     );
-    expect(members[0]._projection.pick).toBe(true);
-    expect(members[0].meta.groupId).toBe("lk-$_pick");
+    expect(members[0].meta.groupId).toBe("lk-$index");
+    expect(members[0]._projection.parallel).toBe(true);
     // hand-written workflow() cannot mint engine-owned fields either
     const solo = workflow({ id: "solo", groupId: "fake", parallel: true } as never)
       .setup(async () => ({}))
@@ -1452,26 +1330,7 @@ describe("workflow.each (addendum §3)", () => {
     expect(solo._projection.parallel).toBeUndefined();
   });
 
-  it("workflow.pick REQUIRES $_pick in the template id (codex S2.12 R8)", () => {
-    expect(() =>
-      workflow.pick({ a: { currency: "USD" } }, 1)({ id: "checkout-$currency" } as never, (wf) =>
-        wf.setup(async () => ({})),
-      ),
-    ).toThrow(/must contain "\$_pick"/);
-  });
 
-  it("workflow.pick selects examples and injects _pick (groupId always set)", () => {
-    const members = workflow.pick(
-      {
-        alpha: { currency: "USD" },
-        beta: { currency: "EUR" },
-      },
-      2,
-    )({ id: "pick-$_pick" }, (wf, row) => wf.setup(async () => ({ c: row.currency })));
-    expect(members).toHaveLength(2);
-    expect(members.map((m) => m.meta.id).sort()).toEqual(["pick-alpha", "pick-beta"]);
-    expect(members[0].meta.groupId).toBe("pick-$_pick");
-  });
 });
 
 // --- pollAction: poll over an arbitrary async attempt (addendum §4) ----------

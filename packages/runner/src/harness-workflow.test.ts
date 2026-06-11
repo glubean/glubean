@@ -357,28 +357,3 @@ export const matrix = workflow.each([
   }
   expect(r.success).toBe(true);
 });
-
-test("an explicitly-filtered-out pick runs NOTHING and reports skipped, not failed (S2.12 R23)", async () => {
-  const src = `
-import { workflow } from "@glubean/sdk";
-export const picky = workflow.pick({ a: { ok: false }, b: { ok: true } }, 1)(
-  { id: "ef-$_pick", filter: (row) => row.ok },
-  (wf, row) => wf.setup(async () => ({ ok: row.ok })).check("c", async (c, s) => c.assert(s.ok, "ok")),
-);
-`;
-  const prev = process.env.GLUBEAN_PICK;
-  process.env.GLUBEAN_PICK = "a"; // names only the filtered-out example
-  try {
-    const r = await runBatch(src, ["ef-$_pick"], {
-      concurrency: 1,
-      exportNames: { "ef-$_pick": "picky" },
-    });
-    const statuses = r.events.filter((e) => e.type === "status");
-    expect(statuses).toHaveLength(1);
-    expect((statuses[0] as { status?: string }).status).toBe("skipped");
-    expect(r.success).toBe(true); // running nothing was the requested outcome
-  } finally {
-    if (prev === undefined) delete process.env.GLUBEAN_PICK;
-    else process.env.GLUBEAN_PICK = prev;
-  }
-});

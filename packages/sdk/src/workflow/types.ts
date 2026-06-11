@@ -48,11 +48,7 @@ export interface WorkflowMeta {
   /** Data-driven member's un-interpolated template id (set by workflow.each/
    * pick on EVERY member — the shared-structure marker, addendum §3). */
   templateId?: string;
-  /** Set by workflow.pick: this member belongs to a RANDOM-selection group
-   * (an each over an object table is deterministic and must not be treated
-   * as one — the id template alone cannot tell them apart). */
-  pickGroup?: boolean;
-  /** Trace-grouping id (set when pick/parallel — mirrors test.each's grouping). */
+  /** Trace-grouping id (set for parallel matrices — mirrors test.each). */
   groupId?: string;
   /** Members of the same group may run in parallel (workflow.each option). */
   parallel?: boolean;
@@ -436,10 +432,7 @@ export interface WorkflowProjection {
    * canonical hash over the structure is identical across rows (addendum §3:
    * one version × N runs). */
   templateId?: string;
-  /** workflow.pick member: a RANDOM-selection group (discovery collapses the
-   * group to one template entry; workflow.each stays concrete). */
-  pick?: boolean;
-  /** Trace-grouping id (pick/parallel members — mirrors test.each). */
+  /** Trace-grouping id (parallel matrices — mirrors test.each). */
   groupId?: string;
   /** Members of this group may run in parallel (drives runner concurrency). */
   parallel?: boolean;

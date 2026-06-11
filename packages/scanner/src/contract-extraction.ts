@@ -319,9 +319,7 @@ export interface NormalizedWorkflowMeta {
   /** Data-driven member (workflow.each/pick): the un-interpolated template id.
    * Rows share ONE projected structure — only id/name/tags vary. */
   templateId?: string;
-  /** workflow.pick member: a RANDOM-selection group. */
-  pick?: boolean;
-  /** Trace-grouping id (pick/parallel members). */
+  /** Trace-grouping id (parallel matrices). */
   groupId?: string;
   /** Members of this group may run in parallel. */
   parallel?: boolean;
@@ -1061,22 +1059,10 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
         // The projection is pre-computed by the SDK's build() (S2.6) — carry
         // it verbatim, stamped with the export name like flows are.
         workflows.push({ ...value._projection, exportName });
-      } else if (
-        Array.isArray(value) &&
-        (value.some(isBuiltWorkflow) ||
-          // a filtered pick can select rows the filter then drops — the
-          // selection is empty but the universe still declares the eligible
-          // examples (codex S2.12 R7 P2).
-          Array.isArray((value as { _pickUniverse?: unknown[] })._pickUniverse))
-      ) {
+      } else if (Array.isArray(value) && value.some(isBuiltWorkflow)) {
         // workflow.each() exports a BuiltWorkflow[] (addendum §3) — collect
         // every member's projection (rows share one structure; ids/tags vary).
-        // workflow.pick(): the export holds this import's RANDOM selection;
-        // metadata must be deterministic, so the declaration inventory reads
-        // the full example universe instead (codex S2.12 R6 P2).
-        const inventory =
-          ((value as { _pickUniverse?: unknown[] })._pickUniverse ?? value) as unknown[];
-        for (const member of inventory) {
+        for (const member of value) {
           if (isBuiltWorkflow(member)) workflows.push({ ...member._projection, exportName });
         }
       } else if (isProtocolContract(value)) {

@@ -7,12 +7,7 @@ import type {
 } from "../contract-flow-condition.js";
 import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
 import { registerTest } from "../internal.js";
-import {
-  interpolateTemplate,
-  matchPickKeys,
-  normalizeEachTable,
-  selectPickExamples,
-} from "../test/utils.js";
+import { interpolateTemplate, normalizeEachTable } from "../test/utils.js";
 import type { Test, TestContext } from "../types.js";
 import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
 import { projectWorkflow } from "./project.js";
@@ -310,7 +305,7 @@ export interface CallBindingsWithInput<
 export interface WorkflowBuilder<State> {
   /** Merge workflow-level metadata (id is fixed at creation). */
   meta(
-    meta: Omit<Partial<WorkflowMeta>, "id" | "templateId" | "groupId" | "parallel" | "pickGroup">,
+    meta: Omit<Partial<WorkflowMeta>, "id" | "templateId" | "groupId" | "parallel">,
   ): ChainedWorkflowBuilder<State>;
   /** The one I/O-capable initializer; its return is the initial state.
    * `timeout` (ms, §17 #4) is TERMINAL — a timed-out setup fails the run. */
@@ -503,14 +498,13 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   }
 
   meta(
-    meta: Omit<Partial<WorkflowMeta>, "id" | "templateId" | "groupId" | "parallel" | "pickGroup">,
+    meta: Omit<Partial<WorkflowMeta>, "id" | "templateId" | "groupId" | "parallel">,
   ): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNotBuilt("meta");
       // ENGINE-OWNED fields are locked (codex S2.12 R21 P2): a factory
-      // overwriting e.g. pickGroup would desync discovery (concrete universe
-      // rows) from execution (selected rows only). The Omit above blocks the
-      // type level; this reapply blocks `as any`.
+      // overwriting them would desync discovery from execution. The Omit
+      // above blocks the type level; this reapply blocks `as any`.
       this._meta = {
         ...this._meta,
         ...meta,
@@ -518,7 +512,6 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         templateId: this._meta.templateId,
         groupId: this._meta.groupId,
         parallel: this._meta.parallel,
-        pickGroup: this._meta.pickGroup,
       };
       return this.chained();
     });
@@ -1209,7 +1202,6 @@ function workflowFn(idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined>
   delete meta.templateId;
   delete meta.groupId;
   delete meta.parallel;
-  delete meta.pickGroup;
   return new WorkflowBuilderImpl<undefined>(meta);
 }
 
@@ -1220,7 +1212,7 @@ function workflowFn(idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined>
  * factory only authors the body.
  */
 export interface WorkflowEachMeta<T>
-  extends Omit<WorkflowMeta, "groupId" | "parallel" | "templateId" | "pickGroup"> {
+  extends Omit<WorkflowMeta, "groupId" | "parallel" | "templateId"> {
   /** Template id, e.g. "checkout-$region". */
   id: string;
   /** Row fields auto-tagged as `field:value` per member. */
@@ -1256,11 +1248,9 @@ function buildEachMembers<T extends Record<string, unknown>>(
     const tagFieldNames =
       typeof meta.tagFields === "string" ? [meta.tagFields] : [...(meta.tagFields ?? [])];
     const staticTags = meta.tags ?? [];
-    // The explicit marker — an object-table each ALSO has _pick on its rows
-    // (the map key), but it is deterministic and must not gain grouping
-    // metadata (codex S2.12 R11 P2).
-    const isPick = (meta as WorkflowMeta).pickGroup === true;
-    const hasGroup = isPick || meta.parallel === true;
+    // Grouping is parallel-only: an object-table each has _pick on its rows
+    // (the map key) but stays deterministic and ungrouped (codex S2.12 R11).
+    const hasGroup = meta.parallel === true;
 
     // Addendum §3 binding rule 2 made executable: row data enters state ONLY
     // via setup (or closure literals), so every row must project to ONE
@@ -1361,119 +1351,13 @@ function workflowEach<T extends Record<string, unknown>>(
   };
 }
 
-/**
- * Example-selection over workflows — `workflow.pick` is to `workflow.each`
- * what `test.pick` is to `test.each`: selects `count` examples (CLI `--pick`
- * / GLUBEAN_PICK override preserved — same engine), injects `_pick` (usable
- * as `$_pick` in the template id), and delegates.
- *
- * Cross-process selection semantics are INHERITED from test.pick verbatim
- * (addendum §3: the engine is reused wholesale): without `--pick` /
- * GLUBEAN_PICK each import re-randomizes, so a discovery pass and the
- * execution pass may select different members — execution then falls back by
- * export name to the CURRENT selection (that fallback exists precisely for
- * pick). `--pick key1,key2` (set into GLUBEAN_PICK, inherited by the runner
- * subprocess) pins the selection across both passes; that is the supported
- * way to run a `count > 1` pick deterministically in batch mode.
- */
-function workflowPick<T extends Record<string, unknown>>(
-  examples: Record<string, T>,
-  count = 1,
-): (
-  meta: WorkflowEachMeta<T & { _pick: string }>,
-  factory: WorkflowEachFactory<T & { _pick: string }>,
-) => BuiltWorkflow[] {
-  return (meta, factory) => {
-    // The template MUST embed the example key: it keeps member ids collision-
-    // free across examples AND it is the marker the CLI relies on to emit a
-    // single template entry for the group (codex S2.12 R8 P2 — a substring
-    // check is only sound because this invariant is enforced here).
-    if (typeof meta?.id !== "string" || !meta.id.includes("$_pick")) {
-      throw new Error(
-        `workflow.pick() "${meta?.id ?? ""}": the template id must contain "$_pick" ` +
-          `(the selected example's key), e.g. "checkout-$_pick"`,
-      );
-    }
-    // Validate the one-structure contract across EVERY example, not just the
-    // selected subset — otherwise different picks could publish different
-    // projections under the same template across imports (codex S2.12 R3 P2).
-    // Factories are pure authoring, so the validation pass is side-effect-free
-    // and nothing from it registers.
-    const allRows = normalizeEachTable(examples) as (T & { _pick: string })[];
-    // `filter` is applied ONCE here, against the full table with ORIGINAL
-    // indexes — both the universe and the selection then draw from the same
-    // eligible rows. Selecting from the raw map and filtering afterwards let
-    // discovery and execution disagree (a selected-but-ineligible example
-    // returned zero runnable members; re-indexed filters ran rows the
-    // universe never advertised) — codex S2.12 R10 P2.
-    const eligibleRows = meta.filter
-      ? allRows.filter((row, index) => meta.filter!(row, index))
-      : allRows;
-    const eligibleExamples = Object.fromEntries(
-      eligibleRows.map((r) => [r._pick, examples[r._pick]]),
-    ) as Record<string, T>;
-    // A filter may legitimately exclude every example (env-gated rows) — an
-    // empty matrix, not an import-time crash from selectPickExamples
-    // (codex S2.12 R13 P2).
-    if (eligibleRows.length === 0) {
-      const empty: BuiltWorkflow[] = [];
-      Object.assign(empty, { _pickUniverse: [] });
-      return empty;
-    }
-    // An EXPLICIT selection (--pick / GLUBEAN_PICK) naming only filtered-out
-    // examples must run NOTHING — falling back to a random eligible row would
-    // silently execute an example the user didn't ask for (codex S2.12 R16
-    // P2). Partial overlap proceeds with the eligible part (engine behavior).
-    const pickEnv =
-      typeof process !== "undefined" ? process.env["GLUBEAN_PICK"] : undefined;
-    if (pickEnv) {
-      // glob-aware (codex S2.12 R17 P2): the pre-check resolves the override
-      // with the SAME semantics the engine uses (`us-*` etc.), so a glob
-      // matching only filtered-out examples also runs nothing.
-      const requested = matchPickKeys(pickEnv, Object.keys(examples));
-      // Object.hasOwn — `in` would see Object.prototype keys (constructor,
-      // toString…) and skip the empty-result branch (codex S2.12 R19 P2).
-      if (requested.length > 0 && !requested.some((k) => Object.hasOwn(eligibleExamples, k))) {
-        const empty: BuiltWorkflow[] = [];
-        Object.assign(empty, {
-          _pickUniverse: buildEachMembers(eligibleRows, { ...meta, filter: undefined, pickGroup: true } as WorkflowEachMeta<T & { _pick: string }>, factory),
-        });
-        return empty;
-      }
-    }
-    // Validation pass over the eligible universe — registrations never
-    // flushed. The universe also rides the returned array (`_pickUniverse`)
-    // so the scanner's metadata extraction is DETERMINISTIC (codex R6 P2).
-    const pickMeta = {
-      ...meta,
-      filter: undefined,
-      pickGroup: true,
-    } as WorkflowEachMeta<T & { _pick: string }>;
-    const universe = buildEachMembers(eligibleRows, pickMeta, factory);
-    // The runnable members ARE the selected universe handles — same objects,
-    // same ORIGINAL row indexes, so an id template using $index cannot
-    // diverge between the advertised universe and the executed member
-    // (codex S2.12 R11 P2).
-    // SELECTION order is preserved (codex S2.12 R18 P2): an explicit
-    // `--pick beta,alpha` runs beta first, exactly like test.pick — members
-    // map selected keys back to their universe handles in selected order.
-    const byKey = new Map(eligibleRows.map((row, i) => [row._pick, universe[i]]));
-    const members = selectPickExamples(eligibleExamples, count).flatMap((r) => {
-      const handle = byKey.get(r._pick);
-      return handle ? [handle] : [];
-    });
-    for (const m of members) {
-      (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
-    }
-    Object.assign(members, { _pickUniverse: universe });
-    return members;
-  };
-}
-
 /** Create a workflow builder. `id` is required (string or `WorkflowMeta`).
- * `workflow.each(table)(metaTemplate, factory)` / `workflow.pick(examples)`
- * author data-driven matrices (addendum §3). */
+ * `workflow.each(table)(metaTemplate, factory)` authors data-driven matrices
+ * (addendum §3). There is deliberately NO `workflow.pick`: random selection
+ * is a test-layer idea — a workflow's declaration inventory must be
+ * deterministic (canonicalHash, one version × N runs), and "hand-run one
+ * member" is already covered because every each member is an addressable
+ * test (`glubean run -t checkout-us`). Owner decision 2026-06-12. */
 export const workflow = Object.assign(workflowFn, {
   each: workflowEach,
-  pick: workflowPick,
 });
