@@ -339,6 +339,31 @@ function parseTestDeclaration(
         const builderParam =
           params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
         if (builderParam) {
+          // Builder names: the factory parameter plus every local alias whose
+          // initializer chains back to one (`const base = wf.setup(...)`) —
+          // a single source-order pass over declarators (codex S2.12 R2 P2).
+          const builderNames = new Set<string>([builderParam]);
+          const rootOf = (expr: AnyNode | undefined): AnyNode | undefined => {
+            let root: AnyNode | undefined = expr ? unwrapExpression(expr) : undefined;
+            while (root && root.type === "CallExpression") {
+              const innerCallee = unwrapExpression(root.callee as AnyNode);
+              if (innerCallee?.type === "MemberExpression") {
+                root = unwrapExpression(innerCallee.object as AnyNode);
+              } else {
+                break;
+              }
+            }
+            return root;
+          };
+          walk(factory.body as AnyNode, (n) => {
+            if (n.type !== "VariableDeclarator") return;
+            const id = n.id as AnyNode | undefined;
+            if (id?.type !== "Identifier") return;
+            const initRoot = rootOf(n.init as AnyNode | undefined);
+            if (initRoot?.type === "Identifier" && builderNames.has(initRoot.name as string)) {
+              builderNames.add(id.name as string);
+            }
+          });
           walk(factory.body as AnyNode, (n) => {
             if (hasBranchOrPoll || n.type !== "CallExpression") return;
             const callee = unwrapExpression(n.callee as AnyNode);
@@ -351,17 +376,9 @@ function parseTestDeclaration(
               return;
             }
             // Root the receiver chain: only calls whose chain bottoms out at
-            // the factory's builder parameter count.
-            let root: AnyNode | undefined = unwrapExpression(callee.object as AnyNode);
-            while (root && root.type === "CallExpression") {
-              const innerCallee = unwrapExpression(root.callee as AnyNode);
-              if (innerCallee?.type === "MemberExpression") {
-                root = unwrapExpression(innerCallee.object as AnyNode);
-              } else {
-                break;
-              }
-            }
-            if (root?.type === "Identifier" && root.name === builderParam) {
+            // the factory's builder parameter (or a local alias of it) count.
+            const root = rootOf(callee.object as AnyNode);
+            if (root?.type === "Identifier" && builderNames.has(root.name as string)) {
               hasBranchOrPoll = true;
             }
           });

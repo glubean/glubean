@@ -1287,6 +1287,15 @@ function workflowEach<T extends Record<string, unknown>>(
  * what `test.pick` is to `test.each`: selects `count` examples (CLI `--pick`
  * / GLUBEAN_PICK override preserved — same engine), injects `_pick` (usable
  * as `$_pick` in the template id), and delegates.
+ *
+ * Cross-process selection semantics are INHERITED from test.pick verbatim
+ * (addendum §3: the engine is reused wholesale): without `--pick` /
+ * GLUBEAN_PICK each import re-randomizes, so a discovery pass and the
+ * execution pass may select different members — execution then falls back by
+ * export name to the CURRENT selection (that fallback exists precisely for
+ * pick). `--pick key1,key2` (set into GLUBEAN_PICK, inherited by the runner
+ * subprocess) pins the selection across both passes; that is the supported
+ * way to run a `count > 1` pick deterministically in batch mode.
  */
 function workflowPick<T extends Record<string, unknown>>(
   examples: Record<string, T>,

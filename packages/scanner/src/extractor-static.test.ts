@@ -133,6 +133,22 @@ export const clean = workflow.each([{ region: "us" }])(
   });
 });
 
+test("factory branch calls through LOCAL builder aliases are flagged too (S2.12 R2)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+export const aliased = workflow.each([{ region: "us" }])(
+  { id: "a-$region" },
+  (wf, row) => {
+    const base = wf.setup(async () => ({ ok: true }));
+    return base.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (b) => b.compute("c", (s) => s) });
+  },
+);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("workflow exports carry a static branch/poll flag for the upload gate (S2.6 R10)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
