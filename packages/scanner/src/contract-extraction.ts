@@ -1059,7 +1059,14 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
         // The projection is pre-computed by the SDK's build() (S2.6) — carry
         // it verbatim, stamped with the export name like flows are.
         workflows.push({ ...value._projection, exportName });
-      } else if (Array.isArray(value) && value.some(isBuiltWorkflow)) {
+      } else if (
+        Array.isArray(value) &&
+        (value.some(isBuiltWorkflow) ||
+          // a filtered pick can select rows the filter then drops — the
+          // selection is empty but the universe still declares the eligible
+          // examples (codex S2.12 R7 P2).
+          Array.isArray((value as { _pickUniverse?: unknown[] })._pickUniverse))
+      ) {
         // workflow.each() exports a BuiltWorkflow[] (addendum §3) — collect
         // every member's projection (rows share one structure; ids/tags vary).
         // workflow.pick(): the export holds this import's RANDOM selection;

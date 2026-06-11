@@ -584,31 +584,62 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     // suites declaring `kinds: [flow]` mean "run the graph orchestrators in
     // these files" — no new user-facing kinds enum until flow is deleted.
     // WorkflowMeta.skip → deferred mirrors the SDK's own Test wrapping.
-    const seenPickTemplates = new Set<string>();
-    for (const wf of result.workflows) {
-      // workflow.pick members are THIS import's random selection — the runner
-      // imports again and may select differently. Emit ONE template entry per
-      // pick group instead; the harness's canonical template expansion (B1)
-      // resolves it to the execution import's CURRENT members, running them
-      // all exactly once (codex S2.12 R6 P2).
-      if (wf.templateId && wf.templateId.includes("$_pick")) {
-        if (seenPickTemplates.has(wf.templateId)) continue;
-        seenPickTemplates.add(wf.templateId);
-        results.push({
-          exportName: wf.exportName,
-          meta: {
-            id: wf.templateId,
-            name: wf.templateId,
-            description: wf.description,
-            tags: wf.tags,
-            deferred: wf.skip,
-            ...(wf.groupId ? { groupId: wf.groupId } : {}),
-            ...(wf.parallel ? { parallel: true } : {}),
-            kind: "flow",
-          },
-        });
-        continue;
+    // workflow.pick members are THIS import's random selection — the runner
+    // imports again and may select differently. Emit ONE template entry per
+    // pick group; the harness's canonical template expansion (B1) resolves it
+    // to the execution import's CURRENT members (codex S2.12 R6 P2). Template
+    // metadata is built from GROUP-level fields: tags = the intersection
+    // across members (tagFields adds row-specific tags that must not gate the
+    // whole group) and `only` is preserved if ANY member carries it
+    // (codex S2.12 R7 P2).
+    const pickGroups = new Map<
+      string,
+      {
+        exportName: string;
+        description?: string;
+        skip?: string;
+        groupId?: string;
+        parallel?: boolean;
+        only?: boolean;
+        tags?: string[];
       }
+    >();
+    for (const wf of result.workflows) {
+      if (!wf.templateId || !wf.templateId.includes("$_pick")) continue;
+      const existing = pickGroups.get(wf.templateId);
+      if (!existing) {
+        pickGroups.set(wf.templateId, {
+          exportName: wf.exportName,
+          description: wf.description,
+          skip: wf.skip,
+          groupId: wf.groupId,
+          parallel: wf.parallel,
+          only: wf.only,
+          tags: wf.tags ? [...wf.tags] : undefined,
+        });
+      } else {
+        if (wf.only) existing.only = true;
+        existing.tags = existing.tags?.filter((t) => wf.tags?.includes(t));
+      }
+    }
+    for (const [templateId, g] of pickGroups) {
+      results.push({
+        exportName: g.exportName,
+        meta: {
+          id: templateId,
+          name: templateId,
+          description: g.description,
+          tags: g.tags && g.tags.length > 0 ? g.tags : undefined,
+          only: g.only,
+          deferred: g.skip,
+          ...(g.groupId ? { groupId: g.groupId } : {}),
+          ...(g.parallel ? { parallel: true } : {}),
+          kind: "flow",
+        },
+      });
+    }
+    for (const wf of result.workflows) {
+      if (wf.templateId && wf.templateId.includes("$_pick")) continue; // grouped above
       results.push({
         exportName: wf.exportName,
         meta: {
