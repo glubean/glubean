@@ -1145,6 +1145,11 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     // member carries its template id (addendum §3: rows share ONE structure).
     const projection = projectWorkflow(handle);
     if (meta.templateId) projection.templateId = meta.templateId;
+    // Discovery paths that read the projection (.flow.ts via the scanner,
+    // upload metadata) need grouping/concurrency too — the registry alone
+    // doesn't reach the CLI/ProjectRunner (codex S2.12 R1 P2).
+    if (meta.groupId) projection.groupId = meta.groupId;
+    if (meta.parallel) projection.parallel = true;
     Object.assign(handle, { _projection: projection });
 
     // Register for scanner discovery with the full graded projection (§7) —

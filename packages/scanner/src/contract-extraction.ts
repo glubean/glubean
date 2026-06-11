@@ -319,6 +319,10 @@ export interface NormalizedWorkflowMeta {
   /** Data-driven member (workflow.each/pick): the un-interpolated template id.
    * Rows share ONE projected structure — only id/name/tags vary. */
   templateId?: string;
+  /** Trace-grouping id (pick/parallel members). */
+  groupId?: string;
+  /** Members of this group may run in parallel. */
+  parallel?: boolean;
   exportName: string;
   name?: string;
   description?: string;

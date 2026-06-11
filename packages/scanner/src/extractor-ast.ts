@@ -53,6 +53,8 @@ interface MetaFields {
   defaultRun?: "always" | "opt-in";
   /** A STRING `skip: "reason"` (WorkflowMeta.skip) — maps to deferred. */
   deferred?: string;
+  /** `parallel: true` in the meta object (workflow.each / TestMeta). */
+  parallel?: boolean;
 }
 
 /** Parse `{ id, name, tags, timeout, requires, defaultRun }` from a TestMeta object literal. */
@@ -98,6 +100,14 @@ function parseMetaObject(obj: AnyNode): MetaFields {
   const defaultRun = stringProperty(obj, "defaultRun");
   if (defaultRun === "always" || defaultRun === "opt-in") out.defaultRun = defaultRun;
 
+  // workflow.each carries `parallel` in the meta object itself (test.each's
+  // legacy second-arg form is parsed separately in parseTestDeclaration).
+  const parallelProp = objectProperty(obj, "parallel");
+  if (parallelProp) {
+    const value = unwrapExpression(parallelProp.value as AnyNode);
+    if (value?.type === "BooleanLiteral" && value.value === true) out.parallel = true;
+  }
+
   return out;
 }
 
@@ -142,6 +152,29 @@ function chainHead(init: AnyNode): AnyNode | undefined {
     }
   }
   return node;
+}
+
+/** The branch-family + poll method names the Cloud-render gate flags. */
+const BRANCH_FAMILY_METHODS = new Set(["branch", "poll", "pollAction", "switch", "route"]);
+
+/** Does the builder chain ITSELF (callee descent, never arguments) contain a
+ * branch-family call? */
+function chainHasBranchFamilyCall(init: AnyNode): boolean {
+  let node: AnyNode | undefined = unwrapExpression(init);
+  while (node && node.type === "CallExpression") {
+    const callee = unwrapExpression(node.callee as AnyNode);
+    if (!callee) return false;
+    if (callee.type === "MemberExpression" && callee.computed !== true) {
+      const property = callee.property as AnyNode;
+      if (property.type === "Identifier" && BRANCH_FAMILY_METHODS.has(property.name as string)) {
+        return true;
+      }
+      node = unwrapExpression(callee.object as AnyNode);
+    } else {
+      return false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -245,7 +278,7 @@ function parseTestDeclaration(
   if (fields.id === undefined) return undefined;
 
   // `.each(data, { parallel: true })`.
-  let parallel = false;
+  let parallel = fields.parallel === true;
   if (variant === "each" && eachArgs && eachArgs.length > 1) {
     const optsObj = objectFromExpression(eachArgs[1]);
     const parallelProp = optsObj ? objectProperty(optsObj, "parallel") : undefined;
@@ -288,29 +321,51 @@ function parseTestDeclaration(
     // linear workflow into the upload refusal (codex S2.6 R11 P2). A branch's
     // then/else sub-chains live in arguments, but the outer `.branch(` on the
     // chain has already flagged it by then.
-    let hasBranchOrPoll = false;
-    let node: AnyNode | undefined = unwrapExpression(init);
-    while (node && node.type === "CallExpression") {
-      const callee = unwrapExpression(node.callee as AnyNode);
-      if (!callee) break;
-      if (callee.type === "MemberExpression" && callee.computed !== true) {
-        const property = callee.property as AnyNode;
-        if (
-          property.type === "Identifier" &&
-          (property.name === "branch" ||
-            property.name === "poll" ||
-            property.name === "pollAction" ||
-            property.name === "switch" ||
-            property.name === "route")
-        ) {
-          // switch/route are branch-family graph orchestrators (addendum §9) —
-          // the same Cloud-render gate applies to all of them.
-          hasBranchOrPoll = true;
-          break;
+    let hasBranchOrPoll = chainHasBranchFamilyCall(init);
+    // workflow.each/pick: the graph lives in the FACTORY callback, not the
+    // outer chain — scan the factory body for branch-family calls ROOTED at
+    // its builder parameter (`wf.branch(...)`, incl. chained receivers), so a
+    // matrix of branch/poll graphs can't slip past the upload gate while an
+    // unrelated `client.poll()` still doesn't false-positive
+    // (codex S2.12 R1 P1).
+    if (!hasBranchOrPoll && (variant === "each" || variant === "pick")) {
+      const factoryArg = (head.arguments as AnyNode[] | undefined)?.[1];
+      const factory = factoryArg ? unwrapExpression(factoryArg) : undefined;
+      if (
+        factory &&
+        (factory.type === "ArrowFunctionExpression" || factory.type === "FunctionExpression")
+      ) {
+        const params = factory.params as AnyNode[] | undefined;
+        const builderParam =
+          params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
+        if (builderParam) {
+          walk(factory.body as AnyNode, (n) => {
+            if (hasBranchOrPoll || n.type !== "CallExpression") return;
+            const callee = unwrapExpression(n.callee as AnyNode);
+            if (!callee || callee.type !== "MemberExpression" || callee.computed === true) return;
+            const property = callee.property as AnyNode;
+            if (
+              property.type !== "Identifier" ||
+              !BRANCH_FAMILY_METHODS.has(property.name as string)
+            ) {
+              return;
+            }
+            // Root the receiver chain: only calls whose chain bottoms out at
+            // the factory's builder parameter count.
+            let root: AnyNode | undefined = unwrapExpression(callee.object as AnyNode);
+            while (root && root.type === "CallExpression") {
+              const innerCallee = unwrapExpression(root.callee as AnyNode);
+              if (innerCallee?.type === "MemberExpression") {
+                root = unwrapExpression(innerCallee.object as AnyNode);
+              } else {
+                break;
+              }
+            }
+            if (root?.type === "Identifier" && root.name === builderParam) {
+              hasBranchOrPoll = true;
+            }
+          });
         }
-        node = unwrapExpression(callee.object as AnyNode);
-      } else {
-        break;
       }
     }
     if (hasBranchOrPoll) result.workflowHasBranchOrPoll = true;

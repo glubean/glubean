@@ -594,6 +594,10 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
           tags: wf.tags,
           only: wf.only,
           deferred: wf.skip,
+          // data-driven members: grouping + concurrency ride the projection
+          // (codex S2.12 R1 P2 — the registry alone never reaches the CLI).
+          ...(wf.groupId ? { groupId: wf.groupId } : {}),
+          ...(wf.parallel ? { parallel: true } : {}),
           kind: "flow",
         },
       });

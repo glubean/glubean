@@ -105,6 +105,34 @@ export const w = wf("aliased-linear").compute("c", (s) => s).build();
   });
 });
 
+test("workflow.each factory bodies are scanned for builder-rooted branch/poll (S2.12 R1)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+export const matrix = workflow.each([{ region: "us" }])(
+  { id: "m-$region", parallel: true },
+  (wf, row) =>
+    wf.setup(async () => ({}))
+      .branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (b) => b.compute("c", (s) => s) }),
+);
+
+export const clean = workflow.each([{ region: "us" }])(
+  { id: "c-$region" },
+  (wf, row) =>
+    wf.setup(async () => ({}))
+      .action("probe", async (ctx, s) => { await client.poll(); return s; }), // foreign receiver — no flag
+);
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(
+    result.map((m) => [m.id, [m.workflowHasBranchOrPoll ?? false, m.parallel ?? false]]),
+  );
+  expect(byId).toEqual({
+    "m-$region": [true, true], // builder-rooted .branch( flagged; meta parallel parsed
+    "c-$region": [false, false], // client.poll() inside the factory must NOT flag
+  });
+});
+
 test("workflow exports carry a static branch/poll flag for the upload gate (S2.6 R10)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

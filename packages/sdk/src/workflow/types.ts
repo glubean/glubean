@@ -432,6 +432,10 @@ export interface WorkflowProjection {
    * canonical hash over the structure is identical across rows (addendum §3:
    * one version × N runs). */
   templateId?: string;
+  /** Trace-grouping id (pick/parallel members — mirrors test.each). */
+  groupId?: string;
+  /** Members of this group may run in parallel (drives runner concurrency). */
+  parallel?: boolean;
   name?: string;
   description?: string;
   tags?: string[];

@@ -324,6 +324,15 @@ export function findTestByExport(
       if (isTest(item)) {
         return item as Test<unknown>;
       }
+      // One nesting level: workflow.each()/pick() exports BuiltWorkflow[]
+      // whose members are themselves one-element Test[] handles. The
+      // export-name fallback exists exactly for pick's run-to-run randomness —
+      // it must see nested members too (codex S2.12 R1 P1).
+      if (Array.isArray(item)) {
+        for (const inner of item) {
+          if (isTest(inner)) return inner as Test<unknown>;
+        }
+      }
     }
   }
   return undefined;
