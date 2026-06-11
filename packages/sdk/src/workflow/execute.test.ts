@@ -1246,6 +1246,34 @@ describe("workflow.each (addendum §3)", () => {
     ).toThrow(/DIFFERENT structure/);
   });
 
+  it("a REJECTED matrix leaves nothing in the registry — not even valid prior rows (codex R3)", () => {
+    expect(() =>
+      workflow.each(regions)({ id: "halfreg-$region" }, (wf, row) => {
+        const c = wf.setup(async () => ({}));
+        return row.region === "jp" ? c.compute("extra", (s) => s) : c; // row 2 diverges
+      }),
+    ).toThrow(/DIFFERENT structure/);
+    expect(getRegistryForEach().some((r) => r.id.startsWith("halfreg-"))).toBe(false);
+  });
+
+  it("workflow.pick validates the one-structure contract across ALL examples (codex R3)", () => {
+    // even with count=1 (single selected member), a structurally-diverging
+    // example elsewhere in the map must fail the build.
+    expect(() =>
+      workflow.pick(
+        {
+          a: { kind: "plain" },
+          b: { kind: "fancy" },
+        },
+        1,
+      )({ id: "pickv-$_pick" }, (wf, row) => {
+        const c = wf.setup(async () => ({}));
+        return row.kind === "fancy" ? c.compute("extra", (s) => s) : c;
+      }),
+    ).toThrow(/DIFFERENT structure/);
+    expect(getRegistryForEach().some((r) => r.id.startsWith("pickv-"))).toBe(false);
+  });
+
   it("rejects an async factory and a missing template id", () => {
     expect(() =>
       workflow.each(regions)({ id: "x-$region" }, (async (wf: unknown) => wf) as never),

@@ -452,6 +452,10 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   /** Set by `.route()` — the tree is terminal; only teardown/build may follow. */
   private _terminated?: string;
 
+  /** workflow.each: registration is deferred until EVERY row passes the
+   * one-structure validation — set by the engine, never by users. */
+  _suppressRegistration = false;
+
   constructor(
     meta: WorkflowMeta,
     private readonly _idPrefix = "",
@@ -1154,16 +1158,24 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
 
     // Register for scanner discovery with the full graded projection (§7) —
     // scanner/Cloud/agents read grades + call identity without executing.
-    registerTest({
-      id: meta.id,
-      name: meta.name ?? meta.id,
-      type: "simple",
-      ...(meta.tags ? { tags: meta.tags } : {}),
-      ...(meta.description ? { description: meta.description } : {}),
-      ...(meta.groupId ? { groupId: meta.groupId } : {}),
-      ...(meta.parallel ? { parallel: true } : {}),
-      workflow: projection,
-    });
+    // workflow.each defers this until every row validates (codex S2.12 R3 P2:
+    // a rejected matrix must not leave half its members in the registry).
+    const register = (): void =>
+      registerTest({
+        id: meta.id,
+        name: meta.name ?? meta.id,
+        type: "simple",
+        ...(meta.tags ? { tags: meta.tags } : {}),
+        ...(meta.description ? { description: meta.description } : {}),
+        ...(meta.groupId ? { groupId: meta.groupId } : {}),
+        ...(meta.parallel ? { parallel: true } : {}),
+        workflow: projection,
+      });
+    if (this._suppressRegistration) {
+      Object.assign(handle, { _pendingRegistration: register });
+    } else {
+      register();
+    }
 
     this._built = handle;
     return handle;
@@ -1204,11 +1216,12 @@ export type WorkflowEachFactory<T> = (
   row: T,
 ) => unknown;
 
-function workflowEach<T extends Record<string, unknown>>(
-  table: readonly T[] | Record<string, T>,
-): (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>) => BuiltWorkflow[] {
-  const rows = normalizeEachTable(table);
-  return (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>): BuiltWorkflow[] => {
+function buildEachMembers<T extends Record<string, unknown>>(
+  rows: readonly T[],
+  meta: WorkflowEachMeta<T>,
+  factory: WorkflowEachFactory<T>,
+): BuiltWorkflow[] {
+  {
     if (typeof meta?.id !== "string" || meta.id.length === 0) {
       throw new Error("workflow.each(): a non-empty template id is required");
     }
@@ -1254,6 +1267,7 @@ function workflowEach<T extends Record<string, unknown>>(
         groupId: hasGroup ? meta.id : undefined,
         parallel: meta.parallel === true ? true : undefined,
       } as WorkflowMeta);
+      builder._suppressRegistration = true; // registered only after ALL rows validate
       const result = factory(builder, row as T);
       // An async factory would add nodes after we build — same hazard as an
       // async branch side (codex S2.4a R5): reject thenables.
@@ -1279,6 +1293,21 @@ function workflowEach<T extends Record<string, unknown>>(
       }
       return handle;
     });
+  }
+}
+
+function workflowEach<T extends Record<string, unknown>>(
+  table: readonly T[] | Record<string, T>,
+): (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>) => BuiltWorkflow[] {
+  const rows = normalizeEachTable(table);
+  return (meta, factory) => {
+    const members = buildEachMembers(rows, meta, factory);
+    // Every row validated against the canonical structure — register now
+    // (a rejected matrix never reaches the registry; codex S2.12 R3 P2).
+    for (const m of members) {
+      (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
+    }
+    return members;
   };
 }
 
@@ -1304,7 +1333,20 @@ function workflowPick<T extends Record<string, unknown>>(
   meta: WorkflowEachMeta<T & { _pick: string }>,
   factory: WorkflowEachFactory<T & { _pick: string }>,
 ) => BuiltWorkflow[] {
-  return workflowEach(selectPickExamples(examples, count));
+  return (meta, factory) => {
+    // Validate the one-structure contract across EVERY example, not just the
+    // selected subset — otherwise different picks could publish different
+    // projections under the same template across imports (codex S2.12 R3 P2).
+    // Factories are pure authoring, so the validation pass is side-effect-free
+    // and nothing from it registers.
+    const allRows = normalizeEachTable(examples) as (T & { _pick: string })[];
+    buildEachMembers(allRows, meta, factory); // validation pass — never flushed
+    const members = buildEachMembers(selectPickExamples(examples, count), meta, factory);
+    for (const m of members) {
+      (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
+    }
+    return members;
+  };
 }
 
 /** Create a workflow builder. `id` is required (string or `WorkflowMeta`).
