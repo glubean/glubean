@@ -40,6 +40,26 @@ async function run(source: string, exportName: string) {
   return executor.execute(`file://${file}`, exportName, { vars: {}, secrets: {} });
 }
 
+async function runBatch(source: string, testIds: string[], opts: { concurrency: number }) {
+  const dir = join(TMP_DIR, String(seq++));
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, "workflow.test.ts");
+  await writeFile(file, source);
+  const executor = new TestExecutor();
+  const events: Array<Record<string, unknown> & { type: string }> = [];
+  let failed = false;
+  for await (const e of executor.run(
+    `file://${file}`,
+    "",
+    { vars: {}, secrets: {} },
+    { testIds, concurrency: opts.concurrency },
+  )) {
+    events.push(e as Record<string, unknown> & { type: string });
+    if (e.type === "status" && (e as { status?: string }).status === "failed") failed = true;
+  }
+  return { events, success: !failed };
+}
+
 /** Workflow node evidence is FIRST-CLASS on the timeline (S2.7). */
 function nodeEnds(evs: TimelineEvent[]): Array<Extract<TimelineEvent, { type: "node_end" }>> {
   return evs.filter((e): e is Extract<TimelineEvent, { type: "node_end" }> => e.type === "node_end");
@@ -294,4 +314,42 @@ export const matrix = workflow.each([
   const r = await run(src, "wf-matrix-eu");
   expect(r.success).toBe(true);
   expect(nodeEnds(r.events).map((e) => [e.nodeId, e.status])).toEqual([["verify", "passed"]]);
+});
+
+test("parallel batch events flush CONTIGUOUSLY per test — no interleave (S2.12 R22)", async () => {
+  // two parallel members with staggered sleeps: without buffering, fast-b's
+  // events would land inside slow-a's start..status block.
+  const src = `
+import { workflow } from "@glubean/sdk";
+export const matrix = workflow.each([
+  { label: "slow-a", delay: 120 },
+  { label: "fast-b", delay: 5 },
+])(
+  { id: "par-$label", parallel: true },
+  (wf, row) =>
+    wf.setup(async () => ({}))
+      .action("work", async (c) => {
+        c.log("begin " + ${JSON.stringify("$label")});
+        await new Promise((r) => setTimeout(r, row.delay));
+      })
+      .check("done", async (c) => c.assert(true, "ok")),
+);
+`;
+  const r = await runBatch(src, ["par-slow-a", "par-fast-b"], { concurrency: 2 });
+  // carve stdout into per-test blocks: every event between a test's start and
+  // its status must belong to that test.
+  let open: string | undefined;
+  for (const e of r.events) {
+    const tid = (e as { testId?: string; id?: string }).testId ?? (e as { id?: string }).id;
+    if (e.type === "start") {
+      expect(open).toBeUndefined(); // a new test may not start inside another's block
+      open = tid;
+    } else if (e.type === "status") {
+      expect(tid).toBe(open);
+      open = undefined;
+    } else if (open !== undefined && tid !== undefined) {
+      expect(tid).toBe(open);
+    }
+  }
+  expect(r.success).toBe(true);
 });

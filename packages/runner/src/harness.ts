@@ -249,10 +249,25 @@ function incrAssertions(passed: boolean): void {
 function emitEvent(event: Record<string, unknown>): void {
   const trc = currentTestCtx();
   if (trc) {
-    console.log(JSON.stringify({ ...event, testId: trc.testId }));
+    writeEventLine(JSON.stringify({ ...event, testId: trc.testId }));
   } else {
-    console.log(JSON.stringify(event));
+    writeEventLine(JSON.stringify(event));
   }
+}
+
+// ── Parallel-batch event buffering (codex S2.12 R22 P1) ─────────────────────
+// Under batchConcurrency > 1, tests run concurrently and their stdout events
+// would interleave — downstream collectors (CLI render, result JSON) keep
+// per-test state that assumes each test's start..status block is CONTIGUOUS.
+// Each parallel task runs inside this ALS with its own line buffer; the task
+// flushes the whole buffer atomically (sync loop — no awaits) when it
+// finishes. Sequential runs never enter the ALS: zero behavior change.
+const parallelEventBuffer = new AsyncLocalStorage<string[]>();
+
+function writeEventLine(json: string): void {
+  const buf = parallelEventBuffer.getStore();
+  if (buf) buf.push(json);
+  else console.log(json);
 }
 
 // ── vNext workflow per-node evidence → first-class timeline events ──────────
@@ -1590,8 +1605,8 @@ try {
         testObj = findTestByExport(userModule, exportNamesMap[id]);
       }
       if (!testObj) {
-        console.log(JSON.stringify({ type: "start", id, name: id, testId: id }));
-        console.log(JSON.stringify({ type: "status", status: "failed", id, testId: id, error: `Test "${id}" not found in module` }));
+        writeEventLine(JSON.stringify({ type: "start", id, name: id, testId: id }));
+        writeEventLine(JSON.stringify({ type: "status", status: "failed", id, testId: id, error: `Test "${id}" not found in module` }));
         hasFailure = true;
         return;
       }
@@ -1599,11 +1614,11 @@ try {
         await executeNewTest(testObj);
       } catch (error) {
         if (error instanceof SkipError) {
-          console.log(JSON.stringify({ type: "status", status: "skipped", id, testId: id, reason: error.reason }));
+          writeEventLine(JSON.stringify({ type: "status", status: "skipped", id, testId: id, reason: error.reason }));
         } else {
           hasFailure = true;
           const reason = classifyErrorReason(error);
-          console.log(JSON.stringify({
+          writeEventLine(JSON.stringify({
             type: "status", status: "failed", id, testId: id,
             error: error instanceof Error ? error.message : String(error),
             stack: error instanceof Error ? error.stack : undefined,
@@ -1655,7 +1670,18 @@ try {
       const { default: PQueue } = await import("p-queue");
       const queue = new PQueue({ concurrency: batchConcurrency });
       for (const id of expandedIds) {
-        void queue.add(() => runOneTest(id));
+        void queue.add(() => {
+          const buf: string[] = [];
+          return parallelEventBuffer.run(buf, async () => {
+            try {
+              await runOneTest(id);
+            } finally {
+              // Atomic flush: the loop is synchronous, so this test's whole
+              // event block lands contiguously on stdout.
+              for (const line of buf) console.log(line);
+            }
+          });
+        });
       }
       await queue.onIdle();
     } else {
