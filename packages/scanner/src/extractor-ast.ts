@@ -412,27 +412,46 @@ function parseTestDeclaration(
           // `b = client; b.branch(...)` stays clean (codex S2.12 R14 P2).
           // Nested functions are recursed with a SNAPSHOT of the names live at
           // their definition point.
+          // Two name sets per scope (codex S2.12 R15 P2 — closures capture
+          // BINDINGS, not snapshot values):
+          //  - `live`: precise source-order state, used for THIS scope's call
+          //    detection (`b = client; b.branch()` stays clean).
+          //  - `everLive`: what nested closures inherit. A DECLARATION creates
+          //    a new binding, so a foreign-initialized declaration removes the
+          //    name from both. A plain ASSIGNMENT mutates an existing binding
+          //    whose read time a closure controls — once a builder flowed
+          //    through it, the name stays in everLive (fail closed:
+          //    `let base; const make = () => base.branch(...); base =
+          //    wf.setup(...)` flags).
           const scanScope = (scopeBody: AnyNode, inherited: ReadonlySet<string>): void => {
-            const names = new Set(inherited);
-            const bind = (nameNode: AnyNode | undefined, valueExpr: AnyNode | undefined): void => {
+            const live = new Set(inherited);
+            const everLive = new Set(inherited);
+            const bind = (
+              nameNode: AnyNode | undefined,
+              valueExpr: AnyNode | undefined,
+              isDeclaration: boolean,
+            ): void => {
               if (nameNode?.type !== "Identifier") return;
+              const name = nameNode.name as string;
               const root = rootOf(valueExpr);
-              if (root?.type === "Identifier" && names.has(root.name as string)) {
-                names.add(nameNode.name as string);
+              if (root?.type === "Identifier" && live.has(root.name as string)) {
+                live.add(name);
+                everLive.add(name);
               } else if (valueExpr !== undefined) {
-                names.delete(nameNode.name as string);
+                live.delete(name);
+                if (isDeclaration) everLive.delete(name);
               }
             };
-            const deferred: Array<{ fn: AnyNode; snapshot: Set<string> }> = [];
+            const deferredFns: AnyNode[] = [];
             walkSameScope(
               scopeBody,
               (n) => {
                 if (n.type === "VariableDeclarator") {
-                  bind(n.id as AnyNode, n.init as AnyNode | undefined);
+                  bind(n.id as AnyNode, n.init as AnyNode | undefined, true);
                   return;
                 }
                 if (n.type === "AssignmentExpression" && n.operator === "=") {
-                  bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode);
+                  bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode, false);
                   return;
                 }
                 if (hasBranchOrPoll || n.type !== "CallExpression") return;
@@ -450,17 +469,20 @@ function parseTestDeclaration(
                 // Only calls whose receiver chain bottoms out at a LIVE
                 // builder name count — foreign receivers stay clean.
                 const root = rootOf(callee.object as AnyNode);
-                if (root?.type === "Identifier" && names.has(root.name as string)) {
+                if (root?.type === "Identifier" && live.has(root.name as string)) {
                   hasBranchOrPoll = true;
                 }
               },
-              (fn) => deferred.push({ fn, snapshot: new Set(names) }),
+              (fn) => deferredFns.push(fn),
             );
-            for (const { fn, snapshot } of deferred) {
+            // Recurse AFTER the full scope is processed — closures see the
+            // binding's whole lifetime, not its state at the definition line.
+            for (const fn of deferredFns) {
+              const childInherited = new Set(everLive);
               for (const param of (fn.params as AnyNode[] | undefined) ?? []) {
-                if (param.type === "Identifier") snapshot.delete(param.name as string);
+                if (param.type === "Identifier") childInherited.delete(param.name as string);
               }
-              scanScope(fn.body as AnyNode, snapshot);
+              scanScope(fn.body as AnyNode, childInherited);
             }
           };
           scanScope(factory.body as AnyNode, new Set([builderParam]));

@@ -1274,6 +1274,15 @@ describe("workflow.each (addendum §3)", () => {
     expect(getRegistryForEach().some((r) => r.id.startsWith("pickv-"))).toBe(false);
   });
 
+  it("row-dependent LIFECYCLE presence is rejected (codex R15)", () => {
+    expect(() =>
+      workflow.each(regions)({ id: "lc-$region" }, (wf, row) => {
+        const base = row.region === "eu" ? wf.setup(async () => ({})) : wf;
+        return base.compute("c", (s) => s);
+      }),
+    ).toThrow(/DIFFERENT structure/);
+  });
+
   it("row-dependent META (e.g. skip) is rejected like row-dependent structure (codex R14)", () => {
     expect(() =>
       workflow.each(regions)({ id: "ms-$region" }, (wf, row) => {

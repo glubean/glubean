@@ -163,6 +163,23 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test("closures capture BINDINGS: alias assigned after closure definition still flags (S2.12 R15)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const lateBind = workflow.each([{ region: "us" }])(
+  { id: "lb-$region" },
+  (wf, row) => {
+    let base;
+    const make = () => base.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+    base = wf.setup(async () => ({ ok: true }));
+    return make();
+  },
+);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("aliases bound INSIDE nested closures are tracked (S2.12 R13)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

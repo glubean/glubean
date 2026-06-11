@@ -1248,6 +1248,10 @@ function buildEachMembers<T extends Record<string, unknown>>(
     // inherit the first member's deferral and skip runnable examples
     // (codex S2.12 R14 P2). name/tags are engine-owned (templated per row)
     // and excluded.
+    // Lifecycle PRESENCE and timeouts are structure too: one row declaring
+    // setup while another doesn't is a different workflow shape even though
+    // projected nodes match (codex S2.12 R15 P2). The setup fn itself may
+    // freely close over row data — only presence/bounds are compared.
     const structureOf = (handle: BuiltWorkflow): string =>
       JSON.stringify({
         nodes: handle._projection.nodes,
@@ -1256,6 +1260,8 @@ function buildEachMembers<T extends Record<string, unknown>>(
         skip: handle.meta.skip ?? null,
         only: handle.meta.only ?? null,
         extensions: handle.meta.extensions ?? null,
+        setup: handle.setup ? { timeoutMs: handle.setupTimeoutMs ?? null } : null,
+        teardown: handle.teardown ? { timeoutMs: handle.teardownTimeoutMs ?? null } : null,
       });
 
     return filtered.map((row, index) => {
