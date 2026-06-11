@@ -1230,7 +1230,10 @@ function buildEachMembers<T extends Record<string, unknown>>(
     const tagFieldNames =
       typeof meta.tagFields === "string" ? [meta.tagFields] : [...(meta.tagFields ?? [])];
     const staticTags = meta.tags ?? [];
-    const isPick = filtered.length > 0 && "_pick" in filtered[0];
+    // The explicit marker — an object-table each ALSO has _pick on its rows
+    // (the map key), but it is deterministic and must not gain grouping
+    // metadata (codex S2.12 R11 P2).
+    const isPick = (meta as WorkflowMeta).pickGroup === true;
     const hasGroup = isPick || meta.parallel === true;
 
     // Addendum §3 binding rule 2 made executable: row data enters state ONLY
@@ -1374,10 +1377,15 @@ function workflowPick<T extends Record<string, unknown>>(
       pickGroup: true,
     } as WorkflowEachMeta<T & { _pick: string }>;
     const universe = buildEachMembers(eligibleRows, pickMeta, factory);
-    const members = buildEachMembers(
-      selectPickExamples(eligibleExamples, count),
-      pickMeta,
-      factory,
+    // The runnable members ARE the selected universe handles — same objects,
+    // same ORIGINAL row indexes, so an id template using $index cannot
+    // diverge between the advertised universe and the executed member
+    // (codex S2.12 R11 P2).
+    const selectedKeys = new Set(
+      selectPickExamples(eligibleExamples, count).map((r) => r._pick),
+    );
+    const members = eligibleRows.flatMap((row, i) =>
+      selectedKeys.has(row._pick) ? [universe[i]] : [],
     );
     for (const m of members) {
       (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();

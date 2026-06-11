@@ -1310,6 +1310,32 @@ describe("workflow.each (addendum §3)", () => {
     }
   });
 
+  it("pick members ARE universe handles — a $index template cannot diverge (codex R11)", () => {
+    const members = workflow.pick(
+      { a: { v: 1 }, b: { v: 2 }, c: { v: 3 } },
+      2,
+    )({ id: "ix-$_pick-$index" }, (wf, row) => wf.setup(async () => ({ v: row.v })));
+    const universe = (members as unknown as { _pickUniverse: Array<{ meta: { id: string } }> })
+      ._pickUniverse;
+    expect(universe.map((m) => m.meta.id)).toEqual(["ix-a-0", "ix-b-1", "ix-c-2"]);
+    // every runnable member is the SAME handle as its universe entry
+    for (const m of members) {
+      expect(universe.includes(m as never)).toBe(true);
+    }
+  });
+
+  it("object-table workflow.each does NOT gain grouping metadata (codex R11)", () => {
+    const members = workflow.each({ alpha: { v: 1 }, beta: { v: 2 } })(
+      { id: "ot-$_pick" },
+      (wf, row) => wf.setup(async () => ({ v: row.v })),
+    );
+    expect(members.map((m) => m.meta.id)).toEqual(["ot-alpha", "ot-beta"]);
+    for (const m of members) {
+      expect(m.meta.groupId).toBeUndefined(); // deterministic — no group
+      expect(m._projection.pick).toBeUndefined();
+    }
+  });
+
   it("workflow.pick REQUIRES $_pick in the template id (codex S2.12 R8)", () => {
     expect(() =>
       workflow.pick({ a: { currency: "USD" } }, 1)({ id: "checkout-$currency" } as never, (wf) =>
