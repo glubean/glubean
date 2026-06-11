@@ -1,14 +1,15 @@
 /**
- * S2.5 discovery — end-to-end execution of vNext `workflow()` through the
- * runner (proposal §17 #9, plan fork c).
+ * S2.5 discovery + S2.7 first-class node events — end-to-end execution of
+ * vNext `workflow()` through the runner (proposal §17 #9/#10, plan fork c).
  *
  * Verifies the full chain: `workflow(...).build()` (or an exported, un-built
- * builder) → runner resolution → simple-Test execution → per-node evidence on
- * the ExecutionResult timeline (`workflow:node_start` / `workflow:node_end` /
- * `workflow:poll_attempt` generic events carrying node id + grade + status) →
- * a summary whose success agrees with the WORKFLOW VERDICT (passed / failed /
- * skipped), including the retry case where a failed attempt must not fail a
- * passed run (§17 #7).
+ * builder) → runner resolution → simple-Test execution → per-node evidence as
+ * FIRST-CLASS timeline events (`node_start` / `node_end` / `poll_attempt`
+ * carrying node id + grade + status directly — the harness unwraps the SDK's
+ * namespaced ctx.event channel) → a generateSummary whose node counts/grades
+ * and success agree with the WORKFLOW VERDICT (passed / failed / skipped),
+ * including the retry case where a failed attempt must not fail a passed run
+ * (§17 #7: last node_end per nodeId wins).
  */
 import { test, expect, afterAll, beforeAll } from "vitest";
 import { mkdir, writeFile, rm } from "node:fs/promises";
@@ -16,6 +17,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TestExecutor } from "./executor.js";
 import type { TimelineEvent } from "./executor.js";
+import { generateSummary } from "./generate_summary.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TMP_DIR = join(resolve(__dirname, ".."), ".tmp-workflow-test");
@@ -38,16 +40,21 @@ async function run(source: string, exportName: string) {
   return executor.execute(`file://${file}`, exportName, { vars: {}, secrets: {} });
 }
 
-/** Workflow node evidence rides the generic `event` channel: unwrap it. */
-function nodeEvents(
+/** Workflow node evidence is FIRST-CLASS on the timeline (S2.7). */
+function nodeEnds(evs: TimelineEvent[]): Array<Extract<TimelineEvent, { type: "node_end" }>> {
+  return evs.filter((e): e is Extract<TimelineEvent, { type: "node_end" }> => e.type === "node_end");
+}
+function nodeStarts(evs: TimelineEvent[]): Array<Extract<TimelineEvent, { type: "node_start" }>> {
+  return evs.filter(
+    (e): e is Extract<TimelineEvent, { type: "node_start" }> => e.type === "node_start",
+  );
+}
+function pollAttempts(
   evs: TimelineEvent[],
-  type: string,
-): Array<Record<string, unknown>> {
-  return evs
-    .filter((e): e is Extract<TimelineEvent, { type: "event" }> => e.type === "event")
-    .map((e) => e.data as { type?: string; data?: Record<string, unknown> })
-    .filter((d) => d?.type === type)
-    .map((d) => d.data ?? {});
+): Array<Extract<TimelineEvent, { type: "poll_attempt" }>> {
+  return evs.filter(
+    (e): e is Extract<TimelineEvent, { type: "poll_attempt" }> => e.type === "poll_attempt",
+  );
 }
 
 test("a passing workflow executes as a simple test with per-node evidence on the timeline", async () => {
@@ -62,16 +69,25 @@ export const wf = workflow("wf-pass")
   const r = await run(src, "wf-pass");
   expect(r.success).toBe(true);
 
-  const ends = nodeEvents(r.events, "workflow:node_end");
+  const ends = nodeEnds(r.events);
   expect(ends.map((e) => [e.nodeId, e.status, e.grade])).toEqual([
     ["bump", "passed", "full"],
     ["verify", "passed", "trace"], // opaque check promoted by its assertion (§17 #10)
   ]);
   // node_start brackets precede their node_end
-  const starts = nodeEvents(r.events, "workflow:node_start");
-  expect(starts.map((e) => e.nodeId)).toEqual(["bump", "verify"]);
+  expect(nodeStarts(r.events).map((e) => e.nodeId)).toEqual(["bump", "verify"]);
   // the check's assertion reached the host timeline
   expect(r.events.some((e) => e.type === "assertion" && e.passed)).toBe(true);
+  // …and generateSummary consumes the node verdicts + grades directly (§17 #9/#10)
+  const summary = generateSummary(r.events);
+  expect(summary).toMatchObject({
+    nodeTotal: 2,
+    nodePassed: 2,
+    nodeFailed: 0,
+    nodeSkipped: 0,
+    nodeGrades: { full: 1, partial: 0, trace: 1, opaque: 0 },
+    success: true,
+  });
 });
 
 test("an exported, un-built workflow builder is auto-resolved and executed", async () => {
@@ -83,7 +99,7 @@ export const wf = workflow("wf-unbuilt")
 `;
   const r = await run(src, "wf-unbuilt");
   expect(r.success).toBe(true);
-  expect(nodeEvents(r.events, "workflow:node_end").map((e) => e.status)).toEqual(["passed"]);
+  expect(nodeEnds(r.events).map((e) => e.status)).toEqual(["passed"]);
 });
 
 test("a failed node fails the run; later nodes are reported skipped", async () => {
@@ -98,11 +114,14 @@ export const wf = workflow("wf-fail")
   const r = await run(src, "wf-fail");
   expect(r.success).toBe(false);
   expect(r.error).toContain("kaput");
-  const ends = nodeEvents(r.events, "workflow:node_end");
+  const ends = nodeEnds(r.events);
   expect(ends.map((e) => [e.nodeId, e.status])).toEqual([
     ["boom", "failed"],
     ["never", "skipped"],
   ]);
+  expect(ends[0].error).toContain("kaput"); // the node error rides the first-class event
+  const summary = generateSummary(r.events);
+  expect(summary).toMatchObject({ nodeTotal: 2, nodeFailed: 1, nodeSkipped: 1, success: false });
 });
 
 test("a workflow ctx.skip() skips the whole test (not a failure)", async () => {
@@ -118,9 +137,7 @@ export const wf = workflow("wf-skip")
   expect(r.error).toBeUndefined();
   // the skipping node settles `skipped` on the timeline (the run-level skipped
   // status is consumed by the sandbox protocol layer, not the events array).
-  expect(nodeEvents(r.events, "workflow:node_end").map((e) => [e.nodeId, e.status])).toEqual([
-    ["gate", "skipped"],
-  ]);
+  expect(nodeEnds(r.events).map((e) => [e.nodeId, e.status])).toEqual([["gate", "skipped"]]);
 });
 
 test("a retried-then-passing node yields a PASSING run — failed attempts don't poison counters (§17 #7)", async () => {
@@ -139,7 +156,7 @@ export const wf = workflow("wf-retry")
   const r = await run(src, "wf-retry");
   expect(r.success).toBe(true); // the dropped attempt's failed assert must not fail the run
   // both attempts visible as attempt-stamped brackets
-  const ends = nodeEvents(r.events, "workflow:node_end");
+  const ends = nodeEnds(r.events);
   expect(ends.map((e) => [e.attempt, e.status])).toEqual([
     [1, "failed"],
     [2, "passed"],
@@ -148,6 +165,10 @@ export const wf = workflow("wf-retry")
   const asserts = r.events.filter((e) => e.type === "assertion");
   expect(asserts).toHaveLength(1);
   expect(asserts[0]).toMatchObject({ passed: true });
+  // summary: the LAST node_end per nodeId wins — one node, PASSED, despite the
+  // attempt-1 failed bracket on the timeline (§17 #7).
+  const summary = generateSummary(r.events);
+  expect(summary).toMatchObject({ nodeTotal: 1, nodePassed: 1, nodeFailed: 0, success: true });
 });
 
 test("a poll node emits its attempt timeline and exhaustion fails the run", async () => {
@@ -173,10 +194,10 @@ export const wf = workflow("wf-poll")
   const r = await run(src, "wf-poll");
   expect(r.success).toBe(false);
   expect(r.error).toContain("exhausted");
-  const attempts = nodeEvents(r.events, "workflow:poll_attempt");
-  expect(attempts.map((a) => [a.attempt, a.outcome])).toEqual([
-    [1, "probe"],
-    [2, "probe"],
+  const attempts = pollAttempts(r.events);
+  expect(attempts.map((a) => [a.nodeId, a.attempt, a.outcome])).toEqual([
+    ["wait", 1, "probe"],
+    ["wait", 2, "probe"],
   ]);
-  expect(nodeEvents(r.events, "workflow:node_end").map((e) => e.status)).toEqual(["failed"]);
+  expect(nodeEnds(r.events).map((e) => e.status)).toEqual(["failed"]);
 });

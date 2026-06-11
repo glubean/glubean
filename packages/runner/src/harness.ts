@@ -254,6 +254,75 @@ function emitEvent(event: Record<string, unknown>): void {
   }
 }
 
+// ── vNext workflow per-node evidence → first-class timeline events ──────────
+// The SDK's workflow executor emits node evidence as namespaced GlubeanEvents
+// over ctx.event (workflow:node_start / node_end / poll_attempt — see
+// sdk/src/workflow/execute.ts §17 #9). The harness unwraps the three known
+// shapes into first-class timeline events so node id + grade reach
+// generateSummary and the Cloud payload directly (§17 #9/#10 consumption).
+// Anything else — other `workflow:*` names, malformed payloads — returns null
+// and stays a generic pass-through `event` (a misshapen payload must not mint
+// a misshapen first-class event).
+
+const NODE_STATUSES = new Set(["passed", "failed", "skipped"]);
+const NODE_GRADES = new Set(["full", "partial", "trace", "opaque"]);
+const POLL_OUTCOMES = new Set(["satisfied", "probe", "failed"]);
+
+function workflowEventToTimeline(ev: GlubeanEvent): Record<string, unknown> | null {
+  if (
+    ev.type !== "workflow:node_start" &&
+    ev.type !== "workflow:node_end" &&
+    ev.type !== "workflow:poll_attempt"
+  ) {
+    return null;
+  }
+  const d = ev.data as Record<string, unknown> | undefined;
+  if (!d || typeof d.nodeId !== "string") return null;
+  const attemptFields = {
+    ...(typeof d.attempt === "number" ? { attempt: d.attempt } : {}),
+    ...(typeof d.attempts === "number" ? { attempts: d.attempts } : {}),
+  };
+  if (ev.type === "workflow:node_start") {
+    return {
+      type: "node_start",
+      nodeId: d.nodeId,
+      kind: typeof d.kind === "string" ? d.kind : "unknown",
+      name: typeof d.name === "string" ? d.name : d.nodeId,
+      ...attemptFields,
+    };
+  }
+  if (ev.type === "workflow:node_end") {
+    if (typeof d.status !== "string" || !NODE_STATUSES.has(d.status)) return null;
+    if (typeof d.grade !== "string" || !NODE_GRADES.has(d.grade)) return null;
+    return {
+      type: "node_end",
+      nodeId: d.nodeId,
+      kind: typeof d.kind === "string" ? d.kind : "unknown",
+      name: typeof d.name === "string" ? d.name : d.nodeId,
+      status: d.status,
+      grade: d.grade,
+      durationMs: typeof d.durationMs === "number" ? d.durationMs : 0,
+      ...(typeof d.error === "string" ? { error: d.error } : {}),
+      ...attemptFields,
+    };
+  }
+  // workflow:poll_attempt
+  if (
+    typeof d.attempt !== "number" ||
+    typeof d.outcome !== "string" ||
+    !POLL_OUTCOMES.has(d.outcome)
+  ) {
+    return null;
+  }
+  return {
+    type: "poll_attempt",
+    nodeId: d.nodeId,
+    attempt: d.attempt,
+    outcome: d.outcome,
+    durationMs: typeof d.durationMs === "number" ? d.durationMs : 0,
+  };
+}
+
 
 /**
  * Start monitoring memory usage.
@@ -662,8 +731,18 @@ const ctx = {
     });
   },
 
-  // Structured event emission
+  // Structured event emission. The vNext workflow executor's per-node
+  // evidence (§17 #9) rides this channel as namespaced GlubeanEvents — the
+  // harness UNWRAPS the three known types into first-class timeline events
+  // (node id + grade reach generateSummary / the Cloud payload directly,
+  // not as a double-wrapped custom blob). Any other type — including other
+  // `workflow:*` names — stays a generic pass-through event.
   event: (ev: GlubeanEvent) => {
+    const firstClass = workflowEventToTimeline(ev);
+    if (firstClass) {
+      emitEvent(firstClass);
+      return;
+    }
     emitEvent({
       type: "event",
       data: ev,

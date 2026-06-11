@@ -375,6 +375,12 @@ export type ExecutionEvent = { testId?: string } & (
     /** Set when the poll failed (exhausted / fn or until threw / non-boolean). */
     error?: string;
   }
+  // vNext workflow per-node evidence (§17 #9/#10) — emitted by the harness
+  // unwrapping the SDK's workflow:* ctx.event channel. Deliberately separate
+  // from the flow branch/poll events above (workflow keeps its own identity).
+  | { type: "node_start"; nodeId: string; kind: string; name: string; attempt?: number; attempts?: number }
+  | { type: "node_end"; nodeId: string; kind: string; name: string; status: "passed" | "failed" | "skipped"; grade: "full" | "partial" | "trace" | "opaque"; durationMs: number; error?: string; attempt?: number; attempts?: number }
+  | { type: "poll_attempt"; nodeId: string; attempt: number; outcome: "satisfied" | "probe" | "failed"; durationMs: number }
   | { type: "timeout_update"; timeout: number }
   | { type: "session:set"; key: string; value: unknown; ts: number }
   | {
@@ -430,6 +436,14 @@ export type TimelineEvent =
   | { type: "step_end"; ts: number; testId?: string; index: number; name: string; status: "passed" | "failed" | "skipped"; durationMs: number; assertions: number; failedAssertions: number; error?: string; returnState?: unknown; attempts?: number; retriesUsed?: number }
   | { type: "branch"; ts: number; testId?: string; index: number; name: string; takenIndex: number | "default"; takenValue?: string | number | boolean | null; message?: string; total: number; error?: string }
   | { type: "poll"; ts: number; testId?: string; index: number; name: string; attempts: number; elapsedMs: number; satisfied: boolean; exhausted: boolean; error?: string }
+  // vNext workflow per-node evidence (§17 #9/#10) — first-class, deliberately
+  // NOT the flow branch/poll shells above (workflow keeps its own identity —
+  // addendum §9 red line). One start/end bracket per node RUN: a retrying node
+  // emits one bracket per attempt (attempt/attempts stamped), and the LAST
+  // node_end per nodeId carries the verdict.
+  | { type: "node_start"; ts: number; testId?: string; nodeId: string; kind: string; name: string; attempt?: number; attempts?: number }
+  | { type: "node_end"; ts: number; testId?: string; nodeId: string; kind: string; name: string; status: "passed" | "failed" | "skipped"; grade: "full" | "partial" | "trace" | "opaque"; durationMs: number; error?: string; attempt?: number; attempts?: number }
+  | { type: "poll_attempt"; ts: number; testId?: string; nodeId: string; attempt: number; outcome: "satisfied" | "probe" | "failed"; durationMs: number }
   | { type: "summary"; ts: number; testId?: string; data: { httpRequestTotal: number; httpErrorTotal: number; httpErrorRate: number; assertionTotal: number; assertionFailed: number; warningTotal: number; warningTriggered: number; schemaValidationTotal: number; schemaValidationFailed: number; schemaValidationWarnings: number; stepTotal: number; stepPassed: number; stepFailed: number; stepSkipped: number } };
 
 export type EventHandler = (event: TimelineEvent) => void | Promise<void>;
@@ -1216,6 +1230,15 @@ export class TestExecutor {
           break;
         case "poll":
           timelineEvent = { type: "poll", ts, ...(includeTestId && { testId }), index: event.index, name: event.name, attempts: event.attempts, elapsedMs: event.elapsedMs, satisfied: event.satisfied, exhausted: event.exhausted, ...(event.error !== undefined && { error: event.error }) };
+          break;
+        case "node_start":
+          timelineEvent = { type: "node_start", ts, ...(includeTestId && { testId }), nodeId: event.nodeId, kind: event.kind, name: event.name, ...(event.attempt !== undefined && { attempt: event.attempt }), ...(event.attempts !== undefined && { attempts: event.attempts }) };
+          break;
+        case "node_end":
+          timelineEvent = { type: "node_end", ts, ...(includeTestId && { testId }), nodeId: event.nodeId, kind: event.kind, name: event.name, status: event.status, grade: event.grade, durationMs: event.durationMs, ...(event.error !== undefined && { error: event.error }), ...(event.attempt !== undefined && { attempt: event.attempt }), ...(event.attempts !== undefined && { attempts: event.attempts }) };
+          break;
+        case "poll_attempt":
+          timelineEvent = { type: "poll_attempt", ts, ...(includeTestId && { testId }), nodeId: event.nodeId, attempt: event.attempt, outcome: event.outcome, durationMs: event.durationMs };
           break;
         case "timeout_update":
           break;

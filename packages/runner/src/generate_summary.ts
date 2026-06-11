@@ -10,6 +10,16 @@ export interface Summary {
   stepPassed: number;
   stepFailed: number;
   stepSkipped: number;
+  /** vNext workflow nodes (§17 #9): per-node verdicts, LAST node_end per nodeId
+   * (a retrying node emits one bracket per attempt; only the terminal one
+   * counts). All zero when the run has no workflow nodes. */
+  nodeTotal: number;
+  nodePassed: number;
+  nodeFailed: number;
+  nodeSkipped: number;
+  /** Runtime grade rollup over the same per-node verdicts (§17 #10 — includes
+   * opaque→trace promotions the static projection cannot know). */
+  nodeGrades: { full: number; partial: number; trace: number; opaque: number };
   warningTotal: number;
   warningTriggered: number;
   schemaValidationTotal: number;
@@ -38,6 +48,13 @@ export function generateSummary(events: TimelineEvent[]): Summary {
   let schemaValidationTotal = 0;
   let schemaValidationFailed = 0;
   let schemaValidationWarnings = 0;
+  // vNext workflow nodes: the LAST node_end per nodeId is the verdict — a
+  // retrying node emits a failed bracket per non-terminal attempt that must
+  // not count (mirrors the executor's commit semantics, §17 #7/#13).
+  const lastNodeEnd = new Map<
+    string,
+    { status: "passed" | "failed" | "skipped"; grade: "full" | "partial" | "trace" | "opaque" }
+  >();
 
   for (const e of events) {
     switch (e.type) {
@@ -59,6 +76,10 @@ export function generateSummary(events: TimelineEvent[]): Summary {
         if (e.status === "passed") stepPassed++;
         else if (e.status === "failed") stepFailed++;
         else if (e.status === "skipped") stepSkipped++;
+        break;
+
+      case "node_end":
+        lastNodeEnd.set(e.nodeId, { status: e.status, grade: e.grade });
         break;
 
 
@@ -86,12 +107,29 @@ export function generateSummary(events: TimelineEvent[]): Summary {
       ? Math.round((httpErrorTotal / httpRequestTotal) * 10000) / 10000
       : 0;
 
+  // Resolve per-node verdicts (last node_end per nodeId wins).
+  let nodePassed = 0;
+  let nodeFailed = 0;
+  let nodeSkipped = 0;
+  const nodeGrades = { full: 0, partial: 0, trace: 0, opaque: 0 };
+  for (const verdict of lastNodeEnd.values()) {
+    if (verdict.status === "passed") nodePassed++;
+    else if (verdict.status === "failed") nodeFailed++;
+    else nodeSkipped++;
+    nodeGrades[verdict.grade]++;
+  }
+  const nodeTotal = lastNodeEnd.size;
+
   // Derive success:
   // 1. Any error/status event → failure (crash, timeout, process exit)
   //    These event types are not in TimelineEvent but may be present
   //    when callers pass ExecutionEvent[] or GlubeanEvent[] via `as any`.
   // 2. If step_end events exist, use them as authority
-  // 3. Otherwise fall back to assertion results
+  // 3. Else if node_end events exist (vNext workflow), the per-node verdicts
+  //    are the authority — assertion counts can disagree by design (e.g. a
+  //    thrown-node failure leaves no failed assertion; the wrapping test's
+  //    error event covers that via the hard-failure check above).
+  // 4. Otherwise fall back to assertion results
   let success: boolean;
   const hasHardFailure = events.some((e) => {
     const t = (e as { type: string }).type;
@@ -115,6 +153,8 @@ export function generateSummary(events: TimelineEvent[]): Summary {
     const hasStepEnds = events.some((e) => e.type === "step_end");
     if (hasStepEnds) {
       success = stepFailed === 0;
+    } else if (nodeTotal > 0) {
+      success = nodeFailed === 0;
     } else {
       success = assertionFailed === 0;
     }
@@ -130,6 +170,11 @@ export function generateSummary(events: TimelineEvent[]): Summary {
     stepPassed,
     stepFailed,
     stepSkipped,
+    nodeTotal,
+    nodePassed,
+    nodeFailed,
+    nodeSkipped,
+    nodeGrades,
     warningTotal,
     warningTriggered,
     schemaValidationTotal,

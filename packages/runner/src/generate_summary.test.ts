@@ -133,3 +133,71 @@ describe("generateSummary", () => {
     expect(s.warningTriggered).toBe(2);
   });
 });
+
+// =============================================================================
+// vNext workflow node events (§17 #9/#10 consumption — S2.7)
+// =============================================================================
+
+describe("workflow node events", () => {
+  const end = (
+    nodeId: string,
+    status: "passed" | "failed" | "skipped",
+    grade: "full" | "partial" | "trace" | "opaque",
+    extra: Record<string, unknown> = {},
+  ): TimelineEvent =>
+    ({ type: "node_end", ts: 1, nodeId, kind: "action", name: nodeId, status, grade, durationMs: 1, ...extra }) as TimelineEvent;
+
+  test("node verdicts + grade rollup; node_end is the success authority without step_end", () => {
+    const events: TimelineEvent[] = [
+      end("a", "passed", "full"),
+      end("b", "passed", "trace"),
+      end("c", "skipped", "opaque"),
+    ];
+    const s = generateSummary(events);
+    expect(s.nodeTotal).toBe(3);
+    expect(s.nodePassed).toBe(2);
+    expect(s.nodeFailed).toBe(0);
+    expect(s.nodeSkipped).toBe(1);
+    expect(s.nodeGrades).toEqual({ full: 1, partial: 0, trace: 1, opaque: 1 });
+    expect(s.success).toBe(true);
+  });
+
+  test("a failed node fails the run even with zero failed assertions (thrown-node case)", () => {
+    const events: TimelineEvent[] = [
+      { type: "assertion", ts: 1, passed: true, message: "ok" },
+      end("boom", "failed", "opaque", { error: "kaput" }),
+    ];
+    const s = generateSummary(events);
+    expect(s.nodeFailed).toBe(1);
+    expect(s.success).toBe(false); // node verdicts are authoritative, not assertion counts
+  });
+
+  test("retry: the LAST node_end per nodeId wins — a non-terminal failed bracket doesn't count", () => {
+    const events: TimelineEvent[] = [
+      end("flaky", "failed", "opaque", { attempt: 1, attempts: 2 }),
+      end("flaky", "passed", "trace", { attempt: 2, attempts: 2 }),
+    ];
+    const s = generateSummary(events);
+    expect(s.nodeTotal).toBe(1);
+    expect(s.nodePassed).toBe(1);
+    expect(s.nodeFailed).toBe(0);
+    expect(s.nodeGrades).toEqual({ full: 0, partial: 0, trace: 1, opaque: 0 });
+    expect(s.success).toBe(true);
+  });
+
+  test("step_end stays the authority when both are present", () => {
+    const events: TimelineEvent[] = [
+      { type: "step_end", ts: 1, index: 0, name: "s", status: "failed", durationMs: 1, assertions: 0, failedAssertions: 0 },
+      end("a", "passed", "full"),
+    ];
+    expect(generateSummary(events).success).toBe(false);
+  });
+
+  test("no node events → node counters zero and assertions stay the fallback authority", () => {
+    const events: TimelineEvent[] = [{ type: "assertion", ts: 1, passed: false, message: "bad" }];
+    const s = generateSummary(events);
+    expect(s.nodeTotal).toBe(0);
+    expect(s.nodeGrades).toEqual({ full: 0, partial: 0, trace: 0, opaque: 0 });
+    expect(s.success).toBe(false);
+  });
+});
