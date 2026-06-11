@@ -1646,6 +1646,27 @@ try {
           (t) => t.exportName === targetExport,
         );
         if (scoped.length === 0) {
+          // A LEGITIMATE empty selection: workflow.pick whose explicit
+          // --pick/GLUBEAN_PICK keys (or filter) excluded every example
+          // exports an empty array that still advertises its universe via
+          // `_pickUniverse` (codex S2.12 R23 P2). Running nothing is the
+          // requested outcome — report skipped, not failed.
+          const exportValue = userModule[targetExport];
+          const isEmptySelection =
+            Array.isArray(exportValue) &&
+            exportValue.length === 0 &&
+            Array.isArray((exportValue as { _pickUniverse?: unknown[] })._pickUniverse);
+          if (isEmptySelection) {
+            console.log(JSON.stringify({ type: "start", id, name: id, testId: id }));
+            console.log(JSON.stringify({
+              type: "status",
+              status: "skipped",
+              id,
+              testId: id,
+              reason: `pick selection is empty — the requested example(s) were excluded by filter`,
+            }));
+            continue;
+          }
           // Template id whose export has no resolvable tests — emit a
           // failure event for the template id itself so the run doesn't
           // silently complete. (Without this, an empty `test.each([])`
