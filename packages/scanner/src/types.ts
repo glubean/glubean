@@ -3,7 +3,7 @@
  */
 
 import type { ContractStaticMeta } from "./extractor-static.js";
-import type { NormalizedFlowMeta } from "./contract-extraction.js";
+import type { NormalizedFlowMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
 
 /** Export metadata for a single test export */
 export interface ExportMeta {
@@ -103,6 +103,12 @@ export interface BundleMetadata {
    * Populated from the scanner's runtime extractor (`_extracted` on FlowContract).
    */
   flows?: NormalizedFlowMeta[];
+  /**
+   * vNext workflow projections (S2.6) — the JSON-safe graded node view read
+   * off `BuiltWorkflow._projection` for workflows exported from runtime-
+   * extractable files (.flow.ts / .contract.ts). Consumed by Cloud/agents.
+   */
+  workflows?: NormalizedWorkflowMeta[];
 }
 
 /** Result of scanning a directory */
@@ -129,6 +135,11 @@ export interface ScanResult {
    * Independent from contracts — consumed by projection/visualization tools.
    */
   flows?: NormalizedFlowMeta[];
+  /**
+   * vNext workflow projections (S2.6) — graded node views read off
+   * `BuiltWorkflow._projection` during runtime extraction.
+   */
+  workflows?: NormalizedWorkflowMeta[];
 }
 
 /** Options for scanning */

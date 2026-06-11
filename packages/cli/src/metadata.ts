@@ -48,6 +48,7 @@ export function deriveMetadataStats(files: Record<string, FileMeta>): {
 export async function computeRootHash(
   files: Record<string, FileMeta>,
   contracts?: unknown[],
+  workflows?: unknown[],
 ): Promise<string> {
   const entries = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
   const parts: string[] = entries.map(([path, meta]) => `${path}:${meta.hash}`);
@@ -58,6 +59,16 @@ export async function computeRootHash(
       .update(JSON.stringify(contracts))
       .digest("hex");
     parts.push(`__contracts__:sha256-${contractHash}`);
+  }
+
+  // Same for workflow projections (S2.6) — a grade/shape change must change
+  // the rootHash. Only added when present, so workflow-free projects keep
+  // their existing hashes.
+  if (workflows && workflows.length > 0) {
+    const workflowHash = createHash("sha256")
+      .update(JSON.stringify(workflows))
+      .digest("hex");
+    parts.push(`__workflows__:sha256-${workflowHash}`);
   }
 
   const hash = createHash("sha256").update(parts.join("\n")).digest("hex");
@@ -76,7 +87,8 @@ export async function buildMetadata(
   const normalizedFiles = normalizeFileMap(scanResult.files);
   const stats = deriveMetadataStats(normalizedFiles);
   const contracts = scanResult.contracts;
-  const rootHash = await computeRootHash(normalizedFiles, contracts);
+  const workflows = scanResult.workflows;
+  const rootHash = await computeRootHash(normalizedFiles, contracts, workflows);
 
   return {
     schemaVersion: METADATA_SCHEMA_VERSION,
@@ -92,5 +104,6 @@ export async function buildMetadata(
     projectId: options.projectId,
     version: options.version,
     contracts: contracts && contracts.length > 0 ? contracts : undefined,
+    workflows: workflows && workflows.length > 0 ? workflows : undefined,
   };
 }

@@ -702,6 +702,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       nodes: this._nodes.slice(),
     }) as unknown as BuiltWorkflow<State>;
 
+    // Pre-compute the graded projection ONCE; the registry entry and the
+    // handle's `_projection` (the scanner's dep-free read, mirroring
+    // FlowContract._extracted — S2.6) share the same object.
+    const projection = projectWorkflow(handle);
+    Object.assign(handle, { _projection: projection });
+
     // Register for scanner discovery with the full graded projection (§7) —
     // scanner/Cloud/agents read grades + call identity without executing.
     registerTest({
@@ -710,7 +716,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       type: "simple",
       ...(meta.tags ? { tags: meta.tags } : {}),
       ...(meta.description ? { description: meta.description } : {}),
-      workflow: projectWorkflow(handle),
+      workflow: projection,
     });
 
     this._built = handle;

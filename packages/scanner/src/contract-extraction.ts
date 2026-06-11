@@ -255,6 +255,71 @@ export interface NormalizedFlowMeta {
 }
 
 // =============================================================================
+// vNext workflow projection (S2.6)
+//
+// Scanner-side mirror of the SDK's JSON-safe `WorkflowProjection` (the graded
+// node view, proposal §7) — re-declared here (like the Normalized* family)
+// so the scanner stays dep-free while consumers of metadata.json get precise
+// types. Read straight off `BuiltWorkflow._projection` (pre-computed by the
+// SDK's `build()`), never re-derived here.
+// =============================================================================
+
+/** One projected workflow node (scanner-side mirror of ProjectedWorkflowNode). */
+export interface NormalizedWorkflowNode {
+  kind: string;
+  id: string;
+  name?: string;
+  description?: string;
+  tags?: string[];
+  extensions?: Record<string, unknown>;
+  /** Static floor grade; the runtime may promote `opaque` → `trace`. */
+  grade: "full" | "partial" | "opaque";
+  /** contract-call / poll: protocol target + identity. */
+  target?: string;
+  protocol?: string;
+  contractId?: string;
+  caseKey?: string;
+  accept?: Array<string | number>;
+  /** action/compute dataflow hints. */
+  reads?: string[];
+  writes?: string[];
+  asserts?: string;
+  note?: string;
+  /** group children. */
+  nodes?: NormalizedWorkflowNode[];
+  /** branch: decision predicate + sides. */
+  when?: NormalizedPredicate;
+  message?: string;
+  then?: NormalizedWorkflowNode[];
+  else?: NormalizedWorkflowNode[];
+  /** poll: exit predicate + bounds. */
+  until?: NormalizedPredicate;
+  every?: number;
+  backoff?: number;
+  timeoutMs?: number;
+  perAttemptTimeoutMs?: number;
+  maxAttempts?: number;
+  /** call/action: explicit-intent retry. */
+  retry?: { attempts: number; delay?: number; reason: string };
+}
+
+/** Workflow projection as carried in metadata.json (mirror of WorkflowProjection). */
+export interface NormalizedWorkflowMeta {
+  id: string;
+  exportName: string;
+  name?: string;
+  description?: string;
+  tags?: string[];
+  /** Skip reason — discoverable so scanner/Cloud honor a deferred workflow. */
+  skip?: string;
+  only?: boolean;
+  extensions?: Record<string, unknown>;
+  nodes: NormalizedWorkflowNode[];
+  /** Count of node static grades (workflow-level rollup, proposal §7.2). */
+  gradeSummary: Record<"full" | "partial" | "opaque", number>;
+}
+
+// =============================================================================
 // v10 attachment-model — runnable inventory (§7.2 / §7.3)
 //
 // Each entry in `attachments[]` represents one runnable test id. Discriminated
@@ -346,6 +411,12 @@ export interface ExtractionResult {
    * top-level field — flows now appear here as `kind: "flow"` entries.
    */
   attachments: NormalizedAttachmentMeta[];
+  /**
+   * vNext workflow projections (S2.6) — read off `BuiltWorkflow._projection`.
+   * A first-class top-level array (NOT an attachment kind: workflows are not
+   * contract attachments; the attachment model stays contract-scoped).
+   */
+  workflows: NormalizedWorkflowMeta[];
   errors: Array<{ file: string; error: string }>;
 }
 
@@ -702,6 +773,46 @@ function autoBuildFlowBuilder(val: unknown): unknown {
   return val;
 }
 
+/**
+ * If the export is an un-built vNext `WorkflowBuilder` (user omitted the
+ * trailing `.build()`), call `.build()` to resolve it to a `BuiltWorkflow`.
+ * Duck-typed like the flow builder; a build() that throws (poisoned builder)
+ * leaves the value unrecognized — the import error surface is the SDK's.
+ */
+function autoBuildWorkflowBuilder(val: unknown): unknown {
+  if (
+    typeof val === "object" &&
+    val !== null &&
+    (val as any).__glubean_type === "workflow-builder" &&
+    typeof (val as any).build === "function"
+  ) {
+    try {
+      return (val as { build(): unknown }).build();
+    } catch {
+      return val;
+    }
+  }
+  return val;
+}
+
+/**
+ * Type guard — a built vNext workflow handle (`workflow(...).build()`):
+ * a Test[] array carrying the workflow IR + the pre-computed `_projection`
+ * (the same dual shape as FlowContract, recognized the same dep-free way).
+ */
+export function isBuiltWorkflow(val: unknown): val is {
+  __glubean_type: "workflow";
+  _projection: Omit<NormalizedWorkflowMeta, "exportName">;
+} {
+  return (
+    Array.isArray(val) &&
+    (val as any).__glubean_type === "workflow" &&
+    typeof (val as any)._projection === "object" &&
+    (val as any)._projection !== null &&
+    typeof (val as any)._projection.id === "string"
+  );
+}
+
 // =============================================================================
 // File-level extraction
 // =============================================================================
@@ -867,6 +978,7 @@ const _importMtimeCache = new Map<string, number>();
 interface RawFileMaterials {
   contracts: NormalizedContractMeta[];
   flows: NormalizedFlowMeta[];
+  workflows: NormalizedWorkflowMeta[];
   markers: BootstrapOverlayMarker[];
   errors: ExtractionResult["errors"];
 }
@@ -881,6 +993,7 @@ interface RawFileMaterials {
 async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> {
   const contracts: NormalizedContractMeta[] = [];
   const flows: NormalizedFlowMeta[] = [];
+  const workflows: NormalizedWorkflowMeta[] = [];
   const markers: BootstrapOverlayMarker[] = [];
   const errors: ExtractionResult["errors"] = [];
   const absolutePath = resolve(filePath);
@@ -922,9 +1035,13 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
       // `export const signup = contract.flow(...).step(...)` returns a
       // FlowBuilder (not a FlowContract) because `.build()` is optional.
       // Scanner must build it to reach the `_flow` projection.
-      const value = autoBuildFlowBuilder(rawValue);
+      const value = autoBuildWorkflowBuilder(autoBuildFlowBuilder(rawValue));
       if (isFlowContract(value)) {
         flows.push(flowContractToNormalized(value, exportName));
+      } else if (isBuiltWorkflow(value)) {
+        // The projection is pre-computed by the SDK's build() (S2.6) — carry
+        // it verbatim, stamped with the export name like flows are.
+        workflows.push({ ...value._projection, exportName });
       } else if (isProtocolContract(value)) {
         contracts.push(protocolContractToNormalized(value, exportName));
       } else if (isBootstrapAttachment(value)) {
@@ -937,7 +1054,7 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
     errors.push({ file: absolutePath, error: message });
   }
 
-  return { contracts, flows, markers, errors };
+  return { contracts, flows, workflows, markers, errors };
 }
 
 /**
@@ -956,6 +1073,7 @@ export async function extractContractFromFile(
   return {
     contracts: raw.contracts,
     attachments: synth.attachments,
+    workflows: raw.workflows,
     errors: [...raw.errors, ...synth.errors],
   };
 }
@@ -1011,11 +1129,12 @@ export async function extractContractsFromProject(
 ): Promise<ExtractionResult> {
   const files = findContractAndFlowFiles(dir);
   if (files.length === 0) {
-    return { contracts: [], attachments: [], errors: [] };
+    return { contracts: [], attachments: [], workflows: [], errors: [] };
   }
 
   const allContracts: NormalizedContractMeta[] = [];
   const allFlows: NormalizedFlowMeta[] = [];
+  const allWorkflows: NormalizedWorkflowMeta[] = [];
   const allMarkers: BootstrapOverlayMarker[] = [];
   const allErrors: ExtractionResult["errors"] = [];
 
@@ -1023,6 +1142,7 @@ export async function extractContractsFromProject(
     const raw = await collectRawMaterials(filePath);
     allContracts.push(...raw.contracts);
     allFlows.push(...raw.flows);
+    allWorkflows.push(...raw.workflows);
     allMarkers.push(...raw.markers);
     allErrors.push(...raw.errors);
   }
@@ -1032,6 +1152,7 @@ export async function extractContractsFromProject(
   return {
     contracts: allContracts,
     attachments: synth.attachments,
+    workflows: allWorkflows,
     errors: [...allErrors, ...synth.errors],
   };
 }

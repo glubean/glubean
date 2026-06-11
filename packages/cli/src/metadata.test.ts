@@ -99,3 +99,39 @@ test("buildMetadata preserves contract given preconditions for upload payloads",
     "the email already belongs to a team member",
   );
 });
+
+test("buildMetadata carries workflow projections + workflows affect the rootHash (S2.6)", async () => {
+  const files: Record<string, FileMeta> = {
+    "flows/signup.flow.ts": {
+      hash: "sha256-aaa",
+      exports: [{ type: "test", id: "signup-journey", exportName: "signup" }],
+    },
+  };
+  const workflows = [
+    {
+      id: "signup-journey",
+      exportName: "signup",
+      nodes: [{ kind: "compute", id: "derive", grade: "full" as const }],
+      gradeSummary: { full: 1, partial: 0, opaque: 0 },
+    },
+  ];
+  const base: ScanResult = {
+    specVersion: "1.0",
+    files,
+    testCount: 1,
+    fileCount: 1,
+    tags: [],
+    warnings: [],
+    contracts: [],
+  };
+
+  const without = await buildMetadata(base, { generatedBy: "test" });
+  expect(without.workflows).toBeUndefined();
+
+  const withWf = await buildMetadata({ ...base, workflows }, { generatedBy: "test" });
+  expect(withWf.workflows).toEqual(workflows);
+  // a workflow projection change must change the rootHash (mirrors contracts)…
+  expect(withWf.rootHash).not.toBe(without.rootHash);
+  // …and workflow-free projects keep their existing hashes (no part added).
+  expect(without.rootHash).toBe(await computeRootHash(files, []));
+});

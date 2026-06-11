@@ -10,7 +10,7 @@ import { extractContractCases } from "./extractor-ast.js";
 import { extractAliasesFromSource } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
-import type { NormalizedFlowMeta } from "./contract-extraction.js";
+import type { NormalizedFlowMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
 import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.js";
 
 /** File system interface for runtime abstraction */
@@ -348,13 +348,16 @@ export class Scanner {
       }
     }
 
-    // Phase 5: Extract flow metadata from flow files.
+    // Phase 5: Extract flow + workflow metadata from flow files.
     // Post-Phase 2f: extractContractFromFile returns flows as `kind: "flow"`
     // entries inside `attachments[]`. We also call it on .flow.ts files so
-    // single-file flow modules are picked up.
+    // single-file flow modules are picked up. vNext workflows (S2.6) live on
+    // the result's first-class `workflows[]` — same files, same import.
     const flows: NormalizedFlowMeta[] = [];
+    const workflows: NormalizedWorkflowMeta[] = [];
     const allFlowSourceFiles = [...flowFiles, ...contractFiles]; // contract files can also export flows
     const seenFlowIds = new Set<string>();
+    const seenWorkflowIds = new Set<string>();
     for (const filePath of allFlowSourceFiles) {
       const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
       const result = await extractContractFromFile(absolutePath);
@@ -363,6 +366,11 @@ export class Scanner {
         if (seenFlowIds.has(att.flow.id)) continue;
         flows.push(att.flow);
         seenFlowIds.add(att.flow.id);
+      }
+      for (const wf of result.workflows) {
+        if (seenWorkflowIds.has(wf.id)) continue;
+        workflows.push(wf);
+        seenWorkflowIds.add(wf.id);
       }
       // Errors already surfaced in contract phase for shared files; only add
       // new errors for flow-only files
@@ -393,6 +401,7 @@ export class Scanner {
       warnings,
       contracts,
       ...(flows.length > 0 ? { flows } : {}),
+      ...(workflows.length > 0 ? { workflows } : {}),
     };
   }
 }

@@ -16,6 +16,7 @@ import {
   bootstrapAttachmentToNormalized,
   flowContractToNormalized,
   isBootstrapAttachment,
+  isBuiltWorkflow,
   protocolContractToNormalized,
   synthesizeAttachments,
   type NormalizedContractMeta,
@@ -511,4 +512,33 @@ test("synthesize: multiple runnability gates surface on raw", () => {
       requireSession: true,
     },
   });
+});
+
+// =============================================================================
+// vNext workflow recognition (S2.6)
+// =============================================================================
+
+test("isBuiltWorkflow: recognizes the dual array handle carrying _projection", () => {
+  const projection = {
+    id: "signup",
+    nodes: [{ kind: "compute", id: "c", grade: "full" }],
+    gradeSummary: { full: 1, partial: 0, opaque: 0 },
+  };
+  const handle = Object.assign(
+    [{ meta: { id: "signup" }, type: "simple", fn: async () => {} }],
+    { __glubean_type: "workflow", _projection: projection },
+  );
+  expect(isBuiltWorkflow(handle)).toBe(true);
+});
+
+test("isBuiltWorkflow: rejects non-arrays, missing markers, and missing projections", () => {
+  expect(isBuiltWorkflow(null)).toBe(false);
+  expect(isBuiltWorkflow({ __glubean_type: "workflow", _projection: { id: "x" } })).toBe(false); // not an array
+  expect(
+    isBuiltWorkflow(Object.assign([], { __glubean_type: "flow-contract", _projection: { id: "x" } })),
+  ).toBe(false); // wrong marker
+  expect(isBuiltWorkflow(Object.assign([], { __glubean_type: "workflow" }))).toBe(false); // no projection
+  expect(
+    isBuiltWorkflow(Object.assign([], { __glubean_type: "workflow", _projection: { id: 42 } })),
+  ).toBe(false); // projection without a string id
 });

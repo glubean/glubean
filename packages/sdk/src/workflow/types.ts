@@ -293,8 +293,14 @@ export interface Workflow<State = any> {
  * FlowContract, so the runner's existing array/`isTest` resolution discovers
  * and executes it with no special casing. `runWorkflow`/`projectWorkflow`
  * consume it directly (it IS a `Workflow`).
+ *
+ * `_projection` carries the pre-computed JSON-safe graded projection (the same
+ * object registered on `RegisteredTestMeta.workflow`) so dep-free consumers —
+ * the scanner's runtime extractor, mirroring `FlowContract._extracted` — read
+ * it off the handle without importing the SDK to call `projectWorkflow` (S2.6).
  */
-export type BuiltWorkflow<State = any> = Workflow<State> & ReadonlyArray<Test>;
+export type BuiltWorkflow<State = any> = Workflow<State> &
+  ReadonlyArray<Test> & { readonly _projection: WorkflowProjection };
 
 // ---------------------------------------------------------------------------
 // Projection (JSON-safe, graded) — what scanner / Cloud / agents read.
