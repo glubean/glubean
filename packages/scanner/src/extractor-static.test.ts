@@ -72,8 +72,43 @@ export const unbuilt = workflow({ id: "wf-unbuilt", tags: ["journey"] })
     exportName: "signup",
     name: "Signup Journey",
     tags: ["journey"],
+    workflow: true, // static marker — classifies as a graph orchestrator (S2.6 R10)
   });
-  expect(result[1]).toMatchObject({ type: "test", id: "wf-unbuilt", exportName: "unbuilt" });
+  expect(result[0].workflowHasBranchOrPoll).toBeUndefined(); // linear chain
+  expect(result[1]).toMatchObject({ type: "test", id: "wf-unbuilt", exportName: "unbuilt", workflow: true });
+});
+
+test("workflow exports carry a static branch/poll flag for the upload gate (S2.6 R10)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+export const branched = workflow("wf-branched")
+  .setup(async () => ({ ok: true }))
+  .branch("route", {
+    when: (w) => w.when((s) => s.ok).eq(true),
+    then: (b) => b.compute("c", (s) => s),
+  })
+  .build();
+
+export const polling = workflow("wf-polling")
+  .setup(async () => ({}))
+  .poll("wait", ref, { until: (w) => w.when((r) => r.status).eq("done"), timeout: 1000 });
+
+export const linear = workflow("wf-linear").compute("c", (s) => s).build();
+
+// a plain test whose body merely CALLS something named branch() must not flag
+export const plain = test("plain-test", async (ctx) => { ctx.log("x"); });
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(
+    result.map((m) => [m.id, [m.workflow ?? false, m.workflowHasBranchOrPoll ?? false]]),
+  );
+  expect(byId).toEqual({
+    "wf-branched": [true, true],
+    "wf-polling": [true, true],
+    "wf-linear": [true, false],
+    "plain-test": [false, false],
+  });
 });
 
 // =============================================================================

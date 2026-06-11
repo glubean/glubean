@@ -44,6 +44,18 @@ export interface ExportMeta {
    * registered test metadata (i.e., for `test.pick` tests).
    */
   groupId?: string;
+  /**
+   * Set when this export is a vNext `workflow(...)` (static AST detection).
+   * Downstream consumers classify it as a graph orchestrator ("flow"-kind
+   * runnable) without importing the file.
+   */
+  workflow?: true;
+  /**
+   * Set when a `workflow(...)` chain contains a `.branch(`/`.poll(` call
+   * (static AST detection) — drives the --upload fail-closed gate for
+   * workflows in files the runtime extractor never imports (.test.ts).
+   */
+  workflowHasBranchOrPoll?: true;
   /** JavaScript export name (e.g., "myTest" or "default") */
   exportName: string;
   /** Source location */

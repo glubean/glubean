@@ -470,6 +470,13 @@ interface DiscoveredTestMeta {
    * - "flow"     — `contract.flow(...).build()` orchestrator
    */
   kind?: "test" | "contract" | "flow";
+  /**
+   * Static AST flag: a vNext workflow chain in a .test.ts contains
+   * `.branch(`/`.poll(`. The --upload gate reads this DIRECTLY — test files
+   * are never runtime-imported, so the gate cannot re-extract them
+   * (codex S2.6 R10 P2).
+   */
+  workflowHasBranchOrPoll?: boolean;
 }
 
 interface DiscoveredTest {
@@ -669,7 +676,12 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         parallel: m.parallel,
         requires: m.requires,
         defaultRun: m.defaultRun,
-        kind: "test",
+        // A vNext workflow is a graph orchestrator — it rides the "flow"
+        // runnable kind even when authored in a .test.ts, so suite
+        // kinds:[flow] keeps it and the --upload gate sees it
+        // (codex S2.6 R10 P2).
+        kind: m.workflow ? "flow" : "test",
+        ...(m.workflowHasBranchOrPoll ? { workflowHasBranchOrPoll: true } : {}),
       },
     };
   });
@@ -1178,8 +1190,16 @@ export async function runCommand(
     );
     if (selectedFlows.length > 0) {
       // Map each selected flow's source file → the set of its branch/poll flow ids.
+      // Only runtime-extractable files are re-imported here; a .test.ts
+      // workflow carries a STATIC branch/poll flag on its discovered meta
+      // instead (test files are never runtime-imported — codex S2.6 R10 P2).
       const branchIdsByFile = new Map<string, Set<string>>();
-      for (const filePath of new Set(selectedFlows.map((ft) => ft.filePath))) {
+      const extractableFiles = new Set(
+        selectedFlows
+          .map((ft) => ft.filePath)
+          .filter((p) => classifyGlubeanFile(p) !== "test"),
+      );
+      for (const filePath of extractableFiles) {
         try {
           const extracted = await extractContractFromFile(filePath);
           const ids = new Set<string>();
@@ -1197,8 +1217,10 @@ export async function runCommand(
           // Real import/extraction errors are surfaced by discovery above.
         }
       }
-      const branchFlows = selectedFlows.filter((ft) =>
-        branchIdsByFile.get(ft.filePath)?.has(ft.test.meta.id),
+      const branchFlows = selectedFlows.filter(
+        (ft) =>
+          ft.test.meta.workflowHasBranchOrPoll === true ||
+          branchIdsByFile.get(ft.filePath)?.has(ft.test.meta.id),
       );
       if (branchFlows.length > 0) {
         console.error(

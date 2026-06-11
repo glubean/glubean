@@ -87,6 +87,42 @@ export const probe = workflow("probe-journey")
   expect(wfEntries[0].meta).toMatchObject({ name: "Signup", tags: ["journey"] });
 });
 
+test("a .test.ts workflow is discovered as a 'flow'-kind runnable with the static branch/poll flag", async () => {
+  const dir = join(FIXTURE_ROOT, "3");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, "journeys.test.ts");
+  await writeFile(
+    file,
+    `
+import { workflow, test } from "@glubean/sdk";
+
+export const branched = workflow("wf-branched")
+  .setup(async () => ({ ok: true }))
+  .branch("route", {
+    when: (w) => w.when((s) => s.ok).eq(true),
+    then: (b) => b.compute("c", (s) => s),
+  })
+  .build();
+
+export const linear = workflow("wf-linear").compute("c", (s) => s).build();
+
+export const plain = test("plain-test", async (ctx) => { ctx.log("x"); });
+`,
+  );
+  const discovered = await discoverTests(file);
+  const byId = Object.fromEntries(
+    discovered.map((d) => [d.meta.id, [d.meta.kind, d.meta.workflowHasBranchOrPoll ?? false]]),
+  );
+  // workflows ride the "flow" kind even in .test.ts (suite kinds:[flow] keeps
+  // them); the branch flag is STATIC — the upload gate reads it without ever
+  // importing the test file (codex S2.6 R10 P2).
+  expect(byId).toEqual({
+    "wf-branched": ["flow", true],
+    "wf-linear": ["flow", false],
+    "plain-test": ["test", false],
+  });
+});
+
 test("a workflow-ONLY project scans as non-empty (no false warning) and still builds metadata", async () => {
   const dir = join(FIXTURE_ROOT, "2");
   await mkdir(dir, { recursive: true });

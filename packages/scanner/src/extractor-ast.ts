@@ -225,6 +225,29 @@ function parseTestDeclaration(
   if (steps.length > 0) result.steps = steps;
   if (parallel) result.parallel = true;
 
+  // vNext workflow exports get a static marker so downstream consumers can
+  // classify them as graph orchestrators ("flow"-kind runnables) without
+  // importing the file, plus an AST-level branch/poll flag so the --upload
+  // gate fails closed for .test.ts workflows the runtime extractor can never
+  // safely inspect (codex S2.6 R10 P2).
+  if (factoryName === "workflow") {
+    result.workflow = true;
+    let hasBranchOrPoll = false;
+    walk(init, (node) => {
+      if (node.type !== "CallExpression") return;
+      const callee = unwrapExpression(node.callee as AnyNode);
+      if (!callee || callee.type !== "MemberExpression" || callee.computed === true) return;
+      const property = callee.property as AnyNode;
+      if (
+        property.type === "Identifier" &&
+        (property.name === "branch" || property.name === "poll")
+      ) {
+        hasBranchOrPoll = true;
+      }
+    });
+    if (hasBranchOrPoll) result.workflowHasBranchOrPoll = true;
+  }
+
   return result;
 }
 
