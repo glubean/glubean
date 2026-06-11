@@ -328,8 +328,13 @@ export class Scanner {
           // Detect any contract.<protocol> that isn't contract.http or contract.flow
           // This catches grpc, graphql, ws, register, and any custom registered protocol
           const hasNonHttp = /contract\.(?!http\b|flow\b)\w+\s*[.(]/i.test(content);
-          // Only fall back if file is HTTP-only (has HTTP, no non-HTTP)
-          if (hasHttp && !hasNonHttp) {
+          // A vNext workflow(...) export also fails the gate closed: accepting
+          // the HTTP fallback would let scan/upload succeed with metadata that
+          // silently omits the workflow projection (codex S2.6 R7 P2; mirrors
+          // the discoverTests gate).
+          const hasWorkflow = /\bworkflow\s*\(/.test(content);
+          // Only fall back if file is HTTP-only (has HTTP, no non-HTTP, no workflow)
+          if (hasHttp && !hasNonHttp && !hasWorkflow) {
             const extracted = extractContractCases(content);
             for (const meta of extracted) {
               contracts.push(meta);
