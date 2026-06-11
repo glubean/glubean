@@ -455,6 +455,18 @@ function parseTestDeclaration(
                   return;
                 }
                 if (hasBranchOrPoll || n.type !== "CallExpression") return;
+                // DELEGATION fails closed (codex S2.12 R18 P2): passing a
+                // live builder to any call (`makeFlow(wf)`) hands the graph
+                // to code this scan cannot see — and test files are never
+                // runtime re-extracted. Inline the graph (or move it to a
+                // .flow.ts) to lift the flag.
+                for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
+                  const argRoot = rootOf(arg);
+                  if (argRoot?.type === "Identifier" && live.has(argRoot.name as string)) {
+                    hasBranchOrPoll = true;
+                    return;
+                  }
+                }
                 const callee = unwrapExpression(n.callee as AnyNode);
                 if (!callee || callee.type !== "MemberExpression" || callee.computed === true) {
                   return;

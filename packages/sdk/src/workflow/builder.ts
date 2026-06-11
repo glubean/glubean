@@ -1431,12 +1431,14 @@ function workflowPick<T extends Record<string, unknown>>(
     // same ORIGINAL row indexes, so an id template using $index cannot
     // diverge between the advertised universe and the executed member
     // (codex S2.12 R11 P2).
-    const selectedKeys = new Set(
-      selectPickExamples(eligibleExamples, count).map((r) => r._pick),
-    );
-    const members = eligibleRows.flatMap((row, i) =>
-      selectedKeys.has(row._pick) ? [universe[i]] : [],
-    );
+    // SELECTION order is preserved (codex S2.12 R18 P2): an explicit
+    // `--pick beta,alpha` runs beta first, exactly like test.pick — members
+    // map selected keys back to their universe handles in selected order.
+    const byKey = new Map(eligibleRows.map((row, i) => [row._pick, universe[i]]));
+    const members = selectPickExamples(eligibleExamples, count).flatMap((r) => {
+      const handle = byKey.get(r._pick);
+      return handle ? [handle] : [];
+    });
     for (const m of members) {
       (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
     }

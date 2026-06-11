@@ -163,6 +163,19 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test("DELEGATING the builder to an uninspectable call fails closed (S2.12 R18)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow } from "./helpers";
+export const delegated = workflow.each([{ region: "us" }])(
+  { id: "dg-$region" },
+  (wf, row) => makeFlow(wf),
+);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true); // graph handed to unseen code
+});
+
 test("closures capture BINDINGS: alias assigned after closure definition still flags (S2.12 R15)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

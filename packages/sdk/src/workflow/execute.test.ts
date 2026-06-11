@@ -1373,6 +1373,21 @@ describe("workflow.each (addendum §3)", () => {
     }
   });
 
+  it("explicit multi-pick runs in SELECTED order, not table order (codex R18)", () => {
+    const prev = process.env.GLUBEAN_PICK;
+    process.env.GLUBEAN_PICK = "beta,alpha";
+    try {
+      const members = workflow.pick({ alpha: { v: 1 }, beta: { v: 2 } }, 2)(
+        { id: "so-$_pick" },
+        (wf, row) => wf.setup(async () => ({ v: row.v })),
+      );
+      expect(members.map((m) => m.meta.id)).toEqual(["so-beta", "so-alpha"]);
+    } finally {
+      if (prev === undefined) delete process.env.GLUBEAN_PICK;
+      else process.env.GLUBEAN_PICK = prev;
+    }
+  });
+
   it("a GLOB pick matching only filtered-out examples also runs nothing (codex R17)", () => {
     const prev = process.env.GLUBEAN_PICK;
     process.env.GLUBEAN_PICK = "us-*";
