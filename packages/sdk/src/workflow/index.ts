@@ -20,3 +20,6 @@ export type {
   PollBounds,
 } from "./builder.js";
 export { projectWorkflow } from "./project.js";
+// Host integration point: @glubean/runner's http hooks attribute auto-traces
+// to the active workflow node's scope (the ctx.http rebind, S2.10).
+export { __activeWorkflowNodeCtx } from "./execute.js";

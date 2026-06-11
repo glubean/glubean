@@ -242,3 +242,38 @@ export const wf = workflow("wf-family")
     unrouted: "skipped",
   });
 });
+
+test("inline ctx.http inside a node attributes to the node scope: trace in-bracket + opaque→trace (S2.10)", async () => {
+  // a local server so the e2e has zero external dependencies
+  const { createServer } = await import("node:http");
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((r) => server.listen(0, r));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const src = `
+import { workflow } from "@glubean/sdk";
+export const wf = workflow("wf-http")
+  .setup(async () => ({}))
+  .action("ping", async (c) => {
+    await c.http.get("http://127.0.0.1:${port}/health");
+  })
+  .build();
+`;
+    const r = await run(src, "wf-http");
+    expect(r.success).toBe(true);
+    // the auto-trace reached the timeline…
+    const traces = r.events.filter((e) => e.type === "trace");
+    expect(traces.length).toBeGreaterThan(0);
+    // …and attributed to the node: the bare action (no hints, no explicit
+    // evidence) is statically opaque — only a scope-attributed auto-trace can
+    // promote it (§17 #10). Before the rebind this stayed "opaque".
+    const end = nodeEnds(r.events).find((e) => e.nodeId === "ping")!;
+    expect(end.status).toBe("passed");
+    expect(end.grade).toBe("trace");
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});

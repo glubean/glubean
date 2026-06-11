@@ -23,6 +23,7 @@
  * not `runNode`; remaining reserved kinds throw "not implemented yet".
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AssertionDetails,
   AssertionResultInput,
@@ -63,6 +64,38 @@ import type {
   WorkflowContext,
   WorkflowNode,
 } from "./types.js";
+
+// =============================================================================
+// Active-node context channel (§17 #9/#12 — the ctx.http rebind, S2.10)
+// =============================================================================
+
+/**
+ * The per-node child ctx of the CURRENTLY EXECUTING workflow node body.
+ *
+ * The host harness pre-binds `ctx.http`'s auto-trace/metric hooks to the
+ * test-level ctx at construction, so inline HTTP inside a workflow node used
+ * to bypass the node scope entirely — no attribution (an opaque HTTP action
+ * never promoted to `trace`, §17 #10) and no late-evidence quarantine
+ * (§17 #12). The executor now runs every node body inside this
+ * AsyncLocalStorage scope; the harness's hooks ask for the active node ctx
+ * FIRST and fall back to their own closure ctx (non-workflow tests see no
+ * behavior change).
+ */
+const activeNodeCtx = new AsyncLocalStorage<TestContext>();
+
+/**
+ * Host integration point (used by @glubean/runner's http hooks): the ctx that
+ * observability emitted DURING a workflow node body should be attributed to,
+ * or undefined outside any workflow node.
+ */
+export function __activeWorkflowNodeCtx(): TestContext | undefined {
+  return activeNodeCtx.getStore();
+}
+
+/** Run a node body (or attempt/decision) attributed to `ctx`. */
+function withActiveNodeCtx<T>(ctx: TestContext, fn: () => T): T {
+  return activeNodeCtx.run(ctx, fn);
+}
 
 // =============================================================================
 // Per-node evidence events (§17 #9)
@@ -209,15 +242,12 @@ export function makeNodeScope(base: TestContext, signal: AbortSignal): NodeScope
   // prototype chain. Only the APIs below are overridden; everything else resolves
   // through `base`.
   //
-  // KNOWN LIMITATION (codex S2.0 P2): `ctx.http` is a ky client pre-bound to the
-  // ORIGINAL ctx at construction, so its auto-traces emit straight to `base`,
-  // bypassing this scope's `trace` override. Two consequences for a node that
-  // calls `ctx.http` directly (an action escape hatch — the contract-call path in
-  // S2.1 instead hands the child ctx to `executeCaseInFlow`, whose traces DO route
-  // through it): (1) an opaque HTTP action won't promote to `trace` (#10), and
-  // (2) an HTTP response landing after the node seals can still leak past the #12
-  // quarantine. TODO(S2.1+): rebind/wrap `ctx.http` onto the node scope so inline
-  // HTTP obeys attribution + quarantine. Acceptable for this skeleton slice.
+  // `ctx.http` rebind (closes the S2.0 known limitation): the host's ky hooks
+  // are pre-bound to the test-level ctx, so the executor runs every node body
+  // inside the activeNodeCtx ALS scope and the harness's hooks route their
+  // auto-trace/metric through `__activeWorkflowNodeCtx()` first — inline HTTP
+  // inside a node now attributes to THIS scope (opaque HTTP actions promote to
+  // `trace`, §17 #10) and is quarantined after seal (§17 #12).
   const ctx = Object.assign(Object.create(base) as TestContext, {
     signal,
 
@@ -682,7 +712,7 @@ export async function runNode(
   };
 
   try {
-    const body = runBody(node, scope.ctx, state, scope);
+    const body = withActiveNodeCtx(scope.ctx, () => runBody(node, scope.ctx, state, scope));
     const raced = hasTimeout
       ? Promise.race([
           body,
@@ -1099,7 +1129,9 @@ async function runBranch(
 
   let decision: BranchDecision;
   try {
-    decision = await selectBranchCase(node, state, scope.ctx);
+    decision = await withActiveNodeCtx(scope.ctx, () =>
+      selectBranchCase(node, state, scope.ctx),
+    );
   } catch (err) {
     scope.seal();
     if (err instanceof GlubeanSkipError && !scope.hasFailure()) {
@@ -1401,7 +1433,7 @@ async function runPollNode(
   let errForEvent: unknown;
   let skipReason: string | undefined;
   try {
-    const res = await pollLoop(node, state, scope);
+    const res = await withActiveNodeCtx(scope.ctx, () => pollLoop(node, state, scope));
     if (scope.hasFailure()) {
       // The satisfying attempt's flushed evidence (or an earlier in-budget
       // predicate assert) recorded a soft failure → the node fails and `out` is
@@ -1539,7 +1571,9 @@ export async function runWorkflow<State = unknown>(
         // setup is an async lifecycle node — its terminal timeout (§17 #4)
         // budget-races the body; on expiry the run fails with the timeout as
         // the cause and the seal (below) quarantines any late evidence.
-        const setupRun = Promise.resolve(wf.setup(scope.ctx));
+        const setupRun = Promise.resolve(
+          withActiveNodeCtx(scope.ctx, () => wf.setup!(scope.ctx)),
+        );
         setupResult =
           wf.setupTimeoutMs !== undefined
             ? await raceBudget(setupRun, wf.setupTimeoutMs, () =>
@@ -1599,7 +1633,9 @@ export async function runWorkflow<State = unknown>(
       let teardownThrew = false;
       try {
         const teardownRun = Promise.resolve(
-          wf.teardown(scope.ctx, state as State | undefined, cause),
+          withActiveNodeCtx(scope.ctx, () =>
+            wf.teardown!(scope.ctx, state as State | undefined, cause),
+          ),
         );
         // teardown's terminal timeout (§17 #4): logged like any teardown
         // failure — it NEVER masks the primary cause (§17 #1).

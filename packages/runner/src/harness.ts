@@ -38,7 +38,8 @@ import type {
   TestContext,
   ValidateOptions,
 } from "@glubean/sdk";
-import { isTestBranchStep, isTestPollStep } from "@glubean/sdk";
+import {
+  __activeWorkflowNodeCtx, isTestBranchStep, isTestPollStep } from "@glubean/sdk";
 import type { TestPollData } from "@glubean/sdk";
 import { Expectation } from "@glubean/sdk/expect";
 
@@ -1041,17 +1042,22 @@ const kyInstance = ky.create({
           // Per-request state is on the options object; no global cleanup needed.
         }
 
-        ctx.trace(traceData as unknown as Trace);
+        // Attribute to the active workflow node's scope when one is executing
+        // (the SDK's ctx.http rebind, §17 #10/#12): inline HTTP inside a
+        // workflow node promotes its grade and obeys the late-evidence
+        // quarantine. Outside a workflow node this is the closure ctx as ever.
+        const sink = __activeWorkflowNodeCtx() ?? ctx;
+        sink.trace(traceData as unknown as Trace);
 
         // Auto-metric for response time
         try {
           const pathname = new URL(request.url).pathname;
-          ctx.metric("http_duration_ms", duration, {
+          sink.metric("http_duration_ms", duration, {
             unit: "ms",
             tags: { method: request.method, path: pathname },
           });
         } catch {
-          ctx.metric("http_duration_ms", duration, {
+          sink.metric("http_duration_ms", duration, {
             unit: "ms",
             tags: { method: request.method },
           });
