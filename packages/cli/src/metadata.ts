@@ -116,6 +116,16 @@ export async function buildMetadata(
     projectId: options.projectId,
     version: options.version,
     contracts: contracts && contracts.length > 0 ? contracts : undefined,
+    // DELIBERATELY UNFILTERED (codex S2.6 R14): metadata is the project's
+    // authoritative DECLARATION inventory — like `files` and `contracts`, it
+    // always reflects the whole scan, never the run's selection. The server's
+    // upsert treats this map as authoritative (filtering to selected runnables
+    // would make Cloud mark everything unselected as removed — see the
+    // degraded-scan note in run.ts). The --upload branch/poll gate protects a
+    // DIFFERENT layer: RUN data, where Cloud would render a misleading
+    // partial view. A projection in metadata is not a run view; Cloud ignores
+    // these fields until the rendering line lands, and when it does it needs
+    // the complete inventory, branch/poll included.
     workflows: workflows && workflows.length > 0 ? workflows : undefined,
     flows: flows && flows.length > 0 ? flows : undefined,
   };
