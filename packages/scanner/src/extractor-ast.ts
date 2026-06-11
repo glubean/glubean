@@ -386,10 +386,6 @@ function parseTestDeclaration(
         const builderParam =
           params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
         if (builderParam) {
-          // Builder names: the factory parameter plus every local alias whose
-          // initializer chains back to one (`const base = wf.setup(...)`) —
-          // a single source-order pass over declarators (codex S2.12 R2 P2).
-          const builderNames = new Set<string>([builderParam]);
           const rootOf = (expr: AnyNode | undefined): AnyNode | undefined => {
             let root: AnyNode | undefined = expr ? unwrapExpression(expr) : undefined;
             while (root && root.type === "CallExpression") {
@@ -402,34 +398,32 @@ function parseTestDeclaration(
             }
             return root;
           };
-          walkSameScope(factory.body as AnyNode, (n) => {
-            // `const b = wf.setup(...)` AND `let b; b = wf.setup(...)` both
-            // bind builder aliases (codex S2.12 R10 P2).
-            if (n.type === "VariableDeclarator") {
-              const id = n.id as AnyNode | undefined;
-              if (id?.type !== "Identifier") return;
-              const initRoot = rootOf(n.init as AnyNode | undefined);
-              if (initRoot?.type === "Identifier" && builderNames.has(initRoot.name as string)) {
-                builderNames.add(id.name as string);
+          // Per-scope dataflow (codex S2.12 R2/R4/R10/R12/R13): every scope —
+          // the factory body and each nested function — first folds its own
+          // bindings into the inherited builder-name set, then detects calls,
+          // then recurses. A declaration/assignment whose right side roots at
+          // a live builder name ADDS an alias (`const base = wf.setup(...)`,
+          // `let b; b = wf.setup(...)` — top-level or nested); one rooting
+          // anywhere else SHADOWS the name (`const wf = makeClient()`).
+          // Nested function params that collide also shadow.
+          const scanScope = (scopeBody: AnyNode, inherited: ReadonlySet<string>): void => {
+            const names = new Set(inherited);
+            const bind = (nameNode: AnyNode | undefined, valueExpr: AnyNode | undefined): void => {
+              if (nameNode?.type !== "Identifier") return;
+              const root = rootOf(valueExpr);
+              if (root?.type === "Identifier" && names.has(root.name as string)) {
+                names.add(nameNode.name as string);
+              } else if (valueExpr !== undefined) {
+                names.delete(nameNode.name as string);
               }
-              return;
-            }
-            if (n.type === "AssignmentExpression" && n.operator === "=") {
-              const left = unwrapExpression(n.left as AnyNode);
-              if (left?.type !== "Identifier") return;
-              const rightRoot = rootOf(n.right as AnyNode | undefined);
-              if (rightRoot?.type === "Identifier" && builderNames.has(rightRoot.name as string)) {
-                builderNames.add(left.name as string);
+            };
+            walkSameScope(scopeBody, (n) => {
+              if (n.type === "VariableDeclarator") {
+                bind(n.id as AnyNode, n.init as AnyNode | undefined);
+              } else if (n.type === "AssignmentExpression" && n.operator === "=") {
+                bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode);
               }
-            }
-          });
-          // Recursive, SHADOW-AWARE scan: a nested closure capturing the
-          // builder (`const make = () => wf.branch(...)`) must flag
-          // (codex S2.12 R12 P2), while a runtime callback REDECLARING the
-          // name (`const wf = makeClient(); wf.poll()`) must not (R4). A
-          // local declaration shadows a builder name unless its initializer
-          // itself roots at an unshadowed builder (then it's still the chain).
-          const scanScope = (scopeBody: AnyNode, shadowed: ReadonlySet<string>): void => {
+            });
             const nestedFns: AnyNode[] = [];
             walkSameScope(
               scopeBody,
@@ -446,43 +440,24 @@ function parseTestDeclaration(
                 ) {
                   return;
                 }
-                // Root the receiver chain: only calls whose chain bottoms out
-                // at an UNSHADOWED builder name count.
+                // Only calls whose receiver chain bottoms out at a LIVE
+                // builder name count — foreign receivers stay clean.
                 const root = rootOf(callee.object as AnyNode);
-                if (
-                  root?.type === "Identifier" &&
-                  builderNames.has(root.name as string) &&
-                  !shadowed.has(root.name as string)
-                ) {
+                if (root?.type === "Identifier" && names.has(root.name as string)) {
                   hasBranchOrPoll = true;
                 }
               },
               (fn) => nestedFns.push(fn),
             );
             for (const fn of nestedFns) {
-              const childShadow = new Set(shadowed);
-              const params = (fn.params as AnyNode[] | undefined) ?? [];
-              for (const param of params) {
-                if (param.type === "Identifier" && builderNames.has(param.name as string)) {
-                  childShadow.add(param.name as string);
-                }
+              const childNames = new Set(names);
+              for (const param of (fn.params as AnyNode[] | undefined) ?? []) {
+                if (param.type === "Identifier") childNames.delete(param.name as string);
               }
-              const body = fn.body as AnyNode;
-              walkSameScope(body, (n) => {
-                if (n.type !== "VariableDeclarator") return;
-                const id = n.id as AnyNode | undefined;
-                if (id?.type !== "Identifier" || !builderNames.has(id.name as string)) return;
-                const initRoot = rootOf(n.init as AnyNode | undefined);
-                const initIsBuilder =
-                  initRoot?.type === "Identifier" &&
-                  builderNames.has(initRoot.name as string) &&
-                  !childShadow.has(initRoot.name as string);
-                if (!initIsBuilder) childShadow.add(id.name as string);
-              });
-              scanScope(body, childShadow);
+              scanScope(fn.body as AnyNode, childNames);
             }
           };
-          scanScope(factory.body as AnyNode, new Set());
+          scanScope(factory.body as AnyNode, new Set([builderParam]));
         }
       }
     }

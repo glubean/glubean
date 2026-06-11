@@ -163,6 +163,24 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test("aliases bound INSIDE nested closures are tracked (S2.12 R13)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const nestedAlias = workflow.each([{ region: "us" }])(
+  { id: "na-$region" },
+  (wf, row) => {
+    const make = () => {
+      const base = wf.setup(async () => ({ ok: true }));
+      return base.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+    };
+    return make();
+  },
+);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("ASSIGNED builder aliases are tracked too (S2.12 R10)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

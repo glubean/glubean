@@ -1368,6 +1368,14 @@ function workflowPick<T extends Record<string, unknown>>(
     const eligibleExamples = Object.fromEntries(
       eligibleRows.map((r) => [r._pick, examples[r._pick]]),
     ) as Record<string, T>;
+    // A filter may legitimately exclude every example (env-gated rows) — an
+    // empty matrix, not an import-time crash from selectPickExamples
+    // (codex S2.12 R13 P2).
+    if (eligibleRows.length === 0) {
+      const empty: BuiltWorkflow[] = [];
+      Object.assign(empty, { _pickUniverse: [] });
+      return empty;
+    }
     // Validation pass over the eligible universe — registrations never
     // flushed. The universe also rides the returned array (`_pickUniverse`)
     // so the scanner's metadata extraction is DETERMINISTIC (codex R6 P2).

@@ -1336,6 +1336,17 @@ describe("workflow.each (addendum §3)", () => {
     }
   });
 
+  it("a pick whose filter excludes EVERY example yields an empty matrix, not a crash (codex R13)", () => {
+    const members = workflow.pick({ a: { ok: false } }, 1)(
+      { id: "ef-$_pick", filter: (row) => (row as { ok: boolean }).ok },
+      (wf, row) => wf.setup(async () => ({ ok: row.ok })),
+    );
+    expect(members).toHaveLength(0);
+    expect(
+      (members as unknown as { _pickUniverse: unknown[] })._pickUniverse,
+    ).toEqual([]);
+  });
+
   it("workflow.pick REQUIRES $_pick in the template id (codex S2.12 R8)", () => {
     expect(() =>
       workflow.pick({ a: { currency: "USD" } }, 1)({ id: "checkout-$currency" } as never, (wf) =>
