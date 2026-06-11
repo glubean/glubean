@@ -7,7 +7,12 @@ import type {
 } from "../contract-flow-condition.js";
 import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
 import { registerTest } from "../internal.js";
-import { interpolateTemplate, normalizeEachTable, selectPickExamples } from "../test/utils.js";
+import {
+  interpolateTemplate,
+  matchPickKeys,
+  normalizeEachTable,
+  selectPickExamples,
+} from "../test/utils.js";
 import type { Test, TestContext } from "../types.js";
 import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
 import { projectWorkflow } from "./project.js";
@@ -1401,10 +1406,10 @@ function workflowPick<T extends Record<string, unknown>>(
     const pickEnv =
       typeof process !== "undefined" ? process.env["GLUBEAN_PICK"] : undefined;
     if (pickEnv) {
-      const requested = pickEnv
-        .split(",")
-        .map((k) => k.trim())
-        .filter((k) => k.length > 0 && k in examples);
+      // glob-aware (codex S2.12 R17 P2): the pre-check resolves the override
+      // with the SAME semantics the engine uses (`us-*` etc.), so a glob
+      // matching only filtered-out examples also runs nothing.
+      const requested = matchPickKeys(pickEnv, Object.keys(examples));
       if (requested.length > 0 && !requested.some((k) => k in eligibleExamples)) {
         const empty: BuiltWorkflow[] = [];
         Object.assign(empty, {

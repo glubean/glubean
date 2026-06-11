@@ -62,6 +62,27 @@ export function normalizeEachTable<T extends Record<string, unknown>>(
 }
 
 /**
+ * Resolve a GLUBEAN_PICK override against a set of example keys — the single
+ * matching semantic shared by `selectPickExamples` and `workflow.pick`'s
+ * filter pre-check: `all`/`*` selects everything, `*`-globs match by pattern,
+ * anything else matches literally. Returns the matched keys (possibly empty).
+ */
+export function matchPickKeys(pickedEnv: string, keys: readonly string[]): string[] {
+  const trimmed = pickedEnv.trim();
+  if (trimmed === "all" || trimmed === "*") return [...keys];
+  const pickedKeys = trimmed
+    .split(",")
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0);
+  const hasGlob = pickedKeys.some((k) => k.includes("*"));
+  if (hasGlob) {
+    const patterns = pickedKeys.map((p) => globToRegExp(p));
+    return keys.filter((k) => patterns.some((re) => re.test(k)));
+  }
+  return pickedKeys.filter((k) => keys.includes(k));
+}
+
+/**
  * Convert a simple glob pattern (with `*` wildcards) to a RegExp.
  * Only `*` is supported (matches any sequence of characters).
  * @internal
@@ -89,27 +110,7 @@ export function selectPickExamples<T extends Record<string, unknown>>(
   }
 
   if (pickedEnv) {
-    const trimmed = pickedEnv.trim();
-
-    if (trimmed === "all" || trimmed === "*") {
-      return keys.map((k) => ({ ...examples[k], _pick: k }));
-    }
-
-    const pickedKeys = trimmed
-      .split(",")
-      .map((k) => k.trim())
-      .filter((k) => k.length > 0);
-
-    const hasGlob = pickedKeys.some((k) => k.includes("*"));
-
-    let validKeys: string[];
-    if (hasGlob) {
-      const patterns = pickedKeys.map((p) => globToRegExp(p));
-      validKeys = keys.filter((k) => patterns.some((re) => re.test(k)));
-    } else {
-      validKeys = pickedKeys.filter((k) => k in examples);
-    }
-
+    const validKeys = matchPickKeys(pickedEnv, keys);
     if (validKeys.length > 0) {
       return validKeys.map((k) => ({ ...examples[k], _pick: k }));
     }

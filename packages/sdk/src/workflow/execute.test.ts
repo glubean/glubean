@@ -1373,6 +1373,24 @@ describe("workflow.each (addendum §3)", () => {
     }
   });
 
+  it("a GLOB pick matching only filtered-out examples also runs nothing (codex R17)", () => {
+    const prev = process.env.GLUBEAN_PICK;
+    process.env.GLUBEAN_PICK = "us-*";
+    try {
+      const members = workflow.pick(
+        { "us-east": { ok: false }, "eu-west": { ok: true } },
+        1,
+      )(
+        { id: "gp-$_pick", filter: (row) => (row as { ok: boolean }).ok },
+        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
+      );
+      expect(members).toHaveLength(0); // glob hit only ineligible examples
+    } finally {
+      if (prev === undefined) delete process.env.GLUBEAN_PICK;
+      else process.env.GLUBEAN_PICK = prev;
+    }
+  });
+
   it("a pick whose filter excludes EVERY example yields an empty matrix, not a crash (codex R13)", () => {
     const members = workflow.pick({ a: { ok: false } }, 1)(
       { id: "ef-$_pick", filter: (row) => (row as { ok: boolean }).ok },

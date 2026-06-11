@@ -549,22 +549,41 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
     // the CLI; the harness's template expansion resolves it to the execution
     // import's current members) instead of scheduling every eligible example
     // as a concrete id (codex S2.12 R16 P2).
-    const seenPickTemplates = new Set<string>();
+    // Group-level tags = the INTERSECTION across members (mirrors the CLI:
+    // tagFields adds row-specific tags that must not gate the whole group);
+    // `only` is preserved if any member carries it (codex S2.12 R17 P2).
+    const pickGroups = new Map<
+      string,
+      { exportName: string; skip?: string; only: boolean; tags?: string[] }
+    >();
     for (const wf of result.workflows ?? []) {
-      if (wf.pick && wf.templateId) {
-        if (seenPickTemplates.has(wf.templateId)) continue;
-        seenPickTemplates.add(wf.templateId);
-        tests.push({
+      if (!wf.pick || !wf.templateId) continue;
+      const existing = pickGroups.get(wf.templateId);
+      if (!existing) {
+        pickGroups.set(wf.templateId, {
           exportName: wf.exportName,
-          id: wf.templateId,
-          name: wf.templateId,
-          skip: wf.skip !== undefined,
+          skip: wf.skip,
           only: wf.only ?? false,
-          tags: [],
-          deferred: wf.skip,
+          tags: wf.tags ? [...wf.tags] : undefined,
         });
-        continue;
+      } else {
+        if (wf.only) existing.only = true;
+        existing.tags = existing.tags?.filter((t) => wf.tags?.includes(t));
       }
+    }
+    for (const [templateId, g] of pickGroups) {
+      tests.push({
+        exportName: g.exportName,
+        id: templateId,
+        name: templateId,
+        skip: g.skip !== undefined,
+        only: g.only,
+        tags: g.tags && g.tags.length > 0 ? g.tags : [],
+        deferred: g.skip,
+      });
+    }
+    for (const wf of result.workflows ?? []) {
+      if (wf.pick && wf.templateId) continue; // grouped above
       tests.push({
         exportName: wf.exportName,
         id: wf.id,
