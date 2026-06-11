@@ -1270,8 +1270,15 @@ function buildEachMembers<T extends Record<string, unknown>>(
       builder._suppressRegistration = true; // registered only after ALL rows validate
       const result = factory(builder, row as T);
       // An async factory would add nodes after we build — same hazard as an
-      // async branch side (codex S2.4a R5): reject thenables.
+      // async branch side (codex S2.4a R5): reject thenables. Consume the
+      // promise first: its continuation will reject later (the builder is
+      // finalized by then), and an unhandled rejection would bury this
+      // actionable diagnostic (codex S2.12 R4 P3).
       if (result && typeof (result as { then?: unknown }).then === "function") {
+        (result as Promise<unknown>).then(
+          () => {},
+          () => {},
+        );
         throw new Error(
           `workflow.each() "${meta.id}": the factory must be synchronous — an async ` +
             `factory loses any steps added after an await`,

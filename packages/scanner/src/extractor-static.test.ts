@@ -133,6 +133,25 @@ export const clean = workflow.each([{ region: "us" }])(
   });
 });
 
+test("shadowing locals inside nested runtime callbacks do NOT flag (S2.12 R4)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+export const shadowed = workflow.each([{ region: "us" }])(
+  { id: "sh-$region" },
+  (wf, row) =>
+    wf.setup(async () => ({}))
+      .action("probe", async (ctx, s) => {
+        const wf = makeClient(); // shadows the builder param inside a RUNTIME callback
+        await wf.poll();
+        return s;
+      }),
+);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBeUndefined(); // linear graph — no flag
+});
+
 test("factory branch calls through LOCAL builder aliases are flagged too (S2.12 R2)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

@@ -154,6 +154,33 @@ function chainHead(init: AnyNode): AnyNode | undefined {
   return node;
 }
 
+/** Like `walk`, but does NOT descend into nested function scopes (arrow /
+ * function expressions / declarations). The factory's graph calls live at its
+ * top level — branch sides etc. are flagged by the outer `.branch(` on the
+ * chain — while runtime callbacks may declare shadowing locals (`const wf =
+ * ...` inside an action) that must not leak into the scan (codex S2.12 R4). */
+function walkSameScope(node: AnyNode, cb: (n: AnyNode) => void): void {
+  cb(node);
+  for (const key of Object.keys(node)) {
+    const value = (node as Record<string, unknown>)[key];
+    const visit = (v: unknown): void => {
+      if (!v || typeof v !== "object") return;
+      const child = v as AnyNode;
+      if (typeof child.type !== "string") return;
+      if (
+        child.type === "ArrowFunctionExpression" ||
+        child.type === "FunctionExpression" ||
+        child.type === "FunctionDeclaration"
+      ) {
+        return; // nested scope — stop here
+      }
+      walkSameScope(child, cb);
+    };
+    if (Array.isArray(value)) value.forEach(visit);
+    else visit(value);
+  }
+}
+
 /** The branch-family + poll method names the Cloud-render gate flags. */
 const BRANCH_FAMILY_METHODS = new Set(["branch", "poll", "pollAction", "switch", "route"]);
 
@@ -355,7 +382,7 @@ function parseTestDeclaration(
             }
             return root;
           };
-          walk(factory.body as AnyNode, (n) => {
+          walkSameScope(factory.body as AnyNode, (n) => {
             if (n.type !== "VariableDeclarator") return;
             const id = n.id as AnyNode | undefined;
             if (id?.type !== "Identifier") return;
@@ -364,7 +391,7 @@ function parseTestDeclaration(
               builderNames.add(id.name as string);
             }
           });
-          walk(factory.body as AnyNode, (n) => {
+          walkSameScope(factory.body as AnyNode, (n) => {
             if (hasBranchOrPoll || n.type !== "CallExpression") return;
             const callee = unwrapExpression(n.callee as AnyNode);
             if (!callee || callee.type !== "MemberExpression" || callee.computed === true) return;
