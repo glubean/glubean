@@ -625,6 +625,9 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
     skip: m.skip,
     only: m.only,
     tags: m.tags,
+    // ProjectRunner gates batch concurrency on meta.parallel — static
+    // discovery must return it like the CLI does (codex S2.12 R20 P2).
+    parallel: m.parallel,
     groupId: m.groupId ?? (m.variant === "pick" || m.parallel ? m.id : undefined),
   }));
   return { fileUrl, tests };
@@ -1145,6 +1148,13 @@ export async function runLocalTestsFromFile(args: {
     if (evt.type !== "file:event") continue; // MCP only cares about test-level events below
 
     const event = evt.event;
+    // Attribution under PARALLEL batches (codex S2.12 R20 P1): every
+    // test-scoped event may carry `testId`; the single mutable currentTestId
+    // is only the fallback for sequential runs where it's absent. Without
+    // this, interleaved events from a parallel workflow.each matrix landed on
+    // whichever test started last.
+    const eventTestId =
+      (event as { testId?: string }).testId ?? currentTestId;
     switch (event.type) {
       case "start": {
         currentTestId = event.id;
@@ -1158,14 +1168,14 @@ export async function runLocalTestsFromFile(args: {
         break;
       }
       case "log": {
-        if (!includeLogs || !currentTestId) break;
-        const acc = accumulators.get(currentTestId);
+        if (!includeLogs || !eventTestId) break;
+        const acc = accumulators.get(eventTestId);
         if (acc) acc.logs.push({ message: event.message, data: event.data });
         break;
       }
       case "assertion": {
-        if (!currentTestId) break;
-        const acc = accumulators.get(currentTestId);
+        if (!eventTestId) break;
+        const acc = accumulators.get(eventTestId);
         if (acc) {
           acc.assertions.push({
             passed: event.passed,
@@ -1177,14 +1187,14 @@ export async function runLocalTestsFromFile(args: {
         break;
       }
       case "trace": {
-        if (!includeTraces || !currentTestId) break;
-        const acc = accumulators.get(currentTestId);
+        if (!includeTraces || !eventTestId) break;
+        const acc = accumulators.get(eventTestId);
         if (acc) acc.traces.push(stripTraceHeaders(event.data, traceConfig));
         break;
       }
       case "status": {
-        if (!currentTestId) break;
-        const acc = accumulators.get(currentTestId);
+        if (!eventTestId) break;
+        const acc = accumulators.get(eventTestId);
         if (!acc) break;
         acc.statusSuccess = event.status === "completed";
         if (event.error) acc.errorMessage = event.error;
@@ -1200,11 +1210,11 @@ export async function runLocalTestsFromFile(args: {
         const success = cleanSkip
           ? true
           : acc.statusSuccess && allAssertionsPassed && !acc.errorMessage;
-        const testMeta = selected.find((t) => matchesTemplateId(t.id, currentTestId!));
+        const testMeta = selected.find((t) => matchesTemplateId(t.id, eventTestId));
         const result: LocalRunResult = {
           exportName: testMeta?.exportName ?? "",
-          id: currentTestId,
-          name: testMeta?.name ?? currentTestId,
+          id: eventTestId,
+          name: testMeta?.name ?? eventTestId,
           success,
           ...(cleanSkip && { skipped: true }),
           durationMs: Date.now() - acc.start,
@@ -1215,12 +1225,12 @@ export async function runLocalTestsFromFile(args: {
             ? { message: acc.errorMessage, stack: acc.errorStack }
             : undefined,
         };
-        resultsByTestId.set(currentTestId, result);
-        currentTestId = undefined;
+        resultsByTestId.set(eventTestId, result);
+        if (currentTestId === eventTestId) currentTestId = undefined;
         break;
       }
       case "error": {
-        if (!currentTestId) {
+        if (!eventTestId) {
           // Subprocess crashed before starting any test (e.g. tsx failed to
           // start, syntax error before first `start` event). Capture as an
           // orchestration error so the caller sees a non-empty error field
@@ -1228,7 +1238,7 @@ export async function runLocalTestsFromFile(args: {
           if (!orchestrationError) orchestrationError = event.message;
           break;
         }
-        const acc = accumulators.get(currentTestId);
+        const acc = accumulators.get(eventTestId);
         if (acc && !acc.errorMessage) acc.errorMessage = event.message;
         break;
       }
