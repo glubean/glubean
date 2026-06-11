@@ -139,7 +139,7 @@ export type RouteOpts<State> =
  * at the last station.
  */
 export interface TerminalWorkflowBuilder<State> {
-  teardown(fn: WorkflowTeardown<State>): TerminalWorkflowBuilder<State>;
+  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): TerminalWorkflowBuilder<State>;
   build(): BuiltWorkflow<State>;
 }
 
@@ -216,6 +216,31 @@ export type PollOptsWithInput<
 };
 
 /**
+ * Validate a per-node timeout (§17 #4) at build time. Only the ASYNC node
+ * kinds accept one; `compute` is synchronous by contract and `poll`/the branch
+ * family own their own bounds/decision semantics — a timeout there would be
+ * dead config pretending to protect something.
+ */
+function validateNodeTimeout(meta: NodeMeta, kind: string): void {
+  if (meta.timeout === undefined) return;
+  if (kind !== "call" && kind !== "action" && kind !== "check") {
+    throw new Error(
+      `workflow.${kind}() "${meta.id}": \`timeout\` is not supported on ${kind} nodes — ` +
+        (kind === "poll"
+          ? "a poll owns its own bounds (timeout/perAttemptTimeout/maxAttempts)"
+          : kind === "compute"
+            ? "compute is synchronous by contract"
+            : "the branch family's decision has no timeout semantics"),
+    );
+  }
+  if (typeof meta.timeout !== "number" || !Number.isFinite(meta.timeout) || meta.timeout <= 0) {
+    throw new Error(
+      `workflow.${kind}() "${meta.id}": \`timeout\` must be a finite number > 0 (ms); got ${String(meta.timeout)}`,
+    );
+  }
+}
+
+/**
  * Normalize a step's first argument into a `NodeMeta`. A string is shorthand for
  * the node `id` (mirrors `workflow(id)`); an object is spread as-is. `id` falls
  * back to `name` then to a positional `${idPrefix}node-${index}`; `name` defaults
@@ -279,10 +304,12 @@ export interface CallBindingsWithInput<
 export interface WorkflowBuilder<State> {
   /** Merge workflow-level metadata (id is fixed at creation). */
   meta(meta: Omit<Partial<WorkflowMeta>, "id">): ChainedWorkflowBuilder<State>;
-  /** The one I/O-capable initializer; its return is the initial state. */
-  setup<S>(fn: WorkflowSetup<S>): ChainedWorkflowBuilder<S>;
-  /** Always-run cleanup (see lifecycle decision in the plan's self-consistency corpus). */
-  teardown(fn: WorkflowTeardown<State>): ChainedWorkflowBuilder<State>;
+  /** The one I/O-capable initializer; its return is the initial state.
+   * `timeout` (ms, §17 #4) is TERMINAL — a timed-out setup fails the run. */
+  setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number }): ChainedWorkflowBuilder<S>;
+  /** Always-run cleanup (see lifecycle decision in the plan's self-consistency
+   * corpus). `timeout` (ms, §17 #4) is TERMINAL — logged, never masks the cause. */
+  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): ChainedWorkflowBuilder<State>;
   /**
    * Use a reusable contract interaction. First arg: node id or `{...NodeMeta}`.
    * Preserves the case's generics (codex slice-1 P2): when the case requires
@@ -394,7 +421,9 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
 
   private _meta: WorkflowMeta;
   private _setup?: WorkflowSetup<any>;
+  private _setupTimeoutMs?: number;
   private _teardown?: WorkflowTeardown<any>;
+  private _teardownTimeoutMs?: number;
   private readonly _nodes: WorkflowNode[] = [];
   private _built?: BuiltWorkflow<State>;
   /** The first authoring error, if any — a poisoned builder never finalizes. */
@@ -449,7 +478,16 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     });
   }
 
-  setup<S>(fn: WorkflowSetup<S>): ChainedWorkflowBuilder<S> {
+  private static validateLifecycleTimeout(phase: string, timeout: number | undefined): void {
+    if (timeout === undefined) return;
+    if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
+      throw new Error(
+        `workflow.${phase}(): \`timeout\` must be a finite number > 0 (ms); got ${String(timeout)}`,
+      );
+    }
+  }
+
+  setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number }): ChainedWorkflowBuilder<S> {
     return this.authoring(() => {
       this.assertNotBuilt("setup");
       // setup runs first at execution, so authoring it after a node OR after
@@ -459,15 +497,19 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
           "workflow.setup() must be called before any step (call/action/check/compute) or teardown",
         );
       }
+      WorkflowBuilderImpl.validateLifecycleTimeout("setup", opts?.timeout);
       this._setup = fn;
+      this._setupTimeoutMs = opts?.timeout;
       return this as unknown as ChainedWorkflowBuilder<S>;
     });
   }
 
-  teardown(fn: WorkflowTeardown<State>): ChainedWorkflowBuilder<State> {
+  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNotBuilt("teardown");
+      WorkflowBuilderImpl.validateLifecycleTimeout("teardown", opts?.timeout);
       this._teardown = fn;
+      this._teardownTimeoutMs = opts?.timeout;
       return this.chained();
     });
   }
@@ -508,6 +550,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("call");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "call");
       const bindings = rest[0] as
         | {
             in?: (state: State) => unknown;
@@ -541,6 +584,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("action");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "action");
       if (opts?.retry) validateRetryMeta(opts.retry, meta.id);
       const node: ActionNode<State> = {
         kind: "action",
@@ -561,9 +605,11 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   ): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("check");
+      const checkMeta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(checkMeta, "check");
       const node: CheckNode<State> = {
         kind: "check",
-        meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
+        meta: checkMeta,
         fn: fn as CheckNode<State>["fn"],
         project: opts?.project,
       };
@@ -588,9 +634,11 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
           "workflow.compute() must be synchronous — use .action() for async work",
         );
       }
+      const computeMeta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(computeMeta, "compute");
       const node: ComputeNode<State> = {
         kind: "compute",
-        meta: normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix),
+        meta: computeMeta,
         fn: fn as unknown as ComputeNode<State>["fn"],
       };
       this._nodes.push(node as WorkflowNode);
@@ -602,6 +650,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("branch");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "branch");
       // 2-way sugar over the branch-family IR (addendum §9): one predicate case
       // (then) + default (else). Prefix each side's anonymous-fallback ids with
       // the branch id + side so flat outcome/projection ids stay unique (S2.4a R7).
@@ -630,6 +679,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("switch");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "switch");
       const node: BranchNode<State> = {
         kind: "branch",
         meta,
@@ -647,6 +697,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("route");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "route");
       // route's default is REQUIRED (a no-match must be defined — §9 #5); the
       // types enforce it, but `as any`/JS callers can omit it.
       if (typeof opts.default !== "function") {
@@ -769,6 +820,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("poll");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "poll");
       const opts = rest[0] as
         | (PollUntil<State, unknown> &
             PollBounds & {
@@ -1008,7 +1060,11 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       __glubean_type: "workflow" as const,
       meta,
       setup: this._setup,
+      ...(this._setupTimeoutMs !== undefined ? { setupTimeoutMs: this._setupTimeoutMs } : {}),
       teardown: this._teardown,
+      ...(this._teardownTimeoutMs !== undefined
+        ? { teardownTimeoutMs: this._teardownTimeoutMs }
+        : {}),
       nodes: this._nodes.slice(),
     }) as unknown as BuiltWorkflow<State>;
 

@@ -309,6 +309,8 @@ export interface NormalizedWorkflowNode {
   maxAttempts?: number;
   /** call/action: explicit-intent retry. */
   retry?: { attempts: number; delay?: number; reason: string };
+  /** call/action/check: per-node terminal timeout (§17 #4). */
+  nodeTimeoutMs?: number;
 }
 
 /** Workflow projection as carried in metadata.json (mirror of WorkflowProjection). */

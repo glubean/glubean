@@ -2018,6 +2018,100 @@ describe("runWorkflow — poll (§17 #3)", () => {
   });
 });
 
+// --- per-node + lifecycle timeouts (§17 #4 wiring — S2.9) ----------------------
+
+describe("workflow timeouts (§17 #4)", () => {
+  it("builder: timeout only on call/action/check; finite > 0", () => {
+    const fn = async (_c: unknown, s: unknown) => s;
+    expect(() => workflow("w").compute({ id: "c", timeout: 50 }, (s) => s)).toThrow(
+      /not supported on compute/,
+    );
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({ ok: true }))
+        .branch({ id: "b", timeout: 50 }, {
+          when: (w) => w.when((s: { ok: boolean }) => s.ok).eq(true),
+          then: (b) => b.check("c", async () => {}),
+        }),
+    ).toThrow(/not supported on branch/);
+    expect(() => workflow("w").action({ id: "a", timeout: 0 }, fn as never)).toThrow(
+      /finite number > 0/,
+    );
+    expect(() => workflow("w").action({ id: "a", timeout: 50 }, fn as never)).not.toThrow();
+  });
+
+  it("a hung action is aborted at its node timeout — TERMINAL even with retry configured", async () => {
+    const { ctx } = fakeBase();
+    let calls = 0;
+    const wf = workflow("t-node")
+      .setup(async () => ({}))
+      .action(
+        { id: "slow", timeout: 20 },
+        async () => {
+          calls += 1;
+          await delay(200);
+        },
+        { retry: { attempts: 3, reason: "must not replay a timeout" } },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(NodeTimeoutError);
+    expect(calls).toBe(1); // §17 #4: terminal — never retried
+  });
+
+  it("a timed-out setup fails the run with the timeout as the cause; teardown still runs", async () => {
+    const { ctx } = fakeBase();
+    let teardownCause: unknown;
+    const wf = workflow("t-setup")
+      .setup(async () => {
+        await delay(200);
+        return {};
+      }, { timeout: 20 })
+      .compute("never", (s) => s)
+      .teardown(async (_c, _s, cause) => {
+        teardownCause = cause;
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(NodeTimeoutError);
+    expect(teardownCause).toBeInstanceOf(NodeTimeoutError);
+    expect(res.nodes.find((n) => n.id === "never")!.status).toBe("skipped");
+  });
+
+  it("a timed-out teardown is logged and never masks the run's verdict (§17 #1)", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("t-teardown")
+      .setup(async () => ({ ok: true }))
+      .compute("c", (s) => s)
+      .teardown(async () => {
+        await delay(200);
+      }, { timeout: 20 })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed"); // teardown timeout doesn't fail a passed run
+    expect(rec.logs.some((l) => l.includes("teardown failed"))).toBe(true);
+  });
+
+  it("lifecycle timeout validation: finite > 0", () => {
+    expect(() => workflow("w").setup(async () => ({}), { timeout: -5 })).toThrow(
+      /finite number > 0/,
+    );
+  });
+
+  it("the per-node timeout is projectable (nodeTimeoutMs on call/action/check)", () => {
+    const wf = workflow("t-proj")
+      .setup(async () => ({}))
+      .action({ id: "a", timeout: 1500 }, (async (_c: unknown, s: unknown) => s) as never)
+      .check({ id: "k", timeout: 800 }, async () => {})
+      .build();
+    const proj = projectWorkflow(wf);
+    expect(proj.nodes.find((n) => n.id === "a")!.nodeTimeoutMs).toBe(1500);
+    expect(proj.nodes.find((n) => n.id === "k")!.nodeTimeoutMs).toBe(800);
+  });
+});
+
 // --- retry: explicit-intent retry on call/action (§17 #7) ---------------------
 
 describe("workflow retry (§17 #7)", () => {

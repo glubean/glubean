@@ -928,8 +928,10 @@ async function runLeafNode(
     }
   }
   const maxAttempts = retry?.attempts ?? 1;
+  const timeoutOpt =
+    node.meta.timeout !== undefined ? { timeoutMs: node.meta.timeout } : {};
   if (!retry) {
-    r = await runNode(baseCtx, node, state, { staticGrade: grade });
+    r = await runNode(baseCtx, node, state, { staticGrade: grade, ...timeoutOpt });
   } else {
     // A failed attempt is terminal when it cannot/must not be replayed: a
     // passed/skipped verdict (skip is control flow), a timeout (TERMINAL,
@@ -978,6 +980,7 @@ async function runLeafNode(
       let flushed = false;
       r = await runNode(attemptCtx, node, state, {
         staticGrade: grade,
+        ...timeoutOpt, // §17 #4: a timed-out attempt is TERMINAL — never retried
         attempt: { n: attempt, of: maxAttempts },
         // Flush the verdict-deciding attempt's evidence BEFORE its node_end is
         // emitted, so the assertions land INSIDE the attempt bracket on the
@@ -1533,7 +1536,16 @@ export async function runWorkflow<State = unknown>(
       let setupError: unknown;
       let threw = false;
       try {
-        setupResult = await wf.setup(scope.ctx);
+        // setup is an async lifecycle node — its terminal timeout (§17 #4)
+        // budget-races the body; on expiry the run fails with the timeout as
+        // the cause and the seal (below) quarantines any late evidence.
+        const setupRun = Promise.resolve(wf.setup(scope.ctx));
+        setupResult =
+          wf.setupTimeoutMs !== undefined
+            ? await raceBudget(setupRun, wf.setupTimeoutMs, () =>
+                new NodeTimeoutError("setup", wf.setupTimeoutMs as number),
+              )
+            : await setupRun;
       } catch (e) {
         threw = true;
         setupError = e;
@@ -1586,7 +1598,18 @@ export async function runWorkflow<State = unknown>(
       const { scope, ac } = deriveLifecycleScope(baseCtx);
       let teardownThrew = false;
       try {
-        await wf.teardown(scope.ctx, state as State | undefined, cause);
+        const teardownRun = Promise.resolve(
+          wf.teardown(scope.ctx, state as State | undefined, cause),
+        );
+        // teardown's terminal timeout (§17 #4): logged like any teardown
+        // failure — it NEVER masks the primary cause (§17 #1).
+        if (wf.teardownTimeoutMs !== undefined) {
+          await raceBudget(teardownRun, wf.teardownTimeoutMs, () =>
+            new NodeTimeoutError("teardown", wf.teardownTimeoutMs as number),
+          );
+        } else {
+          await teardownRun;
+        }
       } catch (teardownErr) {
         teardownThrew = true;
         // Logged, NEVER masks the primary cause (§17 #1).

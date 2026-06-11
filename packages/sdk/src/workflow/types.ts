@@ -93,6 +93,14 @@ export interface NodeMeta {
   description?: string;
   tags?: string[];
   extensions?: Record<string, unknown>;
+  /**
+   * Per-node TERMINAL timeout in ms (§17 #4): the node is aborted (its signal
+   * fires, late evidence is quarantined) and NEVER retried — a timeout wins
+   * over `retry`. Accepted on the ASYNC node kinds (call / action / check);
+   * rejected on `compute` (synchronous by contract) and `poll` (owns its own
+   * bounds: timeout/perAttemptTimeout/maxAttempts).
+   */
+  timeout?: number;
 }
 
 /** First-arg of every step: a string id shorthand, or a full `NodeMeta`. */
@@ -313,7 +321,11 @@ export interface Workflow<State = any> {
   readonly __glubean_type: "workflow";
   readonly meta: WorkflowMeta;
   readonly setup?: WorkflowSetup<any>;
+  /** Terminal timeout for setup (ms, §17 #4) — a timed-out setup fails the run. */
+  readonly setupTimeoutMs?: number;
   readonly teardown?: WorkflowTeardown<State>;
+  /** Terminal timeout for teardown (ms, §17 #4) — logged, never masks the cause. */
+  readonly teardownTimeoutMs?: number;
   readonly nodes: readonly WorkflowNode[];
 }
 
@@ -390,6 +402,9 @@ export interface ProjectedWorkflowNode {
   maxAttempts?: number;
   /** call/action: explicit-intent retry (§17 #7) — intent is projectable. */
   retry?: RetryMeta;
+  /** call/action/check: per-node terminal timeout (§17 #4). (Poll's own
+   * bounds already project via timeoutMs/perAttemptTimeoutMs/maxAttempts.) */
+  nodeTimeoutMs?: number;
 }
 
 export interface WorkflowProjection {

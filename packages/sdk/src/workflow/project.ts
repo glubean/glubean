@@ -129,6 +129,7 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         caseKey: n.ref.caseKey,
         accept: n.accept,
         retry: n.retry,
+        ...(n.meta.timeout !== undefined ? { nodeTimeoutMs: n.meta.timeout } : {}),
       };
     }
     case "compute":
@@ -144,11 +145,20 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         writes: p?.writes,
         note: p?.note,
         retry: a.retry,
+        ...(a.meta.timeout !== undefined ? { nodeTimeoutMs: a.meta.timeout } : {}),
       };
     }
     case "check": {
-      const p = (node as CheckNode).project;
-      return { ...base, kind: "check", grade, reads: p?.reads, asserts: p?.asserts };
+      const c = node as CheckNode;
+      const p = c.project;
+      return {
+        ...base,
+        kind: "check",
+        grade,
+        reads: p?.reads,
+        asserts: p?.asserts,
+        ...(c.meta.timeout !== undefined ? { nodeTimeoutMs: c.meta.timeout } : {}),
+      };
     }
     case "group": {
       const children = (node as GroupNode).nodes.map(projectNode);
