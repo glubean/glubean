@@ -1388,6 +1388,24 @@ describe("workflow.each (addendum §3)", () => {
     }
   });
 
+  it("a prototype-key example name cannot defeat the filtered-override check (codex R19)", () => {
+    const prev = process.env.GLUBEAN_PICK;
+    process.env.GLUBEAN_PICK = "constructor";
+    try {
+      const members = workflow.pick(
+        { constructor: { ok: false }, other: { ok: true } } as Record<string, { ok: boolean }>,
+        1,
+      )(
+        { id: "pk-$_pick", filter: (row) => (row as { ok: boolean }).ok },
+        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
+      );
+      expect(members).toHaveLength(0); // NOT a random fallback to "other"
+    } finally {
+      if (prev === undefined) delete process.env.GLUBEAN_PICK;
+      else process.env.GLUBEAN_PICK = prev;
+    }
+  });
+
   it("a GLOB pick matching only filtered-out examples also runs nothing (codex R17)", () => {
     const prev = process.env.GLUBEAN_PICK;
     process.env.GLUBEAN_PICK = "us-*";

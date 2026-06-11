@@ -1410,7 +1410,9 @@ function workflowPick<T extends Record<string, unknown>>(
       // with the SAME semantics the engine uses (`us-*` etc.), so a glob
       // matching only filtered-out examples also runs nothing.
       const requested = matchPickKeys(pickEnv, Object.keys(examples));
-      if (requested.length > 0 && !requested.some((k) => k in eligibleExamples)) {
+      // Object.hasOwn — `in` would see Object.prototype keys (constructor,
+      // toString…) and skip the empty-result branch (codex S2.12 R19 P2).
+      if (requested.length > 0 && !requested.some((k) => Object.hasOwn(eligibleExamples, k))) {
         const empty: BuiltWorkflow[] = [];
         Object.assign(empty, {
           _pickUniverse: buildEachMembers(eligibleRows, { ...meta, filter: undefined, pickGroup: true } as WorkflowEachMeta<T & { _pick: string }>, factory),

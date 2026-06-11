@@ -452,6 +452,8 @@ interface DiscoveredTest {
   only?: boolean;
   tags?: string[];
   groupId?: string;
+  /** Data-driven members: group may run concurrently (drives ProjectRunner). */
+  parallel?: boolean;
   requires?: string;
   defaultRun?: string;
   deferred?: string;
@@ -554,7 +556,14 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
     // `only` is preserved if any member carries it (codex S2.12 R17 P2).
     const pickGroups = new Map<
       string,
-      { exportName: string; skip?: string; only: boolean; tags?: string[] }
+      {
+        exportName: string;
+        skip?: string;
+        only: boolean;
+        tags?: string[];
+        groupId?: string;
+        parallel?: boolean;
+      }
     >();
     for (const wf of result.workflows ?? []) {
       if (!wf.pick || !wf.templateId) continue;
@@ -565,6 +574,8 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
           skip: wf.skip,
           only: wf.only ?? false,
           tags: wf.tags ? [...wf.tags] : undefined,
+          groupId: wf.groupId,
+          parallel: wf.parallel,
         });
       } else {
         if (wf.only) existing.only = true;
@@ -580,6 +591,8 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
         only: g.only,
         tags: g.tags && g.tags.length > 0 ? g.tags : [],
         deferred: g.skip,
+        ...(g.groupId ? { groupId: g.groupId } : {}),
+        ...(g.parallel ? { parallel: true } : {}),
       });
     }
     for (const wf of result.workflows ?? []) {
@@ -592,6 +605,11 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
         only: wf.only ?? false,
         tags: wf.tags ?? [],
         deferred: wf.skip,
+        // ProjectRunner enables batch concurrency only when meta.parallel is
+        // present — drop it here and MCP runs ignore the matrix's concurrency
+        // (codex S2.12 R19 P2).
+        ...(wf.groupId ? { groupId: wf.groupId } : {}),
+        ...(wf.parallel ? { parallel: true } : {}),
       });
     }
 
@@ -985,6 +1003,7 @@ export async function runLocalTestsFromFile(args: {
       name: t.name,
       tags: t.tags,
       groupId: t.groupId,
+      parallel: t.parallel,
       only: t.only,
       skip: t.skip,
     } as ProjectRunnerTest["meta"],
