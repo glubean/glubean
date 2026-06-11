@@ -1194,7 +1194,7 @@ function workflowFn(idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined>
  * factory only authors the body.
  */
 export interface WorkflowEachMeta<T>
-  extends Omit<WorkflowMeta, "groupId" | "parallel" | "templateId"> {
+  extends Omit<WorkflowMeta, "groupId" | "parallel" | "templateId" | "pickGroup"> {
   /** Template id, e.g. "checkout-$region". */
   id: string;
   /** Row fields auto-tagged as `field:value` per member. */
@@ -1358,8 +1358,9 @@ function workflowPick<T extends Record<string, unknown>>(
     // scanner's metadata extraction is DETERMINISTIC: scan records every
     // example's projection (the declaration inventory), independent of which
     // members this import's random selection produced (codex S2.12 R6 P2).
-    const universe = buildEachMembers(allRows, meta, factory);
-    const members = buildEachMembers(selectPickExamples(examples, count), meta, factory);
+    const pickMeta = { ...meta, pickGroup: true } as WorkflowEachMeta<T & { _pick: string }>;
+    const universe = buildEachMembers(allRows, pickMeta, factory);
+    const members = buildEachMembers(selectPickExamples(examples, count), pickMeta, factory);
     for (const m of members) {
       (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
     }

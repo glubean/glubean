@@ -605,7 +605,9 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
       }
     >();
     for (const wf of result.workflows) {
-      if (!wf.templateId || !wf.templateId.includes("$_pick")) continue;
+      // explicit pick marker — an each over an object table can legitimately
+      // use $_pick in its id while staying deterministic (codex S2.12 R9 P2).
+      if (!wf.pick || !wf.templateId) continue;
       const existing = pickGroups.get(wf.templateId);
       if (!existing) {
         pickGroups.set(wf.templateId, {
@@ -639,7 +641,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
       });
     }
     for (const wf of result.workflows) {
-      if (wf.templateId && wf.templateId.includes("$_pick")) continue; // grouped above
+      if (wf.pick && wf.templateId) continue; // grouped above
       results.push({
         exportName: wf.exportName,
         meta: {

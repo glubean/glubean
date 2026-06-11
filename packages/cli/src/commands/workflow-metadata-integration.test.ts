@@ -172,6 +172,28 @@ export const picky = workflow.pick({
   expect(pickEntries[0].meta.kind).toBe("flow");
 });
 
+test("workflow.each over an OBJECT table with $_pick in the id stays concrete (not a pick group)", async () => {
+  const dir = join(FIXTURE_ROOT, "5");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, "keyed.flow.ts");
+  await writeFile(
+    file,
+    `
+import { workflow } from "@glubean/sdk";
+export const keyed = workflow.each({
+  alpha: { currency: "USD" },
+  beta: { currency: "EUR" },
+})(
+  { id: "keyed-$_pick" }, // map key in the id — but each is DETERMINISTIC
+  (wf, row) => wf.setup(async () => ({ c: row.currency })).compute("derive", (s) => s),
+);
+`,
+  );
+  const discovered = await discoverTests(file);
+  const ids = discovered.filter((d) => d.meta.id.startsWith("keyed")).map((d) => d.meta.id).sort();
+  expect(ids).toEqual(["keyed-alpha", "keyed-beta"]); // concrete rows, no template collapse
+});
+
 test("a workflow-ONLY project scans as non-empty (no false warning) and still builds metadata", async () => {
   const dir = join(FIXTURE_ROOT, "2");
   await mkdir(dir, { recursive: true });

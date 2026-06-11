@@ -256,6 +256,7 @@ export function projectWorkflow(wf: Workflow): WorkflowProjection {
     // part of the projection wherever it is produced — not only on the cached
     // handle (codex S2.12 R5 P2).
     ...(wf.meta.templateId ? { templateId: wf.meta.templateId } : {}),
+    ...(wf.meta.pickGroup ? { pick: true } : {}),
     ...(wf.meta.groupId ? { groupId: wf.meta.groupId } : {}),
     ...(wf.meta.parallel ? { parallel: true } : {}),
     name: wf.meta.name,

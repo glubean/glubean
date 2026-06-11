@@ -133,6 +133,16 @@ export const clean = workflow.each([{ region: "us" }])(
   });
 });
 
+test("a helper-reference factory fails CLOSED on the branch/poll flag (S2.12 R9)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow } from "./helpers";
+export const matrix = workflow.each([{ region: "us" }])({ id: "h-$region" }, makeFlow);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true); // uninspectable — gate closed
+});
+
 test("shadowing locals inside nested runtime callbacks do NOT flag (S2.12 R4)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

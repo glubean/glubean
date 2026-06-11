@@ -364,6 +364,17 @@ function parseTestDeclaration(
       const factory = factoryArg ? unwrapExpression(factoryArg) : undefined;
       if (
         factory &&
+        factory.type !== "ArrowFunctionExpression" &&
+        factory.type !== "FunctionExpression"
+      ) {
+        // A helper-reference factory (`workflow.each(rows)(meta, makeFlow)`)
+        // cannot be inspected statically, and test files are never runtime
+        // re-extracted — fail CLOSED so a branch/poll graph inside the helper
+        // can't slip past the upload gate (codex S2.12 R9 P2). Inline the
+        // factory (or move the workflow to a .flow.ts) to lift the flag.
+        hasBranchOrPoll = true;
+      } else if (
+        factory &&
         (factory.type === "ArrowFunctionExpression" || factory.type === "FunctionExpression")
       ) {
         const params = factory.params as AnyNode[] | undefined;
