@@ -1208,7 +1208,10 @@ export async function runCommand(
       const extractableFiles = new Set(
         selectedFlows
           .map((ft) => ft.filePath)
-          .filter((p) => classifyGlubeanFile(p) !== "test"),
+          // Exclude EVERY test-file suffix (.test.ts/.js/.mjs/…), not just the
+          // .ts one classifyGlubeanFile knows: re-extraction imports the file,
+          // and test files must never be runtime-imported (codex S2.6 R12 P2).
+          .filter((p) => classifyGlubeanFile(p) !== "test" && !basename(p).includes(".test.")),
       );
       for (const filePath of extractableFiles) {
         try {

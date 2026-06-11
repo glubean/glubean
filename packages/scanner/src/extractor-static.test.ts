@@ -78,6 +78,33 @@ export const unbuilt = workflow({ id: "wf-unbuilt", tags: ["journey"] })
   expect(result[1]).toMatchObject({ type: "test", id: "wf-unbuilt", exportName: "unbuilt", workflow: true });
 });
 
+test("aliased workflow imports are still classified as workflows (S2.6 R12)", () => {
+  const content = `
+import { workflow as journeyTest } from "@glubean/sdk";
+import { workflow as wf } from "@glubean/sdk";
+
+// alias satisfying the *Test convention — must NOT pass as a plain test
+export const j = journeyTest("aliased-branched")
+  .setup(async () => ({ ok: true }))
+  .branch("route", {
+    when: (w) => w.when((s) => s.ok).eq(true),
+    then: (b) => b.compute("c", (s) => s),
+  })
+  .build();
+
+// alias matching NO convention — must still be discovered AND classified
+export const w = wf("aliased-linear").compute("c", (s) => s).build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(
+    result.map((m) => [m.id, [m.workflow ?? false, m.workflowHasBranchOrPoll ?? false]]),
+  );
+  expect(byId).toEqual({
+    "aliased-branched": [true, true],
+    "aliased-linear": [true, false],
+  });
+});
+
 test("workflow exports carry a static branch/poll flag for the upload gate (S2.6 R10)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

@@ -26,6 +26,7 @@ import {
   walk,
   lineOf,
   type AnyNode,
+  type SourceFile,
 } from "./ast.js";
 import type { ExportMeta } from "./types.js";
 import type { ContractCaseStaticMeta, ContractStaticMeta, FlowStaticMeta, PickMeta } from "./extractor-static.js";
@@ -136,10 +137,40 @@ function chainHead(init: AnyNode): AnyNode | undefined {
   return node;
 }
 
+/**
+ * Local names bound to the SDK's `workflow` factory via named-import aliases
+ * (`import { workflow as journeyTest } ...`). The literal `workflow` is always
+ * included. Without this, an alias that happens to satisfy the `*Test`/`*Task`
+ * convention (or customFns) would be classified as a plain test and bypass the
+ * workflow marker + the --upload branch/poll gate (codex S2.6 R12 P2).
+ */
+function collectWorkflowAliases(source: SourceFile): Set<string> {
+  const aliases = new Set<string>(["workflow"]);
+  const body = (source.program.body as AnyNode[] | undefined) ?? [];
+  for (const stmt of body) {
+    if (stmt.type !== "ImportDeclaration") continue;
+    const specifiers = (stmt.specifiers as AnyNode[] | undefined) ?? [];
+    for (const spec of specifiers) {
+      if (spec.type !== "ImportSpecifier") continue;
+      const imported = spec.imported as AnyNode | undefined;
+      const importedName =
+        imported?.type === "Identifier"
+          ? (imported.name as string)
+          : (imported?.value as string | undefined); // string import names
+      const local = spec.local as AnyNode | undefined;
+      if (importedName === "workflow" && local?.type === "Identifier") {
+        aliases.add(local.name as string);
+      }
+    }
+  }
+  return aliases;
+}
+
 function parseTestDeclaration(
   decl: AnyNode,
   statement: AnyNode,
   customFns?: Set<string>,
+  workflowAliases?: Set<string>,
 ): ExportMeta | undefined {
   const exportName = (decl.id as AnyNode | undefined)?.name as string | undefined;
   if (!exportName) return undefined;
@@ -178,7 +209,13 @@ function parseTestDeclaration(
     return undefined;
   }
 
-  if (!factoryName || !isTestFnName(factoryName, customFns)) return undefined;
+  // A workflow import alias is always accepted (even when it matches no
+  // test-name convention) and always classified as a workflow — the marker
+  // must not depend on what the alias happens to look like (codex S2.6 R12).
+  const isWorkflowFactory = workflowAliases?.has(factoryName) ?? factoryName === "workflow";
+  if (!factoryName || (!isTestFnName(factoryName, customFns) && !isWorkflowFactory)) {
+    return undefined;
+  }
 
   // Resolve id + inline meta from the first argument (string id or TestMeta obj).
   let fields: MetaFields = {};
@@ -230,7 +267,7 @@ function parseTestDeclaration(
   // importing the file, plus an AST-level branch/poll flag so the --upload
   // gate fails closed for .test.ts workflows the runtime extractor can never
   // safely inspect (codex S2.6 R10 P2).
-  if (factoryName === "workflow") {
+  if (isWorkflowFactory) {
     result.workflow = true;
     // Inspect ONLY the builder chain's own method names — descending callee
     // objects like chainHead does, never the call ARGUMENTS — so a user
@@ -278,9 +315,10 @@ export function extractFromSource(content: string, customFns?: string[]): Export
     return [];
   }
   const fns = customFns && customFns.length > 0 ? new Set([...BASE_FNS, ...customFns]) : undefined;
+  const workflowAliases = collectWorkflowAliases(source);
   const results: ExportMeta[] = [];
   forEachExportedConst(source, (statement, declaration) => {
-    const meta = parseTestDeclaration(declaration, statement, fns);
+    const meta = parseTestDeclaration(declaration, statement, fns, workflowAliases);
     if (meta) results.push(meta);
   });
   return results;
