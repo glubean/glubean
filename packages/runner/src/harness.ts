@@ -246,13 +246,23 @@ function incrAssertions(passed: boolean): void {
  * Use this for all test-scoped event output to ensure concurrent events can be
  * attributed to the correct test.
  */
+/** Events that STEER THE PARENT while the test is still running — the
+ * executor re-arms the subprocess timeout on `timeout_update`, and
+ * ProjectRunner forwards `session:set` to sibling files. Holding them in the
+ * parallel buffer until the test finishes would defeat them (a long test
+ * would be killed at the OLD deadline — codex S2.12 R24 P2), so they bypass
+ * buffering. Out-of-order arrival is fine: both are keyed/merged by the
+ * parent, not attributed to a contiguous test block. */
+const CONTROL_EVENT_TYPES = new Set(["timeout_update", "session:set"]);
+
 function emitEvent(event: Record<string, unknown>): void {
   const trc = currentTestCtx();
-  if (trc) {
-    writeEventLine(JSON.stringify({ ...event, testId: trc.testId }));
-  } else {
-    writeEventLine(JSON.stringify(event));
+  const json = JSON.stringify(trc ? { ...event, testId: trc.testId } : event);
+  if (CONTROL_EVENT_TYPES.has(event.type as string)) {
+    console.log(json);
+    return;
   }
+  writeEventLine(json);
 }
 
 // ── Parallel-batch event buffering (codex S2.12 R22 P1) ─────────────────────

@@ -320,6 +320,29 @@ export const matrix = workflow.each([
   expect(nodeEnds(r.events).map((e) => [e.nodeId, e.status])).toEqual([["verify", "passed"]]);
 });
 
+test("control events (timeout_update) BYPASS the parallel buffer — emitted live (S2.12 R24)", async () => {
+  // a parallel member extends its timeout mid-flight; the parent must see the
+  // update BEFORE the test completes (else it kills at the old deadline).
+  const src = `
+import { workflow } from "@glubean/sdk";
+export const matrix = workflow.each([{ label: "x" }])(
+  { id: "to-$label", parallel: true },
+  (wf, row) =>
+    wf.setup(async () => ({}))
+      .action("extend", async (c) => {
+        c.setTimeout(60000);
+        await new Promise((r) => setTimeout(r, 80));
+      }),
+);
+`;
+  const r = await runBatch(src, ["to-x"], { concurrency: 2 });
+  const idx = (t: string): number => r.events.findIndex((e) => e.type === t);
+  expect(idx("timeout_update")).toBeGreaterThanOrEqual(0);
+  // live: the update precedes the test's own status (buffered events flush at completion)
+  expect(idx("timeout_update")).toBeLessThan(idx("status"));
+  expect(r.success).toBe(true);
+});
+
 test("parallel batch events flush CONTIGUOUSLY per test — no interleave (S2.12 R22)", async () => {
   // two parallel members with staggered sleeps: without buffering, fast-b's
   // events would land inside slow-a's start..status block.
