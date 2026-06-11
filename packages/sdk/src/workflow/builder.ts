@@ -1243,8 +1243,20 @@ function buildEachMembers<T extends Record<string, unknown>>(
     // contract and is rejected here, not silently shipped as N blobs.
     let canonicalStructure: string | undefined;
     let canonicalRowId: string | undefined;
-    const structureOf = (p: { nodes: unknown; gradeSummary: unknown }): string =>
-      JSON.stringify({ nodes: p.nodes, gradeSummary: p.gradeSummary });
+    // Row-INVARIANT top-level meta participates too: a factory varying e.g.
+    // `skip` per row via wf.meta() would let pick's collapsed template entry
+    // inherit the first member's deferral and skip runnable examples
+    // (codex S2.12 R14 P2). name/tags are engine-owned (templated per row)
+    // and excluded.
+    const structureOf = (handle: BuiltWorkflow): string =>
+      JSON.stringify({
+        nodes: handle._projection.nodes,
+        gradeSummary: handle._projection.gradeSummary,
+        description: handle.meta.description ?? null,
+        skip: handle.meta.skip ?? null,
+        only: handle.meta.only ?? null,
+        extensions: handle.meta.extensions ?? null,
+      });
 
     return filtered.map((row, index) => {
       const id = interpolateTemplate(meta.id, row, index);
@@ -1285,7 +1297,7 @@ function buildEachMembers<T extends Record<string, unknown>>(
       }
       const handle = builder.build();
 
-      const structure = structureOf(handle._projection);
+      const structure = structureOf(handle);
       if (canonicalStructure === undefined) {
         canonicalStructure = structure;
         canonicalRowId = id;

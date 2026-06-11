@@ -1274,6 +1274,15 @@ describe("workflow.each (addendum §3)", () => {
     expect(getRegistryForEach().some((r) => r.id.startsWith("pickv-"))).toBe(false);
   });
 
+  it("row-dependent META (e.g. skip) is rejected like row-dependent structure (codex R14)", () => {
+    expect(() =>
+      workflow.each(regions)({ id: "ms-$region" }, (wf, row) => {
+        const c = wf.meta(row.region === "eu" ? { description: "EU only" } : {});
+        return c.compute("c", (s) => s);
+      }),
+    ).toThrow(/DIFFERENT structure/);
+  });
+
   it("rejects an async factory and a missing template id", () => {
     expect(() =>
       workflow.each(regions)({ id: "x-$region" }, (async (wf: unknown) => wf) as never),

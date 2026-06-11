@@ -406,6 +406,12 @@ function parseTestDeclaration(
           // `let b; b = wf.setup(...)` — top-level or nested); one rooting
           // anywhere else SHADOWS the name (`const wf = makeClient()`).
           // Nested function params that collide also shadow.
+          // ONE source-order traversal per scope: bindings mutate the live
+          // name set as they are encountered, so `let b = wf; b.branch(...);
+          // b = client` flags (the call precedes the reassignment) while
+          // `b = client; b.branch(...)` stays clean (codex S2.12 R14 P2).
+          // Nested functions are recursed with a SNAPSHOT of the names live at
+          // their definition point.
           const scanScope = (scopeBody: AnyNode, inherited: ReadonlySet<string>): void => {
             const names = new Set(inherited);
             const bind = (nameNode: AnyNode | undefined, valueExpr: AnyNode | undefined): void => {
@@ -417,17 +423,18 @@ function parseTestDeclaration(
                 names.delete(nameNode.name as string);
               }
             };
-            walkSameScope(scopeBody, (n) => {
-              if (n.type === "VariableDeclarator") {
-                bind(n.id as AnyNode, n.init as AnyNode | undefined);
-              } else if (n.type === "AssignmentExpression" && n.operator === "=") {
-                bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode);
-              }
-            });
-            const nestedFns: AnyNode[] = [];
+            const deferred: Array<{ fn: AnyNode; snapshot: Set<string> }> = [];
             walkSameScope(
               scopeBody,
               (n) => {
+                if (n.type === "VariableDeclarator") {
+                  bind(n.id as AnyNode, n.init as AnyNode | undefined);
+                  return;
+                }
+                if (n.type === "AssignmentExpression" && n.operator === "=") {
+                  bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode);
+                  return;
+                }
                 if (hasBranchOrPoll || n.type !== "CallExpression") return;
                 const callee = unwrapExpression(n.callee as AnyNode);
                 if (!callee || callee.type !== "MemberExpression" || callee.computed === true) {
@@ -447,14 +454,13 @@ function parseTestDeclaration(
                   hasBranchOrPoll = true;
                 }
               },
-              (fn) => nestedFns.push(fn),
+              (fn) => deferred.push({ fn, snapshot: new Set(names) }),
             );
-            for (const fn of nestedFns) {
-              const childNames = new Set(names);
+            for (const { fn, snapshot } of deferred) {
               for (const param of (fn.params as AnyNode[] | undefined) ?? []) {
-                if (param.type === "Identifier") childNames.delete(param.name as string);
+                if (param.type === "Identifier") snapshot.delete(param.name as string);
               }
-              scanScope(fn.body as AnyNode, childNames);
+              scanScope(fn.body as AnyNode, snapshot);
             }
           };
           scanScope(factory.body as AnyNode, new Set([builderParam]));
