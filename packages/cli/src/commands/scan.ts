@@ -30,8 +30,13 @@ export async function scanCommand(
   console.log(`${colors.dim}Output:    ${outputPath}${colors.reset}\n`);
 
   const scanResult = await scan(dir);
+  // Presence gate counts EVERY artifact kind the scanner can discover —
+  // a flow-only or workflow-only project must still write metadata
+  // (codex S2.6 R3 P2; flows had the same gap).
   const hasContracts = (scanResult.contracts ?? []).length > 0;
-  if (scanResult.fileCount === 0 && !hasContracts) {
+  const hasFlows = (scanResult.flows ?? []).length > 0;
+  const hasWorkflows = (scanResult.workflows ?? []).length > 0;
+  if (scanResult.fileCount === 0 && !hasContracts && !hasFlows && !hasWorkflows) {
     console.log(`${colors.yellow}⚠️  No test or contract files found.${colors.reset}`);
     console.log(
       `${colors.dim}   Ensure files import @glubean/sdk and export test() or contract.http.with().${colors.reset}\n`,

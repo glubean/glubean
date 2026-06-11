@@ -86,3 +86,26 @@ export const probe = workflow("probe-journey")
   ]);
   expect(wfEntries[0].meta).toMatchObject({ name: "Signup", tags: ["journey"] });
 });
+
+test("a workflow-ONLY project scans as non-empty (no false warning) and still builds metadata", async () => {
+  const dir = join(FIXTURE_ROOT, "2");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "only.flow.ts"),
+    `
+import { workflow } from "@glubean/sdk";
+export const wf = workflow("only-wf").compute("c", (s) => s).build();
+`,
+  );
+
+  const scanResult = await scan(dir);
+  // the static test extractor doesn't read .flow.ts, so files stays empty —
+  // exactly the shape the scan command's presence gate must accept
+  // (codex S2.6 R3 P2) and the scanner must not warn about (R1 P3).
+  expect(scanResult.fileCount).toBe(0);
+  expect(scanResult.workflows?.map((w) => w.id)).toEqual(["only-wf"]);
+  expect(scanResult.warnings.some((w) => w.includes("No Glubean"))).toBe(false);
+
+  const metadata = await buildMetadata(scanResult, { generatedBy: "test" });
+  expect(metadata.workflows?.map((w) => w.id)).toEqual(["only-wf"]);
+});
