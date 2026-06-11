@@ -254,7 +254,18 @@ export interface PollOpaqueUntil<State = any> {
 export interface PollNode<State = any> {
   kind: "poll";
   meta: NodeMeta;
-  ref: ContractCaseRef;
+  /** Contract attempt (`.poll`): the polled case. XOR `attemptFn`. */
+  ref?: ContractCaseRef;
+  /**
+   * Action attempt (`.pollAction`, addendum §4): an arbitrary async probe —
+   * inbox.take(), DB read, queue peek. Runs under the attempt's QUARANTINED
+   * ctx (probe noise discarded, §17 #3) with `ctx.signal` = the per-attempt
+   * budget abort. Statically opaque, so the node's grade caps at `partial`
+   * (an L2 `until` over the probed value) — §6.7's projection ladder.
+   */
+  attemptFn?: (ctx: WorkflowContext, state: State) => unknown | Promise<unknown>;
+  /** pollAction: dataflow hints for the opaque attempt (projection only). */
+  project?: ActionProjection;
   /** Pure lens projecting workflow state → the case's logical input. */
   in?: (state: State) => unknown;
   /** Pure lens folding the SATISFYING response back into state (probes discarded). */

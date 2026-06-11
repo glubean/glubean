@@ -299,6 +299,7 @@ function parseTestDeclaration(
           property.type === "Identifier" &&
           (property.name === "branch" ||
             property.name === "poll" ||
+            property.name === "pollAction" ||
             property.name === "switch" ||
             property.name === "route")
         ) {

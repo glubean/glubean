@@ -406,6 +406,26 @@ export interface WorkflowBuilder<State> {
       : [opts: PollOptsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
   ): ChainedWorkflowBuilder<NewState>;
   /**
+   * Bounded poll over an ARBITRARY async attempt (addendum §4 — the webhook/
+   * inbox customer): `.poll`'s twin where the probe is a function instead of a
+   * contract case. Same bounds validation, same per-attempt quarantine
+   * (§17 #3, with `ctx.signal` = the attempt's budget abort), same `until`
+   * split (L2 over the probed value XOR untilRuntime + message). The attempt
+   * is statically opaque, so the grade caps at `partial` (L2 until) /
+   * `opaque` (untilRuntime) — §6.7's ladder.
+   */
+  pollAction<Res, NewState = State>(
+    idOrMeta: NodeMetaInput,
+    fn: (ctx: WorkflowContext, state: State) => Res | Promise<Res>,
+    opts: PollUntil<State, Res> &
+      PollBounds & {
+        /** Pure lens folding the SATISFYING probe result into the next state. */
+        out?: (state: State, res: Res) => NewState;
+        /** Dataflow hints for the opaque attempt (projection only). */
+        project?: ActionProjection;
+      },
+  ): ChainedWorkflowBuilder<NewState>;
+  /**
    * Finalize into a `BuiltWorkflow`: the Workflow IR + a one-element `Test[]`
    * (a simple test that executes the graph via `runWorkflow`), registered for
    * discovery. Idempotent — repeat calls return the same handle. The builder
@@ -854,6 +874,56 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         in: opts.in,
         out: opts.out as PollNode<State>["out"],
         accept: opts.accept,
+        until: this.buildPollUntil(opts),
+        message: opts.message,
+        every: opts.every ?? DEFAULT_EVERY_MS,
+        backoff: opts.backoff ?? 1,
+        timeoutMs: opts.timeout,
+        perAttemptTimeoutMs: opts.perAttemptTimeout,
+        maxAttempts: opts.maxAttempts,
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pollAction(idOrMeta: NodeMetaInput, fn: (ctx: WorkflowContext, state: State) => unknown, ...rest: any[]): any {
+    return this.authoring(() => {
+      this.assertNoTeardown("pollAction");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "poll");
+      const opts = rest[0] as
+        | (PollUntil<State, unknown> &
+            PollBounds & {
+              out?: (state: State, res: unknown) => unknown;
+              project?: ActionProjection;
+            })
+        | undefined;
+      if (typeof fn !== "function") {
+        throw new Error(`workflow.pollAction() "${meta.id}" requires an attempt function`);
+      }
+      if (!opts || (typeof opts.until !== "function" && typeof opts.untilRuntime !== "function")) {
+        throw new Error(
+          `workflow.pollAction() "${meta.id}" requires an exit predicate — \`until\` (declarative) or \`untilRuntime\``,
+        );
+      }
+      validatePollBounds(
+        {
+          timeout: opts.timeout,
+          maxAttempts: opts.maxAttempts,
+          perAttemptTimeout: opts.perAttemptTimeout,
+          every: opts.every,
+          backoff: opts.backoff,
+        },
+        meta.id,
+      );
+      const node: PollNode<State> = {
+        kind: "poll",
+        meta,
+        attemptFn: fn as PollNode<State>["attemptFn"],
+        project: opts.project,
+        out: opts.out as PollNode<State>["out"],
         until: this.buildPollUntil(opts),
         message: opts.message,
         every: opts.every ?? DEFAULT_EVERY_MS,

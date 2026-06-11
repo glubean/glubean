@@ -1288,6 +1288,11 @@ async function evalUntil(
  */
 async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promise<unknown> {
   const label = node.meta.id;
+  // `as any`/JS callers can hand a poll node with neither attempt source —
+  // executeCallAttempt would crash on an undefined ref; fail fast instead.
+  if (!node.ref && !node.attemptFn) {
+    throw new Error(`workflow poll "${label}": needs a contract ref (.poll) or an attempt fn (.pollAction)`);
+  }
   // Runtime bound guard — the builder validates at construction, but `as any` /
   // JS callers can hand the executor an unbounded poll node. Fail fast instead of
   // looping forever (mirrors runPollStep's guard).
@@ -1332,15 +1337,19 @@ async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promi
           attemptAc.abort();
         }, Math.max(0, attemptBudget))
       : undefined;
-    const reqCtx = quarantinedCtx(scope.ctx);
+    // The attempt ctx: quarantined over the node scope, with `signal` =
+    // THIS attempt's budget abort (an attemptFn reads ctx.signal; a contract
+    // attempt gets the same signal explicitly).
+    const reqCtx = Object.assign(quarantinedCtx(scope.ctx), { signal: attemptAc.signal });
     const exhausted = (): PollExhaustedError =>
       new PollExhaustedError(label, attempt, `attempt budget ${Math.round(attemptBudget)}ms exceeded`);
     try {
-      lastRes = await raceBudget(
-        executeCallAttempt("poll", node, reqCtx, state, attemptAc.signal),
-        attemptBudget,
-        exhausted,
-      );
+      // pollAction (addendum §4): the probe is an arbitrary async fn instead
+      // of a contract case — same quarantine, same budget race.
+      const attemptRun = node.attemptFn
+        ? Promise.resolve(node.attemptFn(reqCtx as unknown as WorkflowContext, state))
+        : executeCallAttempt("poll", node as CallLikeNode, reqCtx, state, attemptAc.signal);
+      lastRes = await raceBudget(attemptRun, attemptBudget, exhausted);
     } catch (err) {
       // A signal-honoring adapter (HTTP) rejects with AbortError when OUR budget
       // timer fired — convert it to the poll exhaustion error (with the attempt

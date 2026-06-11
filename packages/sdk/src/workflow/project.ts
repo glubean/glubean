@@ -86,13 +86,14 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
         ? "opaque"
         : "full";
     }
-    case "poll":
-      // Same decision-only rule as branch: the poll's grade is its EXIT predicate's
-      // projectability (the call target is a declared contract ref either way).
-      // L2 declarative over the response → full; opaque untilRuntime → opaque.
-      return ((node as PollNode).until as { kind?: unknown }).kind === "opaque"
-        ? "opaque"
-        : "full";
+    case "poll": {
+      // §6.7's ladder: contract attempt + L2 exit → full; ACTION attempt
+      // (pollAction, addendum §4) caps at partial — the probe is opaque even
+      // when the exit predicate is declarative; opaque exit → opaque.
+      const p = node as PollNode;
+      if ((p.until as { kind?: unknown }).kind === "opaque") return "opaque";
+      return p.attemptFn ? "partial" : "full";
+    }
     default:
       return "opaque";
   }
@@ -190,10 +191,20 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         ...base,
         kind: "poll",
         grade,
-        target: p.ref.target,
-        protocol: p.ref.protocol,
-        contractId: p.ref.contractId,
-        caseKey: p.ref.caseKey,
+        // contract attempt only — a pollAction probe has no call identity;
+        // its dataflow hints (reads/writes/note) project instead.
+        ...(p.ref
+          ? {
+              target: p.ref.target,
+              protocol: p.ref.protocol,
+              contractId: p.ref.contractId,
+              caseKey: p.ref.caseKey,
+            }
+          : {
+              reads: p.project?.reads,
+              writes: p.project?.writes,
+              note: p.project?.note,
+            }),
         accept: p.accept,
         // The opaque until's fn takes (ctx, res, state) — wider than the condition
         // model's (ctx, state) — but extractPredicate only reads kind/sync, so the

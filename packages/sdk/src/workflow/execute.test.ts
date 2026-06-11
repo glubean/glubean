@@ -1195,6 +1195,116 @@ describe("runWorkflow — branch (§17 #6)", () => {
   });
 });
 
+// --- pollAction: poll over an arbitrary async attempt (addendum §4) ----------
+
+describe("runWorkflow — pollAction (addendum §4)", () => {
+  it("polls an async probe until the L2 exit holds; probe noise quarantined; out folds the hit", async () => {
+    const { ctx, rec } = fakeBase();
+    let takes = 0;
+    const wf = workflow("pa-inbox")
+      .setup(async () => ({ seen: "" }))
+      .pollAction(
+        "wait for email",
+        async (c) => {
+          takes += 1;
+          c.assert(takes >= 3, `probe-${takes}`); // probe noise — must be discarded
+          return takes >= 3 ? { subject: "Welcome" } : { subject: "" };
+        },
+        {
+          until: (w) => w.when((r: { subject: string }) => r.subject).eq("Welcome"),
+          out: (s, r) => ({ ...s, seen: r.subject }),
+          every: 1,
+          maxAttempts: 10,
+          perAttemptTimeout: 1000,
+          project: { reads: ["inbox"], note: "wait for the welcome email" },
+        },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.state).toEqual({ seen: "Welcome" });
+    expect(takes).toBe(3);
+    // probe-attempt assertion noise discarded; only the satisfying attempt flushed
+    expect(rec.asserts).toEqual([{ passed: true, message: "probe-3" }]);
+  });
+
+  it("the attempt ctx.signal is the PER-ATTEMPT budget abort; exhaustion fails the node", async () => {
+    const { ctx } = fakeBase();
+    const aborted: boolean[] = [];
+    const wf = workflow("pa-budget")
+      .setup(async () => ({}))
+      .pollAction(
+        "hang",
+        async (c) => {
+          await new Promise<void>((r) => {
+            c.signal.addEventListener("abort", () => {
+              aborted.push(true);
+              r();
+            });
+          });
+          return null;
+        },
+        { untilRuntime: () => false, message: "m", every: 1, maxAttempts: 2, perAttemptTimeout: 15 },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(PollExhaustedError);
+    expect(aborted.length).toBeGreaterThan(0); // the budget abort reached the probe
+  });
+
+  it("grade ladder (§6.7): action attempt caps at partial with an L2 exit; opaque exit → opaque", () => {
+    const partial = workflow("pa-grade1")
+      .setup(async () => ({}))
+      .pollAction("p", async () => ({ ok: true }), {
+        until: (w) => w.when((r: { ok: boolean }) => r.ok).eq(true),
+        timeout: 1000,
+      })
+      .build();
+    const opaque = workflow("pa-grade2")
+      .setup(async () => ({}))
+      .pollAction("p", async () => true, {
+        untilRuntime: (_c, r) => r === true,
+        message: "m",
+        timeout: 1000,
+      })
+      .build();
+    expect(projectWorkflow(partial).nodes[0].grade).toBe("partial");
+    expect(projectWorkflow(opaque).nodes[0].grade).toBe("opaque");
+    // projection: no call identity; the dataflow hints project instead
+    const proj = projectWorkflow(
+      workflow("pa-proj")
+        .setup(async () => ({}))
+        .pollAction("p", async () => null, {
+          untilRuntime: (_c, r) => r !== null,
+          message: "m",
+          timeout: 1000,
+          project: { reads: ["inbox"], note: "n" },
+        })
+        .build(),
+    ).nodes[0];
+    expect(proj.contractId).toBeUndefined();
+    expect(proj.reads).toEqual(["inbox"]);
+    expect(proj.note).toBe("n");
+    expect(proj.timeoutMs).toBe(1000);
+  });
+
+  it("builder validation: attempt fn + exit predicate + bounds are required", () => {
+    expect(() =>
+      workflow("w").pollAction("p", undefined as never, { untilRuntime: () => true, message: "m", timeout: 100 }),
+    ).toThrow(/requires an attempt function/);
+    expect(() =>
+      workflow("w").pollAction("p", async () => null, { timeout: 100 } as never),
+    ).toThrow(/requires an exit predicate/);
+    expect(() =>
+      workflow("w").pollAction("p", async () => null, {
+        untilRuntime: () => true,
+        message: "m",
+      } as never),
+    ).toThrow(/needs a stop condition/);
+  });
+});
+
 // --- switch / route: the branch family (addendum §9) -------------------------
 
 describe("runWorkflow — switch (addendum §9 #4)", () => {
