@@ -383,12 +383,29 @@ function deriveMetadataStats(files: Record<string, FileMeta>): {
 
 async function computeRootHash(
   files: Record<string, FileMeta>,
+  contracts?: unknown[],
+  workflows?: unknown[],
+  flows?: unknown[],
 ): Promise<string> {
+  // Keep ISOMORPHIC with cli/src/metadata.ts computeRootHash — the MCP
+  // metadata path must report the same rootHash for the same scan inputs
+  // (codex S2.6 R8 P2: this copy had drifted, hashing files only, so
+  // contract/workflow projects disagreed between the CLI and MCP views).
   const entries = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
-  const payload = entries
-    .map(([path, meta]) => `${path}:${meta.hash}`)
-    .join("\n");
-  const hash = createHash("sha256").update(payload).digest("hex");
+  const parts: string[] = entries.map(([path, meta]) => `${path}:${meta.hash}`);
+  if (contracts && contracts.length > 0) {
+    const contractHash = createHash("sha256").update(JSON.stringify(contracts)).digest("hex");
+    parts.push(`__contracts__:sha256-${contractHash}`);
+  }
+  if (workflows && workflows.length > 0) {
+    const workflowHash = createHash("sha256").update(JSON.stringify(workflows)).digest("hex");
+    parts.push(`__workflows__:sha256-${workflowHash}`);
+  }
+  if (flows && flows.length > 0) {
+    const flowHash = createHash("sha256").update(JSON.stringify(flows)).digest("hex");
+    parts.push(`__flows__:sha256-${flowHash}`);
+  }
+  const hash = createHash("sha256").update(parts.join("\n")).digest("hex");
   return `sha256-${hash}`;
 }
 
@@ -398,7 +415,10 @@ async function buildMetadata(
 ): Promise<BundleMetadata> {
   const normalizedFiles = normalizeFileMap(scanResult.files);
   const stats = deriveMetadataStats(normalizedFiles);
-  const rootHash = await computeRootHash(normalizedFiles);
+  const contracts = scanResult.contracts;
+  const workflows = scanResult.workflows;
+  const flows = scanResult.flows;
+  const rootHash = await computeRootHash(normalizedFiles, contracts, workflows, flows);
 
   return {
     schemaVersion: METADATA_SCHEMA_VERSION,
@@ -411,6 +431,9 @@ async function buildMetadata(
     fileCount: stats.fileCount,
     tags: stats.tags,
     warnings: scanResult.warnings,
+    contracts: contracts && contracts.length > 0 ? contracts : undefined,
+    workflows: workflows && workflows.length > 0 ? workflows : undefined,
+    flows: flows && flows.length > 0 ? flows : undefined,
   };
 }
 
@@ -491,7 +514,12 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
       const hasHttp = /contract\.http\b/i.test(content);
       // Detect any contract.<protocol> that isn't contract.http or contract.flow
       const hasNonHttp = /contract\.(?!http\b|flow\b)\w+\s*[.(]/i.test(content);
-      const contracts = (hasHttp && !hasNonHttp) ? extractContractCases(content) : [];
+      // A vNext workflow also fails the gate closed (mirrors the CLI/scanner
+      // gates; the import-clause check catches aliased imports — codex S2.6 R8).
+      const hasWorkflow =
+        /\bworkflow\s*\(/.test(content) ||
+        /import\s[^;]*?\{[^}]*\bworkflow\b[^}]*\}/.test(content);
+      const contracts = (hasHttp && !hasNonHttp && !hasWorkflow) ? extractContractCases(content) : [];
       if (contracts.length > 0) {
         tests = contracts.flatMap((contract) =>
           contract.cases.map((c) => ({

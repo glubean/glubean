@@ -331,8 +331,13 @@ export class Scanner {
           // A vNext workflow(...) export also fails the gate closed: accepting
           // the HTTP fallback would let scan/upload succeed with metadata that
           // silently omits the workflow projection (codex S2.6 R7 P2; mirrors
-          // the discoverTests gate).
-          const hasWorkflow = /\bworkflow\s*\(/.test(content);
+          // the discoverTests gate). The import-clause check catches aliased
+          // imports (`import { workflow as wf }` — the literal name still
+          // appears in the braces; codex R8). Deep re-exports stay invisible,
+          // matching the literal-name strength of the contract checks above.
+          const hasWorkflow =
+            /\bworkflow\s*\(/.test(content) ||
+            /import\s[^;]*?\{[^}]*\bworkflow\b[^}]*\}/.test(content);
           // Only fall back if file is HTTP-only (has HTTP, no non-HTTP, no workflow)
           if (hasHttp && !hasNonHttp && !hasWorkflow) {
             const extracted = extractContractCases(content);

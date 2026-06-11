@@ -568,7 +568,11 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
       // common fluent style `contract\n  .flow(...)` still trips the gate.
       const hasHttp = /contract\s*\.\s*http\b/i.test(content);
       const hasNonHttp = /contract\s*\.\s*(?!http\b)\w+\s*[.(]/i.test(content);
-      const hasWorkflow = /\bworkflow\s*\(/.test(content);
+      // Import-clause check catches aliased workflow imports too
+      // (`import { workflow as wf }` — codex S2.6 R8 P2).
+      const hasWorkflow =
+        /\bworkflow\s*\(/.test(content) ||
+        /import\s[^;]*?\{[^}]*\bworkflow\b[^}]*\}/.test(content);
       const contracts =
         hasHttp && !hasNonHttp && !hasWorkflow ? extractContractCases(content) : [];
       if (contracts.length > 0) {
