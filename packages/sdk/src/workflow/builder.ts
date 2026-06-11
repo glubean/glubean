@@ -1147,13 +1147,9 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     // handle's `_projection` (the scanner's dep-free read, mirroring
     // FlowContract._extracted — S2.6) share the same object. A data-driven
     // member carries its template id (addendum §3: rows share ONE structure).
+    // templateId/groupId/parallel ride projectWorkflow itself (from meta) so
+    // every projection path agrees, not just this cached one (codex R5 P2).
     const projection = projectWorkflow(handle);
-    if (meta.templateId) projection.templateId = meta.templateId;
-    // Discovery paths that read the projection (.flow.ts via the scanner,
-    // upload metadata) need grouping/concurrency too — the registry alone
-    // doesn't reach the CLI/ProjectRunner (codex S2.12 R1 P2).
-    if (meta.groupId) projection.groupId = meta.groupId;
-    if (meta.parallel) projection.parallel = true;
     Object.assign(handle, { _projection: projection });
 
     // Register for scanner discovery with the full graded projection (§7) —

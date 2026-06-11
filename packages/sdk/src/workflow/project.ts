@@ -252,6 +252,12 @@ export function projectWorkflow(wf: Workflow): WorkflowProjection {
   tallyGrades(nodes, gradeSummary);
   return {
     id: wf.meta.id,
+    // Data-driven members (workflow.each/pick): grouping + concurrency are
+    // part of the projection wherever it is produced — not only on the cached
+    // handle (codex S2.12 R5 P2).
+    ...(wf.meta.templateId ? { templateId: wf.meta.templateId } : {}),
+    ...(wf.meta.groupId ? { groupId: wf.meta.groupId } : {}),
+    ...(wf.meta.parallel ? { parallel: true } : {}),
     name: wf.meta.name,
     description: wf.meta.description,
     tags: wf.meta.tags,

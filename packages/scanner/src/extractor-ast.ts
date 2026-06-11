@@ -53,8 +53,6 @@ interface MetaFields {
   defaultRun?: "always" | "opt-in";
   /** A STRING `skip: "reason"` (WorkflowMeta.skip) — maps to deferred. */
   deferred?: string;
-  /** `parallel: true` in the meta object (workflow.each / TestMeta). */
-  parallel?: boolean;
 }
 
 /** Parse `{ id, name, tags, timeout, requires, defaultRun }` from a TestMeta object literal. */
@@ -100,15 +98,17 @@ function parseMetaObject(obj: AnyNode): MetaFields {
   const defaultRun = stringProperty(obj, "defaultRun");
   if (defaultRun === "always" || defaultRun === "opt-in") out.defaultRun = defaultRun;
 
-  // workflow.each carries `parallel` in the meta object itself (test.each's
-  // legacy second-arg form is parsed separately in parseTestDeclaration).
-  const parallelProp = objectProperty(obj, "parallel");
-  if (parallelProp) {
-    const value = unwrapExpression(parallelProp.value as AnyNode);
-    if (value?.type === "BooleanLiteral" && value.value === true) out.parallel = true;
-  }
-
   return out;
+}
+
+/** `parallel: true` from a meta OBJECT — read only for data-driven (.each/
+ * .pick) declarations; a plain test() meta must not gain a parallel group
+ * (codex S2.12 R5 P2). */
+function parseMetaParallel(obj: AnyNode): boolean {
+  const parallelProp = objectProperty(obj, "parallel");
+  if (!parallelProp) return false;
+  const value = unwrapExpression(parallelProp.value as AnyNode);
+  return value?.type === "BooleanLiteral" && value.value === true;
 }
 
 /** Builder `.meta({...})` fields (name/tags/timeout/requires/defaultRun) from the chain. */
@@ -305,7 +305,11 @@ function parseTestDeclaration(
   if (fields.id === undefined) return undefined;
 
   // `.each(data, { parallel: true })`.
-  let parallel = fields.parallel === true;
+  // meta-object `parallel` counts only for data-driven declarations
+  // (workflow.each puts it there); legacy each-args form parsed below.
+  const metaObjForParallel =
+    (variant === "each" || variant === "pick") && metaArg ? objectFromExpression(metaArg) : undefined;
+  let parallel = metaObjForParallel ? parseMetaParallel(metaObjForParallel) : false;
   if (variant === "each" && eachArgs && eachArgs.length > 1) {
     const optsObj = objectFromExpression(eachArgs[1]);
     const parallelProp = optsObj ? objectProperty(optsObj, "parallel") : undefined;
