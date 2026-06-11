@@ -1292,6 +1292,24 @@ describe("workflow.each (addendum §3)", () => {
     expect(entries.every((r) => r.workflow?.templateId === "par-$region")).toBe(true);
   });
 
+  it("pick filter applies BEFORE selection — discovery and execution share one eligible set (codex R10)", () => {
+    // with the only eligible example being "b", selection can never land on
+    // the filtered-out "a" and return zero members.
+    for (let i = 0; i < 5; i++) {
+      const members = workflow.pick(
+        { a: { ok: false }, b: { ok: true } },
+        1,
+      )(
+        { id: "pf-$_pick", filter: (row) => (row as { ok: boolean }).ok },
+        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
+      );
+      expect(members.map((m) => m.meta.id)).toEqual(["pf-b"]);
+      const universe = (members as unknown as { _pickUniverse: Array<{ meta: { id: string } }> })
+        ._pickUniverse;
+      expect(universe.map((m) => m.meta.id)).toEqual(["pf-b"]); // same eligible set
+    }
+  });
+
   it("workflow.pick REQUIRES $_pick in the template id (codex S2.12 R8)", () => {
     expect(() =>
       workflow.pick({ a: { currency: "USD" } }, 1)({ id: "checkout-$currency" } as never, (wf) =>

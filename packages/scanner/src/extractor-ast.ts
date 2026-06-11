@@ -398,12 +398,24 @@ function parseTestDeclaration(
             return root;
           };
           walkSameScope(factory.body as AnyNode, (n) => {
-            if (n.type !== "VariableDeclarator") return;
-            const id = n.id as AnyNode | undefined;
-            if (id?.type !== "Identifier") return;
-            const initRoot = rootOf(n.init as AnyNode | undefined);
-            if (initRoot?.type === "Identifier" && builderNames.has(initRoot.name as string)) {
-              builderNames.add(id.name as string);
+            // `const b = wf.setup(...)` AND `let b; b = wf.setup(...)` both
+            // bind builder aliases (codex S2.12 R10 P2).
+            if (n.type === "VariableDeclarator") {
+              const id = n.id as AnyNode | undefined;
+              if (id?.type !== "Identifier") return;
+              const initRoot = rootOf(n.init as AnyNode | undefined);
+              if (initRoot?.type === "Identifier" && builderNames.has(initRoot.name as string)) {
+                builderNames.add(id.name as string);
+              }
+              return;
+            }
+            if (n.type === "AssignmentExpression" && n.operator === "=") {
+              const left = unwrapExpression(n.left as AnyNode);
+              if (left?.type !== "Identifier") return;
+              const rightRoot = rootOf(n.right as AnyNode | undefined);
+              if (rightRoot?.type === "Identifier" && builderNames.has(rightRoot.name as string)) {
+                builderNames.add(left.name as string);
+              }
             }
           });
           walkSameScope(factory.body as AnyNode, (n) => {

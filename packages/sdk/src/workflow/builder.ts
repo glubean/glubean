@@ -1353,14 +1353,32 @@ function workflowPick<T extends Record<string, unknown>>(
     // Factories are pure authoring, so the validation pass is side-effect-free
     // and nothing from it registers.
     const allRows = normalizeEachTable(examples) as (T & { _pick: string })[];
-    // Validation pass over the whole universe — registrations never flushed.
-    // The universe also rides the returned array (`_pickUniverse`) so the
-    // scanner's metadata extraction is DETERMINISTIC: scan records every
-    // example's projection (the declaration inventory), independent of which
-    // members this import's random selection produced (codex S2.12 R6 P2).
-    const pickMeta = { ...meta, pickGroup: true } as WorkflowEachMeta<T & { _pick: string }>;
-    const universe = buildEachMembers(allRows, pickMeta, factory);
-    const members = buildEachMembers(selectPickExamples(examples, count), pickMeta, factory);
+    // `filter` is applied ONCE here, against the full table with ORIGINAL
+    // indexes — both the universe and the selection then draw from the same
+    // eligible rows. Selecting from the raw map and filtering afterwards let
+    // discovery and execution disagree (a selected-but-ineligible example
+    // returned zero runnable members; re-indexed filters ran rows the
+    // universe never advertised) — codex S2.12 R10 P2.
+    const eligibleRows = meta.filter
+      ? allRows.filter((row, index) => meta.filter!(row, index))
+      : allRows;
+    const eligibleExamples = Object.fromEntries(
+      eligibleRows.map((r) => [r._pick, examples[r._pick]]),
+    ) as Record<string, T>;
+    // Validation pass over the eligible universe — registrations never
+    // flushed. The universe also rides the returned array (`_pickUniverse`)
+    // so the scanner's metadata extraction is DETERMINISTIC (codex R6 P2).
+    const pickMeta = {
+      ...meta,
+      filter: undefined,
+      pickGroup: true,
+    } as WorkflowEachMeta<T & { _pick: string }>;
+    const universe = buildEachMembers(eligibleRows, pickMeta, factory);
+    const members = buildEachMembers(
+      selectPickExamples(eligibleExamples, count),
+      pickMeta,
+      factory,
+    );
     for (const m of members) {
       (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
     }

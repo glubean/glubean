@@ -133,6 +133,22 @@ export const clean = workflow.each([{ region: "us" }])(
   });
 });
 
+test("ASSIGNED builder aliases are tracked too (S2.12 R10)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const assigned = workflow.each([{ region: "us" }])(
+  { id: "as-$region" },
+  (wf, row) => {
+    let b;
+    b = wf.setup(async () => ({ ok: true }));
+    return b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+  },
+);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("a helper-reference factory fails CLOSED on the branch/poll flag (S2.12 R9)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
