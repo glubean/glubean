@@ -1351,14 +1351,16 @@ async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promi
         : executeCallAttempt("poll", node as CallLikeNode, reqCtx, state, attemptAc.signal);
       lastRes = await raceBudget(attemptRun, attemptBudget, exhausted);
     } catch (err) {
-      // A signal-honoring adapter (HTTP) rejects with AbortError when OUR budget
-      // timer fired — convert it to the poll exhaustion error (with the attempt
-      // count) rather than leaking a raw AbortError.
-      const isBudgetAbort =
-        budgetAborted && err instanceof Error && err.name === "AbortError";
-      // A budget timeout discards this attempt's ctx (orphan); a genuine request
-      // error (incl. fatal validation / ctx.fail in the adapter) is in-budget —
-      // flush its buffered effects (the failure assertion lands) then fail the poll.
+      // Once OUR budget timer fired, the attempt is over budget no matter HOW
+      // the cancelled body rejects — an AbortError from a signal-honoring
+      // adapter, or (pollAction takes arbitrary fns — codex S2.11 R1 P2) a
+      // plain Error thrown from an abort handler. Either way the rejection is
+      // the cancellation's echo, not an in-budget verdict: normalize to poll
+      // exhaustion and DISCARD the orphan's buffered evidence.
+      const isBudgetAbort = budgetAborted && !(err instanceof PollExhaustedError);
+      // A genuine IN-BUDGET request error (incl. fatal validation / ctx.fail)
+      // flushes its buffered effects (the failure assertion lands) then fails
+      // the poll; budget overruns discard the orphan ctx.
       if (!isBudgetAbort && !(err instanceof PollExhaustedError)) reqCtx.flushTo(scope.ctx);
       emitPollAttempt(scope.ctx, node, attempt, "failed", now() - attemptStart);
       throw isBudgetAbort ? exhausted() : err;

@@ -1253,6 +1253,28 @@ describe("runWorkflow — pollAction (addendum §4)", () => {
     expect(aborted.length).toBeGreaterThan(0); // the budget abort reached the probe
   });
 
+  it("an over-budget attempt rejecting with a PLAIN error is still exhaustion — buffer discarded (codex S2.11 R1)", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("pa-plain-abort")
+      .setup(async () => ({}))
+      .pollAction(
+        "hang",
+        async (c) => {
+          c.assert(false, "orphan noise"); // buffered — must NEVER flush
+          await new Promise((_resolve, reject) => {
+            c.signal.addEventListener("abort", () => reject(new Error("cancelled by handler")));
+          });
+          return null;
+        },
+        { untilRuntime: () => false, message: "m", every: 1, maxAttempts: 2, perAttemptTimeout: 15 },
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(res.error).toBeInstanceOf(PollExhaustedError); // NOT "cancelled by handler"
+    expect(rec.asserts).toEqual([]); // the orphan's buffer stayed quarantined
+  });
+
   it("grade ladder (§6.7): action attempt caps at partial with an L2 exit; opaque exit → opaque", () => {
     const partial = workflow("pa-grade1")
       .setup(async () => ({}))
