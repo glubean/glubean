@@ -1270,6 +1270,40 @@ describe("runWorkflow — switch (addendum §9 #4)", () => {
     expect(res.nodes.find((n) => n.id === "medium")!.status).toBe("skipped");
   });
 
+  it("rejects colliding case labels and non-finite numeric values (codex S2.8 R1)", () => {
+    // value: 1 and value: "1" both stringify to "1" — child id prefixes and
+    // takenLabel would collide; an explicit distinct label is required.
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({ k: 1 as number | string }))
+        .switch("s", {
+          on: (s) => s.k,
+          cases: [
+            { value: 1, then: (b) => b.compute("a", (s) => s) },
+            { value: "1", then: (b) => b.compute("b", (s) => s) },
+          ],
+        }),
+    ).toThrow(/duplicate case label "1"/);
+    // …and an explicit label resolves it:
+    expect(() =>
+      workflow("w2")
+        .setup(async () => ({ k: 1 as number | string }))
+        .switch("s", {
+          on: (s) => s.k,
+          cases: [
+            { value: 1, then: (b) => b.compute("a", (s) => s) },
+            { value: "1", then: (b) => b.compute("b", (s) => s), label: "one-string" },
+          ],
+        }),
+    ).not.toThrow();
+    // NaN never matches under === and is not JSON-safe.
+    expect(() =>
+      workflow("w3")
+        .setup(async () => ({}))
+        .switch("s", { on: () => Number.NaN, cases: [{ value: Number.NaN, then: (b) => b.compute("c", (s) => s) }] }),
+    ).toThrow(/finite number/);
+  });
+
   it("build-time validation: duplicate value, non-scalar value, non-L2 predicate, empty cases", () => {
     expect(() =>
       workflow("w")
@@ -1277,20 +1311,20 @@ describe("runWorkflow — switch (addendum §9 #4)", () => {
         .switch("s", {
           on: (s) => s.k,
           cases: [
-            { value: "a", then: (b) => b },
-            { value: "a", then: (b) => b }, // unreachable duplicate
+            { value: "a", then: ((b: unknown) => b) as never },
+            { value: "a", then: ((b: unknown) => b) as never }, // unreachable duplicate
           ],
         }),
     ).toThrow(/duplicate case value/);
     expect(() =>
       workflow("w")
         .setup(async () => ({}))
-        .switch("s", { on: () => "x", cases: [{ value: {} as never, then: (b) => b }] }),
+        .switch("s", { on: () => "x", cases: [{ value: {} as never, then: ((b: unknown) => b) as never }] }),
     ).toThrow(/JSON-scalar/);
     expect(() =>
       workflow("w")
         .setup(async () => ({}))
-        .switch("s", { cases: [{ when: (() => ({ kind: "opaque" })) as never, then: (b) => b }] }),
+        .switch("s", { cases: [{ when: (() => ({ kind: "opaque" })) as never, then: ((b: unknown) => b) as never }] }),
     ).toThrow(/switch/);
     expect(() =>
       workflow("w")

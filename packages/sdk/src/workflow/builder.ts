@@ -41,7 +41,21 @@ import type {
  * trunk pre-declared (optional fields / one tagged-union FIELD — never a
  * whole-state union).
  */
-export type StrictSide<State> = (b: WorkflowBuilder<State>) => WorkflowBuilder<State>;
+export type StrictSide<State> = (b: WorkflowBuilder<State>) => ChainedWorkflowBuilder<State>;
+
+/** Phantom brand for builders that came off a CHAIN CALL (not the raw side
+ * parameter). Closes the block-body strict-S bypass (codex S2.8 R1 P1):
+ * `then: b => { b.compute(reshape); return b; }` returned the parameter — the
+ * type held while the collected nodes reshaped state. A strict side must now
+ * return the chain itself (`b.compute(...)`, or `const c = b.x(); return c`),
+ * never the bare parameter. Purely type-level — no runtime field exists.
+ * (A deliberately forked chain — building twice off `b` and returning one —
+ * still collects both; that is `as never` territory, same as every other
+ * type-layer bypass.) */
+declare const CHAINED: unique symbol;
+export interface ChainedWorkflowBuilder<State> extends WorkflowBuilder<State> {
+  readonly [CHAINED]: true;
+}
 
 /**
  * `.branch()` options (addendum §9) — a declarative `when` (L2, statically
@@ -264,11 +278,11 @@ export interface CallBindingsWithInput<
 
 export interface WorkflowBuilder<State> {
   /** Merge workflow-level metadata (id is fixed at creation). */
-  meta(meta: Omit<Partial<WorkflowMeta>, "id">): WorkflowBuilder<State>;
+  meta(meta: Omit<Partial<WorkflowMeta>, "id">): ChainedWorkflowBuilder<State>;
   /** The one I/O-capable initializer; its return is the initial state. */
-  setup<S>(fn: WorkflowSetup<S>): WorkflowBuilder<S>;
+  setup<S>(fn: WorkflowSetup<S>): ChainedWorkflowBuilder<S>;
   /** Always-run cleanup (see lifecycle decision in the plan's self-consistency corpus). */
-  teardown(fn: WorkflowTeardown<State>): WorkflowBuilder<State>;
+  teardown(fn: WorkflowTeardown<State>): ChainedWorkflowBuilder<State>;
   /**
    * Use a reusable contract interaction. First arg: node id or `{...NodeMeta}`.
    * Preserves the case's generics (codex slice-1 P2): when the case requires
@@ -287,7 +301,7 @@ export interface WorkflowBuilder<State> {
     ...rest: [CaseInputs] extends [void]
       ? [bindings?: CallBindings<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
       : [bindings: CallBindingsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
-  ): WorkflowBuilder<NewState>;
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * Arbitrary ASYNC state-producing glue (graded partial w/ hints, else opaque).
    * A void-returning action PRESERVES the state type; a value-returning one
@@ -298,18 +312,18 @@ export interface WorkflowBuilder<State> {
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => Promise<void>,
     opts?: { project?: ActionProjection; retry?: RetryMeta },
-  ): WorkflowBuilder<State>;
+  ): ChainedWorkflowBuilder<State>;
   action<NewState>(
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => Promise<NewState>,
     opts?: { project?: ActionProjection; retry?: RetryMeta },
-  ): WorkflowBuilder<NewState>;
+  ): ChainedWorkflowBuilder<NewState>;
   /** Arbitrary assertion (graded partial w/ asserts hint, else opaque/trace). */
   check(
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
     opts?: { project?: CheckProjection },
-  ): WorkflowBuilder<State>;
+  ): ChainedWorkflowBuilder<State>;
   /**
    * Pure SYNCHRONOUS state transform. First arg: node id or `{...NodeMeta}`.
    * Async callbacks are rejected at RUNTIME (the impl throws) — route async work
@@ -318,14 +332,14 @@ export interface WorkflowBuilder<State> {
   compute<NewState = State>(
     idOrMeta: NodeMetaInput,
     fn: (state: State) => NewState,
-  ): WorkflowBuilder<NewState>;
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * 2-way branch (§6.6): run `then` when the predicate holds, else `else`. ONLY the
    * taken side executes; the other is reported `skipped` (§17 #6). Declarative `when`
    * projects to `full`; runtime `whenRuntime` is opaque and needs a `message`. The
    * branch does not change the State type — sub-graph state writes apply at runtime.
    */
-  branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): WorkflowBuilder<State>;
+  branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): ChainedWorkflowBuilder<State>;
   /**
    * N-way CONVERGING dispatch (addendum §9 #4) — the heir of flow's
    * switchOn/switchCond. Value mode (`on` lens + literal case table, ===) XOR
@@ -333,7 +347,7 @@ export interface WorkflowBuilder<State> {
    * STRICT-S; `default` is optional = identity pass-through. Only the taken
    * case executes; the rest are reported skipped (§17 #6).
    */
-  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State>): WorkflowBuilder<State>;
+  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State>): ChainedWorkflowBuilder<State>;
   /**
    * N-way TERMINAL tree (addendum §9 #5) — paths own their futures; no trunk
    * continues. Cases are unconstrained (`(b) => WorkflowBuilder<any>`);
@@ -363,7 +377,7 @@ export interface WorkflowBuilder<State> {
     ...rest: [CaseInputs] extends [void]
       ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
       : [opts: PollOptsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
-  ): WorkflowBuilder<NewState>;
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * Finalize into a `BuiltWorkflow`: the Workflow IR + a one-element `Test[]`
    * (a simple test that executes the graph via `runWorkflow`), registered for
@@ -407,6 +421,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     }
   }
 
+  // The CHAINED brand is purely type-level — at runtime every chain call
+  // returns this same instance; the cast just re-labels it.
+  private chained(): ChainedWorkflowBuilder<State> {
+    return this as unknown as ChainedWorkflowBuilder<State>;
+  }
+
   // Wraps every authoring mutator: a throw from validation (invalid poll
   // bounds, sub-builder build(), …) leaves the graph half-authored, so it
   // poisons the builder — build()/auto-build then refuse instead of
@@ -421,15 +441,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     }
   }
 
-  meta(meta: Omit<Partial<WorkflowMeta>, "id">): WorkflowBuilder<State> {
+  meta(meta: Omit<Partial<WorkflowMeta>, "id">): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNotBuilt("meta");
       this._meta = { ...this._meta, ...meta, id: this._meta.id };
-      return this;
+      return this.chained();
     });
   }
 
-  setup<S>(fn: WorkflowSetup<S>): WorkflowBuilder<S> {
+  setup<S>(fn: WorkflowSetup<S>): ChainedWorkflowBuilder<S> {
     return this.authoring(() => {
       this.assertNotBuilt("setup");
       // setup runs first at execution, so authoring it after a node OR after
@@ -440,15 +460,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         );
       }
       this._setup = fn;
-      return this as unknown as WorkflowBuilder<S>;
+      return this as unknown as ChainedWorkflowBuilder<S>;
     });
   }
 
-  teardown(fn: WorkflowTeardown<State>): WorkflowBuilder<State> {
+  teardown(fn: WorkflowTeardown<State>): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNotBuilt("teardown");
       this._teardown = fn;
-      return this;
+      return this.chained();
     });
   }
 
@@ -538,7 +558,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
     opts?: { project?: CheckProjection },
-  ): WorkflowBuilder<State> {
+  ): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("check");
       const node: CheckNode<State> = {
@@ -548,7 +568,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         project: opts?.project,
       };
       this._nodes.push(node as WorkflowNode);
-      return this;
+      return this.chained();
     });
   }
 
@@ -578,7 +598,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     });
   }
 
-  branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): WorkflowBuilder<State> {
+  branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("branch");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
@@ -600,13 +620,13 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         default: opts.else ? this.collectSubNodes(opts.else, `${meta.id}.else.`) : undefined,
       };
       this._nodes.push(node as WorkflowNode);
-      return this;
+      return this.chained();
     });
   }
 
   // Broad impls satisfy the interface signatures; call sites type-check against
   // the precise interface, not these.
-  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State>): WorkflowBuilder<State> {
+  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State>): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("switch");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
@@ -619,7 +639,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
           : undefined, // optional = identity pass-through (addendum §9 #4)
       };
       this._nodes.push(node as WorkflowNode);
-      return this;
+      return this.chained();
     });
   }
 
@@ -676,6 +696,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
               `(string | number | boolean | null); got ${typeof v}`,
           );
         }
+        // NaN never matches under === and non-finite numbers serialize as null
+        // in JSON metadata — reject before they poison the case table (codex
+        // S2.8 R1 P2).
+        if (typeof v === "number" && !Number.isFinite(v)) {
+          throw new Error(
+            `workflow.${method}() "${nodeId}" case ${i}: \`value\` must be a finite number — ` +
+              `${String(v)} never matches (===) and is not JSON-safe`,
+          );
+        }
         const label = raw.label ?? String(v);
         return { value: v, label, nodes: this.collectSubNodes(raw.then, `${nodeId}.${label}.`) };
       }
@@ -704,6 +733,20 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         }
         seen.add(key);
       }
+    }
+    // Labels must be unique: they prefix anonymous child ids and identify the
+    // taken case in branch_decision events — `value: 1` vs `value: "1"` both
+    // stringify to "1", and explicit labels can collide too (codex S2.8 R1 P2).
+    const seenLabels = new Set<string>();
+    for (const c of cases) {
+      if (seenLabels.has(c.label!)) {
+        throw new Error(
+          `workflow.${method}() "${nodeId}": duplicate case label "${c.label}" — ` +
+            `labels prefix child node ids and identify the taken case; give the ` +
+            `colliding case an explicit distinct \`label\``,
+        );
+      }
+      seenLabels.add(c.label!);
     }
     return valueMode
       ? { mode: "value", on: (opts as { on: (s: State) => unknown }).on, cases }

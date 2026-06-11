@@ -452,6 +452,18 @@ function _compileTimeGuards(): void {
       // @ts-expect-error — the side returns { a } only; strict-S demands the full S
       then: (b) => b.compute("c", (s) => ({ a: s.a })),
     });
+  // …a block body that discards the chain and returns the BARE parameter must
+  // not compile either — the CHAINED brand closes that bypass (codex S2.8 R1 P1):
+  workflow("guard")
+    .setup(async () => ({ a: 1 }))
+    .branch("g", {
+      when: (w) => w.when((s) => s.a).eq(1),
+      // @ts-expect-error — `return b` is the unbranded parameter, not the chain
+      then: (b) => {
+        b.compute("c", (s) => ({ ...s }));
+        return b;
+      },
+    });
   // …and a compliant side (fills a pre-declared slot, keeps the shape) compiles:
   workflow("guard")
     .setup(async () => ({ a: 1, flag: false }))
