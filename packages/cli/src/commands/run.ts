@@ -560,15 +560,17 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     // contain ONLY contract.http(...). Stricter than MCP's gate: CLI
     // emits flows as runnable tests via discoverTests, so silently
     // dropping `contract.flow(...)` would hide an actual test. Any
-    // non-HTTP usage (including flow) → fail closed and surface the
-    // import error so the user knows discovery is degraded.
+    // non-HTTP usage (including flow, and a vNext workflow(...) — codex
+    // S2.6 R6 P2) → fail closed and surface the import error so the user
+    // knows discovery is degraded.
     if (result.errors.length > 0) {
       // Allow whitespace/newlines between `contract` and `.method` so the
       // common fluent style `contract\n  .flow(...)` still trips the gate.
       const hasHttp = /contract\s*\.\s*http\b/i.test(content);
       const hasNonHttp = /contract\s*\.\s*(?!http\b)\w+\s*[.(]/i.test(content);
+      const hasWorkflow = /\bworkflow\s*\(/.test(content);
       const contracts =
-        hasHttp && !hasNonHttp ? extractContractCases(content) : [];
+        hasHttp && !hasNonHttp && !hasWorkflow ? extractContractCases(content) : [];
       if (contracts.length > 0) {
         for (const c of contracts) {
           for (const caseItem of c.cases) {
