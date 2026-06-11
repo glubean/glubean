@@ -165,3 +165,61 @@ export const pollFlow = contract
   expect(flowAtts.length).toBe(1);
   expect(flowStepsHaveBranchOrPoll((flowAtts[0] as { flow: { steps: unknown[] } }).flow.steps)).toBe(true);
 });
+
+// =============================================================================
+// vNext workflows ride the same gate (codex S2.6 R9)
+// =============================================================================
+
+const { workflowNodesHaveBranchOrPoll } = __testing;
+
+test("workflowNodesHaveBranchOrPoll detects branch/poll nodes (incl. nested sides)", () => {
+  expect(workflowNodesHaveBranchOrPoll(undefined)).toBe(false);
+  expect(
+    workflowNodesHaveBranchOrPoll([{ kind: "contract-call" }, { kind: "compute" }]),
+  ).toBe(false);
+  expect(workflowNodesHaveBranchOrPoll([{ kind: "poll" }])).toBe(true);
+  // a branch nested inside a branch side is detected
+  expect(
+    workflowNodesHaveBranchOrPoll([
+      { kind: "branch", then: [{ kind: "compute" }], else: [{ kind: "branch" }] },
+    ]),
+  ).toBe(true);
+  // …and inside a group's children
+  expect(
+    workflowNodesHaveBranchOrPoll([{ kind: "group", nodes: [{ kind: "poll" }] }]),
+  ).toBe(true);
+});
+
+test("a real workflow with a poll node extracts to nodes the gate detects (per-file, as the gate does)", async () => {
+  const file = join(dir, "wf.flow.ts");
+  await writeFile(
+    file,
+    `
+import { workflow, contract } from "@glubean/sdk";
+contract.register("gate-poll", {
+  project: () => ({ cases: {} }),
+  executeCaseInFlow: async () => ({ status: "pending" }),
+});
+const ref = {
+  __glubean_type: "contract-case-ref",
+  contractId: "job", caseKey: "status", protocol: "gate-poll", target: "GET /job",
+  contract: {},
+};
+export const waiting = workflow("wf-gate-poll")
+  .setup(async () => ({}))
+  .poll("wait", ref, { until: (w) => w.when((r) => r.status).eq("done"), timeout: 1000 })
+  .build();
+
+export const plain = workflow("wf-gate-plain")
+  .setup(async () => ({}))
+  .compute("c", (s) => s)
+  .build();
+`,
+  );
+  const { extractContractFromFile } = await import("@glubean/scanner");
+  const extracted = await extractContractFromFile(file);
+  const gated = (extracted.workflows ?? []).filter((wf) =>
+    workflowNodesHaveBranchOrPoll(wf.nodes),
+  );
+  expect(gated.map((wf) => wf.id)).toEqual(["wf-gate-poll"]); // plain workflow NOT gated
+});

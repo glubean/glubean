@@ -239,6 +239,27 @@ function flowStepsHaveBranchOrPoll(
   return false;
 }
 
+/**
+ * Same gate for vNext workflows (codex S2.6 R9): a workflow with `.branch()`
+ * or `.poll()` nodes is a graph orchestrator Cloud cannot render yet — it gets
+ * the same --upload refusal as a branch/poll flow. Recurses branch sides and
+ * group children.
+ */
+function workflowNodesHaveBranchOrPoll(
+  nodes:
+    | ReadonlyArray<{ kind: string; then?: any[]; else?: any[]; nodes?: any[] }>
+    | undefined,
+): boolean {
+  if (!nodes) return false;
+  for (const n of nodes) {
+    if (n.kind === "branch" || n.kind === "poll") return true;
+    if (n.then && workflowNodesHaveBranchOrPoll(n.then)) return true;
+    if (n.else && workflowNodesHaveBranchOrPoll(n.else)) return true;
+    if (n.nodes && workflowNodesHaveBranchOrPoll(n.nodes)) return true;
+  }
+  return false;
+}
+
 // Config consolidation (docs/06): the package.json `glubean` field is no
 // longer a config source. Warn (don't error) when one lingers so users
 // migrate it into glubean.yaml instead of wondering why it stopped working.
@@ -668,6 +689,8 @@ export const __testing = {
     matchesExcludeTags(...args),
   flowStepsHaveBranchOrPoll: (...args: Parameters<typeof flowStepsHaveBranchOrPoll>) =>
     flowStepsHaveBranchOrPoll(...args),
+  workflowNodesHaveBranchOrPoll: (...args: Parameters<typeof workflowNodesHaveBranchOrPoll>) =>
+    workflowNodesHaveBranchOrPoll(...args),
 };
 
 function matchesTags(
@@ -1162,6 +1185,12 @@ export async function runCommand(
           const ids = new Set<string>();
           for (const att of extracted.attachments ?? []) {
             if (att.kind === "flow" && flowStepsHaveBranchOrPoll(att.flow.steps)) ids.add(att.flow.id);
+          }
+          // vNext workflows ride the "flow" runnable kind, so they reach this
+          // gate too — a branch/poll workflow gets the same refusal (codex
+          // S2.6 R9 P2).
+          for (const wf of extracted.workflows ?? []) {
+            if (workflowNodesHaveBranchOrPoll(wf.nodes)) ids.add(wf.id);
           }
           branchIdsByFile.set(filePath, ids);
         } catch {

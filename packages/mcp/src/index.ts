@@ -540,6 +540,22 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
       }
     }
 
+    // vNext workflows exported from a contract file are runnable simple tests —
+    // emit one entry per workflow like the CLI's discoverTests does (codex
+    // S2.6 R9 P2). Mutually exclusive with the error fallback above: workflows
+    // only exist when the runtime import succeeded.
+    for (const wf of result.workflows ?? []) {
+      tests.push({
+        exportName: wf.exportName,
+        id: wf.id,
+        name: wf.name,
+        skip: wf.skip !== undefined,
+        only: wf.only ?? false,
+        tags: wf.tags ?? [],
+        deferred: wf.skip,
+      });
+    }
+
     return { fileUrl, tests, ...(result.errors.length > 0 ? { errors: result.errors } : {}) };
   }
 
