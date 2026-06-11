@@ -531,6 +531,29 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
       });
     }
 
+    // vNext workflows (S2.6): each BuiltWorkflow wraps the graph in ONE
+    // simple test — discover it like a flow orchestrator, so a file whose
+    // projection scan/upload advertises is also runnable (codex S2.6 R2 P2).
+    // During the migration window workflows ride the "flow" runnable kind:
+    // a workflow IS the vNext orchestrator replacing contract.flow(), and
+    // suites declaring `kinds: [flow]` mean "run the graph orchestrators in
+    // these files" — no new user-facing kinds enum until flow is deleted.
+    // WorkflowMeta.skip → deferred mirrors the SDK's own Test wrapping.
+    for (const wf of result.workflows) {
+      results.push({
+        exportName: wf.exportName,
+        meta: {
+          id: wf.id,
+          name: wf.name,
+          description: wf.description,
+          tags: wf.tags,
+          only: wf.only,
+          deferred: wf.skip,
+          kind: "flow",
+        },
+      });
+    }
+
     if (results.length > 0) return results;
 
     // Runtime failed — fall back to static regex ONLY for files that

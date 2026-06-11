@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { afterAll, expect, test } from "vitest";
 import { scan } from "@glubean/scanner";
 import { buildMetadata } from "../metadata.js";
+import { discoverTests } from "./run.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(HERE, "..", "..", ".tmp-workflow-metadata");
@@ -72,4 +73,16 @@ export const probe = workflow("probe-journey")
   // `metadata` bucket is this object verbatim).
   const metadata = await buildMetadata(scanResult, { generatedBy: "test" });
   expect(metadata.workflows).toEqual(workflows);
+
+  // What scan advertises, run must execute: discoverTests emits one runnable
+  // per workflow (riding the "flow" kind during migration — codex S2.6 R2 P2).
+  const discovered = await discoverTests(join(dir, "journeys.flow.ts"));
+  const wfEntries = discovered.filter((d) =>
+    ["signup-journey", "probe-journey"].includes(d.meta.id),
+  );
+  expect(wfEntries.map((d) => [d.meta.id, d.exportName, d.meta.kind])).toEqual([
+    ["signup-journey", "signup", "flow"],
+    ["probe-journey", "probe", "flow"],
+  ]);
+  expect(wfEntries[0].meta).toMatchObject({ name: "Signup", tags: ["journey"] });
 });
