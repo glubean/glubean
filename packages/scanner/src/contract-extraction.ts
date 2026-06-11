@@ -1062,7 +1062,12 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
       } else if (Array.isArray(value) && value.some(isBuiltWorkflow)) {
         // workflow.each() exports a BuiltWorkflow[] (addendum §3) — collect
         // every member's projection (rows share one structure; ids/tags vary).
-        for (const member of value) {
+        // workflow.pick(): the export holds this import's RANDOM selection;
+        // metadata must be deterministic, so the declaration inventory reads
+        // the full example universe instead (codex S2.12 R6 P2).
+        const inventory =
+          ((value as { _pickUniverse?: unknown[] })._pickUniverse ?? value) as unknown[];
+        for (const member of inventory) {
           if (isBuiltWorkflow(member)) workflows.push({ ...member._projection, exportName });
         }
       } else if (isProtocolContract(value)) {

@@ -1343,11 +1343,17 @@ function workflowPick<T extends Record<string, unknown>>(
     // Factories are pure authoring, so the validation pass is side-effect-free
     // and nothing from it registers.
     const allRows = normalizeEachTable(examples) as (T & { _pick: string })[];
-    buildEachMembers(allRows, meta, factory); // validation pass — never flushed
+    // Validation pass over the whole universe — registrations never flushed.
+    // The universe also rides the returned array (`_pickUniverse`) so the
+    // scanner's metadata extraction is DETERMINISTIC: scan records every
+    // example's projection (the declaration inventory), independent of which
+    // members this import's random selection produced (codex S2.12 R6 P2).
+    const universe = buildEachMembers(allRows, meta, factory);
     const members = buildEachMembers(selectPickExamples(examples, count), meta, factory);
     for (const m of members) {
       (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
     }
+    Object.assign(members, { _pickUniverse: universe });
     return members;
   };
 }

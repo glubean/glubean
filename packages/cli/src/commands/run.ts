@@ -584,7 +584,31 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     // suites declaring `kinds: [flow]` mean "run the graph orchestrators in
     // these files" — no new user-facing kinds enum until flow is deleted.
     // WorkflowMeta.skip → deferred mirrors the SDK's own Test wrapping.
+    const seenPickTemplates = new Set<string>();
     for (const wf of result.workflows) {
+      // workflow.pick members are THIS import's random selection — the runner
+      // imports again and may select differently. Emit ONE template entry per
+      // pick group instead; the harness's canonical template expansion (B1)
+      // resolves it to the execution import's CURRENT members, running them
+      // all exactly once (codex S2.12 R6 P2).
+      if (wf.templateId && wf.templateId.includes("$_pick")) {
+        if (seenPickTemplates.has(wf.templateId)) continue;
+        seenPickTemplates.add(wf.templateId);
+        results.push({
+          exportName: wf.exportName,
+          meta: {
+            id: wf.templateId,
+            name: wf.templateId,
+            description: wf.description,
+            tags: wf.tags,
+            deferred: wf.skip,
+            ...(wf.groupId ? { groupId: wf.groupId } : {}),
+            ...(wf.parallel ? { parallel: true } : {}),
+            kind: "flow",
+          },
+        });
+        continue;
+      }
       results.push({
         exportName: wf.exportName,
         meta: {
