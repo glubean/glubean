@@ -272,7 +272,8 @@ function workflowEventToTimeline(ev: GlubeanEvent): Record<string, unknown> | nu
   if (
     ev.type !== "workflow:node_start" &&
     ev.type !== "workflow:node_end" &&
-    ev.type !== "workflow:poll_attempt"
+    ev.type !== "workflow:poll_attempt" &&
+    ev.type !== "workflow:branch_decision"
   ) {
     return null;
   }
@@ -306,20 +307,35 @@ function workflowEventToTimeline(ev: GlubeanEvent): Record<string, unknown> | nu
       ...attemptFields,
     };
   }
-  // workflow:poll_attempt
+  if (ev.type === "workflow:poll_attempt") {
+    if (
+      typeof d.attempt !== "number" ||
+      typeof d.outcome !== "string" ||
+      !POLL_OUTCOMES.has(d.outcome)
+    ) {
+      return null;
+    }
+    return {
+      type: "poll_attempt",
+      nodeId: d.nodeId,
+      attempt: d.attempt,
+      outcome: d.outcome,
+      durationMs: typeof d.durationMs === "number" ? d.durationMs : 0,
+    };
+  }
+  // workflow:branch_decision (addendum §9 — branch/switch/route taken case)
   if (
-    typeof d.attempt !== "number" ||
-    typeof d.outcome !== "string" ||
-    !POLL_OUTCOMES.has(d.outcome)
+    (d.mode !== "predicate" && d.mode !== "value") ||
+    (typeof d.takenIndex !== "number" && d.takenIndex !== "default")
   ) {
     return null;
   }
   return {
-    type: "poll_attempt",
+    type: "branch_decision",
     nodeId: d.nodeId,
-    attempt: d.attempt,
-    outcome: d.outcome,
-    durationMs: typeof d.durationMs === "number" ? d.durationMs : 0,
+    mode: d.mode,
+    takenIndex: d.takenIndex,
+    ...(typeof d.takenLabel === "string" ? { takenLabel: d.takenLabel } : {}),
   };
 }
 

@@ -297,8 +297,13 @@ function parseTestDeclaration(
         const property = callee.property as AnyNode;
         if (
           property.type === "Identifier" &&
-          (property.name === "branch" || property.name === "poll")
+          (property.name === "branch" ||
+            property.name === "poll" ||
+            property.name === "switch" ||
+            property.name === "route")
         ) {
+          // switch/route are branch-family graph orchestrators (addendum §9) —
+          // the same Cloud-render gate applies to all of them.
           hasBranchOrPoll = true;
           break;
         }

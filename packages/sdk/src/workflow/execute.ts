@@ -814,6 +814,8 @@ interface NodeListOutcome {
   cause?: unknown;
   /** The user-authored ctx.skip(reason), preserved to the run result (codex S2.5 R6). */
   skipReason?: string;
+  /** A terminal route completed — the trunk ends here (addendum §9 #5). */
+  terminal?: boolean;
 }
 
 /** Is this `when` an L1/L0 opaque predicate (vs an L2 declarative `BranchPredicate`)? */
@@ -823,30 +825,60 @@ function isOpaquePredicate(
   return (when as { kind?: unknown }).kind === "opaque";
 }
 
+/** The taken-case decision (branch_decision event payload + dispatch result). */
+type BranchDecision = { takenIndex: number | "default"; takenLabel?: string };
+
 /**
- * Evaluate a branch predicate against state. L2 declarative → pure synchronous
- * `evalPredicate` (reused from the flow condition model). L1/L0 opaque → run its fn
- * under the branch's child ctx (it may read ctx + emit evidence; an L0 async fn is
- * awaited). A non-boolean opaque result is coerced with Boolean().
+ * Decide the taken case of a branch-family node (addendum §9).
+ *
+ * - value mode: run the `on` lens (pure + synchronous — thenables rejected,
+ *   mirrors call's `in`), === match against the literal case table.
+ * - predicate mode: ordered first-match. L2 declarative → pure synchronous
+ *   `evalPredicate`; an opaque fn (branch's whenRuntime) runs under the node's
+ *   child ctx (may read ctx + emit evidence; async awaited). A non-boolean
+ *   opaque result is rejected, not coerced (codex S2.4a P2).
+ *
+ * No match → "default" (which the caller maps to the `default` nodes, or — for
+ * switch with no default — the identity pass-through).
  */
-async function selectBranch(
+async function selectBranchCase(
   node: BranchNode,
   state: unknown,
   ctx: WorkflowContext,
-): Promise<boolean> {
-  const when = node.when;
-  if (isOpaquePredicate(when)) {
-    const result = await when.fn(ctx, state);
-    if (typeof result !== "boolean") {
-      // The public type promises boolean; reject non-booleans rather than coercing
-      // (a `'false'` string or a forgotten return would silently pick `then`) — codex S2.4a P2.
+): Promise<BranchDecision> {
+  if (node.mode === "value") {
+    const discriminant = node.on?.(state);
+    if (isThenable(discriminant)) {
       throw new Error(
-        `workflow branch "${node.meta.id}": whenRuntime must return a boolean, got ${typeof result}`,
+        `workflow ${node.meta.id}: \`on\` returned a thenable — on must be a pure ` +
+          `synchronous lens (state) => scalar; do async work in .action()`,
       );
     }
-    return result;
+    const idx = node.cases.findIndex((c) => c.value === discriminant);
+    return idx >= 0
+      ? { takenIndex: idx, takenLabel: node.cases[idx].label }
+      : { takenIndex: "default" };
   }
-  return evalPredicate(when as BranchPredicate<unknown>, state);
+  for (let i = 0; i < node.cases.length; i++) {
+    const when = node.cases[i].when;
+    if (when === undefined) continue; // defensive: a case without a predicate never matches
+    let hit: boolean;
+    if (isOpaquePredicate(when)) {
+      const result = await when.fn(ctx, state);
+      if (typeof result !== "boolean") {
+        // The public type promises boolean; reject non-booleans rather than coercing
+        // (a `'false'` string or a forgotten return would silently take the case).
+        throw new Error(
+          `workflow branch "${node.meta.id}": whenRuntime must return a boolean, got ${typeof result}`,
+        );
+      }
+      hit = result;
+    } else {
+      hit = evalPredicate(when as BranchPredicate<unknown>, state);
+    }
+    if (hit) return { takenIndex: i, takenLabel: node.cases[i].label };
+  }
+  return { takenIndex: "default" };
 }
 
 /**
@@ -1002,11 +1034,27 @@ async function runLeafNode(
   };
 }
 
+/** Branch-family decision event (§17 #9 "branch decision") — rides the generic
+ * ctx.event channel like node_start/node_end; the runner unwraps it into a
+ * first-class `branch_decision` timeline event. */
+export const BRANCH_DECISION_EVENT = "workflow:branch_decision";
+
+export interface BranchDecisionEventData {
+  nodeId: string;
+  mode: "predicate" | "value";
+  takenIndex: number | "default";
+  takenLabel?: string;
+  [k: string]: unknown;
+}
+
 /**
- * Run a 2-way branch (§17 #6): evaluate the predicate (under a child ctx so an
- * opaque predicate's evidence is attributed + quarantined), then run ONLY the taken
- * side via runNodeList; the non-taken side is emitted as `skipped`. A predicate that
- * throws or soft-fails fails the branch node (both sides skipped).
+ * Run a branch-family node (§17 #6, addendum §9): decide the taken case (under
+ * a child ctx so an opaque predicate's evidence is attributed + quarantined),
+ * then run ONLY the taken case's nodes via runNodeList; every non-taken case
+ * (and the un-taken default) is emitted `skipped`. A decision that throws or
+ * soft-fails fails the node (all cases skipped). switch with no default and no
+ * match = identity pass-through. A terminal route's outcome carries
+ * `terminal: true` so runNodeList stops the trunk after it.
  */
 async function runBranch(
   baseCtx: TestContext,
@@ -1018,35 +1066,44 @@ async function runBranch(
   const grade = staticGradeOf(node);
   const started = Date.now();
   emitNodeStart(baseCtx, node);
-  // The branch node's own outcome precedes its children (tree order); the final
-  // status is set once the taken side settles.
+  // The family node's own outcome precedes its children (tree order); the final
+  // status is set once the taken case settles.
   const outcomeIndex = outcomes.length;
   outcomes.push({ id: node.meta.id, status: "passed", grade });
 
   const ac = new AbortController();
   const scope = makeNodeScope(baseCtx, ac.signal);
 
-  const failBoth = (cause: unknown, error?: unknown): NodeListOutcome => {
+  // Emit ALL children (every case in authored order, then default) as skipped.
+  // `exceptIndex` skips the taken case's slot (its children get real outcomes).
+  const emitChildrenSkipped = (exceptIndex?: number | "default"): void => {
+    node.cases.forEach((c, i) => {
+      if (exceptIndex !== i) emitNodesSkipped(baseCtx, c.nodes, outcomes, 0);
+    });
+    if (node.default && exceptIndex !== "default") {
+      emitNodesSkipped(baseCtx, node.default, outcomes, 0);
+    }
+  };
+
+  const failAll = (cause: unknown, error?: unknown): NodeListOutcome => {
     ac.abort();
-    emitNodesSkipped(baseCtx, node.then, outcomes, 0);
-    if (node.else) emitNodesSkipped(baseCtx, node.else, outcomes, 0);
+    emitChildrenSkipped();
     const g = promoteGrade(grade, scope); // a soft-failed predicate may have emitted evidence (§17 #10)
     outcomes[outcomeIndex] = { id: node.meta.id, status: "failed", grade: g };
     emitNodeEnd(baseCtx, node, "failed", g, Date.now() - started, error);
     return { state, status: "failed", cause };
   };
 
-  let taken: boolean;
+  let decision: BranchDecision;
   try {
-    taken = await selectBranch(node, state, scope.ctx);
+    decision = await selectBranchCase(node, state, scope.ctx);
   } catch (err) {
     scope.seal();
     if (err instanceof GlubeanSkipError && !scope.hasFailure()) {
-      // predicate ctx.skip() with no prior failure → skip the branch (→ whole
+      // decision ctx.skip() with no prior failure → skip the node (→ whole
       // workflow, like a node skip), NOT a failure (codex S2.4a R5).
       ac.abort();
-      emitNodesSkipped(baseCtx, node.then, outcomes, 0);
-      if (node.else) emitNodesSkipped(baseCtx, node.else, outcomes, 0);
+      emitChildrenSkipped();
       const g = promoteGrade(grade, scope);
       outcomes[outcomeIndex] = { id: node.meta.id, status: "skipped", grade: g };
       emitNodeEnd(baseCtx, node, "skipped", g, Date.now() - started);
@@ -1055,36 +1112,56 @@ async function runBranch(
     // a real throw, OR a soft-failure-then-skip → fail. A skip is never the cause;
     // synthesize a phase failure (mirrors runNode/setup, codex S2.4a R6).
     if (err instanceof GlubeanSkipError) {
-      return failBoth(new WorkflowPhaseFailedError(workflowId, `branch "${node.meta.id}" predicate`));
+      return failAll(new WorkflowPhaseFailedError(workflowId, `branch "${node.meta.id}" decision`));
     }
-    return failBoth(err, err);
+    return failAll(err, err);
   }
   if (scope.hasFailure()) {
-    // opaque predicate soft-failed (scoped assert/validate) — fail the branch.
+    // opaque predicate soft-failed (scoped assert/validate) — fail the node.
     scope.seal();
-    return failBoth(new WorkflowPhaseFailedError(workflowId, `branch "${node.meta.id}" predicate`));
+    return failAll(new WorkflowPhaseFailedError(workflowId, `branch "${node.meta.id}" decision`));
   }
+  // The decision is observability (§17 #9) — emit through the scope while live.
+  const decisionData: BranchDecisionEventData = {
+    nodeId: node.meta.id,
+    mode: node.mode,
+    takenIndex: decision.takenIndex,
+    ...(decision.takenLabel !== undefined ? { takenLabel: decision.takenLabel } : {}),
+  };
+  scope.ctx.event({ type: BRANCH_DECISION_EVENT, data: decisionData });
   scope.seal();
 
-  // Emit children in AUTHORED order (then before else regardless of which is taken):
-  // run the taken side, mark the other skipped — so outcomes/events align with the
-  // projected tree, not with which branch was selected (codex S2.4a P2).
+  // Run the taken case; emit every other case's children skipped — in AUTHORED
+  // order, so outcomes/events align with the projected tree (codex S2.4a P2):
+  // cases before the taken one first, then the taken sub-run, then the rest.
   let r: NodeListOutcome;
-  if (taken) {
-    r = await runNodeList(baseCtx, workflowId, node.then, state, outcomes);
-    if (node.else) emitNodesSkipped(baseCtx, node.else, outcomes, 0);
+  if (decision.takenIndex === "default") {
+    emitChildrenSkipped("default");
+    r = node.default
+      ? await runNodeList(baseCtx, workflowId, node.default, state, outcomes)
+      : { state, status: "passed" }; // switch with no default: identity pass-through (§9 #4)
   } else {
-    emitNodesSkipped(baseCtx, node.then, outcomes, 0);
-    r = node.else
-      ? await runNodeList(baseCtx, workflowId, node.else, state, outcomes)
-      : { state, status: "passed" };
+    const takenIdx = decision.takenIndex;
+    node.cases.forEach((c, i) => {
+      if (i < takenIdx) emitNodesSkipped(baseCtx, c.nodes, outcomes, 0);
+    });
+    r = await runNodeList(baseCtx, workflowId, node.cases[takenIdx].nodes, state, outcomes);
+    node.cases.forEach((c, i) => {
+      if (i > takenIdx) emitNodesSkipped(baseCtx, c.nodes, outcomes, 0);
+    });
+    if (node.default) emitNodesSkipped(baseCtx, node.default, outcomes, 0);
   }
 
-  // promote opaque→trace if the predicate emitted structured evidence, same as
+  // promote opaque→trace if the decision emitted structured evidence, same as
   // runNode (§17 #10; codex S2.4a P2).
   const runtimeGrade = promoteGrade(grade, scope);
   outcomes[outcomeIndex] = { id: node.meta.id, status: r.status, grade: runtimeGrade };
   emitNodeEnd(baseCtx, node, r.status, runtimeGrade, Date.now() - started);
+  // A terminal route that completed (passed OR skipped) ends the trunk; a
+  // failed one already fail-stops the list the normal way.
+  if (node.terminal && r.status === "passed") {
+    return { ...r, terminal: true };
+  }
   return r;
 }
 
@@ -1395,7 +1472,16 @@ async function runNodeList(
           ? await runPollNode(baseCtx, workflowId, node as PollNode, state, outcomes)
           : await runLeafNode(baseCtx, workflowId, node, state, outcomes);
     state = r.state;
-    if (r.status === "passed") continue;
+    if (r.status === "passed") {
+      // A terminal route completed: the trunk ends here (§9 #5). Anything
+      // smuggled after it (the builder forbids it; `as any` can't) is reported
+      // skipped, never executed.
+      if (r.terminal) {
+        emitNodesSkipped(baseCtx, list, outcomes, i + 1);
+        return r;
+      }
+      continue;
+    }
     emitNodesSkipped(baseCtx, list, outcomes, i + 1); // rest of THIS list → skipped
     return r;
   }

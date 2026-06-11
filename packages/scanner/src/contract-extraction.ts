@@ -287,11 +287,19 @@ export interface NormalizedWorkflowNode {
   note?: string;
   /** group children. */
   nodes?: NormalizedWorkflowNode[];
-  /** branch: decision predicate + sides. */
-  when?: NormalizedPredicate;
+  /** branch family (addendum §9): decision mode + projected case table. */
+  mode?: "predicate" | "value";
+  cases?: Array<{
+    label?: string;
+    value?: string | number | boolean | null;
+    when?: NormalizedPredicate;
+    nodes: NormalizedWorkflowNode[];
+  }>;
+  /** branch family: fallback nodes (branch else / switch identity / route default). */
+  default?: NormalizedWorkflowNode[];
+  /** route: terminal — no trunk continues after the taken case. */
+  terminal?: boolean;
   message?: string;
-  then?: NormalizedWorkflowNode[];
-  else?: NormalizedWorkflowNode[];
   /** poll: exit predicate + bounds. */
   until?: NormalizedPredicate;
   every?: number;

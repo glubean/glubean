@@ -65,8 +65,10 @@ export const probe = workflow("probe-journey")
     ["route", "branch", "full"],
   ]);
   const route = signup.nodes[2];
-  expect(route.when).toMatchObject({ kind: "compare", op: "eq", path: ["n"], value: 2 });
-  expect(route.then?.[0]).toMatchObject({ id: "verify", kind: "check", grade: "opaque" });
+  // branch lowers to the family IR (addendum §9): then = cases[0]
+  expect(route.mode).toBe("predicate");
+  expect(route.cases?.[0].when).toMatchObject({ kind: "compare", op: "eq", path: ["n"], value: 2 });
+  expect(route.cases?.[0].nodes[0]).toMatchObject({ id: "verify", kind: "check", grade: "opaque" });
   expect(signup.gradeSummary).toEqual({ full: 2, partial: 1, opaque: 1 });
 
   // …and buildMetadata ships them on the bundle (the upload payload's

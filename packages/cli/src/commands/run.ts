@@ -247,14 +247,23 @@ function flowStepsHaveBranchOrPoll(
  */
 function workflowNodesHaveBranchOrPoll(
   nodes:
-    | ReadonlyArray<{ kind: string; then?: any[]; else?: any[]; nodes?: any[] }>
+    | ReadonlyArray<{
+        kind: string;
+        cases?: Array<{ nodes?: any[] }>;
+        default?: any[];
+        nodes?: any[];
+      }>
     | undefined,
 ): boolean {
   if (!nodes) return false;
   for (const n of nodes) {
+    // The whole branch FAMILY (branch/switch/route lower to kind "branch" —
+    // addendum §9) and poll are graph orchestrators Cloud cannot render yet.
     if (n.kind === "branch" || n.kind === "poll") return true;
-    if (n.then && workflowNodesHaveBranchOrPoll(n.then)) return true;
-    if (n.else && workflowNodesHaveBranchOrPoll(n.else)) return true;
+    for (const c of n.cases ?? []) {
+      if (c.nodes && workflowNodesHaveBranchOrPoll(c.nodes)) return true;
+    }
+    if (n.default && workflowNodesHaveBranchOrPoll(n.default)) return true;
     if (n.nodes && workflowNodesHaveBranchOrPoll(n.nodes)) return true;
   }
   return false;

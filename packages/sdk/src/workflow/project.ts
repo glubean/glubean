@@ -72,14 +72,20 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
         (g: StaticGrade, c) => worst(g, staticGradeOf(c)),
         "full" as StaticGrade,
       );
-    case "branch":
-      // The branch node's grade reflects the projectability of its DECISION (the
-      // predicate) ONLY — L2 declarative → full, L1/L0 opaque → opaque. Children are
-      // graded + tallied independently, so folding them in here would double-count
-      // their opacity and hide a projectable branch decision (codex S2.4a R4).
-      return ((node as BranchNode).when as { kind?: unknown }).kind === "opaque"
+    case "branch": {
+      // The branch-family node's grade reflects the projectability of its
+      // DECISION ONLY — children are graded + tallied independently, so folding
+      // them in would double-count their opacity and hide a projectable
+      // decision (codex S2.4a R4). Value mode is a fully-projectable literal
+      // decision table (the `on` lens carries the same trust as a call's `in`
+      // lens — the lens-purity TODO covers both). Predicate mode is `full` iff
+      // EVERY case predicate is L2 declarative (an opaque whenRuntime → opaque).
+      const b = node as BranchNode;
+      if (b.mode === "value") return "full";
+      return b.cases.some((c) => (c.when as { kind?: unknown } | undefined)?.kind === "opaque")
         ? "opaque"
         : "full";
+    }
     case "poll":
       // Same decision-only rule as branch: the poll's grade is its EXIT predicate's
       // projectability (the call target is a declared contract ref either way).
@@ -154,10 +160,18 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         ...base,
         kind: "branch",
         grade,
-        when: extractPredicate(b.when),
+        mode: b.mode,
         message: b.message,
-        then: b.then.map(projectNode),
-        else: b.else ? b.else.map(projectNode) : undefined,
+        cases: b.cases.map((c) => ({
+          ...(c.label !== undefined ? { label: c.label } : {}),
+          ...(c.value !== undefined ? { value: c.value } : {}),
+          ...(c.when !== undefined
+            ? { when: extractPredicate(c.when as Parameters<typeof extractPredicate>[0]) }
+            : {}),
+          nodes: c.nodes.map(projectNode),
+        })),
+        default: b.default ? b.default.map(projectNode) : undefined,
+        ...(b.terminal ? { terminal: true } : {}),
       };
     }
     case "poll": {
@@ -202,9 +216,9 @@ function tallyGrades(
     if (n.kind === "group" && n.nodes) {
       tallyGrades(n.nodes, acc);
     } else if (n.kind === "branch") {
-      acc[n.grade] += 1; // the branch node itself
-      if (n.then) tallyGrades(n.then, acc);
-      if (n.else) tallyGrades(n.else, acc);
+      acc[n.grade] += 1; // the branch-family node itself (its decision)
+      for (const c of n.cases ?? []) tallyGrades(c.nodes, acc);
+      if (n.default) tallyGrades(n.default, acc);
     } else {
       acc[n.grade] += 1;
     }

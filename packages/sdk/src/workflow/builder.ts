@@ -13,6 +13,8 @@ import { projectWorkflow } from "./project.js";
 import type {
   ActionNode,
   ActionProjection,
+  BranchCase,
+  BranchCaseValue,
   BranchNode,
   BuiltWorkflow,
   CheckNode,
@@ -32,25 +34,100 @@ import type {
 } from "./types.js";
 
 /**
- * `.branch()` options (proposal §6.6) — a declarative `when` (L2, statically
- * projectable → `full`) XOR a runtime `whenRuntime` (opaque L1 sync / L0 async,
- * requires `message`). `then`/`else` are sub-builders over the same state.
+ * A branch-family side: STRICT-S convergence (addendum §9 #1) — the sub-chain
+ * must return to the trunk's State, so a side that forgets `...s` is caught at
+ * the branch line instead of exploding as runtime `undefined` downstream. The
+ * managed-shape rule (§9 #3): sides don't invent shape, they fill slots the
+ * trunk pre-declared (optional fields / one tagged-union FIELD — never a
+ * whole-state union).
+ */
+export type StrictSide<State> = (b: WorkflowBuilder<State>) => WorkflowBuilder<State>;
+
+/**
+ * `.branch()` options (addendum §9) — a declarative `when` (L2, statically
+ * projectable → `full`) XOR a runtime `whenRuntime` (opaque, requires
+ * `message`). `then`/`else` are STRICT-S sub-builders over the same state.
  */
 export type BranchOpts<State> =
   | {
       when: (w: PredicateScope<State>) => BranchPredicate<State>;
       whenRuntime?: never;
       message?: string;
-      then: (b: WorkflowBuilder<State>) => unknown;
-      else?: (b: WorkflowBuilder<State>) => unknown;
+      then: StrictSide<State>;
+      else?: StrictSide<State>;
     }
   | {
       when?: never;
       whenRuntime: (ctx: WorkflowContext, state: State) => boolean | Promise<boolean>;
       message: string;
-      then: (b: WorkflowBuilder<State>) => unknown;
-      else?: (b: WorkflowBuilder<State>) => unknown;
+      then: StrictSide<State>;
+      else?: StrictSide<State>;
     };
+
+/**
+ * `.switch()` options (addendum §9 #4) — the full heir of flow's
+ * switchOn/switchCond: value mode (`on` lens + literal case table) XOR
+ * predicate mode (ordered L2 predicates, first-match). One method, option-key
+ * split. Every case is STRICT-S; `default` is OPTIONAL = identity pass-through.
+ * Case predicates are L2-only (a clean decision table — an opaque N-way gate
+ * is a nested `branch` with `whenRuntime`, not a switch).
+ */
+export type SwitchOpts<State> =
+  | {
+      /** value mode: pure lens state → a JSON-scalar discriminant. */
+      on: (state: State) => BranchCaseValue | undefined;
+      cases: ReadonlyArray<{ value: BranchCaseValue; then: StrictSide<State>; label?: string }>;
+      default?: StrictSide<State>;
+    }
+  | {
+      on?: never;
+      /** predicate mode: ordered, possibly-overlapping L2 predicates; first-match. */
+      cases: ReadonlyArray<{
+        when: (w: PredicateScope<State>) => BranchPredicate<State>;
+        then: StrictSide<State>;
+        label?: string;
+      }>;
+      default?: StrictSide<State>;
+    };
+
+/**
+ * `.route()` options (addendum §9 #5) — the N-way TERMINAL tree. Cases are
+ * UNCONSTRAINED (`(b) => WorkflowBuilder<any>`): no downstream trunk exists to
+ * lie to, so strict-S has nothing to protect. `default` is REQUIRED (a
+ * no-match must be defined). After `.route()` only `.teardown()/.build()`.
+ */
+export type RouteOpts<State> =
+  | {
+      on: (state: State) => BranchCaseValue | undefined;
+      cases: ReadonlyArray<{
+        value: BranchCaseValue;
+        then: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
+        label?: string;
+      }>;
+      default: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
+    }
+  | {
+      on?: never;
+      cases: ReadonlyArray<{
+        when: (w: PredicateScope<State>) => BranchPredicate<State>;
+        then: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
+        label?: string;
+      }>;
+      default: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
+    };
+
+/**
+ * What `.route()` returns: the workflow is a terminal tree now — paths own
+ * their futures, no trunk continues. Only cleanup and finalization remain.
+ * `teardown` is typed against the TRUNK State: at runtime it receives the
+ * taken leaf's state (the union of leaf states) — common trunk fields stay
+ * accessible without narrowing, which §9 accepts as the contained compromise
+ * at the last station.
+ */
+export interface TerminalWorkflowBuilder<State> {
+  teardown(fn: WorkflowTeardown<State>): TerminalWorkflowBuilder<State>;
+  build(): BuiltWorkflow<State>;
+}
 
 /**
  * `.poll()` exit predicate (proposal §6.7) — a declarative `until` over the
@@ -250,6 +327,22 @@ export interface WorkflowBuilder<State> {
    */
   branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): WorkflowBuilder<State>;
   /**
+   * N-way CONVERGING dispatch (addendum §9 #4) — the heir of flow's
+   * switchOn/switchCond. Value mode (`on` lens + literal case table, ===) XOR
+   * predicate mode (ordered L2 predicates, first-match). Every case is
+   * STRICT-S; `default` is optional = identity pass-through. Only the taken
+   * case executes; the rest are reported skipped (§17 #6).
+   */
+  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State>): WorkflowBuilder<State>;
+  /**
+   * N-way TERMINAL tree (addendum §9 #5) — paths own their futures; no trunk
+   * continues. Cases are unconstrained (`(b) => WorkflowBuilder<any>`);
+   * `default` is REQUIRED. Returns a terminal builder allowing only
+   * `.teardown()/.build()`. teardown sees the taken leaf's runtime state
+   * (typed against the trunk State — §9's contained compromise).
+   */
+  route(idOrMeta: NodeMetaInput, opts: RouteOpts<State>): TerminalWorkflowBuilder<State>;
+  /**
    * Bounded poll-until (§6.7, §17 #3): repeat ONE contract case until the exit
    * predicate over the RESPONSE holds. Declarative `until` projects to `full`;
    * runtime `untilRuntime` is opaque and needs a `message`. Bounds are validated
@@ -292,6 +385,8 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   private _built?: BuiltWorkflow<State>;
   /** The first authoring error, if any — a poisoned builder never finalizes. */
   private _poisoned?: unknown;
+  /** Set by `.route()` — the tree is terminal; only teardown/build may follow. */
+  private _terminated?: string;
 
   constructor(
     meta: WorkflowMeta,
@@ -369,8 +464,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
 
   // teardown receives the FINAL state, so no step may follow it (else its
   // callback is authored against a stale state type) (codex slice-1 P2).
+  // A `.route()` terminal tree likewise allows no further graph nodes (§9 #5).
   private assertNoTeardown(method: string): void {
     this.assertNotBuilt(method);
+    if (this._terminated) {
+      throw new Error(
+        `workflow.${method}() cannot follow ${this._terminated} — a route is terminal; ` +
+          `only .teardown()/.build() may come after`,
+      );
+    }
     if (this._teardown) {
       throw new Error(
         `workflow.${method}() cannot be added after .teardown() — teardown must be the last step`,
@@ -480,19 +582,132 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNoTeardown("branch");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
-      // Prefix each side's anonymous-fallback ids with the branch id + side so the
-      // flat outcome/projection ids stay unique (codex S2.4a R7).
+      // 2-way sugar over the branch-family IR (addendum §9): one predicate case
+      // (then) + default (else). Prefix each side's anonymous-fallback ids with
+      // the branch id + side so flat outcome/projection ids stay unique (S2.4a R7).
       const node: BranchNode<State> = {
         kind: "branch",
         meta,
-        when: this.buildBranchPredicate(opts),
+        mode: "predicate",
         message: opts.message,
-        then: this.collectSubNodes(opts.then, `${meta.id}.then.`),
-        else: opts.else ? this.collectSubNodes(opts.else, `${meta.id}.else.`) : undefined,
+        cases: [
+          {
+            when: this.buildBranchPredicate(opts),
+            label: "then",
+            nodes: this.collectSubNodes(opts.then, `${meta.id}.then.`),
+          },
+        ],
+        default: opts.else ? this.collectSubNodes(opts.else, `${meta.id}.else.`) : undefined,
       };
       this._nodes.push(node as WorkflowNode);
       return this;
     });
+  }
+
+  // Broad impls satisfy the interface signatures; call sites type-check against
+  // the precise interface, not these.
+  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State>): WorkflowBuilder<State> {
+    return this.authoring(() => {
+      this.assertNoTeardown("switch");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      const node: BranchNode<State> = {
+        kind: "branch",
+        meta,
+        ...this.buildFamilyDecision("switch", meta.id, opts),
+        default: opts.default
+          ? this.collectSubNodes(opts.default, `${meta.id}.default.`)
+          : undefined, // optional = identity pass-through (addendum §9 #4)
+      };
+      this._nodes.push(node as WorkflowNode);
+      return this;
+    });
+  }
+
+  route(idOrMeta: NodeMetaInput, opts: RouteOpts<State>): TerminalWorkflowBuilder<State> {
+    return this.authoring(() => {
+      this.assertNoTeardown("route");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      // route's default is REQUIRED (a no-match must be defined — §9 #5); the
+      // types enforce it, but `as any`/JS callers can omit it.
+      if (typeof opts.default !== "function") {
+        throw new Error(
+          `workflow.route() "${meta.id}" requires a \`default\` case — a no-match path must be defined`,
+        );
+      }
+      const node: BranchNode<State> = {
+        kind: "branch",
+        meta,
+        ...this.buildFamilyDecision("route", meta.id, opts),
+        default: this.collectSubNodes(opts.default, `${meta.id}.default.`),
+        terminal: true,
+      };
+      this._nodes.push(node as WorkflowNode);
+      // The tree is terminal: only teardown/build may follow (§9 #5).
+      this._terminated = `route "${meta.id}"`;
+      return this as TerminalWorkflowBuilder<State>;
+    });
+  }
+
+  // Shared switch/route decision lowering: value mode (on lens + literal table,
+  // === match) XOR predicate mode (ordered L2, first-match). Case sub-graphs
+  // collect under `<id>.<label>.` prefixes; labels derive from explicit label →
+  // String(value) → positional case-N.
+  private buildFamilyDecision(
+    method: "switch" | "route",
+    nodeId: string,
+    opts: SwitchOpts<State> | RouteOpts<State>,
+  ): Pick<BranchNode<State>, "mode" | "on" | "cases"> {
+    if (!Array.isArray(opts.cases) || opts.cases.length === 0) {
+      throw new Error(`workflow.${method}() "${nodeId}" requires at least one case`);
+    }
+    const valueMode = typeof opts.on === "function";
+    const cases: BranchCase[] = opts.cases.map((c, i) => {
+      const raw = c as {
+        value?: BranchCaseValue;
+        when?: (w: PredicateScope<State>) => BranchPredicate<State>;
+        then: (b: WorkflowBuilder<State>) => unknown;
+        label?: string;
+      };
+      if (valueMode) {
+        const v = raw.value;
+        if (v !== null && typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+          throw new Error(
+            `workflow.${method}() "${nodeId}" case ${i}: value mode requires a JSON-scalar \`value\` ` +
+              `(string | number | boolean | null); got ${typeof v}`,
+          );
+        }
+        const label = raw.label ?? String(v);
+        return { value: v, label, nodes: this.collectSubNodes(raw.then, `${nodeId}.${label}.`) };
+      }
+      if (typeof raw.when !== "function") {
+        throw new Error(
+          `workflow.${method}() "${nodeId}" case ${i}: predicate mode requires a declarative \`when\``,
+        );
+      }
+      const pred = raw.when(predicateScope<State>());
+      // switch/route case predicates are L2-only — a clean decision table
+      // (addendum §9 #4); an opaque N-way gate is a nested branch+whenRuntime.
+      assertL2Predicate(pred, method);
+      const label = raw.label ?? `case-${i}`;
+      return { when: pred, label, nodes: this.collectSubNodes(raw.then, `${nodeId}.${label}.`) };
+    });
+    // Duplicate value-mode literals would make later cases unreachable — fail
+    // fast (mirrors the unreachable-case spirit of a real switch).
+    if (valueMode) {
+      const seen = new Set<string>();
+      for (const c of cases) {
+        const key = `${typeof c.value}:${String(c.value)}`;
+        if (seen.has(key)) {
+          throw new Error(
+            `workflow.${method}() "${nodeId}": duplicate case value ${JSON.stringify(c.value)} — later case is unreachable`,
+          );
+        }
+        seen.add(key);
+      }
+    }
+    return valueMode
+      ? { mode: "value", on: (opts as { on: (s: State) => unknown }).on, cases }
+      : { mode: "predicate", cases };
   }
 
   // Broad impl satisfies the interface's conditional-tuple signature; call sites

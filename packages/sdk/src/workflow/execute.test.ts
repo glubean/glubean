@@ -18,7 +18,7 @@ import {
   NODE_END_EVENT,
   POLL_ATTEMPT_EVENT,
 } from "./execute.js";
-import type { ActionNode, CheckNode, WorkflowTeardown } from "./types.js";
+import type { ActionNode, CheckNode, WorkflowNode, WorkflowTeardown } from "./types.js";
 
 const fakeRef = <I = unknown, O = unknown>(
   contractId: string,
@@ -928,12 +928,14 @@ describe("runWorkflow — branch (§17 #6)", () => {
 
   it("runtime branch (whenRuntime) runs the taken side; threads state out of it", async () => {
     const { ctx } = fakeBase();
+    // strict-S (addendum §9 #1/#3): the trunk PRE-DECLARES the slot a side
+    // fills — a side inventing `taken` out of thin air no longer compiles.
     const wf = workflow("br-rt")
-      .setup(async () => ({ n: 5 }))
+      .setup(async () => ({ n: 5, taken: false }))
       .branch("gate", {
         whenRuntime: async (_c, s: { n: number }) => s.n > 3,
         message: "n over threshold",
-        then: (b) => b.compute("mark", (s) => ({ ...s, taken: true })),
+        then: (b) => b.compute("mark", (s) => ({ ...s, taken: true as boolean })),
       })
       .build();
     const res = await runWorkflow(wf, ctx);
@@ -1013,7 +1015,10 @@ describe("runWorkflow — branch (§17 #6)", () => {
         then: (b) => b.compute("c", (s) => s),
       })
       .build();
-    const when = projectWorkflow(wf).nodes.find((n) => n.id === "b")!.when as {
+    // branch lowers to the family IR: the predicate lives on cases[0].when
+    const projected = projectWorkflow(wf).nodes.find((n) => n.id === "b")!;
+    expect(projected.mode).toBe("predicate");
+    const when = projected.cases![0].when as {
       kind: string;
       strictness?: string;
       mayDoAsyncIO?: boolean;
@@ -1173,8 +1178,8 @@ describe("runWorkflow — branch (§17 #6)", () => {
       .build();
     const proj = projectWorkflow(wf);
     const branchNode = proj.nodes.find((n) => n.id === "route")!;
-    const thenId = branchNode.then![0].id;
-    const elseId = branchNode.else![0].id;
+    const thenId = branchNode.cases![0].nodes[0].id; // then = cases[0] in the family IR
+    const elseId = branchNode.default![0].id; // else = default
     expect(thenId).toBe("route.then.node-0");
     expect(elseId).toBe("route.else.node-0");
     expect(thenId).not.toBe(elseId);
@@ -1187,6 +1192,228 @@ describe("runWorkflow — branch (§17 #6)", () => {
         then: (b: unknown) => b,
       } as never),
     ).toThrow(/requires a non-empty `message`/);
+  });
+});
+
+// --- switch / route: the branch family (addendum §9) -------------------------
+
+describe("runWorkflow — switch (addendum §9 #4)", () => {
+  it("value mode: === match runs ONLY the taken case; others + default skipped; decision event emitted", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("sw-value")
+      .setup(async () => ({ plan: "pro", path: "none" }))
+      .switch("by plan", {
+        on: (s) => s.plan,
+        cases: [
+          { value: "free", then: (b) => b.compute("go-free", (s) => ({ ...s, path: "free" })) },
+          { value: "pro", then: (b) => b.compute("go-pro", (s) => ({ ...s, path: "pro" })) },
+        ],
+        default: (b) => b.compute("go-default", (s) => ({ ...s, path: "default" })),
+      })
+      .compute("after", (s) => s) // trunk continues (converging)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect((res.state as { path: string }).path).toBe("pro");
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toEqual({
+      "by plan": "passed",
+      "go-free": "skipped",
+      "go-pro": "passed",
+      "go-default": "skipped",
+      after: "passed",
+    });
+    const decision = rec.events.find((e) => e.type === "workflow:branch_decision");
+    expect(decision?.data).toMatchObject({
+      nodeId: "by plan",
+      mode: "value",
+      takenIndex: 1,
+      takenLabel: "pro",
+    });
+  });
+
+  it("value mode with NO match and NO default = identity pass-through (§9 #4)", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("sw-identity")
+      .setup(async () => ({ plan: "enterprise" }))
+      .switch("by plan", {
+        on: (s) => s.plan,
+        cases: [{ value: "free", then: (b) => b.compute("c", (s) => s) }],
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.state).toEqual({ plan: "enterprise" }); // state unchanged
+    expect(res.nodes.find((n) => n.id === "by plan")!.status).toBe("passed");
+    const decision = rec.events.find((e) => e.type === "workflow:branch_decision");
+    expect(decision?.data).toMatchObject({ takenIndex: "default" });
+  });
+
+  it("predicate mode: ordered first-match (overlapping predicates take the FIRST)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("sw-pred")
+      .setup(async () => ({ n: 10, hit: "none" }))
+      .switch("by n", {
+        cases: [
+          {
+            when: (w) => w.when((s: { n: number }) => s.n).gt(5),
+            then: (b) => b.compute("big", (s) => ({ ...s, hit: "big" })),
+          },
+          {
+            when: (w) => w.when((s: { n: number }) => s.n).gt(1),
+            then: (b) => b.compute("medium", (s) => ({ ...s, hit: "medium" })), // overlaps; must not run
+          },
+        ],
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect((res.state as { hit: string }).hit).toBe("big");
+    expect(res.nodes.find((n) => n.id === "medium")!.status).toBe("skipped");
+  });
+
+  it("build-time validation: duplicate value, non-scalar value, non-L2 predicate, empty cases", () => {
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({ k: "a" }))
+        .switch("s", {
+          on: (s) => s.k,
+          cases: [
+            { value: "a", then: (b) => b },
+            { value: "a", then: (b) => b }, // unreachable duplicate
+          ],
+        }),
+    ).toThrow(/duplicate case value/);
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({}))
+        .switch("s", { on: () => "x", cases: [{ value: {} as never, then: (b) => b }] }),
+    ).toThrow(/JSON-scalar/);
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({}))
+        .switch("s", { cases: [{ when: (() => ({ kind: "opaque" })) as never, then: (b) => b }] }),
+    ).toThrow(/switch/);
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({}))
+        .switch("s", { cases: [] as never }),
+    ).toThrow(/at least one case/);
+  });
+
+  it("projection: value mode is a full decision table; grade summary counts the family node + children", () => {
+    const wf = workflow("sw-proj")
+      .setup(async () => ({ k: "a" }))
+      .switch("dispatch", {
+        on: (s) => s.k,
+        cases: [
+          { value: "a", then: (b) => b.compute("ca", (s) => s) },
+          { value: "b", then: (b) => b.compute("cb", (s) => s), label: "bee" },
+        ],
+        default: (b) => b.compute("cd", (s) => s),
+      })
+      .build();
+    const proj = projectWorkflow(wf);
+    const n = proj.nodes.find((p) => p.id === "dispatch")!;
+    expect(n).toMatchObject({ kind: "branch", mode: "value", grade: "full" });
+    expect(n.cases!.map((c) => [c.label, c.value])).toEqual([
+      ["a", "a"],
+      ["bee", "b"],
+    ]);
+    expect(n.default![0].id).toBe("cd");
+    expect(proj.gradeSummary).toEqual({ full: 4, partial: 0, opaque: 0 }); // dispatch + ca + cb + cd
+  });
+});
+
+describe("runWorkflow — route (addendum §9 #5)", () => {
+  it("terminal: the taken case runs, the trunk ENDS (only teardown after); leaf state reaches teardown", async () => {
+    const { ctx } = fakeBase();
+    let teardownState: unknown;
+    const wf = workflow("rt-terminal")
+      .setup(async () => ({ kind: "a", trunk: true }))
+      .route("fan out", {
+        on: (s) => s.kind,
+        cases: [
+          {
+            value: "a",
+            then: (b) => b.compute("leaf-a", (s) => ({ ...s, leaf: "a" })),
+          },
+          { value: "b", then: (b) => b.compute("leaf-b", (s) => ({ ...s, leaf: "b" })) },
+        ],
+        default: (b) => b.check("no-match", async (c) => c.fail("unrouted")),
+      })
+      .teardown(async (_c, s) => {
+        teardownState = s;
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.state).toEqual({ kind: "a", trunk: true, leaf: "a" }); // leaf state committed
+    expect(teardownState).toEqual({ kind: "a", trunk: true, leaf: "a" });
+    expect(Object.fromEntries(res.nodes.map((n) => [n.id, n.status]))).toEqual({
+      "fan out": "passed",
+      "leaf-a": "passed",
+      "leaf-b": "skipped",
+      "no-match": "skipped",
+    });
+  });
+
+  it("default is REQUIRED and runs on no-match; missing default throws at build time", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("rt-default")
+      .setup(async () => ({ kind: "zzz" }))
+      .route("fan out", {
+        on: (s) => s.kind,
+        cases: [{ value: "a", then: (b) => b.compute("leaf-a", (s) => s) }],
+        default: (b) => b.compute("fallback", (s) => ({ ...s, routed: "default" })),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect((res.state as { routed?: string }).routed).toBe("default");
+
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({}))
+        .route("r", {
+          on: () => "x",
+          cases: [{ value: "x", then: (b: unknown) => b }],
+        } as never),
+    ).toThrow(/requires a `default` case/);
+  });
+
+  it("nothing may follow .route() — terminal at the type AND runtime layer", () => {
+    const b = workflow("rt-frozen").setup(async () => ({ k: "x" }));
+    const terminal = b.route("r", {
+      on: (s) => s.k,
+      cases: [{ value: "x", then: (bb) => bb }],
+      default: (bb) => bb,
+    });
+    expect(typeof terminal.teardown).toBe("function");
+    expect(typeof terminal.build).toBe("function");
+    // runtime guard for `as any` callers (the type layer already forbids this)
+    expect(() => (b as unknown as { compute: (i: string, f: (s: unknown) => unknown) => unknown }).compute("late", (s) => s)).toThrow(
+      /cannot follow route/,
+    );
+  });
+
+  it("a route smuggled into mid-list ends the trunk: later nodes report skipped", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("rt-smuggle")
+      .setup(async () => ({ k: "x" }))
+      .route("r", {
+        on: (s) => s.k,
+        cases: [{ value: "x", then: (b) => b.compute("leaf", (s) => s) }],
+        default: (b) => b,
+      })
+      .build();
+    // smuggle a node AFTER the terminal route (builder forbids it; `as any` can't)
+    (wf.nodes as WorkflowNode[]).push({
+      kind: "compute",
+      meta: { id: "after", name: "after" },
+      fn: (s: unknown) => s,
+    } as WorkflowNode);
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.nodes.find((n) => n.id === "after")!.status).toBe("skipped"); // never executed
   });
 });
 

@@ -201,3 +201,44 @@ export const wf = workflow("wf-poll")
   ]);
   expect(nodeEnds(r.events).map((e) => e.status)).toEqual(["failed"]);
 });
+
+test("switch + route run end-to-end with a first-class branch_decision event (addendum §9)", async () => {
+  const src = `
+import { workflow } from "@glubean/sdk";
+export const wf = workflow("wf-family")
+  .setup(async () => ({ plan: "pro", path: "none" }))
+  .switch("by plan", {
+    on: (s) => s.plan,
+    cases: [
+      { value: "free", then: (b) => b.compute("go-free", (s) => ({ ...s, path: "free" })) },
+      { value: "pro", then: (b) => b.compute("go-pro", (s) => ({ ...s, path: "pro" })) },
+    ],
+  })
+  .route("fan out", {
+    on: (s) => s.path,
+    cases: [
+      { value: "pro", then: (b) => b.check("pro-leaf", async (c, s) => { c.assert(s.path === "pro", "routed pro"); }) },
+    ],
+    default: (b) => b.check("unrouted", async (c) => c.fail("unrouted")),
+  })
+  .build();
+`;
+  const r = await run(src, "wf-family");
+  expect(r.success).toBe(true);
+  const decisions = r.events.filter(
+    (e): e is Extract<TimelineEvent, { type: "branch_decision" }> => e.type === "branch_decision",
+  );
+  expect(decisions.map((d) => [d.nodeId, d.mode, d.takenIndex, d.takenLabel])).toEqual([
+    ["by plan", "value", 1, "pro"],
+    ["fan out", "value", 0, "pro"],
+  ]);
+  const byId = Object.fromEntries(nodeEnds(r.events).map((e) => [e.nodeId, e.status]));
+  expect(byId).toEqual({
+    "by plan": "passed",
+    "go-free": "skipped",
+    "go-pro": "passed",
+    "fan out": "passed",
+    "pro-leaf": "passed",
+    unrouted: "skipped",
+  });
+});

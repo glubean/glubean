@@ -381,6 +381,7 @@ export type ExecutionEvent = { testId?: string } & (
   | { type: "node_start"; nodeId: string; kind: string; name: string; attempt?: number; attempts?: number }
   | { type: "node_end"; nodeId: string; kind: string; name: string; status: "passed" | "failed" | "skipped"; grade: "full" | "partial" | "trace" | "opaque"; durationMs: number; error?: string; attempt?: number; attempts?: number }
   | { type: "poll_attempt"; nodeId: string; attempt: number; outcome: "satisfied" | "probe" | "failed"; durationMs: number }
+  | { type: "branch_decision"; nodeId: string; mode: "predicate" | "value"; takenIndex: number | "default"; takenLabel?: string }
   | { type: "timeout_update"; timeout: number }
   | { type: "session:set"; key: string; value: unknown; ts: number }
   | {
@@ -444,6 +445,7 @@ export type TimelineEvent =
   | { type: "node_start"; ts: number; testId?: string; nodeId: string; kind: string; name: string; attempt?: number; attempts?: number }
   | { type: "node_end"; ts: number; testId?: string; nodeId: string; kind: string; name: string; status: "passed" | "failed" | "skipped"; grade: "full" | "partial" | "trace" | "opaque"; durationMs: number; error?: string; attempt?: number; attempts?: number }
   | { type: "poll_attempt"; ts: number; testId?: string; nodeId: string; attempt: number; outcome: "satisfied" | "probe" | "failed"; durationMs: number }
+  | { type: "branch_decision"; ts: number; testId?: string; nodeId: string; mode: "predicate" | "value"; takenIndex: number | "default"; takenLabel?: string }
   | { type: "summary"; ts: number; testId?: string; data: { httpRequestTotal: number; httpErrorTotal: number; httpErrorRate: number; assertionTotal: number; assertionFailed: number; warningTotal: number; warningTriggered: number; schemaValidationTotal: number; schemaValidationFailed: number; schemaValidationWarnings: number; stepTotal: number; stepPassed: number; stepFailed: number; stepSkipped: number } };
 
 export type EventHandler = (event: TimelineEvent) => void | Promise<void>;
@@ -1239,6 +1241,9 @@ export class TestExecutor {
           break;
         case "poll_attempt":
           timelineEvent = { type: "poll_attempt", ts, ...(includeTestId && { testId }), nodeId: event.nodeId, attempt: event.attempt, outcome: event.outcome, durationMs: event.durationMs };
+          break;
+        case "branch_decision":
+          timelineEvent = { type: "branch_decision", ts, ...(includeTestId && { testId }), nodeId: event.nodeId, mode: event.mode, takenIndex: event.takenIndex, ...(event.takenLabel !== undefined && { takenLabel: event.takenLabel }) };
           break;
         case "timeout_update":
           break;

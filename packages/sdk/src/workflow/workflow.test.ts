@@ -254,8 +254,9 @@ describe("workflow build() — discovery handle (S2.5)", () => {
       workflow("parent")
         .setup(async () => ({ x: 1 }))
         .branch("route", {
+          then: ((b: { compute: (id: string, f: (s: unknown) => unknown) => { build: () => unknown } }) =>
+            b.compute("c", (s) => s).build()) as never,
           when: (w) => w.when((s: { x: number }) => s.x).eq(1),
-          then: (b) => (b.compute("c", (s) => s) as unknown as { build: () => unknown }).build(),
         }),
     ).toThrow(/cannot be called on a branch\/poll sub-builder/);
     expect(getRegistry().filter((r) => r.id === "parent")).toHaveLength(0); // nothing registered
@@ -440,6 +441,40 @@ function _compileTimeGuards(): void {
       in: (s) => ({ jobId: s.jobId }),
       untilRuntime: (_c, res: { status: string }) => res.status === "done",
       timeout: 1000,
+    });
+
+  // strict-S (addendum §9 #1): a branch side that DROPS trunk fields (forgets
+  // `...s`) must not compile — the footgun is caught at the branch line.
+  workflow("guard")
+    .setup(async () => ({ a: 1, b: 2 }))
+    .branch("g", {
+      when: (w) => w.when((s) => s.a).eq(1),
+      // @ts-expect-error — the side returns { a } only; strict-S demands the full S
+      then: (b) => b.compute("c", (s) => ({ a: s.a })),
+    });
+  // …and a compliant side (fills a pre-declared slot, keeps the shape) compiles:
+  workflow("guard")
+    .setup(async () => ({ a: 1, flag: false }))
+    .branch("g", {
+      when: (w) => w.when((s) => s.a).eq(1),
+      then: (b) => b.compute("c", (s) => ({ ...s, flag: true as boolean })),
+    });
+
+  // switch cases are strict-S too (§9 #4); route cases are unconstrained (§9 #5).
+  workflow("guard")
+    .setup(async () => ({ k: "x", out: "" }))
+    .switch("s", {
+      on: (s) => s.k,
+      // @ts-expect-error — a value-mode case that reshapes state must not compile
+      cases: [{ value: "x", then: (b) => b.compute("c", (s) => ({ k: s.k })) }],
+    });
+  workflow("guard")
+    .setup(async () => ({ k: "x" }))
+    .route("r", {
+      on: (s) => s.k,
+      // a route case MAY reshape freely — no downstream trunk exists to lie to
+      cases: [{ value: "x", then: (b) => b.compute("c", (s) => ({ leaf: s.k })) }],
+      default: (b) => b,
     });
 }
 void _compileTimeGuards;

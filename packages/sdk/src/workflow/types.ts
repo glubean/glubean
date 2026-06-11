@@ -170,23 +170,54 @@ export interface InlineProtocolNode {
   reserved?: never;
 }
 
+/** A JSON-scalar literal a value-mode case matches against (===). */
+export type BranchCaseValue = string | number | boolean | null;
+
+/** One case of the generalized branch family (addendum §9). */
+export interface BranchCase {
+  /** value mode: the JSON-scalar literal this case matches (=== on the `on` lens result). */
+  value?: BranchCaseValue;
+  /** predicate mode (incl. the 2-way `branch` sugar): this case's predicate.
+   * L2 declarative, or — for `branch`'s `whenRuntime` only — an opaque fn. */
+  when?: BranchPredicate<any> | OpaquePredicate;
+  /** Display label: explicit, else derived (String(value) / "then" / "case-N"). */
+  label?: string;
+  nodes: WorkflowNode[];
+}
+
 /**
- * 2-way branch (proposal §6.6). Runs ONLY the taken side's nodes; the non-taken
- * side is emitted as `skipped` (§17 #6, first-match). The predicate reuses the flow
- * condition model: an L2 declarative `BranchPredicate` (statically projectable →
- * grade `full`) or an L1/L0 `OpaquePredicate` (runtime → grade `opaque`).
+ * The branch FAMILY node (addendum §9 — supersedes the 2-way-only sketch).
+ * One IR for all three authoring constructs, mirroring the flow IR's proven
+ * cases[] extraction shape (Gate B canonical-hash rules: order preserved):
+ *
+ * - `.branch()` — 2-way converging sugar: mode "predicate", one case (then) +
+ *   `default` (else).
+ * - `.switch()` — N-way converging, heir of switchOn/switchCond: mode "value"
+ *   (`on` lens + literal case table) XOR mode "predicate" (ordered L2
+ *   first-match). `default` optional = identity pass-through.
+ * - `.route()`  — N-way TERMINAL tree: same decision modes, `default`
+ *   REQUIRED, `terminal: true` (no trunk continues; only teardown/build after).
+ *
+ * Runtime (§17 #6, all three): ONLY the taken case's nodes execute; every
+ * non-taken case (and the un-taken default) is emitted `skipped`.
  */
 export interface BranchNode<State = any> {
   kind: "branch";
   meta: NodeMeta;
-  /** Taken side selected by this predicate (L2 declarative, or L1/L0 opaque). */
-  when: BranchPredicate<State> | OpaquePredicate;
-  /** Author label — required for opaque predicates (projection / diagnostics). */
+  /** How the taken case is decided. */
+  mode: "predicate" | "value";
+  /** value mode: pure lens state → discriminant (JSON scalar). Same trust level
+   * as a call's `in` lens (TODO lens-purity applies to both). */
+  on?: (state: State) => unknown;
+  /** Author label — required when a predicate is opaque (projection/diagnostics). */
   message?: string;
-  /** Nodes run when `when` holds. */
-  then: WorkflowNode[];
-  /** Nodes run otherwise (absent = empty else). */
-  else?: WorkflowNode[];
+  /** Decision table — first-match (predicate) / ===-match (value). Order preserved. */
+  cases: BranchCase[];
+  /** Fallback: branch's else / switch's optional identity / route's REQUIRED default. */
+  default?: WorkflowNode[];
+  /** route: paths own their futures — after the taken case the workflow ends
+   * (runNodeList stops; the builder allows only teardown/build after). */
+  terminal?: boolean;
 }
 
 /**
@@ -333,13 +364,22 @@ export interface ProjectedWorkflowNode {
   note?: string;
   /** group children. */
   nodes?: ProjectedWorkflowNode[];
-  /** branch: the extracted predicate — an L2 declarative tree, or an opaque marker. */
-  when?: ExtractedPredicate;
+  /** branch family: how the taken case is decided (addendum §9). */
+  mode?: "predicate" | "value";
+  /** branch family: the projected decision table (order preserved). Only the
+   * taken case runs at runtime; the rest are reported skipped (§17 #6). */
+  cases?: Array<{
+    label?: string;
+    value?: BranchCaseValue;
+    when?: ExtractedPredicate;
+    nodes: ProjectedWorkflowNode[];
+  }>;
+  /** branch family: fallback nodes (branch's else / switch identity / route default). */
+  default?: ProjectedWorkflowNode[];
+  /** route: terminal — no trunk continues after the taken case. */
+  terminal?: boolean;
   /** branch/poll: author label (required for opaque predicates). */
   message?: string;
-  /** branch: projected `then` / `else` side nodes (only the taken side runs at runtime). */
-  then?: ProjectedWorkflowNode[];
-  else?: ProjectedWorkflowNode[];
   /** poll: the extracted exit predicate — L2 declarative over the response, or opaque. */
   until?: ExtractedPredicate;
   /** poll bounds (every/backoff always present; the rest as authored). */

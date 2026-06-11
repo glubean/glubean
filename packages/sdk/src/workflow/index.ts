@@ -8,8 +8,12 @@ export * from "./types.js";
 export { workflow } from "./builder.js";
 export type {
   WorkflowBuilder,
+  TerminalWorkflowBuilder,
   CallBindings,
   BranchOpts,
+  SwitchOpts,
+  RouteOpts,
+  StrictSide,
   PollOpts,
   PollOptsWithInput,
   PollUntil,
