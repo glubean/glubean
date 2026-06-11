@@ -96,6 +96,13 @@ export const polling = workflow("wf-polling")
 
 export const linear = workflow("wf-linear").compute("c", (s) => s).build();
 
+// a CALLBACK body calling something named .poll()/.branch() must NOT flag —
+// only the builder chain's own method names count (codex S2.6 R11 P2).
+export const callbackNoise = workflow("wf-callback-noise")
+  .setup(async () => ({}))
+  .action("a", async (ctx, s) => { await client.poll(); other.branch(); return s; })
+  .build();
+
 // a plain test whose body merely CALLS something named branch() must not flag
 export const plain = test("plain-test", async (ctx) => { ctx.log("x"); });
 `;
@@ -107,6 +114,7 @@ export const plain = test("plain-test", async (ctx) => { ctx.log("x"); });
     "wf-branched": [true, true],
     "wf-polling": [true, true],
     "wf-linear": [true, false],
+    "wf-callback-noise": [true, false],
     "plain-test": [false, false],
   });
 });

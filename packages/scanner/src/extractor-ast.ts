@@ -232,19 +232,31 @@ function parseTestDeclaration(
   // safely inspect (codex S2.6 R10 P2).
   if (factoryName === "workflow") {
     result.workflow = true;
+    // Inspect ONLY the builder chain's own method names — descending callee
+    // objects like chainHead does, never the call ARGUMENTS — so a user
+    // callback body calling e.g. `client.poll()` cannot false-positive a
+    // linear workflow into the upload refusal (codex S2.6 R11 P2). A branch's
+    // then/else sub-chains live in arguments, but the outer `.branch(` on the
+    // chain has already flagged it by then.
     let hasBranchOrPoll = false;
-    walk(init, (node) => {
-      if (node.type !== "CallExpression") return;
+    let node: AnyNode | undefined = unwrapExpression(init);
+    while (node && node.type === "CallExpression") {
       const callee = unwrapExpression(node.callee as AnyNode);
-      if (!callee || callee.type !== "MemberExpression" || callee.computed === true) return;
-      const property = callee.property as AnyNode;
-      if (
-        property.type === "Identifier" &&
-        (property.name === "branch" || property.name === "poll")
-      ) {
-        hasBranchOrPoll = true;
+      if (!callee) break;
+      if (callee.type === "MemberExpression" && callee.computed !== true) {
+        const property = callee.property as AnyNode;
+        if (
+          property.type === "Identifier" &&
+          (property.name === "branch" || property.name === "poll")
+        ) {
+          hasBranchOrPoll = true;
+          break;
+        }
+        node = unwrapExpression(callee.object as AnyNode);
+      } else {
+        break;
       }
-    });
+    }
     if (hasBranchOrPoll) result.workflowHasBranchOrPoll = true;
   }
 

@@ -437,6 +437,14 @@ export async function resolveTestFilesForSuite(
   // `.flow.ts` file (recommended canonical layout) or declare the
   // suite as `kinds: [contract, flow]` so both candidate file types
   // are scanned and the runnable-level filter sorts them out.
+  //
+  // The same applies to a vNext workflow authored in a `.test.ts`
+  // (workflows ride the "flow" RUNNABLE kind, codex S2.6 R10/R11): a
+  // strict `kinds: [flow]` suite won't see the file. Move the workflow
+  // to a `.flow.ts` (recommended — it also gains the metadata
+  // projection, which `.test.ts` files never get) or declare
+  // `kinds: [test, flow]`; the runnable-level filter then keeps the
+  // workflow and drops the plain test() exports.
   return files.filter((f) => {
     const k = classifyGlubeanFile(f);
     if (k === undefined) return false;
@@ -677,9 +685,12 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         requires: m.requires,
         defaultRun: m.defaultRun,
         // A vNext workflow is a graph orchestrator — it rides the "flow"
-        // runnable kind even when authored in a .test.ts, so suite
-        // kinds:[flow] keeps it and the --upload gate sees it
-        // (codex S2.6 R10 P2).
+        // RUNNABLE kind even when authored in a .test.ts, so the
+        // runnable-level suite filter and the --upload gate treat it like a
+        // flow (codex S2.6 R10 P2). NOTE: the FILE-level suite filter still
+        // maps .test.ts ↔ "test" (see resolveTestFilesForSuite's KNOWN
+        // LIMITATION) — a strict kinds:[flow] suite needs the workflow in a
+        // .flow.ts, or kinds:[test, flow].
         kind: m.workflow ? "flow" : "test",
         ...(m.workflowHasBranchOrPoll ? { workflowHasBranchOrPoll: true } : {}),
       },
