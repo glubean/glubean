@@ -384,7 +384,8 @@ export class Scanner {
     if (
       Object.keys(files).length === 0 &&
       contracts.length === 0 &&
-      flows.length === 0
+      flows.length === 0 &&
+      workflows.length === 0
     ) {
       warnings.push(
         "No Glubean test, contract, or flow files found. " +

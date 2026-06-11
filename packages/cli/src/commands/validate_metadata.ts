@@ -109,7 +109,15 @@ export async function validateMetadataCommand(
     }
   }
 
-  const computedRootHash = await computeRootHash(normalizedFiles!);
+  // Recompute with the SAME inputs buildMetadata hashed: contracts and
+  // workflow projections are part of the rootHash when present (a metadata
+  // file carrying them would otherwise always report a false mismatch —
+  // codex S2.6 R1 P2).
+  const computedRootHash = await computeRootHash(
+    normalizedFiles!,
+    metadata.contracts,
+    metadata.workflows,
+  );
   if (computedRootHash !== metadata.rootHash) {
     console.error(`${colors.red}✗ Root hash mismatch${colors.reset}`);
     console.error(
