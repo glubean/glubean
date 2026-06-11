@@ -200,4 +200,30 @@ describe("workflow node events", () => {
     expect(s.nodeGrades).toEqual({ full: 0, partial: 0, trace: 0, opaque: 0 });
     expect(s.success).toBe(false);
   });
+
+  test("a setup soft-failure (failed assert + all nodes skipped) fails a recomputed summary (codex S2.7 R1)", () => {
+    const events: TimelineEvent[] = [
+      { type: "assertion", ts: 1, passed: false, message: "setup precondition" },
+      end("a", "skipped", "full"),
+      end("b", "skipped", "opaque"),
+    ];
+    const s = generateSummary(events);
+    expect(s.nodeFailed).toBe(0); // no node failed…
+    expect(s.success).toBe(false); // …but the failed assertion is verdict-relevant
+  });
+
+  test("duplicate node ids stay distinct occurrences; only attempt>1 folds a retry chain (codex S2.7 R1)", () => {
+    const events: TimelineEvent[] = [
+      end("dup", "failed", "opaque"), // first occurrence (no attempt stamp)
+      end("dup", "skipped", "opaque"), // second occurrence — must NOT replace the first
+      end("chain", "failed", "opaque", { attempt: 1, attempts: 2 }),
+      end("chain", "passed", "trace", { attempt: 2, attempts: 2 }), // folds onto attempt 1
+    ];
+    const s = generateSummary(events);
+    expect(s.nodeTotal).toBe(3); // dup×2 + chain×1
+    expect(s.nodeFailed).toBe(1); // the first "dup" occurrence still counts
+    expect(s.nodePassed).toBe(1);
+    expect(s.nodeSkipped).toBe(1);
+    expect(s.success).toBe(false);
+  });
 });

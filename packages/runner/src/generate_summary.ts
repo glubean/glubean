@@ -48,13 +48,18 @@ export function generateSummary(events: TimelineEvent[]): Summary {
   let schemaValidationTotal = 0;
   let schemaValidationFailed = 0;
   let schemaValidationWarnings = 0;
-  // vNext workflow nodes: the LAST node_end per nodeId is the verdict — a
-  // retrying node emits a failed bracket per non-terminal attempt that must
-  // not count (mirrors the executor's commit semantics, §17 #7/#13).
-  const lastNodeEnd = new Map<
-    string,
-    { status: "passed" | "failed" | "skipped"; grade: "full" | "partial" | "trace" | "opaque" }
-  >();
+  // vNext workflow nodes: a retrying node emits one bracket per attempt and
+  // only the LAST one carries the verdict (§17 #7/#13). The executor does NOT
+  // reject duplicate authored node ids, so the fold cannot key on nodeId
+  // alone: an attempt-stamped bracket with attempt > 1 REPLACES the previous
+  // verdict of its retry chain; everything else (no attempt stamp, or
+  // attempt 1 starting a new chain) is a distinct node occurrence.
+  type NodeVerdict = {
+    status: "passed" | "failed" | "skipped";
+    grade: "full" | "partial" | "trace" | "opaque";
+  };
+  const nodeVerdicts: NodeVerdict[] = [];
+  const lastIndexByNodeId = new Map<string, number>();
 
   for (const e of events) {
     switch (e.type) {
@@ -78,9 +83,18 @@ export function generateSummary(events: TimelineEvent[]): Summary {
         else if (e.status === "skipped") stepSkipped++;
         break;
 
-      case "node_end":
-        lastNodeEnd.set(e.nodeId, { status: e.status, grade: e.grade });
+      case "node_end": {
+        const verdict: NodeVerdict = { status: e.status, grade: e.grade };
+        const retryOfPrevious =
+          e.attempt !== undefined && e.attempt > 1 && lastIndexByNodeId.has(e.nodeId);
+        if (retryOfPrevious) {
+          nodeVerdicts[lastIndexByNodeId.get(e.nodeId)!] = verdict;
+        } else {
+          lastIndexByNodeId.set(e.nodeId, nodeVerdicts.length);
+          nodeVerdicts.push(verdict);
+        }
         break;
+      }
 
 
       case "warning":
@@ -107,28 +121,33 @@ export function generateSummary(events: TimelineEvent[]): Summary {
       ? Math.round((httpErrorTotal / httpRequestTotal) * 10000) / 10000
       : 0;
 
-  // Resolve per-node verdicts (last node_end per nodeId wins).
+  // Resolve per-node verdicts (retry chains already folded above).
   let nodePassed = 0;
   let nodeFailed = 0;
   let nodeSkipped = 0;
   const nodeGrades = { full: 0, partial: 0, trace: 0, opaque: 0 };
-  for (const verdict of lastNodeEnd.values()) {
+  for (const verdict of nodeVerdicts) {
     if (verdict.status === "passed") nodePassed++;
     else if (verdict.status === "failed") nodeFailed++;
     else nodeSkipped++;
     nodeGrades[verdict.grade]++;
   }
-  const nodeTotal = lastNodeEnd.size;
+  const nodeTotal = nodeVerdicts.length;
 
   // Derive success:
   // 1. Any error/status event → failure (crash, timeout, process exit)
   //    These event types are not in TimelineEvent but may be present
   //    when callers pass ExecutionEvent[] or GlubeanEvent[] via `as any`.
   // 2. If step_end events exist, use them as authority
-  // 3. Else if node_end events exist (vNext workflow), the per-node verdicts
-  //    are the authority — assertion counts can disagree by design (e.g. a
-  //    thrown-node failure leaves no failed assertion; the wrapping test's
-  //    error event covers that via the hard-failure check above).
+  // 3. Else if node_end events exist (vNext workflow): node verdicts AND
+  //    assertion counts must BOTH be clean. Verdicts catch what assertions
+  //    can't (a thrown-node failure leaves no failed assertion); assertions
+  //    catch what verdicts can't (a setup soft-failure skips every node, so
+  //    no node is "failed" — and the wrapping test's error event is NOT in
+  //    the timeline array, so a recomputed summary would otherwise pass).
+  //    Retry noise can't poison this: a quarantined attempt's failed asserts
+  //    never reach the host timeline (sdk S2.4c) — every failed assertion
+  //    present is verdict-relevant.
   // 4. Otherwise fall back to assertion results
   let success: boolean;
   const hasHardFailure = events.some((e) => {
@@ -154,7 +173,7 @@ export function generateSummary(events: TimelineEvent[]): Summary {
     if (hasStepEnds) {
       success = stepFailed === 0;
     } else if (nodeTotal > 0) {
-      success = nodeFailed === 0;
+      success = nodeFailed === 0 && assertionFailed === 0;
     } else {
       success = assertionFailed === 0;
     }
