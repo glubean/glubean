@@ -309,7 +309,9 @@ export interface CallBindingsWithInput<
 
 export interface WorkflowBuilder<State> {
   /** Merge workflow-level metadata (id is fixed at creation). */
-  meta(meta: Omit<Partial<WorkflowMeta>, "id">): ChainedWorkflowBuilder<State>;
+  meta(
+    meta: Omit<Partial<WorkflowMeta>, "id" | "templateId" | "groupId" | "parallel" | "pickGroup">,
+  ): ChainedWorkflowBuilder<State>;
   /** The one I/O-capable initializer; its return is the initial state.
    * `timeout` (ms, §17 #4) is TERMINAL — a timed-out setup fails the run. */
   setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number }): ChainedWorkflowBuilder<S>;
@@ -500,10 +502,24 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     }
   }
 
-  meta(meta: Omit<Partial<WorkflowMeta>, "id">): ChainedWorkflowBuilder<State> {
+  meta(
+    meta: Omit<Partial<WorkflowMeta>, "id" | "templateId" | "groupId" | "parallel" | "pickGroup">,
+  ): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNotBuilt("meta");
-      this._meta = { ...this._meta, ...meta, id: this._meta.id };
+      // ENGINE-OWNED fields are locked (codex S2.12 R21 P2): a factory
+      // overwriting e.g. pickGroup would desync discovery (concrete universe
+      // rows) from execution (selected rows only). The Omit above blocks the
+      // type level; this reapply blocks `as any`.
+      this._meta = {
+        ...this._meta,
+        ...meta,
+        id: this._meta.id,
+        templateId: this._meta.templateId,
+        groupId: this._meta.groupId,
+        parallel: this._meta.parallel,
+        pickGroup: this._meta.pickGroup,
+      };
       return this.chained();
     });
   }
@@ -1189,6 +1205,11 @@ function workflowFn(idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined>
   if (typeof meta.id !== "string" || meta.id.length === 0) {
     throw new Error("workflow(): a non-empty string id is required");
   }
+  // Engine-owned data-driven fields can only be minted by workflow.each/pick.
+  delete meta.templateId;
+  delete meta.groupId;
+  delete meta.parallel;
+  delete meta.pickGroup;
   return new WorkflowBuilderImpl<undefined>(meta);
 }
 

@@ -1435,6 +1435,23 @@ describe("workflow.each (addendum §3)", () => {
     ).toEqual([]);
   });
 
+  it("engine-owned grouping fields cannot be forged or overwritten (codex R21)", () => {
+    // factory cannot strip the pick marker via .meta() (as-any included)
+    const members = workflow.pick({ a: { v: 1 } }, 1)({ id: "lk-$_pick" }, (wf, row) =>
+      (wf.meta({ pickGroup: false, groupId: "forged" } as never) as never as typeof wf).setup(
+        async () => ({ v: row.v }),
+      ),
+    );
+    expect(members[0]._projection.pick).toBe(true);
+    expect(members[0].meta.groupId).toBe("lk-$_pick");
+    // hand-written workflow() cannot mint engine-owned fields either
+    const solo = workflow({ id: "solo", groupId: "fake", parallel: true } as never)
+      .setup(async () => ({}))
+      .build();
+    expect(solo.meta.groupId).toBeUndefined();
+    expect(solo._projection.parallel).toBeUndefined();
+  });
+
   it("workflow.pick REQUIRES $_pick in the template id (codex S2.12 R8)", () => {
     expect(() =>
       workflow.pick({ a: { currency: "USD" } }, 1)({ id: "checkout-$currency" } as never, (wf) =>
