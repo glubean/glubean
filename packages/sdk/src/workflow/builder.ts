@@ -875,7 +875,38 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     idPrefix: string,
   ): WorkflowNode[] {
     const child = new WorkflowBuilderImpl<State>({ id: this._meta.id }, idPrefix, true);
-    const result = fn(child);
+    // Tip-guarded facade (codex S2.8 R3 P2): the CHAINED brand catches
+    // `return b`, but a FORKED chain needs a runtime guard — e.g.
+    // `b.compute(reshape); return b.check(noop)` compiles (the second chain is
+    // S→S) while the discarded reshaping chain still lands in child._nodes.
+    // Every facade remembers the chain length at its creation; a node call from
+    // a handle whose tip is no longer the chain's end IS the fork — throw at
+    // authoring time. Sequential chains (incl. `const c = b.x(); return c`)
+    // always call from the tip and pass untouched.
+    const tips = new WeakMap<object, number>();
+    const makeFacade = (tip: number): WorkflowBuilder<State> => {
+      const proxy = new Proxy(child as object, {
+        get: (target, prop) => {
+          const v = Reflect.get(target, prop, target);
+          if (typeof v !== "function") return v;
+          return (...args: unknown[]) => {
+            if (child._nodes.length !== tip) {
+              throw new Error(
+                `workflow side under "${idPrefix}" forked its chain — continue from the ` +
+                  `latest chain return value; don't call off an earlier handle`,
+              );
+            }
+            const out = v.apply(target, args);
+            // A node call advanced the chain → hand back a fresh tip handle.
+            // Non-advancing calls return their own result.
+            return child._nodes.length !== tip ? makeFacade(child._nodes.length) : out;
+          };
+        },
+      }) as WorkflowBuilder<State>;
+      tips.set(proxy as object, tip);
+      return proxy;
+    };
+    const result = fn(makeFacade(0));
     // An async then/else callback would snapshot child._nodes BEFORE its post-await
     // steps are added — silently dropping them. Reject thenables (codex S2.4a R5).
     if (result && typeof (result as { then?: unknown }).then === "function") {
@@ -883,6 +914,18 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         "workflow.branch() then/else callback must be synchronous — an async callback " +
           "loses any steps added after an await",
       );
+    }
+    // Belt-and-suspenders for the same fork: a returned handle that is NOT the
+    // chain's tip means steps were added after it — the callback returned a
+    // stale prefix of its own chain.
+    if (typeof result === "object" && result !== null) {
+      const returnedTip = tips.get(result as object);
+      if (returnedTip !== undefined && returnedTip !== child._nodes.length) {
+        throw new Error(
+          `workflow side under "${idPrefix}" returned a stale chain handle — ` +
+            `return the value of the LAST chain call`,
+        );
+      }
     }
     if (child._setup || child._teardown) {
       throw new Error("workflow.branch() then/else cannot declare setup/teardown");

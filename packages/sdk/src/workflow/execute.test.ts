@@ -1270,6 +1270,37 @@ describe("runWorkflow — switch (addendum §9 #4)", () => {
     expect(res.nodes.find((n) => n.id === "medium")!.status).toBe("skipped");
   });
 
+  it("a FORKED side chain throws at authoring time (codex S2.8 R3 P2)", () => {
+    // Discarding a reshaping chain and returning a second same-state chain
+    // compiles — the runtime tip guard catches the fork.
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({ a: 1, b: 2 }))
+        .branch("g", {
+          when: (w) => w.when((s) => s.a).eq(1),
+          then: (b) => {
+            (b as unknown as { compute: (id: string, f: (s: unknown) => unknown) => unknown }).compute(
+              "drop",
+              (s) => ({ a: (s as { a: number }).a }), // reshapes — would corrupt the trunk
+            );
+            return b.check("noop", async () => {});
+          },
+        }),
+    ).toThrow(/forked its chain/);
+    // …while a legitimate block body that continues from the latest handle passes:
+    expect(() =>
+      workflow("w2")
+        .setup(async () => ({ a: 1 }))
+        .branch("g", {
+          when: (w) => w.when((s) => s.a).eq(1),
+          then: (b) => {
+            const c = b.check("step-1", async () => {});
+            return c.check("step-2", async () => {});
+          },
+        }),
+    ).not.toThrow();
+  });
+
   it("rejects colliding case labels and non-finite numeric values (codex S2.8 R1)", () => {
     // value: 1 and value: "1" both stringify to "1" — child id prefixes and
     // takenLabel would collide; an explicit distinct label is required.
