@@ -1394,6 +1394,25 @@ function workflowPick<T extends Record<string, unknown>>(
       Object.assign(empty, { _pickUniverse: [] });
       return empty;
     }
+    // An EXPLICIT selection (--pick / GLUBEAN_PICK) naming only filtered-out
+    // examples must run NOTHING — falling back to a random eligible row would
+    // silently execute an example the user didn't ask for (codex S2.12 R16
+    // P2). Partial overlap proceeds with the eligible part (engine behavior).
+    const pickEnv =
+      typeof process !== "undefined" ? process.env["GLUBEAN_PICK"] : undefined;
+    if (pickEnv) {
+      const requested = pickEnv
+        .split(",")
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0 && k in examples);
+      if (requested.length > 0 && !requested.some((k) => k in eligibleExamples)) {
+        const empty: BuiltWorkflow[] = [];
+        Object.assign(empty, {
+          _pickUniverse: buildEachMembers(eligibleRows, { ...meta, filter: undefined, pickGroup: true } as WorkflowEachMeta<T & { _pick: string }>, factory),
+        });
+        return empty;
+      }
+    }
     // Validation pass over the eligible universe — registrations never
     // flushed. The universe also rides the returned array (`_pickUniverse`)
     // so the scanner's metadata extraction is DETERMINISTIC (codex R6 P2).

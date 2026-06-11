@@ -544,7 +544,27 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
     // emit one entry per workflow like the CLI's discoverTests does (codex
     // S2.6 R9 P2). Mutually exclusive with the error fallback above: workflows
     // only exist when the runtime import succeeded.
+    // workflow.pick members are the scan import's random selection over the
+    // advertised universe — emit ONE template entry per pick group (mirrors
+    // the CLI; the harness's template expansion resolves it to the execution
+    // import's current members) instead of scheduling every eligible example
+    // as a concrete id (codex S2.12 R16 P2).
+    const seenPickTemplates = new Set<string>();
     for (const wf of result.workflows ?? []) {
+      if (wf.pick && wf.templateId) {
+        if (seenPickTemplates.has(wf.templateId)) continue;
+        seenPickTemplates.add(wf.templateId);
+        tests.push({
+          exportName: wf.exportName,
+          id: wf.templateId,
+          name: wf.templateId,
+          skip: wf.skip !== undefined,
+          only: wf.only ?? false,
+          tags: [],
+          deferred: wf.skip,
+        });
+        continue;
+      }
       tests.push({
         exportName: wf.exportName,
         id: wf.id,

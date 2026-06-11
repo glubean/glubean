@@ -1354,6 +1354,25 @@ describe("workflow.each (addendum §3)", () => {
     }
   });
 
+  it("an EXPLICIT pick naming only filtered-out examples runs NOTHING, never a random row (codex R16)", () => {
+    const prev = process.env.GLUBEAN_PICK;
+    process.env.GLUBEAN_PICK = "a";
+    try {
+      const members = workflow.pick({ a: { ok: false }, b: { ok: true } }, 1)(
+        { id: "xp-$_pick", filter: (row) => (row as { ok: boolean }).ok },
+        (wf, row) => wf.setup(async () => ({ ok: row.ok })),
+      );
+      expect(members).toHaveLength(0); // NOT a silent fallback to "b"
+      // the universe still advertises the eligible examples
+      const universe = (members as unknown as { _pickUniverse: Array<{ meta: { id: string } }> })
+        ._pickUniverse;
+      expect(universe.map((m) => m.meta.id)).toEqual(["xp-b"]);
+    } finally {
+      if (prev === undefined) delete process.env.GLUBEAN_PICK;
+      else process.env.GLUBEAN_PICK = prev;
+    }
+  });
+
   it("a pick whose filter excludes EVERY example yields an empty matrix, not a crash (codex R13)", () => {
     const members = workflow.pick({ a: { ok: false } }, 1)(
       { id: "ef-$_pick", filter: (row) => (row as { ok: boolean }).ok },
