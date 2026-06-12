@@ -1228,11 +1228,18 @@ describe("workflow.extend — fixtures (phase4 §3)", () => {
     expect(Object.keys(test.fixtures ?? {}).sort()).toEqual(["a", "b"]);
   });
 
-  it("reserved keys are rejected — incl. workflow's own `signal`", () => {
+  it("reserved keys are rejected — test set + every node-scope ctx member (codex R2)", () => {
     expect(() => workflow.extend({ signal: () => "x" } as never)).toThrow(
       /reserved key "signal"/,
     );
     expect(() => workflow.extend({ vars: () => "x" } as never)).toThrow(/reserved key "vars"/);
+    // node-scope wrappers would shadow the fixture AND delegate to the
+    // fixture VALUE as if it were the real API
+    expect(() => workflow.extend({ log: () => "x" } as never)).toThrow(/reserved key "log"/);
+    expect(() => workflow.extend({ assert: () => "x" } as never)).toThrow(
+      /reserved key "assert"/,
+    );
+    expect(() => workflow.extend({ event: () => "x" } as never)).toThrow(/reserved key "event"/);
   });
 
   it("extended each: every member carries the fixtures", () => {

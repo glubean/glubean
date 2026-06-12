@@ -1624,8 +1624,26 @@ function workflowEach<T extends Record<string, unknown>>(
   return (meta, factory) => runEachInternal(table, meta, factory);
 }
 
-/** Reserved fixture names: the test set plus workflow's own ctx members. */
-const WORKFLOW_RESERVED_FIXTURE_KEYS = new Set([...EXTEND_RESERVED_KEYS, "signal"]);
+/** Reserved fixture names: the test set, plus EVERY ctx member the workflow
+ * node scope installs (makeNodeScope's Object.assign keys — codex S2.15 R2
+ * P2: a fixture named e.g. "log" would be shadowed by the scope's wrapper,
+ * and the wrapper's delegation to base.log would hit the fixture VALUE
+ * instead of the real logger). Keep in sync with makeNodeScope. */
+const WORKFLOW_RESERVED_FIXTURE_KEYS = new Set([
+  ...EXTEND_RESERVED_KEYS,
+  "signal",
+  "assert",
+  "expect",
+  "validate",
+  "fail",
+  "skip",
+  "warn",
+  "trace",
+  "metric",
+  "event",
+  "log",
+  "action",
+]);
 
 /**
  * An extended `workflow` factory (phase4 §3 — plan fork (b)/(f)): same

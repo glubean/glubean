@@ -867,7 +867,10 @@ function parseTestDeclaration(
     factoryName = headCallee.name as string;
     metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
   } else if (headCallee.type === "CallExpression") {
-    // Curried: `test.each(data)(...)` / `test.pick(examples)(...)`.
+    // Curried: `test.each(data)(...)` / `test.pick(examples)(...)`, or an
+    // INLINE extended factory `workflow.extend({...})("id")` (codex S2.15
+    // R2 P2 — single-use extends never bind an alias, so the alias pass
+    // can't see them).
     const factoryCallee = unwrapExpression(headCallee.callee as AnyNode);
     if (!factoryCallee || factoryCallee.type !== "MemberExpression" || factoryCallee.computed === true) {
       return undefined;
@@ -875,11 +878,16 @@ function parseTestDeclaration(
     const object = factoryCallee.object as AnyNode;
     const property = factoryCallee.property as AnyNode;
     if (object.type !== "Identifier" || property.type !== "Identifier") return undefined;
-    if (property.name !== "each" && property.name !== "pick") return undefined;
-    factoryName = object.name as string;
-    variant = property.name as "each" | "pick";
-    eachArgs = (headCallee.arguments as AnyNode[] | undefined) ?? [];
-    metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
+    if (property.name === "extend" && workflowAliases?.has(object.name as string)) {
+      factoryName = object.name as string; // classifies as a workflow below
+      metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
+    } else {
+      if (property.name !== "each" && property.name !== "pick") return undefined;
+      factoryName = object.name as string;
+      variant = property.name as "each" | "pick";
+      eachArgs = (headCallee.arguments as AnyNode[] | undefined) ?? [];
+      metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
+    }
   } else {
     return undefined;
   }

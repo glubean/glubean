@@ -163,6 +163,23 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test("INLINE workflow.extend factories are discovered too (S2.15 R2)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const oneShot = workflow.extend({ inbox: () => ({}) })("wfx-inline")
+  .setup(async (ctx) => ({ ok: true }))
+  .branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) })
+  .build();
+`;
+  const result = extractFromSource(content);
+  expect(result).toHaveLength(1);
+  expect(result[0]).toMatchObject({
+    id: "wfx-inline",
+    workflow: true,
+    workflowHasBranchOrPoll: true,
+  });
+});
+
 test("workflow.extend factories are recognized as workflow factories (S2.15)", () => {
   const content = `
 import { workflow as base } from "@glubean/sdk";
