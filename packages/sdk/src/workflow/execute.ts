@@ -1280,6 +1280,20 @@ export interface PollAttemptEventData {
    * threw / exceeded its budget (the poll node fails). */
   outcome: "satisfied" | "probe" | "failed";
   durationMs: number;
+  /**
+   * Inbound polls only (design §9.4): the matcher's classification for this
+   * attempt — `matched`, the probe attributions (`no-delivery` /
+   * `type-mismatch` / `correlation-mismatch` / `schema-mismatch`), or the
+   * fail class that ended the poll. Diagnosis, never verdict.
+   */
+  classification?: string;
+  /**
+   * Inbound polls, satisfied attempts only: `receivedAt − pollStart` of the
+   * matched delivery (ms) — the measured side of `expect.within` (§9.4a #5).
+   * NEGATIVE when the delivery arrived before the poll started (allowed
+   * evidence, §9.4a #3).
+   */
+  withinDeltaMs?: number;
   [k: string]: unknown;
 }
 
@@ -1289,17 +1303,131 @@ function emitPollAttempt(
   attempt: number,
   outcome: PollAttemptEventData["outcome"],
   durationMs: number,
+  inboundDetail?: { classification: string; withinDeltaMs?: number },
 ): void {
   const data: PollAttemptEventData = {
     nodeId: node.meta.id,
     attempt,
     outcome,
     durationMs: Math.round(durationMs),
+    ...(inboundDetail ? inboundDetail : {}),
   };
   ctx.event({ type: POLL_ATTEMPT_EVENT, data });
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A fail-class inbound classification (inbound-contract-design §9.4 rows 1–3):
+ * a property of the delivery CHANNEL (forgery / replay / non-JSON), never
+ * noise — it fails the poll node even when a later delivery in the same
+ * snapshot would have matched (§9.4a #4, first terminal wins).
+ */
+export class InboundDeliveryFailError extends Error {
+  constructor(
+    readonly classification: "signature-invalid" | "stale" | "unparseable",
+    nodeId: string,
+    detail?: string,
+  ) {
+    super(
+      `workflow poll "${nodeId}": inbound delivery classified ${classification}` +
+        `${detail ? ` (${detail})` : ""} — authentication/channel failures are ` +
+        `never noise (inbound-contract-design §9.4).`,
+    );
+    this.name = "InboundDeliveryFailError";
+  }
+}
+
+interface InboundAttemptResult {
+  matched: boolean;
+  parsed?: unknown;
+  /** Matcher classification for poll_attempt diagnosis (§9.4). */
+  classification: string;
+  /** Matched delivery's receipt time (epoch ms) — `within` evidence. */
+  receivedAt?: number;
+}
+
+/**
+ * ONE inbound attempt (design §9.3): walk the receiver's unclaimed snapshot
+ * in receiver order (oldest first) through the adapter matcher; the FIRST
+ * terminal classification wins — matched claims and exits, a fail class
+ * throws (§9.4a #4). Pre-existing deliveries are allowed evidence
+ * (§9.4a #3) — eligibility is "unclaimed", not "received after poll start".
+ */
+function runInboundAttempt(
+  node: PollNode,
+  state: unknown,
+  ctx: TestContext,
+): InboundAttemptResult {
+  const inbound = node.inbound!;
+  const ref = node.ref!;
+  const label = node.meta.id;
+  const adapter = getAdapter(ref.protocol);
+  if (!adapter?.matchInboundCase) {
+    throw new Error(
+      `workflow poll "${label}": adapter for protocol "${ref.protocol}" does ` +
+        `not implement matchInboundCase — it cannot await inbound deliveries.`,
+    );
+  }
+  const handle = inbound.via(state) as {
+    deliveries?: unknown;
+    claim?: unknown;
+  } | null;
+  if (
+    !handle ||
+    typeof handle.deliveries !== "function" ||
+    typeof handle.claim !== "function"
+  ) {
+    throw new Error(
+      `workflow poll "${label}": \`via\` did not resolve to a ReceiverHandle ` +
+        `(needs deliveries() and claim()) — put the live handle in state ` +
+        `during setup and select it with a pure lens.`,
+    );
+  }
+  const caseSpec = (ref.contract._spec as { cases?: Record<string, unknown> })
+    ?.cases?.[ref.caseKey];
+  if (!caseSpec) {
+    throw new Error(
+      `workflow poll "${label}": case "${ref.caseKey}" not found in contract "${ref.contractId}"`,
+    );
+  }
+  const correlate = inbound.correlate
+    ? {
+        eventLens: inbound.correlate.event as (e: unknown) => unknown,
+        stateValue: inbound.correlate.state(state),
+      }
+    : undefined;
+
+  type Handle = { deliveries(): readonly { id: string; receivedAt: number }[]; claim(id: string): void };
+  let last: InboundAttemptResult = { matched: false, classification: "no-delivery" };
+  for (const delivery of (handle as Handle).deliveries()) {
+    const result = adapter.matchInboundCase({
+      caseSpec,
+      delivery: delivery as Parameters<NonNullable<typeof adapter.matchInboundCase>>[0]["delivery"],
+      secrets: ctx.secrets,
+      correlate,
+      nowMs: Date.now(),
+    });
+    if (result.kind === "matched") {
+      (handle as Handle).claim(delivery.id);
+      return {
+        matched: true,
+        parsed: result.parsed,
+        classification: "matched",
+        receivedAt: delivery.receivedAt,
+      };
+    }
+    if (
+      result.kind === "signature-invalid" ||
+      result.kind === "stale" ||
+      result.kind === "unparseable"
+    ) {
+      throw new InboundDeliveryFailError(result.kind, label, result.detail);
+    }
+    last = { matched: false, classification: result.kind };
+  }
+  return last;
+}
 
 /**
  * Evaluate the poll exit predicate. L2 declarative reads the RESPONSE (shared
@@ -1357,6 +1485,14 @@ async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promi
   if (!node.ref && !node.attemptFn) {
     throw new Error(`workflow poll "${label}": needs a contract ref (.poll) or an attempt fn (.pollAction)`);
   }
+  // Inbound polls have no exit predicate — matched IS the exit (§9.4a); every
+  // other poll requires one (an exit-predicate-less poll loops for nothing).
+  if (!node.inbound && !node.until) {
+    throw new Error(`workflow poll "${label}": needs an exit predicate — \`until\` (declarative) or \`untilRuntime\``);
+  }
+  // Epoch anchor for `within` evidence (receivedAt is epoch ms; §9.4a #3 —
+  // the delta may be negative for deliveries that beat the poll start).
+  const pollStartEpochMs = Date.now();
   // Runtime bound guard — the builder validates at construction, but `as any` /
   // JS callers can hand the executor an unbounded poll node. Fail fast instead of
   // looping forever (mirrors runPollStep's guard).
@@ -1408,11 +1544,14 @@ async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promi
     const exhausted = (): PollExhaustedError =>
       new PollExhaustedError(label, attempt, `attempt budget ${Math.round(attemptBudget)}ms exceeded`);
     try {
-      // pollAction (addendum §4): the probe is an arbitrary async fn instead
-      // of a contract case — same quarantine, same budget race.
-      const attemptRun = node.attemptFn
-        ? Promise.resolve(node.attemptFn(reqCtx as unknown as WorkflowContext, state))
-        : executeCallAttempt("poll", node as CallLikeNode, reqCtx, state, attemptAc.signal);
+      // Attempt source: inbound await (design §9.3 — scan the receiver
+      // snapshot through the adapter matcher), pollAction probe (addendum
+      // §4), or a contract-call attempt. Same quarantine, same budget race.
+      const attemptRun = node.inbound
+        ? Promise.resolve(runInboundAttempt(node, state, reqCtx))
+        : node.attemptFn
+          ? Promise.resolve(node.attemptFn(reqCtx as unknown as WorkflowContext, state))
+          : executeCallAttempt("poll", node as CallLikeNode, reqCtx, state, attemptAc.signal);
       lastRes = await raceBudget(attemptRun, attemptBudget, exhausted);
     } catch (err) {
       // Once OUR budget timer fired, the attempt is over budget no matter HOW
@@ -1426,7 +1565,16 @@ async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promi
       // flushes its buffered effects (the failure assertion lands) then fails
       // the poll; budget overruns discard the orphan ctx.
       if (!isBudgetAbort && !(err instanceof PollExhaustedError)) reqCtx.flushTo(scope.ctx);
-      emitPollAttempt(scope.ctx, node, attempt, "failed", now() - attemptStart);
+      emitPollAttempt(
+        scope.ctx,
+        node,
+        attempt,
+        "failed",
+        now() - attemptStart,
+        err instanceof InboundDeliveryFailError
+          ? { classification: err.classification }
+          : undefined,
+      );
       throw isBudgetAbort ? exhausted() : err;
     } finally {
       if (budgetTimer) clearTimeout(budgetTimer);
@@ -1436,35 +1584,50 @@ async function pollLoop(node: PollNode, state: unknown, scope: NodeScope): Promi
     if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
     if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
 
-    // Exit predicate — quarantined ctx, budget-raced, flushed only on in-budget completion.
-    const predBudget = Math.min(deadline - now(), perAttempt - (now() - attemptStart));
-    const predCtx = quarantinedCtx(scope.ctx);
     let done: boolean;
-    try {
-      done = await raceBudget(
-        evalUntil(node, lastRes, predCtx, state),
-        Math.max(0, predBudget),
-        () => new PollExhaustedError(label, attempt, "exit-predicate budget exceeded"),
-      );
-    } catch (err) {
-      // Timed-out predicate orphan → discard predCtx. An in-budget predicate that
-      // threw (ctx.fail / ctx.skip / a thrown error) → flush its buffered effects
-      // (the failure assertion lands) then propagate (the poll fails / skips).
-      if (!(err instanceof PollExhaustedError)) predCtx.flushTo(scope.ctx);
-      emitPollAttempt(scope.ctx, node, attempt, "failed", now() - attemptStart);
-      throw err;
+    let inboundDetail: { classification: string; withinDeltaMs?: number } | undefined;
+    if (node.inbound) {
+      // Inbound: matched IS the exit (§9.4a) — no predicate, no predCtx.
+      const res = lastRes as InboundAttemptResult;
+      done = res.matched;
+      inboundDetail = {
+        classification: res.classification,
+        ...(res.matched && res.receivedAt !== undefined
+          ? { withinDeltaMs: res.receivedAt - pollStartEpochMs }
+          : {}),
+      };
+    } else {
+      // Exit predicate — quarantined ctx, budget-raced, flushed only on in-budget completion.
+      const predBudget = Math.min(deadline - now(), perAttempt - (now() - attemptStart));
+      const predCtx = quarantinedCtx(scope.ctx);
+      try {
+        done = await raceBudget(
+          evalUntil(node, lastRes, predCtx, state),
+          Math.max(0, predBudget),
+          () => new PollExhaustedError(label, attempt, "exit-predicate budget exceeded"),
+        );
+      } catch (err) {
+        // Timed-out predicate orphan → discard predCtx. An in-budget predicate that
+        // threw (ctx.fail / ctx.skip / a thrown error) → flush its buffered effects
+        // (the failure assertion lands) then propagate (the poll fails / skips).
+        if (!(err instanceof PollExhaustedError)) predCtx.flushTo(scope.ctx);
+        emitPollAttempt(scope.ctx, node, attempt, "failed", now() - attemptStart);
+        throw err;
+      }
+      if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
+      if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
+      predCtx.flushTo(scope.ctx); // in-budget: the user's deliberate skip/fail/assert count (§17 #3)
     }
-    if (now() > deadline) throw new PollExhaustedError(label, attempt, "total timeout reached");
-    if (now() - attemptStart > perAttempt) throw new PollExhaustedError(label, attempt, "attempt budget exceeded");
-    predCtx.flushTo(scope.ctx); // in-budget: the user's deliberate skip/fail/assert count (§17 #3)
 
     if (done) {
       reqCtx.flushTo(scope.ctx); // satisfying attempt: final-response validation failures surface
-      emitPollAttempt(scope.ctx, node, attempt, "satisfied", now() - attemptStart);
-      return lastRes;
+      emitPollAttempt(scope.ctx, node, attempt, "satisfied", now() - attemptStart, inboundDetail);
+      // The satisfying inbound result hands `out` the PARSED, schema-validated
+      // body (§9.4a) — the wrapper is loop machinery, not user data.
+      return node.inbound ? (lastRes as InboundAttemptResult).parsed : lastRes;
     }
     // probe (not satisfied): reqCtx discarded (pending validation noise).
-    emitPollAttempt(scope.ctx, node, attempt, "probe", now() - attemptStart);
+    emitPollAttempt(scope.ctx, node, attempt, "probe", now() - attemptStart, inboundDetail);
 
     if (node.maxAttempts && attempt >= node.maxAttempts) {
       throw new PollExhaustedError(label, attempt, "maxAttempts reached");

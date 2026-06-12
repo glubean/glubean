@@ -18,7 +18,7 @@
  * and `internal/40-discovery/proposals/contract-flow.md` v9 for design.
  */
 
-import type { SchemaLike, Test, TestContext } from "./types.js";
+import type { SchemaLike, SecretsAccessor, Test, TestContext } from "./types.js";
 import type {
   KnownArtifacts,
   KnownArtifactParts,
@@ -643,6 +643,30 @@ export interface ContractProtocolAdapter<
     caseKey: string,
     contractId: string,
   ) => void;
+
+  /**
+   * Optional: classify ONE delivery against an inbound case
+   * (inbound-contract-design §9.4/§9.4a). Called by the workflow inbound
+   * poll once per unclaimed delivery, in receiver order; the FIRST terminal
+   * classification wins (consult #4). Authentication decides failure;
+   * content decides attribution: fail-class results come only from the
+   * channel (signature / staleness / non-JSON), mismatches are probes.
+   *
+   * Preflight errors (unknown verifier scheme, missing secret) MUST throw —
+   * bad config must never hide as a probe (§9.4 preflight row).
+   *
+   * The poll resolves the state lens itself (it owns the state) and hands
+   * the matcher the concrete value + the event lens (§9.4: the matcher
+   * cannot classify correlation-mismatch without these inputs). `nowMs` is
+   * injected so staleness windows are testable.
+   */
+  matchInboundCase?: (input: {
+    caseSpec: unknown;
+    delivery: InboundDelivery;
+    secrets: SecretsAccessor;
+    correlate?: { eventLens: (event: unknown) => unknown; stateValue: unknown };
+    nowMs: number;
+  }) => InboundMatchResult;
 }
 
 /**
@@ -716,7 +740,11 @@ export interface ProtocolContract<
     ApplyCaseOutput<PayloadSchemas, Cases[K]>,
     InferAcceptKey<PayloadSchemas>,
     InferRawOutcome<PayloadSchemas, InferOutput<PayloadSchemas>>
-  >;
+  > &
+    // Inbound case refs carry their direction at the TYPE level too, so the
+    // workflow inbound-poll overload matches them and outbound-consuming
+    // signatures can reject them statically (runtime guards still back this).
+    (Cases[K] extends { direction: "inbound" } ? { readonly direction: "inbound" } : unknown);
 }
 
 /**
@@ -818,6 +846,68 @@ export type InferRawOutcome<P, Fallback = unknown> = P extends {
     ? Fallback
     : NonNullable<R>
   : Fallback;
+
+// =============================================================================
+// Inbound receiver protocol (inbound-contract-design §9.1)
+// =============================================================================
+
+/**
+ * One delivery as received — RAW. `bodyBytes` is the exact byte sequence the
+ * counterparty sent: HMAC-style signatures are computed over raw bytes, so
+ * any parsing or decoding before verification would destroy the evidence
+ * (design §9.1, blind spot 3). Protocol-agnostic: core's inbound-poll
+ * machinery and adapter `matchInboundCase` hooks both consume it (the
+ * zero-dependency local implementation lives in `contract-http/inbound.ts`).
+ */
+export interface InboundDelivery {
+  /** Receiver-assigned, unique per delivery (claim key). */
+  id: string;
+  /** EXACT body bytes as received — THE signature input. */
+  bodyBytes: Uint8Array;
+  /**
+   * UTF-8 decoded view of `bodyBytes`, for JSON parsing and display. LOSSY
+   * for non-UTF-8 payloads — never feed this to a signature verifier.
+   */
+  rawBody: string;
+  /** Header names lowercased. */
+  headers: Record<string, string>;
+  method: string;
+  path: string;
+  /** Epoch ms at receipt — the measured side of `within` evidence. */
+  receivedAt: number;
+}
+
+/**
+ * The receiver protocol an inbound poll (`.poll(ref, { via })`) consumes
+ * (design §9.1). NON-DESTRUCTIVE by construction: matching inspects
+ * `deliveries()` snapshots and `claim()`s only the matched delivery — other
+ * consumers' events are never swallowed by a failed match.
+ *
+ * ONE handle corresponds to ONE endpoint/secret domain (design §9.4):
+ * the matcher never checks method/path — full grade means "received through
+ * THIS handle" (consult #7), so multi-source channels must be split into
+ * per-domain handles at the receiver layer.
+ */
+export interface ReceiverHandle {
+  /** Snapshot of UNCLAIMED deliveries, oldest first. */
+  deliveries(): readonly InboundDelivery[];
+  /** Mark one delivery consumed (idempotent; unknown ids are a no-op). */
+  claim(id: string): void;
+  /** The URL the counterparty should be pointed at. */
+  url: string;
+  close(): Promise<void>;
+}
+
+/**
+ * Result of an adapter's `matchInboundCase` over ONE delivery (§9.4/§9.4a).
+ * Fail-class results (signature-invalid / stale / unparseable) FAIL the poll
+ * node; mismatch results are probes whose labels exist for diagnosis;
+ * `matched` claims the delivery and satisfies the poll.
+ */
+export type InboundMatchResult =
+  | { kind: "matched"; parsed: unknown }
+  | { kind: "type-mismatch" | "correlation-mismatch" | "schema-mismatch" }
+  | { kind: "signature-invalid" | "stale" | "unparseable"; detail?: string };
 
 // =============================================================================
 // Flow types

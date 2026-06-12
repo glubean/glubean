@@ -11,53 +11,13 @@
  */
 
 import { createServer, type Server } from "node:http";
+import type { InboundDelivery, ReceiverHandle } from "../contract-types.js";
 
-/**
- * One delivery as received — RAW. `bodyBytes` is the exact byte sequence the
- * counterparty sent: Stripe-style HMAC signatures are computed over raw
- * bytes, so any parsing or decoding before verification would destroy the
- * evidence (design §9.1, blind spot 3).
- */
-export interface InboundDelivery {
-  /** Receiver-assigned, unique per delivery (claim key). */
-  id: string;
-  /** EXACT body bytes as received — THE signature input. */
-  bodyBytes: Uint8Array;
-  /**
-   * UTF-8 decoded view of `bodyBytes`, for JSON parsing and display.
-   * LOSSY for payloads that are not valid UTF-8 (invalid sequences become
-   * replacement characters) — never feed this to a signature verifier
-   * (codex I1-R2 P2).
-   */
-  rawBody: string;
-  /** Header names lowercased (node:http convention). */
-  headers: Record<string, string>;
-  method: string;
-  path: string;
-  /** Epoch ms at receipt — the measured side of `within` evidence. */
-  receivedAt: number;
-}
-
-/**
- * The receiver protocol an inbound `.poll(ref, { via })` consumes
- * (design §9.1). NON-DESTRUCTIVE by construction (blind spot 2): matching
- * inspects `deliveries()` snapshots and `claim()`s only the matched one —
- * other consumers' events are never swallowed by a failed match.
- *
- * ONE handle corresponds to ONE endpoint/secret domain (design §9.4):
- * authentication-first matching FAILS the node on a signature mismatch, so
- * multi-source channels must be split into per-domain handles — see
- * {@link LocalInbox.scope}.
- */
-export interface ReceiverHandle {
-  /** Snapshot of UNCLAIMED deliveries, oldest first. */
-  deliveries(): readonly InboundDelivery[];
-  /** Mark one delivery consumed (idempotent; unknown ids are a no-op). */
-  claim(id: string): void;
-  /** The URL the counterparty should be pointed at. */
-  url: string;
-  close(): Promise<void>;
-}
+// The receiver protocol types are protocol-agnostic and live in
+// contract-types.ts (core's inbound poll + adapter matchInboundCase hooks
+// consume them). Re-exported here so the contract-http barrel stays the
+// natural import site for receiver authors.
+export type { InboundDelivery, ReceiverHandle } from "../contract-types.js";
 
 /**
  * A local inbox that can derive path-scoped sub-handles. ONE underlying

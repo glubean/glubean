@@ -1,5 +1,5 @@
 import type { ContractCaseRef } from "../contract-types.js";
-import { predicateScope, assertL2Predicate } from "../contract-flow-condition.js";
+import { predicateScope, assertL2Predicate, selectorPath } from "../contract-flow-condition.js";
 import type {
   BranchPredicate,
   OpaquePredicate,
@@ -25,6 +25,7 @@ import type {
   ContractCallNode,
   NodeMeta,
   NodeMetaInput,
+  InboundPollSpec,
   PollNode,
   PollOpaqueUntil,
   RetryMeta,
@@ -205,6 +206,31 @@ export type PollOpts<
     /** Accepted alternate outcome keys (poll-on-status needs this). */
     accept?: Accept;
   };
+
+/**
+ * `.poll()` options for an INBOUND case ref (inbound-contract-design §9.3):
+ * the counterparty calls US, so there is no `until` (matched IS the exit),
+ * no `in`/`accept` (nothing is sent). `via` selects the live ReceiverHandle
+ * from state; `correlate` pins WHICH instance (=== compare, both lenses
+ * required together). `timeout` defaults from the case's `expect.within`.
+ */
+export type InboundPollOpts<State, NewState = State, Event = unknown> = PollBounds & {
+  /** Pure lens: state → ReceiverHandle (put the handle in state during setup). */
+  via: (state: State) => unknown;
+  correlate?: {
+    /** Lens over the PARSED delivery body. */
+    event: (event: Event) => unknown;
+    /** Lens over workflow state. */
+    state: (state: State) => unknown;
+  };
+  /** Pure lens folding the parsed, schema-validated event into the next state. */
+  out?: (state: State, event: Event) => NewState;
+  until?: never;
+  untilRuntime?: never;
+  in?: never;
+  accept?: never;
+  message?: never;
+};
 
 /** `.poll()` options when the polled case REQUIRES input — `in` is mandatory. */
 export type PollOptsWithInput<
@@ -441,6 +467,20 @@ export interface WorkflowBuilder<State> {
    * attempts' assertion noise is quarantined; only the satisfying attempt's
    * evidence (and any in-budget deliberate failure) lands on the run.
    */
+  /**
+   * Inbound await (inbound-contract-design §9.3): the polled case has
+   * `direction: "inbound"` — the counterparty calls US. One attempt scans
+   * `via(state).deliveries()` through the adapter matcher; matched claims
+   * the delivery and exits (no `until`). Authentication decides failure,
+   * content decides attribution (§9.4a): forged/stale/non-JSON deliveries
+   * FAIL the node; mismatched shapes are probes. `timeout` defaults from
+   * the case's `expect.within`.
+   */
+  poll<Event = unknown, NewState = State>(
+    idOrMeta: NodeMetaInput,
+    ref: ContractCaseRef<void, unknown, unknown, unknown> & { direction: "inbound" },
+    opts: InboundPollOpts<State, NewState, Event>,
+  ): ChainedWorkflowBuilder<NewState>;
   poll<
     CaseInputs,
     CaseOutput,
@@ -1080,13 +1120,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(meta, "poll");
       if (ref?.direction === "inbound") {
-        // Inbound polling (.poll(ref, { via, correlate }) — design §9.3)
-        // ships in the next slice; reject now so the ref is never executed
-        // as an outbound request.
-        throw new Error(
-          `workflow.poll() "${meta.id}": case "${ref.contractId}.${ref.caseKey}" is ` +
-            `inbound — inbound polling is not yet supported by this SDK version.`,
-        );
+        return this.inboundPoll(meta, ref, rest[0]);
       }
       const opts = rest[0] as
         | (PollUntil<State, unknown> &
@@ -1096,6 +1130,16 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
               accept?: ReadonlyArray<string | number>;
             })
         | undefined;
+      // Inbound-only vocabulary on an outbound poll = a direction mixup —
+      // reject loudly instead of silently ignoring the receiver lens.
+      const stray = opts as Record<string, unknown> | undefined;
+      if (stray && (stray.via !== undefined || stray.correlate !== undefined)) {
+        throw new Error(
+          `workflow.poll() "${meta.id}": \`via\`/\`correlate\` are inbound-poll options, ` +
+            `but case "${ref?.contractId}.${ref?.caseKey}" is outbound — did you mean an ` +
+            `inboundCase (direction: "inbound")?`,
+        );
+      }
       // The type system requires opts (until XOR untilRuntime), but JS / `as any`
       // callers can omit it — an exit-predicate-less poll would loop to exhaustion
       // for nothing, so fail fast here.
@@ -1132,6 +1176,103 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       this._nodes.push(node as WorkflowNode);
       return this;
     });
+  }
+
+  /**
+   * Inbound await (inbound-contract-design §9.3, slice I3): the counterparty
+   * calls US — one attempt scans `via(state).deliveries()` through the
+   * adapter matcher; matched IS the exit (no `until`), nothing is sent (no
+   * `in`/`accept`). `timeout` defaults from the case's `expect.within`
+   * (evidence + default bound, not an independent failure condition —
+   * §9.4a #5). All lenses pass the selector-source gate at build time.
+   */
+  private inboundPoll(
+    meta: NodeMeta,
+    ref: ContractCaseRef,
+    rawOpts: unknown,
+  ): this {
+    const opts = (rawOpts ?? {}) as {
+      via?: (state: State) => unknown;
+      correlate?: { event?: (e: unknown) => unknown; state?: (s: State) => unknown };
+      out?: (state: State, parsed: unknown) => State;
+    } & PollBounds & Record<string, unknown>;
+    const where = `workflow.poll() "${meta.id}" (inbound "${ref.contractId}.${ref.caseKey}")`;
+
+    // Outbound-only vocabulary is rejected loudly — silent acceptance would
+    // read as "this knob works" when nothing is ever sent or predicated.
+    const rejected: Array<[string, string]> = [
+      ["until", "matched IS the exit — an inbound poll has no response to predicate over"],
+      ["untilRuntime", "matched IS the exit"],
+      ["in", "nothing is sent — an inbound case has no logical input"],
+      ["accept", "alternate outcome keys are outbound response vocabulary"],
+      ["message", "no opaque predicate exists to label"],
+    ];
+    for (const [key, why] of rejected) {
+      if (opts[key] !== undefined) {
+        throw new Error(`${where}: \`${key}\` is not allowed on an inbound poll — ${why}.`);
+      }
+    }
+    if (typeof opts.via !== "function") {
+      throw new Error(
+        `${where}: \`via\` is required — a pure lens selecting the ReceiverHandle ` +
+          `from workflow state, e.g. \`via: (s) => s.inbox\` (design §9.3).`,
+      );
+    }
+    const viaPath = selectorPath(opts.via);
+    let correlate: InboundPollSpec<State>["correlate"];
+    if (opts.correlate !== undefined) {
+      const { event, state: stateLens } = opts.correlate;
+      // §9.3: correlation is an === compare — BOTH lenses must be defined or
+      // the comparison degenerates to undefined === x.
+      if (typeof event !== "function" || typeof stateLens !== "function") {
+        throw new Error(
+          `${where}: \`correlate\` needs BOTH lenses — { event: (e) => ..., state: (s) => ... } (design §9.3).`,
+        );
+      }
+      correlate = {
+        event,
+        eventPath: selectorPath(event),
+        state: stateLens,
+        statePath: selectorPath(stateLens),
+      };
+    }
+
+    // `expect.within` (duck-read; the adapter owns the case shape) is the
+    // poll's default total timeout.
+    const within = (
+      (ref.contract._spec as { cases?: Record<string, { expect?: { within?: number } }> })
+        ?.cases?.[ref.caseKey]?.expect?.within
+    );
+    const timeout = opts.timeout ?? within;
+    validatePollBounds(
+      {
+        timeout,
+        maxAttempts: opts.maxAttempts,
+        perAttemptTimeout: opts.perAttemptTimeout,
+        every: opts.every,
+        backoff: opts.backoff,
+      },
+      meta.id,
+    );
+    const node: PollNode<State> = {
+      kind: "poll",
+      meta,
+      ref,
+      inbound: {
+        via: opts.via,
+        viaPath,
+        ...(correlate ? { correlate } : {}),
+        ...(within !== undefined ? { withinMs: within } : {}),
+      },
+      out: opts.out as PollNode<State>["out"],
+      every: opts.every ?? DEFAULT_EVERY_MS,
+      backoff: opts.backoff ?? 1,
+      timeoutMs: timeout,
+      perAttemptTimeoutMs: opts.perAttemptTimeout,
+      maxAttempts: opts.maxAttempts,
+    };
+    this._nodes.push(node as WorkflowNode);
+    return this;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

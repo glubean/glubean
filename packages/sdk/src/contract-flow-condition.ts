@@ -254,7 +254,12 @@ function isBrandedPredicate(node: unknown): boolean {
   );
 }
 
-function selectorPath(lens: (s: any) => unknown): readonly string[] {
+/**
+ * Gate + extract a pure selector lens to its frozen path. The single trust
+ * boundary every projected lens passes — predicates here, and the workflow
+ * inbound poll's `via`/`correlate` lenses (inbound-contract-design §9.3).
+ */
+export function selectorPath(lens: (s: any) => unknown): readonly string[] {
   assertSelectorSource(lens); // P0 source gate (ternary / free-var / calls)
   return Object.freeze(extractSelectorPath(lens)); // strict-Proxy path + Proxy purity
 }

@@ -267,6 +267,33 @@ export interface PollOpaqueUntil<State = any> {
 }
 
 /**
+ * Inbound poll configuration (inbound-contract-design §9.3). `via` is a pure
+ * lens from workflow state to the live ReceiverHandle; `correlate` pins the
+ * INSTANCE (which run's event) — it lives on the poll because it references
+ * run state. All lenses pass the selector-source gate at build time; their
+ * extracted paths ride the projection (full grade — same trust as eqPath).
+ */
+export interface InboundPollSpec<State = any> {
+  /** Lens: state → ReceiverHandle (validated structurally at run time). */
+  via: (state: State) => unknown;
+  /** Selector path of `via` (projection). */
+  viaPath: readonly string[];
+  correlate?: {
+    /** Lens over the PARSED delivery body. */
+    event: (event: any) => unknown;
+    eventPath: readonly string[];
+    /** Lens over workflow state. */
+    state: (state: State) => unknown;
+    statePath: readonly string[];
+  };
+  /**
+   * The case's `expect.within` (ms) — evidence + the poll's default timeout,
+   * NOT an independent failure condition (§9.4a #5).
+   */
+  withinMs?: number;
+}
+
+/**
  * Bounded poll-until (proposal §6.7, §17 #3): repeat ONE contract case until an
  * exit predicate over the RESPONSE holds, bounded by a total wall-clock deadline
  * and/or a finite per-attempt budget (validated at build time — a poll can never
@@ -296,8 +323,20 @@ export interface PollNode<State = any> {
   out?: (state: State, res: any) => State;
   /** Accepted alternate outcome keys (e.g. HTTP statuses) — poll-on-status needs this. */
   accept?: ReadonlyArray<string | number>;
-  /** Exit predicate — L2 declarative over the response (grade `full`) or opaque (`opaque`). */
-  until: BranchPredicate<any> | PollOpaqueUntil<State>;
+  /**
+   * Exit predicate — L2 declarative over the response (grade `full`) or
+   * opaque (`opaque`). ABSENT exactly when `inbound` is set: an inbound
+   * poll's exit IS the adapter matcher's `matched` classification
+   * (inbound-contract-design §9.4a) — there is no response to predicate over.
+   */
+  until?: BranchPredicate<any> | PollOpaqueUntil<State>;
+  /**
+   * Inbound await configuration (design §9.3, slice I3) — present exactly
+   * when `ref` points at a `direction: "inbound"` case. One attempt = one
+   * pass over `via(state).deliveries()` through the adapter's
+   * `matchInboundCase`, first terminal classification wins (§9.4a #4).
+   */
+  inbound?: InboundPollSpec<State>;
   /** Author label — required for opaque predicates (projection / diagnostics). */
   message?: string;
   /** Interval between attempts (ms); builder defaults it. */
@@ -439,8 +478,16 @@ export interface ProjectedWorkflowNode {
   terminal?: boolean;
   /** branch/poll: author label (required for opaque predicates). */
   message?: string;
-  /** poll: the extracted exit predicate — L2 declarative over the response, or opaque. */
+  /** poll: the extracted exit predicate — L2 declarative over the response, or
+   * opaque. ABSENT on inbound polls (matched IS the exit — see `inbound`). */
   until?: ExtractedPredicate;
+  /** poll (inbound, design §9.3): the await declaration — gated lens paths +
+   * the case's `within` promise. Presence marks the poll as inbound. */
+  inbound?: {
+    viaPath: string[];
+    correlate?: { eventPath: string[]; statePath: string[] };
+    withinMs?: number;
+  };
   /** poll bounds (every/backoff always present; the rest as authored). */
   every?: number;
   backoff?: number;

@@ -53,6 +53,7 @@ import type {
 import { isInboundCase } from "./types.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
 import { genericMarkdownPart } from "../contract-artifacts.js";
+import { matchInboundCaseHttp } from "./inbound-match.js";
 
 // =============================================================================
 // Helpers — endpoint, params, request body, response headers
@@ -1009,6 +1010,12 @@ export const httpAdapter: ContractProtocolAdapter<
 
   renderTarget(target) {
     return target; // HTTP "POST /users" is already human-readable
+  },
+
+  // Inbound delivery classification for the workflow inbound poll
+  // (inbound-contract-design §9.4/§9.4a, slice I3).
+  matchInboundCase(input) {
+    return matchInboundCaseHttp(input);
   },
 
   // v10: HTTP no longer needs a validateCaseForFlow. In v9, function-valued

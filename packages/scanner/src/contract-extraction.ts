@@ -319,8 +319,15 @@ export interface NormalizedWorkflowNode {
   /** route: terminal — no trunk continues after the taken case. */
   terminal?: boolean;
   message?: string;
-  /** poll: exit predicate + bounds. */
+  /** poll: exit predicate + bounds. ABSENT on inbound polls (see `inbound`). */
   until?: NormalizedPredicate;
+  /** poll (inbound, inbound-contract-design §9.3): the await declaration —
+   * gated lens paths + the case's `within` promise. Presence = inbound. */
+  inbound?: {
+    viaPath: string[];
+    correlate?: { eventPath: string[]; statePath: string[] };
+    withinMs?: number;
+  };
   every?: number;
   backoff?: number;
   timeoutMs?: number;

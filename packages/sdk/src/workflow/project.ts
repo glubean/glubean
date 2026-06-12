@@ -93,6 +93,9 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
       // (pollAction, addendum §4) caps at partial — the probe is opaque even
       // when the exit predicate is declarative; opaque exit → opaque.
       const p = node as PollNode;
+      // Inbound await (design §9.3): contract ref + matcher exit + gated
+      // via/correlate lens paths — everything is declared, grade full.
+      if (p.inbound) return "full";
       if ((p.until as { kind?: unknown }).kind === "opaque") return "opaque";
       return p.attemptFn ? "partial" : "full";
     }
@@ -217,8 +220,27 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         accept: p.accept,
         // The opaque until's fn takes (ctx, res, state) — wider than the condition
         // model's (ctx, state) — but extractPredicate only reads kind/sync, so the
-        // cast at this seam is sound (mirrors extractPollStep).
-        until: extractPredicate(p.until as Parameters<typeof extractPredicate>[0]),
+        // cast at this seam is sound (mirrors extractPollStep). Inbound polls have
+        // no predicate — matched IS the exit (§9.4a); they project `inbound` instead.
+        ...(p.until !== undefined
+          ? { until: extractPredicate(p.until as Parameters<typeof extractPredicate>[0]) }
+          : {}),
+        ...(p.inbound
+          ? {
+              inbound: {
+                viaPath: [...p.inbound.viaPath],
+                ...(p.inbound.correlate
+                  ? {
+                      correlate: {
+                        eventPath: [...p.inbound.correlate.eventPath],
+                        statePath: [...p.inbound.correlate.statePath],
+                      },
+                    }
+                  : {}),
+                ...(p.inbound.withinMs !== undefined ? { withinMs: p.inbound.withinMs } : {}),
+              },
+            }
+          : {}),
         message: p.message,
         every: p.every,
         backoff: p.backoff,

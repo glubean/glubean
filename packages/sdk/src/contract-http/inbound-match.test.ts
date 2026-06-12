@@ -1,0 +1,168 @@
+/**
+ * I3 — matchInboundCase classification matrix (inbound-contract-design
+ * §9.4/§9.4a). The contract under test: authentication decides failure;
+ * content decides attribution (every content mismatch is a probe).
+ */
+
+import { createHmac } from "node:crypto";
+import { describe, expect, it } from "vitest";
+import { matchInboundCaseHttp } from "./inbound-match.js";
+import { inboundCase } from "./types.js";
+import type { InboundDelivery } from "../contract-types.js";
+import type { SecretsAccessor } from "../types.js";
+
+const enc = new TextEncoder();
+
+const makeDelivery = (body: string, headers: Record<string, string> = {}): InboundDelivery => ({
+  id: "d-1",
+  bodyBytes: enc.encode(body),
+  rawBody: body,
+  headers,
+  method: "POST",
+  path: "/",
+  receivedAt: 1000,
+});
+
+const secrets = {
+  require: (name: string) => {
+    if (name === "WH_SECRET") return "whsec_test";
+    throw new Error(`Secret "${name}" is not set`);
+  },
+  get: (name: string) => (name === "WH_SECRET" ? "whsec_test" : undefined),
+} as unknown as SecretsAccessor;
+
+/** Discriminating schema: accepts only type === "created" events. */
+const createdSchema = {
+  safeParse: (d: unknown) => {
+    const ok = !!d && typeof d === "object" && (d as { type?: unknown }).type === "created";
+    return ok
+      ? { success: true as const, data: d }
+      : { success: false as const, error: { issues: [{ message: "wrong type" }] } };
+  },
+};
+
+const plainCase = inboundCase({ description: "d", expect: { bodySchema: createdSchema } });
+const match = (
+  caseSpec: unknown,
+  delivery: InboundDelivery,
+  correlate?: { eventLens: (e: unknown) => unknown; stateValue: unknown },
+) => matchInboundCaseHttp({ caseSpec, delivery, secrets, correlate, nowMs: 5000 });
+
+describe("preflight (§9.4 row P) — bad config never hides as a probe", () => {
+  it("unknown verifier scheme throws", () => {
+    const c = inboundCase({
+      description: "d",
+      expect: {
+        bodySchema: createdSchema,
+        signature: { scheme: "nope-v9", header: "x-sig", secretRef: "WH_SECRET" },
+      },
+    });
+    expect(() => match(c, makeDelivery("{}"))).toThrow(/unknown signature scheme "nope-v9"/);
+  });
+
+  it("missing secret throws (secrets.require propagates)", () => {
+    const c = inboundCase({
+      description: "d",
+      expect: {
+        bodySchema: createdSchema,
+        signature: { scheme: "hmac-sha256", header: "x-sig", secretRef: "ABSENT" },
+      },
+    });
+    expect(() => match(c, makeDelivery("{}"))).toThrow(/Secret "ABSENT" is not set/);
+  });
+
+  it("a non-inbound case spec is a dispatch bug — throws", () => {
+    expect(() => match({ description: "outbound", expect: { status: 200 } }, makeDelivery("{}")))
+      .toThrow(/not an inbound case/);
+  });
+});
+
+describe("authentication first (§9.4 rows 1–3)", () => {
+  const signedCase = inboundCase({
+    description: "d",
+    expect: {
+      bodySchema: createdSchema,
+      signature: { scheme: "hmac-sha256", header: "x-sig", secretRef: "WH_SECRET" },
+    },
+  });
+  const sign = (body: string) => createHmac("sha256", "whsec_test").update(body).digest("hex");
+
+  it("missing signature header → signature-invalid (never a probe)", () => {
+    const r = match(signedCase, makeDelivery('{"type":"created"}'));
+    expect(r).toEqual({ kind: "signature-invalid", detail: 'header "x-sig" missing' });
+  });
+
+  it("forged signature → signature-invalid even when the body would match", () => {
+    const r = match(signedCase, makeDelivery('{"type":"created"}', { "x-sig": "0".repeat(64) }));
+    expect(r.kind).toBe("signature-invalid");
+  });
+
+  it("valid signature + matching body → matched with the parsed body", () => {
+    const body = '{"type":"created"}';
+    const r = match(signedCase, makeDelivery(body, { "x-sig": sign(body) }));
+    expect(r).toEqual({ kind: "matched", parsed: { type: "created" } });
+  });
+
+  it("authenticated but non-JSON → unparseable (promise violated)", () => {
+    const body = "not json {";
+    const r = match(signedCase, makeDelivery(body, { "x-sig": sign(body) }));
+    expect(r.kind).toBe("unparseable");
+  });
+});
+
+describe("content = attribution only (§9.4a rows 4–6, all probes)", () => {
+  it("without correlate: non-fitting body → type-mismatch (someone else's event)", () => {
+    expect(match(plainCase, makeDelivery('{"type":"succeeded"}')).kind).toBe("type-mismatch");
+  });
+
+  it("without correlate: header matcher miss → type-mismatch", () => {
+    const c = inboundCase({
+      description: "d",
+      expect: { bodySchema: createdSchema, headers: { "content-type": { eq: "application/json" } } },
+    });
+    const r = match(c, makeDelivery('{"type":"created"}', { "content-type": "text/plain" }));
+    expect(r.kind).toBe("type-mismatch");
+  });
+
+  it("with correlate: lens path missing → type-mismatch", () => {
+    const r = match(plainCase, makeDelivery('{"type":"created"}'), {
+      eventLens: (e) => (e as { data?: { id?: string } }).data?.id,
+      stateValue: "pi_1",
+    });
+    expect(r.kind).toBe("type-mismatch");
+  });
+
+  it("with correlate: value differs → correlation-mismatch (sibling run)", () => {
+    const r = match(plainCase, makeDelivery('{"type":"created","data":{"id":"pi_OTHER"}}'), {
+      eventLens: (e) => (e as { data: { id: string } }).data.id,
+      stateValue: "pi_1",
+    });
+    expect(r.kind).toBe("correlation-mismatch");
+  });
+
+  it("with correlate: instance attributed but wrong event type → schema-mismatch, STILL a probe kind", () => {
+    // The §9.4a #2 scenario: payment_intent.succeeded for OUR object while we
+    // wait for created — attribution says ours, shape says another event.
+    const r = match(plainCase, makeDelivery('{"type":"succeeded","data":{"id":"pi_1"}}'), {
+      eventLens: (e) => (e as { data: { id: string } }).data.id,
+      stateValue: "pi_1",
+    });
+    expect(r.kind).toBe("schema-mismatch");
+  });
+
+  it("with correlate: attributed + fitting → matched", () => {
+    const c = inboundCase({
+      description: "d",
+      expect: {
+        bodySchema: {
+          safeParse: (d: unknown) => ({ success: true as const, data: d }),
+        },
+      },
+    });
+    const r = match(c, makeDelivery('{"type":"created","data":{"id":"pi_1"}}'), {
+      eventLens: (e) => (e as { data: { id: string } }).data.id,
+      stateValue: "pi_1",
+    });
+    expect(r.kind).toBe("matched");
+  });
+});

@@ -208,9 +208,11 @@ test(".case() ref carries direction; call/poll/flow-step/bootstrap all reject it
   expect(() =>
     workflow("w").call("hit", ref),
   ).toThrow(/is inbound — the counterparty calls us/);
+  // Inbound polling itself ships in I3 — an inbound ref IS accepted by
+  // .poll, but only with the inbound vocabulary (until is outbound).
   expect(() =>
     workflow("w").poll("wait", ref, { until: { ok: { eq: [(s: unknown) => s, true] } } } as never),
-  ).toThrow(/inbound polling is not yet supported/);
+  ).toThrow(/`until` is not allowed on an inbound poll/);
   expect(() =>
     contract.flow("f").step(ref),
   ).toThrow(/is inbound/);
