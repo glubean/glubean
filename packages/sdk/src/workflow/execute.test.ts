@@ -1201,11 +1201,12 @@ describe("runWorkflow — branch (§17 #6)", () => {
 
 describe("workflow.extend — fixtures (phase4 §3)", () => {
   it("the fixture map rides Test.fixtures; bodies see the augmented Ctx type", async () => {
-    // lifecycle-form fixture withOUT manual annotations: `use`'s instance
-    // type must infer (codex R6 — an unknown-constrained E erased it)
-    const lc = workflow.extend({
+    // lifecycle-form fixtures: STRICT typing via the explicit type argument
+    // (Playwright-style — codex R6/R16: TS cannot back-infer `use`'s instance
+    // type from a context-sensitive lambda, and `any` would forge types)
+    const lc = workflow.extend<{ db: { query: (q: string) => number } }>({
       db: async (_ctx, use) => {
-        await use({ query: (q: string) => q.length });
+        await use({ query: (q) => q.length });
       },
     });
     lc("wfx-lifecycle")

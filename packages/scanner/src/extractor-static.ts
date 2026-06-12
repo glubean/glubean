@@ -169,7 +169,7 @@ export function extractAliasesFromSource(content: string): string[] {
   // Match: [export] const NAME = SOMETHING.extend(
   // optional type annotation between name and `=` (no `=>` arrows supported
   // there — an annotation containing one would stop the match early)
-  const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=]*?)?=\s*\w+\.extend\s*\(/g;
+  const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*\(/g;
   const aliases: string[] = [];
   let m;
   while ((m = pattern.exec(stripped)) !== null) {
@@ -208,7 +208,7 @@ export function extractWorkflowExtendAliasesFromSource(
   let grew = true;
   while (grew) {
     grew = false;
-    const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=]*?)?=\s*(\w+)\s*\.extend\s*\(/g;
+    const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*(\w+)\s*\.extend\s*\(/g;
     let m;
     while ((m = pattern.exec(stripped)) !== null) {
       const [, name, base] = m;

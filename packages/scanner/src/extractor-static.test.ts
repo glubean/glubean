@@ -248,6 +248,16 @@ export const x = wf("id");`,
     ),
   ).toEqual(["wf"]);
 
+  // an annotation BEFORE the factory must not let the regex span
+  // declarations (codex R16)
+  expect(
+    extractWorkflowExtendAliasesFromSource(
+      `import { workflow } from "@glubean/sdk";
+declare const foo: SomeType;
+export const wf = workflow.extend({ a: () => 1 });`,
+    ),
+  ).toEqual(["wf"]);
+
   // TYPE-ANNOTATED fixture exports register (codex R13)
   expect(
     extractWorkflowExtendAliasesFromSource(

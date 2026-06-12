@@ -9,7 +9,7 @@ import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
 import { registerTest } from "../internal.js";
 import { EXTEND_RESERVED_KEYS } from "../test/extend.js";
 import { interpolateTemplate, normalizeEachTable } from "../test/utils.js";
-import type { ExtensionFn, ResolveExtensions, Test, TestContext } from "../types.js";
+import type { ExtensionFn, Test, TestContext } from "../types.js";
 import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
 import { projectWorkflow } from "./project.js";
 import type {
@@ -1669,10 +1669,19 @@ export interface ExtendedWorkflowFactory<Ctx extends WorkflowContext> {
     meta: WorkflowEachMeta<T>,
     factory: (wf: WorkflowBuilder<undefined, Ctx>, row: T) => unknown,
   ) => BuiltWorkflow[];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extend<E extends Record<string, ExtensionFn<any>>>(
-    extensions: E,
-  ): ExtendedWorkflowFactory<Omit<Ctx, keyof ResolveExtensions<E>> & WorkflowContext & ResolveExtensions<E>>;
+  /**
+   * Compose more fixtures. Lifecycle fixtures get STRICT typing via an
+   * explicit type argument (Playwright-style — codex S2.15 R16: TS cannot
+   * back-infer `use`'s instance type from a context-sensitive lambda, and an
+   * `any` fallback would forge types):
+   * `wf.extend<{ db: DbClient }>({ db: async (ctx, use) => { ... } })`.
+   * Simple factories (`auth: () => client`) infer without the argument; an
+   * unannotated lifecycle fixture resolves to `unknown` (honest — narrow or
+   * annotate).
+   */
+  extend<F extends Record<string, unknown>>(
+    extensions: { [K in keyof F]: ExtensionFn<F[K]> },
+  ): ExtendedWorkflowFactory<Omit<Ctx, keyof F> & WorkflowContext & F>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1712,8 +1721,7 @@ function makeExtendedWorkflow(allFixtures: Record<string, ExtensionFn<any>>): un
  * decision 2026-06-12. */
 export const workflow = Object.assign(workflowFn, {
   each: workflowEach,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extend: makeExtendedWorkflow as <E extends Record<string, ExtensionFn<any>>>(
-    extensions: E,
-  ) => ExtendedWorkflowFactory<WorkflowContext & ResolveExtensions<E>>,
+  extend: makeExtendedWorkflow as <F extends Record<string, unknown>>(
+    extensions: { [K in keyof F]: ExtensionFn<F[K]> },
+  ) => ExtendedWorkflowFactory<WorkflowContext & F>,
 });
