@@ -228,11 +228,18 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
   const params = fn.params as AnyNode[] | undefined;
   const builderParam = params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
   if (!builderParam) return undefined; // destructured/absent — cannot root the dataflow
-  // A default-parameter initializer can author the delegated chain BEFORE the
-  // body (`(b, r = b.branch(...)) => r`) — the body-only scan would miss it.
-  // Any non-simple parameter fails closed (codex S2.13 R5 P2).
-  for (const param of params ?? []) {
-    if (param.type !== "Identifier") return undefined;
+  // A default-parameter INITIALIZER can author the delegated chain before the
+  // body (`(b, r = b.branch(...)) => r`) — the body-only scan would miss it
+  // (codex S2.13 R5 P2). Only initializers can EXECUTE code, so fail closed
+  // exactly on AssignmentPattern (incl. nested inside destructuring); a plain
+  // destructured row param (`(wf, { region }) => ...`) is pure binding and
+  // stays scannable (codex S2.13 R6 P2).
+  for (const param of (params ?? []).slice(1)) {
+    let hasInitializer = false;
+    walk(param, (n) => {
+      if (n.type === "AssignmentPattern") hasInitializer = true;
+    });
+    if (hasInitializer) return undefined;
   }
   let found = false;
   // Per-scope dataflow: every scope folds its own bindings into the inherited

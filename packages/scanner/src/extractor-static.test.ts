@@ -195,6 +195,18 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a DESTRUCTURED row parameter stays scannable — no false flag (S2.13 R6)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const destructured = workflow.each([{ region: "us" }])(
+  { id: "d-$region" },
+  (wf, { region }) => wf.setup(async () => ({ region })).compute("c", (s) => s),
+);
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll ?? false).toBe(false); // linear — pure binding
+});
+
 test("a default-parameter initializer authoring the chain fails closed (S2.13 R5)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
