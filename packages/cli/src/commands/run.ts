@@ -1114,7 +1114,10 @@ export async function runCommand(
   const prepassSources = new Map<string, string>();
   {
     const queue = [...testFiles];
-    const importPattern = /import\s*\{[^}]*\}\s*from\s*["'](\.[^"']+)["']/g;
+    // imports AND re-export forms — a barrel's `export { wf } from "./base"`
+    // must pull ./base into the closure (codex S2.15 R15 P2)
+    const importPattern =
+      /(?:import\s*\{[^}]*\}|export\s*(?:\{[^}]*\}|\*))\s*from\s*["'](\.[^"']+)["']/g;
     while (queue.length > 0) {
       const f = queue.shift()!;
       if (prepassSources.has(f)) continue;

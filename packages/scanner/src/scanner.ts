@@ -122,15 +122,22 @@ export class Scanner {
     try {
       const sources: Array<{ path: string; content: string }> = [];
       for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
-        const content = await this.fs.readText(filePath);
-        for (const alias of extractAliasesFromSource(content)) {
-          aliases.add(alias);
-        }
-        sources.push({ path: filePath, content });
+        sources.push({ path: filePath, content: await this.fs.readText(filePath) });
       }
       // fixed-point build: fixtures files may re-extend each other's exports
       // across files at any depth (codex S2.15 R9 P2)
       workflowFnRegistry = buildWorkflowFnRegistry(sources);
+      // Generic (test) aliases come SECOND, excluding names this very file
+      // contributes to the workflow registry — otherwise a workflow factory
+      // name leaks into customFns and an unrelated same-name import is
+      // accepted as a plain test, defeating the module-aware guard
+      // (codex S2.15 R15 P2).
+      for (const { path: filePath, content } of sources) {
+        for (const alias of extractAliasesFromSource(content)) {
+          if (workflowFnRegistry.get(alias)?.includes(filePath)) continue;
+          aliases.add(alias);
+        }
+      }
     } catch {
       // Non-fatal — continue without aliases
     }
