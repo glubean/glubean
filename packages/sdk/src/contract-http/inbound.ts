@@ -13,15 +13,22 @@
 import { createServer, type Server } from "node:http";
 
 /**
- * One delivery as received — RAW. `rawBody` is the exact byte string the
+ * One delivery as received — RAW. `bodyBytes` is the exact byte sequence the
  * counterparty sent: Stripe-style HMAC signatures are computed over raw
- * bytes, so any parsing before verification would destroy the evidence
- * (design §9.1, blind spot 3).
+ * bytes, so any parsing or decoding before verification would destroy the
+ * evidence (design §9.1, blind spot 3).
  */
 export interface InboundDelivery {
   /** Receiver-assigned, unique per delivery (claim key). */
   id: string;
-  /** EXACT body as received — the signature input. */
+  /** EXACT body bytes as received — THE signature input. */
+  bodyBytes: Uint8Array;
+  /**
+   * UTF-8 decoded view of `bodyBytes`, for JSON parsing and display.
+   * LOSSY for payloads that are not valid UTF-8 (invalid sequences become
+   * replacement characters) — never feed this to a signature verifier
+   * (codex I1-R2 P2).
+   */
   rawBody: string;
   /** Header names lowercased (node:http convention). */
   headers: Record<string, string>;
@@ -39,8 +46,8 @@ export interface InboundDelivery {
  *
  * ONE handle corresponds to ONE endpoint/secret domain (design §9.4):
  * authentication-first matching FAILS the node on a signature mismatch, so
- * multi-source channels must be split at the receiver layer (e.g.
- * path-routed inboxes), never share a handle.
+ * multi-source channels must be split into per-domain handles — see
+ * {@link LocalInbox.scope}.
  */
 export interface ReceiverHandle {
   /** Snapshot of UNCLAIMED deliveries, oldest first. */
@@ -53,46 +60,53 @@ export interface ReceiverHandle {
 }
 
 /**
+ * A local inbox that can derive path-scoped sub-handles. ONE underlying
+ * server: `scope()` is how multiple endpoint/secret domains share one port
+ * (e.g. behind a single tunnel) without an `EADDRINUSE` collision
+ * (codex I1-R2 P2; design §9.4).
+ */
+export interface LocalInbox extends ReceiverHandle {
+  /**
+   * Derive a {@link ReceiverHandle} that sees only deliveries whose pathname
+   * matches `path` exactly. Claims are shared with the root (ids are
+   * root-global); `close()` on ANY handle closes the one underlying server —
+   * one server, one lifecycle.
+   */
+  scope(path: string): ReceiverHandle;
+}
+
+/**
  * Zero-dependency local inbox: an ephemeral HTTP server recording every
  * request as an {@link InboundDelivery}. This is the dev/CI receiver for
  * counterparties that can reach the test host directly; tunnel transports
  * (smee.io etc.) are user-side compositions — start the tunnel pointing at
- * `inbox.url` and hand the same handle to the workflow.
- *
- * Optional `path` scopes the inbox to one route — the cheap way to give each
- * endpoint/secret domain its own handle on a shared port (design §9.4).
+ * `inbox.url` and hand the same handle (or a `scope()` of it) to the
+ * workflow.
  */
 export async function createLocalInbox(options?: {
-  /** Only record requests whose pathname matches exactly (default: all). */
-  path?: string;
   /** Port to listen on (default 0 = ephemeral). */
   port?: number;
   /** Host to bind (default 127.0.0.1 — loopback only; wildcard binding
    * would expose the receiver on external interfaces and trips
    * loopback-only sandbox policies — codex I1-R1 P2). */
   host?: string;
-}): Promise<ReceiverHandle> {
+}): Promise<LocalInbox> {
   const unclaimed: InboundDelivery[] = [];
   const claimed = new Set<string>();
   let seq = 0;
 
   const server: Server = createServer((req, res) => {
-    // Collect raw Buffer chunks and decode ONCE: per-chunk string coercion
-    // would decode each chunk separately, corrupting multi-byte UTF-8
-    // sequences split across TCP chunks — and rawBody is the HMAC input
-    // (codex I1-R1 P2).
+    // Collect raw Buffer chunks and concatenate ONCE: per-chunk string
+    // coercion would decode each chunk separately, corrupting multi-byte
+    // UTF-8 sequences split across TCP chunks — and the body is the HMAC
+    // input (codex I1-R1 P2).
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });
     req.on("end", () => {
-      const body = Buffer.concat(chunks).toString("utf8");
+      const bodyBytes = Buffer.concat(chunks);
       const url = new URL(req.url ?? "/", "http://localhost");
-      if (options?.path !== undefined && url.pathname !== options.path) {
-        res.statusCode = 404;
-        res.end("not found");
-        return;
-      }
       const headers: Record<string, string> = {};
       for (const [k, v] of Object.entries(req.headers)) {
         if (typeof v === "string") headers[k] = v;
@@ -101,7 +115,8 @@ export async function createLocalInbox(options?: {
       seq += 1;
       unclaimed.push({
         id: `d-${seq}`,
-        rawBody: body,
+        bodyBytes: new Uint8Array(bodyBytes),
+        rawBody: bodyBytes.toString("utf8"),
         headers,
         method: req.method ?? "GET",
         path: url.pathname,
@@ -120,15 +135,29 @@ export async function createLocalInbox(options?: {
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;
 
+  const live = () => unclaimed.filter((d) => !claimed.has(d.id));
+  const claim = (id: string) => {
+    claimed.add(id);
+  };
+  // Idempotent: server.close() rejects with ERR_SERVER_NOT_RUNNING when
+  // called twice, and scoped handles share this one server.
+  let closing: Promise<void> | undefined;
+  const close = () =>
+    (closing ??= new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    }));
+  const rootUrl = `http://${host}:${port}`;
+
   return {
-    deliveries: () => unclaimed.filter((d) => !claimed.has(d.id)),
-    claim: (id: string) => {
-      claimed.add(id);
-    },
-    url: `http://${host}:${port}${options?.path ?? ""}`,
-    close: () =>
-      new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
-      }),
+    deliveries: live,
+    claim,
+    url: rootUrl,
+    close,
+    scope: (path: string) => ({
+      deliveries: () => live().filter((d) => d.path === path),
+      claim,
+      url: `${rootUrl}${path}`,
+      close,
+    }),
   };
 }

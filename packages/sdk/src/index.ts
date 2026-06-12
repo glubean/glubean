@@ -447,7 +447,7 @@ export type { OpenApiDocument, OpenApiOptions } from "./contract-http/openapi.js
 // Inbound HTTP receiver protocol + zero-dependency local inbox (I1,
 // inbound-contract-design §9.1)
 export { createLocalInbox } from "./contract-http/inbound.js";
-export type { InboundDelivery, ReceiverHandle } from "./contract-http/inbound.js";
+export type { InboundDelivery, LocalInbox, ReceiverHandle } from "./contract-http/inbound.js";
 export type { MarkdownPart } from "./contract-artifacts.js";
 
 export {

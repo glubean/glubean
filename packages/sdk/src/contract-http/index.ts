@@ -13,7 +13,7 @@
 
 export { httpAdapter } from "./adapter.js";
 export { createLocalInbox } from "./inbound.js";
-export type { InboundDelivery, ReceiverHandle } from "./inbound.js";
+export type { InboundDelivery, LocalInbox, ReceiverHandle } from "./inbound.js";
 export { createHttpFactory, createHttpRoot } from "./factory.js";
 export { defineHttpCase } from "./types.js";
 
