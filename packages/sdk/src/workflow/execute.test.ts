@@ -6,6 +6,7 @@ import { getRegistry as getRegistryForEach } from "../internal.js";
 import type { ContractCaseRef } from "../contract-types.js";
 import { workflow } from "./builder.js";
 import type { WorkflowBuilder } from "./builder.js";
+import type { WorkflowContext } from "./types.js";
 import { projectWorkflow } from "./project.js";
 import { PollExhaustedError } from "../contract-flow-poll.js";
 import {
@@ -1269,6 +1270,24 @@ describe("workflow.check — declarative expect[] (phase4 §7)", () => {
         .setup(async () => ({}))
         .check("c", 42 as never),
     ).toThrow(/requires a check function or/);
+  });
+
+  it("path-vs-path cannot be NEGATED — not(eqPath) would invert the missing rule (codex R3)", () => {
+    expect(() =>
+      workflow("ex-not")
+        .setup(async () => ({ a: 1, b: 2 }))
+        .check("c", { expect: (w) => [w.not(w.when((s) => s.a).eqPath((s) => s.b))] }),
+    ).toThrow(/cannot be negated/);
+    // …nested inside and/or under not is caught too
+    expect(() =>
+      workflow("ex-not-nested")
+        .setup(async () => ({ a: 1, b: 2 }))
+        .check("c", {
+          expect: (w) => [
+            w.not(w.all(w.when((s) => s.a).exists(), w.when((s) => s.a).eqPath((s) => s.b))),
+          ],
+        }),
+    ).toThrow(/cannot be negated/);
   });
 
   it("eqPath: a MISSING operand never matches (codex R1)", async () => {

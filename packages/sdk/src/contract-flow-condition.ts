@@ -306,6 +306,12 @@ export function predicateScope<S>(): PredicateScope<S> {
         brandFreeze({ kind: "compare", op: "ne", lens, path, rhsPath: selectorPath(rhs) }),
     };
   };
+  const treeHasRhsPath = (pred: BranchPredicate<any>): boolean => {
+    if (pred.kind === "compare") return pred.rhsPath !== undefined;
+    if (pred.kind === "and" || pred.kind === "or") return pred.clauses.some(treeHasRhsPath);
+    if (pred.kind === "not") return treeHasRhsPath(pred.clause);
+    return false;
+  };
   const combine = (kind: "and" | "or", clauses: BranchPredicate<any>[]) => {
     if (clauses.length === 0) {
       throw new LensPurityError(`predicate.${kind}`, `${kind}() needs at least one clause`);
@@ -316,7 +322,19 @@ export function predicateScope<S>(): PredicateScope<S> {
     when: when as any,
     all: (...clauses: BranchPredicate<any>[]) => combine("and", clauses),
     any: (...clauses: BranchPredicate<any>[]) => combine("or", clauses),
-    not: (clause: BranchPredicate<any>) => brandFreeze({ kind: "not", clause }),
+    not: (clause: BranchPredicate<any>) => {
+      // path-vs-path under NOT would invert the missing-operand-never-matches
+      // rule (`not(eqPath)` passes against {} — codex S2.17 R3 P2). Binary
+      // semantics can't carry "missing" through negation; both directions
+      // are directly expressible (eqPath / nePath), so reject the negation.
+      if (treeHasRhsPath(clause)) {
+        throw new LensPurityError(
+          "predicate.not",
+          "path-vs-path compares cannot be negated — use nePath/eqPath to express the direction directly",
+        );
+      }
+      return brandFreeze({ kind: "not", clause });
+    },
   } as PredicateScope<S>;
 }
 
@@ -398,6 +416,18 @@ export function evalPredicate<S>(pred: BranchPredicate<S>, state: S): boolean {
 
 const COMPARE_OPS: ReadonlySet<string> = new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
 const PRESENCE_OPS: ReadonlySet<string> = new Set(["exists", "absent", "truthy", "falsy"]);
+
+/** Does this (untrusted) predicate tree contain a path-vs-path compare? */
+function subtreeHasRhsPath(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  const n = node as { kind?: unknown; rhsPath?: unknown; clauses?: unknown; clause?: unknown };
+  if (n.kind === "compare") return n.rhsPath !== undefined;
+  if ((n.kind === "and" || n.kind === "or") && Array.isArray(n.clauses)) {
+    return n.clauses.some(subtreeHasRhsPath);
+  }
+  if (n.kind === "not") return subtreeHasRhsPath(n.clause);
+  return false;
+}
 
 function assertPath(path: unknown, op: string): void {
   if (!Array.isArray(path) || !path.every((seg) => typeof seg === "string")) {
@@ -497,6 +527,14 @@ export function assertL2Predicate(node: unknown, op = "condition"): void {
     case "not": {
       const c = node as { clause?: unknown };
       assertL2Predicate(c.clause, op);
+      // mirror the construction-time guard for as-any/deserialized trees
+      // (codex S2.17 R3 P2): path-vs-path cannot be negated.
+      if (subtreeHasRhsPath(c.clause)) {
+        throw new LensPurityError(
+          op,
+          "path-vs-path compares cannot be negated — use nePath/eqPath to express the direction directly",
+        );
+      }
       return;
     }
     default:
