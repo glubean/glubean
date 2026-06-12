@@ -195,6 +195,36 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("destructuring defaults and extracted method aliases cannot hide a branch (S2.13 R13)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+// builder smuggled through a destructuring DEFAULT with a clean RHS — flagged
+export const destrDefault = workflow("u-destr-default")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const { x = b } = {};
+    return x.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) });
+  })
+  .build();
+
+// extracted method alias called bare — flagged (fail closed)
+export const extracted = workflow("u-extracted")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const branch = b.branch;
+    return branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) });
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-destr-default": true,
+    "u-extracted": true,
+  });
+});
+
 test("a closure inside a parameter default cannot hide a branch (S2.13 R12)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

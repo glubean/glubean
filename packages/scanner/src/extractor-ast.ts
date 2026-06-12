@@ -360,11 +360,24 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
     ): void => {
       const names = boundNames(nameNode);
       if (names.length === 0) return;
+      // A PATTERN-INTERNAL default can smuggle the builder into a binding
+      // even when the RHS is clean: `const { x = b } = {}` (codex S2.13 R13).
+      let patternDefaultIsLive = false;
+      if (nameNode && nameNode.type !== "Identifier") {
+        walk(nameNode, (n) => {
+          if (
+            n.type === "AssignmentPattern" &&
+            containsLiveIdentifier((n as { right?: AnyNode }).right, live)
+          ) {
+            patternDefaultIsLive = true;
+          }
+        });
+      }
       // A value that CONTAINS a live builder reference (chain root, or a
       // wrapper like `{ b }` — codex S2.13 R7) makes every bound name
       // suspect: alias them all (fail-closed; destructuring from a live
       // container — codex S2.13 R10).
-      if (containsLiveIdentifier(valueExpr, live)) {
+      if (patternDefaultIsLive || containsLiveIdentifier(valueExpr, live)) {
         for (const name of names) {
           live.add(name);
           everLive.add(name);
@@ -394,6 +407,13 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         }
         if (found || !isCallNode(n)) return;
         const callee = unwrapExpression(n.callee as AnyNode);
+        // An EXTRACTED method alias (`const branch = b.branch; branch(...)`)
+        // calls a live alias directly — no member access to inspect; fail
+        // closed (codex S2.13 R13 P2).
+        if (callee?.type === "Identifier" && live.has(callee.name as string)) {
+          found = true;
+          return;
+        }
         let methodName: string | undefined;
         if (callee && isMemberNode(callee)) {
           const prop = unwrapExpression(callee.property as AnyNode);
