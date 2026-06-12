@@ -19,7 +19,7 @@ import type { UploadResultPayload } from "../lib/upload.js";
 import {
   extractContractCases,
   extractFromSource,
-  extractWorkflowExtendAliasesFromSource,
+  buildWorkflowFnRegistry,
   resolveExternalWorkflowFns,
 } from "@glubean/scanner/static";
 import {
@@ -1105,23 +1105,39 @@ export async function runCommand(
   const allFileTests: FileTest[] = [];
   let totalDiscovered = 0;
 
-  // Prepass: project-level extended-workflow factory registry (name →
-  // defining file), so `.test.ts` files importing a shared
-  // `workflow.extend(...)` factory are discovered and classified
-  // (codex S2.15 R7 P2).
-  const workflowFnRegistry = new Map<string, string[]>();
-  for (const filePath of testFiles) {
-    try {
-      const c = await readFile(filePath, "utf-8");
-      for (const name of extractWorkflowExtendAliasesFromSource(c)) {
-        const files = workflowFnRegistry.get(name) ?? [];
-        files.push(filePath);
-        workflowFnRegistry.set(name, files);
+  // Prepass: project-level extended-workflow factory registry, so `.test.ts`
+  // files importing a shared `workflow.extend(...)` factory are discovered
+  // and classified (codex S2.15 R7/R9 P2). Shared fixtures modules are NOT
+  // test files — collect the relative-import CLOSURE of the test set (any
+  // depth; fixtures may re-extend other fixtures), then build the registry
+  // to its fixed point.
+  const prepassSources = new Map<string, string>();
+  {
+    const queue = [...testFiles];
+    const importPattern = /import\s*\{[^}]*\}\s*from\s*["'](\.[^"']+)["']/g;
+    while (queue.length > 0) {
+      const f = queue.shift()!;
+      if (prepassSources.has(f)) continue;
+      let c: string;
+      try {
+        c = await readFile(f, "utf-8");
+      } catch {
+        continue; // candidate path didn't exist — non-fatal
       }
-    } catch {
-      // non-fatal — discovery proceeds without this file's registry entries
+      prepassSources.set(f, c);
+      let im;
+      while ((im = importPattern.exec(c)) !== null) {
+        const base = resolve(dirname(f), im[1]);
+        for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}/index.ts`]) {
+          if (!prepassSources.has(candidate)) queue.push(candidate);
+        }
+      }
+      importPattern.lastIndex = 0;
     }
   }
+  const workflowFnRegistry = buildWorkflowFnRegistry(
+    [...prepassSources].map(([p2, content]) => ({ path: p2, content })),
+  );
 
   for (const filePath of testFiles) {
     try {

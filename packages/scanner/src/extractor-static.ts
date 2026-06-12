@@ -185,9 +185,15 @@ export function extractAliasesFromSource(content: string): string[] {
  * alias pass; the workflow root is the literal `workflow` import name or a
  * `workflow as X` alias.
  */
-export function extractWorkflowExtendAliasesFromSource(content: string): string[] {
+export function extractWorkflowExtendAliasesFromSource(
+  content: string,
+  /** Extra root factory names valid in THIS file (pre-resolved local names of
+   * IMPORTED extended factories — lets a fixtures file re-extend another
+   * fixtures file's export, codex S2.15 R9 P2). */
+  extraRoots?: readonly string[],
+): string[] {
   const stripped = stripComments(content);
-  const roots = new Set<string>(["workflow"]);
+  const roots = new Set<string>(["workflow", ...(extraRoots ?? [])]);
   const importPattern = /import\s*\{([^}]*)\}\s*from/g;
   let im;
   while ((im = importPattern.exec(stripped)) !== null) {
@@ -211,6 +217,39 @@ export function extractWorkflowExtendAliasesFromSource(content: string): string[
     }
   }
   return [...names];
+}
+
+/**
+ * Build the PROJECT-LEVEL extended-workflow factory registry (exported name →
+ * defining files) over a set of files, to a FIXED POINT: a fixtures file may
+ * re-extend a factory imported from another fixtures file (any depth), so
+ * each iteration re-resolves every file's imported factory names against the
+ * registry-so-far and feeds them as extra roots (codex S2.15 R9 P2). Shared
+ * by Scanner.collectAliases and the CLI discovery prepass. Pure — callers
+ * supply contents.
+ */
+export function buildWorkflowFnRegistry(
+  files: ReadonlyArray<{ path: string; content: string }>,
+): Map<string, string[]> {
+  const registry = new Map<string, string[]>();
+  const add = (name: string, file: string): boolean => {
+    const existing = registry.get(name) ?? [];
+    if (existing.includes(file)) return false;
+    existing.push(file);
+    registry.set(name, existing);
+    return true;
+  };
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const { path, content } of files) {
+      const seeds = resolveExternalWorkflowFns(content, path, registry);
+      for (const name of extractWorkflowExtendAliasesFromSource(content, seeds)) {
+        if (add(name, path)) grew = true;
+      }
+    }
+  }
+  return registry;
 }
 
 /**

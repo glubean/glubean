@@ -34,6 +34,7 @@ export {
 export {
   extractAliasesFromSource,
   extractWorkflowExtendAliasesFromSource,
+  buildWorkflowFnRegistry,
   resolveExternalWorkflowFns,
   isGlubeanFile,
 } from "./extractor-static.js";

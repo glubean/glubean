@@ -2,6 +2,7 @@ import { test, expect } from "vitest";
 import {
   extractAliasesFromSource,
   extractWorkflowExtendAliasesFromSource,
+  buildWorkflowFnRegistry,
   resolveExternalWorkflowFns,
   isGlubeanFile,
 } from "./extractor-static.js";
@@ -246,6 +247,31 @@ export const x = wf("id");`,
       dupRegistry,
     ),
   ).toEqual(["wf"]);
+
+  // CHAINED fixtures across files reach the registry fixed point (codex R9):
+  // base.ts defines wf; auth.ts re-extends it; the consumer imports authed.
+  const chainedRegistry = buildWorkflowFnRegistry([
+    {
+      path: "/proj/fixtures/base.ts",
+      content: `import { workflow } from "@glubean/sdk";
+export const wf = workflow.extend({ a: () => 1 });`,
+    },
+    {
+      path: "/proj/fixtures/auth.ts",
+      content: `import { wf } from "./base";
+export const authed = wf.extend({ auth: () => "t" });`,
+    },
+  ]);
+  expect(chainedRegistry.get("wf")).toEqual(["/proj/fixtures/base.ts"]);
+  expect(chainedRegistry.get("authed")).toEqual(["/proj/fixtures/auth.ts"]);
+  expect(
+    resolveExternalWorkflowFns(
+      `import { authed } from "../fixtures/auth";
+export const x = authed("id");`,
+      "/proj/tests/y.test.ts",
+      chainedRegistry,
+    ),
+  ).toEqual(["authed"]);
 
   // a LOCAL re-extend of an imported factory classifies too (codex R8):
   // pre-resolved names seed the extend fixed point

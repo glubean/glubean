@@ -51,6 +51,7 @@ export { createStaticExtractor, extractFromSource, extractContractCases, extract
 export {
   extractAliasesFromSource,
   extractWorkflowExtendAliasesFromSource,
+  buildWorkflowFnRegistry,
   resolveExternalWorkflowFns,
   isGlubeanFile,
 } from "./extractor-static.js";

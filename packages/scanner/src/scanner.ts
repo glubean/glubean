@@ -9,7 +9,7 @@ import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from ".
 import { extractContractCases } from "./extractor-ast.js";
 import {
   extractAliasesFromSource,
-  extractWorkflowExtendAliasesFromSource,
+  buildWorkflowFnRegistry,
   resolveExternalWorkflowFns,
 } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
@@ -118,19 +118,19 @@ export class Scanner {
     // renames map and unrelated same-name imports stay unclassified
     // (codex S2.15 R7 P2); duplicate names across fixtures modules each keep
     // their definer (R8 P2).
-    const workflowFnRegistry = new Map<string, string[]>();
+    let workflowFnRegistry = new Map<string, string[]>();
     try {
+      const sources: Array<{ path: string; content: string }> = [];
       for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
         const content = await this.fs.readText(filePath);
         for (const alias of extractAliasesFromSource(content)) {
           aliases.add(alias);
         }
-        for (const name of extractWorkflowExtendAliasesFromSource(content)) {
-          const files = workflowFnRegistry.get(name) ?? [];
-          files.push(filePath);
-          workflowFnRegistry.set(name, files);
-        }
+        sources.push({ path: filePath, content });
       }
+      // fixed-point build: fixtures files may re-extend each other's exports
+      // across files at any depth (codex S2.15 R9 P2)
+      workflowFnRegistry = buildWorkflowFnRegistry(sources);
     } catch {
       // Non-fatal — continue without aliases
     }
