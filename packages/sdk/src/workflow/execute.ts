@@ -1571,11 +1571,17 @@ async function runGroup(
   emitNodeStart(baseCtx, node);
   const before = outcomes.length;
   const r = await runNodeList(baseCtx, workflowId, node.nodes, state, outcomes);
-  // worst member grade, over what actually ran/skipped inside the bracket
+  // Worst DIRECT-member grade — same scope as staticGradeOf(group), which
+  // folds direct children only (a branch member contributes its DECISION
+  // grade; its case sub-graphs are tallied independently, S2.4a R4). Folding
+  // descendants here would let a skipped opaque side DOWNGRADE the bracket
+  // below its static floor (codex S2.14 R1 P2) — runtime may only promote.
+  const directIds = new Set(node.nodes.map((n) => n.meta.id));
   const RANK: Record<ProjectionGrade, number> = { full: 0, partial: 1, trace: 2, opaque: 3 };
   let grade: ProjectionGrade = "full";
   for (let i = before; i < outcomes.length; i++) {
-    if (RANK[outcomes[i].grade] > RANK[grade]) grade = outcomes[i].grade;
+    const o = outcomes[i];
+    if (directIds.has(o.id) && RANK[o.grade] > RANK[grade]) grade = o.grade;
   }
   if (node.nodes.length === 0) grade = staticGradeOf(node);
   outcomes.push({ id: node.meta.id, status: r.status, grade });

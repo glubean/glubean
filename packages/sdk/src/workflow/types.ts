@@ -324,7 +324,8 @@ export type V1WorkflowNodeKind =
   | "check"
   | "compute"
   | "branch"
-  | "poll";
+  | "poll"
+  | "group";
 
 export type WorkflowSetup<State> = (ctx: WorkflowContext) => State | Promise<State>;
 /**

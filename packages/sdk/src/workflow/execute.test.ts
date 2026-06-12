@@ -1322,6 +1322,27 @@ describe("workflow.group — display-only bracket (phase4 §2)", () => {
     ).toThrow(/duplicate node id "x"/);
   });
 
+  it("runtime bracket grade matches the STATIC scope — direct members only (codex R1)", async () => {
+    const { ctx } = fakeBase();
+    // a branch whose taken side is empty-ish but whose OTHER side holds an
+    // opaque action: static group grade = full (decision is declarative);
+    // runtime must not downgrade below that floor via skipped descendants.
+    const wf = workflow("g-grade-scope")
+      .setup(async () => ({ ok: true }))
+      .group("seg", (b) =>
+        b.branch("route", {
+          when: (w) => w.when((s: { ok: boolean }) => s.ok).eq(true),
+          then: (x) => x.compute("c", (s) => s),
+          else: (x) => x.action("opaque-side", async (_c, s) => s),
+        }),
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    const bracket = res.nodes.find((n) => n.id === "seg")!;
+    expect(bracket.grade).toBe("full"); // NOT opaque from the skipped else-side
+  });
+
   it("group projects with children and worst-of static grade", () => {
     const wf = workflow("g-proj")
       .setup(async () => ({}))
