@@ -195,6 +195,22 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a foreign 'use' on a tainted container fails closed (S2.13 R19)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { importedRunner } from "./helpers";
+export const fakeUse = workflow("u-fake-use")
+  .setup(async () => ({}))
+  .use((b) => {
+    const h = { b, use: importedRunner };
+    return h.use((x) => x.compute("c", (s) => s));
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("a builder-method NAME on a tainted container is still foreign (S2.13 R18)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

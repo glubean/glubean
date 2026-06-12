@@ -556,7 +556,10 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           DELEGATING_CHAIN_METHODS.has(methodName) &&
           (() => {
             const root = chainRootOf(callee!.object as AnyNode);
-            return root?.type === "Identifier" && live.has(root.name as string);
+            // DIRECT aliases only — `h.use(cb)` on a tainted container is a
+            // foreign method wearing the name (codex S2.13 R19 P2); it falls
+            // through to the foreign-call deep checks below.
+            return root?.type === "Identifier" && liveDirect.has(root.name as string);
           })()
         ) {
           const arg = (n.arguments as AnyNode[] | undefined)?.[0];
@@ -600,6 +603,18 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
             found = true;
             return;
           }
+        }
+        // A member call on a LIVE root that is NOT the builder's own chain
+        // surface hands the receiver — and the builder inside it — to foreign
+        // code as `this` (`h.use(cb)` reaching b via this.b — codex S2.13 R19
+        // P2). Fail closed.
+        if (
+          calleeRootForArgs?.type === "Identifier" &&
+          live.has(calleeRootForArgs.name as string) &&
+          !calleeIsLiveChain
+        ) {
+          found = true;
+          return;
         }
         if (methodName === undefined || !BRANCH_FAMILY_METHODS.has(methodName)) return;
         const root = chainRootOf((callee as AnyNode).object as AnyNode);
