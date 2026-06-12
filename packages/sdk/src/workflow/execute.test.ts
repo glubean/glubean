@@ -1225,6 +1225,15 @@ describe("workflow.use — fragments (phase4 §1)", () => {
     // ...and the poisoned trunk refuses to build (half-authored)
   });
 
+  it("a fragment calling b.build() is rejected — no premature registration (codex R2)", () => {
+    expect(() =>
+      workflow("use-build")
+        .setup(async () => ({}))
+        .use(((b: { build: () => unknown }) => b.build()) as never),
+    ).toThrow(/build\(\) cannot be called inside a \.use\(\) fragment/);
+    expect(getRegistryForEach().some((r) => r.id === "use-build")).toBe(false);
+  });
+
   it("an async fragment is rejected", () => {
     expect(() =>
       workflow("use-async")

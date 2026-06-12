@@ -711,6 +711,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     });
   }
 
+  /** Set while a `.use()` fragment is executing — a fragment finalizing the
+   * workflow (`b.build()` via JS/as-any) would register it BEFORE use() can
+   * reject the handle, and the set `_built` would defeat poisoning
+   * (codex S2.13 R2 P2). */
+  private _inFragment = false;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   use(fragment: (b: WorkflowBuilder<State>) => unknown): any {
     return this.authoring(() => {
@@ -718,10 +724,22 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       if (typeof fragment !== "function") {
         throw new Error(`workflow.use() on "${this._meta.id}": a fragment function is required`);
       }
-      const result = fragment(this);
+      let result: unknown;
+      this._inFragment = true;
+      try {
+        result = fragment(this);
+      } finally {
+        this._inFragment = false;
+      }
       // An async fragment would add nodes after the chain moved on — same
-      // hazard as an async branch side (codex S2.4a R5).
+      // hazard as an async branch side (codex S2.4a R5). Consume the promise
+      // first: its later rejection would otherwise surface as unhandled even
+      // when the caller catches this throw (codex S2.13 R2 P2).
       if (result && typeof (result as { then?: unknown }).then === "function") {
+        (result as Promise<unknown>).then(
+          () => {},
+          () => {},
+        );
         throw new Error(
           `workflow.use() on "${this._meta.id}": the fragment must be synchronous — an ` +
             `async fragment loses any steps added after an await`,
@@ -1179,6 +1197,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       throw new Error(
         "workflow.build() cannot be called on a branch/poll sub-builder — " +
           "return the builder chain from the callback instead",
+      );
+    }
+    // A fragment finalizing its host would register the workflow before
+    // use() can validate the return — and `_built` would then defeat the
+    // poison path (codex S2.13 R2 P2).
+    if (this._inFragment) {
+      throw new Error(
+        `workflow "${this._meta.id}": build() cannot be called inside a .use() fragment — ` +
+          `return the chain; the workflow's author builds it`,
       );
     }
     if (this._built) return this._built; // idempotent — one Test, one registration
