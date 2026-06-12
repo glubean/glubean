@@ -399,6 +399,46 @@ describe("execution — the await loop (§9.3/§9.4a)", () => {
     expect(String((res.nodes[0] as { status: string }).status)).toBe("failed");
   });
 
+  it("bad config + EMPTY inbox fails fast via preflight, not exhaustion (codex R3)", async () => {
+    const { ctx, rec } = baseCtx();
+    const c = contract.http.with("api", {})("hooks2", {
+      endpoint: "POST /hooks",
+      cases: {
+        evt: inboundCase({
+          description: "d",
+          expect: {
+            bodySchema: createdSchema,
+            signature: { scheme: "never-registered", header: "x-sig", secretRef: "WH_SECRET" },
+            within: 60_000, // far beyond the test runtime — only preflight can fail this fast
+          },
+        }),
+      },
+    });
+    const wf = workflow("w")
+      .setup(async () => ({ inbox: fakeInbox() })) // NO deliveries at all
+      .poll("wait", c.case("evt") as never, {
+        via: (s: { inbox: unknown }) => s.inbox,
+      } as never)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    // First attempt failed outright — no probe ever happened.
+    expect(attemptsOf(rec)[0]?.outcome).toBe("failed");
+  });
+
+  it("TYPE: an inbound ref with outbound-shaped opts is a compile error (codex R3)", () => {
+    const ref = makeContract(30_000).case("created");
+    void (() =>
+      // @ts-expect-error — until/timeout must not fall through to the outbound overload
+      workflow("w").poll("wait", ref, { until: (w: never) => w, timeout: 1000 }));
+    // And the inbound overload accepts the inbound vocabulary without casts.
+    void (() =>
+      workflow("w")
+        .setup(async () => ({ inbox: {} as unknown }))
+        .poll("wait", ref, { via: (s) => s.inbox }));
+    expect(true).toBe(true);
+  });
+
   it("an empty inbox exhausts the bounds → node fails with no-delivery probes", async () => {
     const { ctx, rec } = baseCtx();
     const inbox = fakeInbox();

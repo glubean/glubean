@@ -1391,6 +1391,10 @@ function runInboundAttempt(
       `workflow poll "${label}": case "${ref.caseKey}" not found in contract "${ref.contractId}"`,
     );
   }
+  // Delivery-less preflight (§9.4 row P): an EMPTY inbox must not let an
+  // unknown scheme / missing secret exhaust as a timeout — the matcher's own
+  // preflight only runs when a delivery exists (codex I3 R3 P2).
+  adapter.preflightInboundCase?.({ caseSpec, secrets: ctx.secrets });
   // Both correlate sides resolve via EXTRACTED paths (safe traversal) — a
   // lens call (`s => s.a.b`) throws on a missing intermediate. Event side:
   // missing path = type-mismatch probe (the matcher walks it). State side:

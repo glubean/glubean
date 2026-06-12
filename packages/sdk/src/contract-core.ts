@@ -800,7 +800,7 @@ export function bootstrap<Needs, Params = void>(
   ref: ContractCaseRef<Needs, unknown>,
   spec: Bootstrap<Params, NoInfer<Needs>>,
 ): BootstrapAttachment<Needs, Params> {
-  if (ref.direction === "inbound") {
+  if ((ref as { direction?: string }).direction === "inbound") {
     throw new Error(
       `contract.bootstrap: case "${ref.contractId}.${ref.caseKey}" is inbound — ` +
         `it is awaited (workflow inbound poll), never executed, so a bootstrap ` +
@@ -842,7 +842,7 @@ function buildContractCallStep(
     accept?: readonly unknown[];
   },
 ): RuntimeContractCallStep {
-  if (ref.direction === "inbound") {
+  if ((ref as { direction?: string }).direction === "inbound") {
     throw new Error(
       `contract.flow(${JSON.stringify(flowId)}).step: case ` +
         `"${ref.contractId}.${ref.caseKey}" is inbound — the counterparty calls ` +
@@ -1072,7 +1072,7 @@ function buildPollStep(
     maxAttempts?: number;
   },
 ): RuntimePollStep {
-  if (ref.direction === "inbound") {
+  if ((ref as { direction?: string }).direction === "inbound") {
     throw new Error(
       `contract.flow(${JSON.stringify(flowId)}).poll: case ` +
         `"${ref.contractId}.${ref.caseKey}" is inbound — legacy flows cannot ` +

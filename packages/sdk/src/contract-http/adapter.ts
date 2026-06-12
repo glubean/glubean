@@ -53,7 +53,7 @@ import type {
 import { isInboundCase } from "./types.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
 import { genericMarkdownPart } from "../contract-artifacts.js";
-import { matchInboundCaseHttp } from "./inbound-match.js";
+import { matchInboundCaseHttp, preflightInboundCaseHttp } from "./inbound-match.js";
 
 // =============================================================================
 // Helpers — endpoint, params, request body, response headers
@@ -1016,6 +1016,13 @@ export const httpAdapter: ContractProtocolAdapter<
   // (inbound-contract-design §9.4/§9.4a, slice I3).
   matchInboundCase(input) {
     return matchInboundCaseHttp(input);
+  },
+
+  // Delivery-less config validation (§9.4 row P): the poll runs this every
+  // attempt so an empty inbox can't hide an unknown scheme / missing secret
+  // behind a timeout (codex I3 R3 P2).
+  preflightInboundCase(input) {
+    preflightInboundCaseHttp(input);
   },
 
   // v10: HTTP no longer needs a validateCaseForFlow. In v9, function-valued

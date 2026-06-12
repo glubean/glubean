@@ -674,6 +674,19 @@ export interface ContractProtocolAdapter<
     secrets: SecretsAccessor;
     correlate?: { eventPath: readonly string[]; stateValue: unknown };
   }) => InboundMatchResult;
+
+  /**
+   * Optional: validate inbound-case CONFIG without a delivery — throw on an
+   * unknown verifier scheme / missing secret (§9.4 preflight row). The poll
+   * calls this every attempt BEFORE reading the receiver: an empty inbox
+   * must not let bad config exhaust as a timeout (codex I3 R3 P2 — the
+   * matcher's own preflight only runs when a delivery exists). Adapters
+   * implementing matchInboundCase should implement this too.
+   */
+  preflightInboundCase?: (input: {
+    caseSpec: unknown;
+    secrets: SecretsAccessor;
+  }) => void;
 }
 
 /**
@@ -751,7 +764,13 @@ export interface ProtocolContract<
     // Inbound case refs carry their direction at the TYPE level too, so the
     // workflow inbound-poll overload matches them and outbound-consuming
     // signatures can reject them statically (runtime guards still back this).
-    (Cases[K] extends { direction: "inbound" } ? { readonly direction: "inbound" } : unknown);
+    // The outbound branch pins `direction?: undefined` (not `unknown`) so
+    // outbound-only signatures can require `{ direction?: undefined }` and
+    // TS excludes inbound refs instead of letting them fall through to the
+    // generic overload (codex I3 R3 P2).
+    (Cases[K] extends { direction: "inbound" }
+      ? { readonly direction: "inbound" }
+      : { readonly direction?: undefined });
 }
 
 /**
@@ -947,12 +966,13 @@ export interface ContractCaseRef<
   /** Live ProtocolContract instance — flow runtime uses this, not contractId lookup. */
   readonly contract: ProtocolContract<any, any, any>;
 
-  /**
-   * Mirrors the projection case's direction. Inbound refs are only valid as
-   * the subject of a workflow inbound poll — `.call()`, flow `.step()` and
-   * `contract.bootstrap()` reject them at declaration time.
-   */
-  readonly direction?: "inbound";
+  // NOTE: an inbound ref also carries a runtime `direction: "inbound"` field
+  // (mirroring the projection case). It is deliberately NOT declared here —
+  // `.case()` adds it via a conditional intersection ("inbound" for inbound
+  // cases, `direction?: undefined` otherwise), so outbound-consuming
+  // signatures can require `{ direction?: undefined }` and statically
+  // exclude inbound refs while hand-built test refs stay assignable
+  // (codex I3 R3 P2). Runtime code duck-reads it.
 
   /** Phantom fields — do not populate at runtime. TS-only. */
   readonly __phantom_inputs?: CaseInputs;

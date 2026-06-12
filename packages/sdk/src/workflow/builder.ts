@@ -478,7 +478,10 @@ export interface WorkflowBuilder<State> {
    */
   poll<Event = unknown, NewState = State>(
     idOrMeta: NodeMetaInput,
-    ref: ContractCaseRef<void, unknown, unknown, unknown> & { direction: "inbound" },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- don't-care
+    // slots: the inbound overload keys on `direction` alone (adapter generics
+    // vary per protocol; `void/unknown` would reject HTTP's typed refs).
+    ref: ContractCaseRef<any, any, any, any> & { direction: "inbound" },
     opts: InboundPollOpts<State, NewState, Event>,
   ): ChainedWorkflowBuilder<NewState>;
   poll<
@@ -490,7 +493,13 @@ export interface WorkflowBuilder<State> {
     NewState = State,
   >(
     idOrMeta: NodeMetaInput,
-    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
+    // `direction?: undefined` excludes inbound refs — without it an inbound
+    // ref with outbound-shaped opts ({until, timeout}) would fall through the
+    // inbound overload (until: never) into THIS one and only fail at runtime
+    // (codex I3 R3 P2). `.case()` pins outbound refs to direction?: undefined.
+    ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome> & {
+      direction?: undefined;
+    },
     ...rest: [CaseInputs] extends [void]
       ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
       : [opts: PollOptsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
@@ -726,7 +735,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       this.assertNoTeardown("call");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(meta, "call");
-      if (ref?.direction === "inbound") {
+      if ((ref as { direction?: string } | undefined)?.direction === "inbound") {
         throw new Error(
           `workflow.call() "${meta.id}": case "${ref.contractId}.${ref.caseKey}" is ` +
             `inbound — the counterparty calls us, so there is nothing to call. ` +
@@ -1119,7 +1128,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       this.assertNoTeardown("poll");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(meta, "poll");
-      if (ref?.direction === "inbound") {
+      if ((ref as { direction?: string } | undefined)?.direction === "inbound") {
         return this.inboundPoll(meta, ref, rest[0]);
       }
       const opts = rest[0] as

@@ -11,7 +11,10 @@
  * (consult #2), so a hard content fail would misfire on them.
  */
 
-import type { InboundDelivery, InboundMatchResult } from "../contract-types.js";
+import type {
+  InboundDelivery,
+  InboundMatchResult,
+} from "../contract-types.js";
 import type { SchemaLike, SecretsAccessor } from "../types.js";
 import type { InboundContractCase } from "./types.js";
 import { isInboundCase } from "./types.js";
@@ -74,8 +77,21 @@ function headersAccept(c: InboundContractCase, delivery: InboundDelivery): boole
   return true;
 }
 
-export function matchInboundCaseHttp(input: MatchInboundInput): InboundMatchResult {
-  const { caseSpec, delivery, secrets, correlate } = input;
+/**
+ * Preflight (§9.4 row P): validate config WITHOUT a delivery — bad config
+ * must never hide as a probe or, with an empty inbox, exhaust as a timeout
+ * (codex I3 R3 P2). The poll calls this each attempt before reading the
+ * receiver; the matcher reuses it so direct callers get the same guarantee.
+ */
+export function preflightInboundCaseHttp(input: {
+  caseSpec: unknown;
+  secrets: SecretsAccessor;
+}): {
+  c: InboundContractCase;
+  verifier?: ReturnType<typeof getSignatureVerifier>;
+  secret?: string;
+} {
+  const { caseSpec, secrets } = input;
   if (!isInboundCase(caseSpec)) {
     throw new Error(
       "matchInboundCase: case is not an inbound case — the workflow inbound " +
@@ -83,23 +99,24 @@ export function matchInboundCaseHttp(input: MatchInboundInput): InboundMatchResu
     );
   }
   const c = caseSpec as InboundContractCase;
-
-  // ── Preflight (§9.4 row P): bad config must never hide as a probe ──────
   const sig = c.expect.signature;
-  let verifier;
-  let secret: string | undefined;
-  if (sig) {
-    verifier = getSignatureVerifier(sig.scheme);
-    if (!verifier) {
-      throw new Error(
-        `inbound case: unknown signature scheme "${sig.scheme}" — not in the ` +
-          `verifier registry (built-ins: stripe-v1, hmac-sha256; plugins ` +
-          `register via registerSignatureVerifier).`,
-      );
-    }
-    // Throws when missing — exactly the preflight semantics we want.
-    secret = secrets.require(sig.secretRef);
+  if (!sig) return { c };
+  const verifier = getSignatureVerifier(sig.scheme);
+  if (!verifier) {
+    throw new Error(
+      `inbound case: unknown signature scheme "${sig.scheme}" — not in the ` +
+        `verifier registry (built-ins: stripe-v1, hmac-sha256; plugins ` +
+        `register via registerSignatureVerifier).`,
+    );
   }
+  // Throws when missing — exactly the preflight semantics we want.
+  return { c, verifier, secret: secrets.require(sig.secretRef) };
+}
+
+export function matchInboundCaseHttp(input: MatchInboundInput): InboundMatchResult {
+  const { delivery, correlate } = input;
+  const { c, verifier, secret } = preflightInboundCaseHttp(input);
+  const sig = c.expect.signature;
 
   // ── Authentication first (§9.4 rows 1–2) ───────────────────────────────
   if (sig && verifier && secret !== undefined) {
