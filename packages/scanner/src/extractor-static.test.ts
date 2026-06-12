@@ -248,6 +248,16 @@ export const x = wf("id");`,
     ),
   ).toEqual(["wf"]);
 
+  // ESM-style `.js` specifier resolves to the .ts source (codex R10)
+  expect(
+    resolveExternalWorkflowFns(
+      `import { wf } from "./fixtures.js";
+export const x = wf("id");`,
+      "/proj/tests/esm.test.ts",
+      new Map([["wf", ["/proj/tests/fixtures.ts"]]]),
+    ),
+  ).toEqual(["wf"]);
+
   // CHAINED fixtures across files reach the registry fixed point (codex R9):
   // base.ts defines wf; auth.ts re-extends it; the consumer imports authed.
   const chainedRegistry = buildWorkflowFnRegistry([

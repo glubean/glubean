@@ -1127,8 +1127,15 @@ export async function runCommand(
       prepassSources.set(f, c);
       let im;
       while ((im = importPattern.exec(c)) !== null) {
-        const base = resolve(dirname(f), im[1]);
-        for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}/index.ts`]) {
+        const spec = im[1];
+        const base = resolve(dirname(f), spec);
+        // ESM TS convention: `./fixtures.js` refers to fixtures.ts on disk —
+        // map compiled-extension specifiers back to TS sources
+        // (codex S2.15 R10 P2).
+        const stripped = base.replace(/\.(js|jsx|mjs|cjs)$/, "");
+        const candidates = [base, `${base}.ts`, `${base}.tsx`, `${base}/index.ts`];
+        if (stripped !== base) candidates.push(`${stripped}.ts`, `${stripped}.tsx`);
+        for (const candidate of candidates) {
           if (!prepassSources.has(candidate)) queue.push(candidate);
         }
       }

@@ -285,7 +285,7 @@ export function resolveExternalWorkflowFns(
   while ((m = importPattern.exec(stripped)) !== null) {
     const [, specs, source] = m;
     if (!source.startsWith(".")) continue; // package imports never match project files
-    const resolvedBase = normalize(`${dir}/${source}`).replace(/\.(ts|tsx|js|jsx|mts|cts)$/, "");
+    const resolvedBase = normalize(`${dir}/${source}`).replace(/\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/, "");
     for (const spec of specs.split(",")) {
       const sm = spec.match(/^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/);
       if (!sm) continue;
