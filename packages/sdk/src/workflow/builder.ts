@@ -202,7 +202,8 @@ export type PollOpts<
   RawOutcome,
   AcceptKey,
   Accept extends ReadonlyArray<AcceptKey> = never,
-> = PollUntil<State, CallResponse<Accept, CaseOutput, RawOutcome>> &
+  Ctx extends WorkflowContext = WorkflowContext,
+> = PollUntil<State, CallResponse<Accept, CaseOutput, RawOutcome>, Ctx> &
   PollBounds & {
     /** Pure lens folding the SATISFYING response into the next state. */
     out?: (state: State, res: CallResponse<Accept, CaseOutput, RawOutcome>) => NewState;
@@ -219,7 +220,8 @@ export type PollOptsWithInput<
   RawOutcome,
   AcceptKey,
   Accept extends ReadonlyArray<AcceptKey> = never,
-> = PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept> & {
+  Ctx extends WorkflowContext = WorkflowContext,
+> = PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept, Ctx> & {
   /** Pure lens: workflow state → the case's logical input (required). */
   in: (state: State) => CaseInputs;
 };
@@ -445,8 +447,19 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
     idOrMeta: NodeMetaInput,
     ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
     ...rest: [CaseInputs] extends [void]
-      ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
-      : [opts: PollOptsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
+      ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept, Ctx>]
+      : [
+          opts: PollOptsWithInput<
+            State,
+            NewState,
+            CaseInputs,
+            CaseOutput,
+            RawOutcome,
+            AcceptKey,
+            Accept,
+            Ctx
+          >,
+        ]
   ): ChainedWorkflowBuilder<NewState, Ctx>;
   /**
    * Bounded poll over an ARBITRARY async attempt (addendum §4 — the webhook/
@@ -460,7 +473,7 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
   pollAction<Res, NewState = State>(
     idOrMeta: NodeMetaInput,
     fn: (ctx: Ctx, state: State) => Res | Promise<Res>,
-    opts: PollUntil<State, Res> &
+    opts: PollUntil<State, Res, Ctx> &
       PollBounds & {
         /** Pure lens folding the SATISFYING probe result into the next state. */
         out?: (state: State, res: Res) => NewState;
@@ -1584,16 +1597,17 @@ function buildEachMembers<T extends Record<string, unknown>>(
   }
 }
 
-function workflowEach<T extends Record<string, unknown>>(
+/** Internal each runner — fixtures stay OFF the public surface so the only
+ * injection path is workflow.extend()'s validated map (codex S2.15 R1 P2). */
+function runEachInternal<T extends Record<string, unknown>>(
   table: readonly T[] | Record<string, T>,
-): (
   meta: WorkflowEachMeta<T>,
   factory: WorkflowEachFactory<T>,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fixtures?: Record<string, ExtensionFn<any>>,
-) => BuiltWorkflow[] {
+): BuiltWorkflow[] {
   const rows = normalizeEachTable(table);
-  return (meta, factory, fixtures) => {
+  {
     const members = buildEachMembers(rows, meta, factory, fixtures);
     // Every row validated against the canonical structure — register now
     // (a rejected matrix never reaches the registry; codex S2.12 R3 P2).
@@ -1601,7 +1615,13 @@ function workflowEach<T extends Record<string, unknown>>(
       (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
     }
     return members;
-  };
+  }
+}
+
+function workflowEach<T extends Record<string, unknown>>(
+  table: readonly T[] | Record<string, T>,
+): (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>) => BuiltWorkflow[] {
+  return (meta, factory) => runEachInternal(table, meta, factory);
 }
 
 /** Reserved fixture names: the test set plus workflow's own ctx members. */
@@ -1644,9 +1664,8 @@ function makeExtendedWorkflow(allFixtures: Record<string, ExtensionFn<any>>): un
   };
   return Object.assign(factory, {
     each: <T extends Record<string, unknown>>(table: readonly T[] | Record<string, T>) => {
-      const run = workflowEach<T>(table);
       return (meta: WorkflowEachMeta<T>, factoryFn: WorkflowEachFactory<T>) =>
-        run(meta, factoryFn, allFixtures);
+        runEachInternal(table, meta, factoryFn, allFixtures);
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     extend: (more: Record<string, ExtensionFn<any>>) =>

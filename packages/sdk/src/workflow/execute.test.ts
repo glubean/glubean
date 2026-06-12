@@ -1249,6 +1249,25 @@ describe("workflow.extend — fixtures (phase4 §3)", () => {
     }
   });
 
+  it("untilRuntime sees the extended Ctx; public each takes exactly two args (codex R1)", async () => {
+    const wf = workflow.extend({ inbox: () => ({ ready: () => true }) });
+    // type-level: untilRuntime ctx carries the fixture
+    const built = wf("wfx-until")
+      .setup(async () => ({}))
+      .pollAction("probe", async (ctx) => (ctx.inbox.ready() ? "ok" : null), {
+        untilRuntime: (ctx, res) => ctx.inbox.ready() && res === "ok",
+        message: "inbox ready",
+        every: 1,
+        maxAttempts: 3,
+        perAttemptTimeout: 100,
+      })
+      .build();
+    expect((built[0] as { fixtures?: Record<string, unknown> }).fixtures).toBeDefined();
+    // public each surface: two parameters only — no fixtures back door
+    const run = workflow.each([{ v: 1 }]);
+    expect(run.length).toBe(2);
+  });
+
   it("plain workflow() stays fixture-free", () => {
     const built = workflow("wfx-plain")
       .setup(async () => ({}))
