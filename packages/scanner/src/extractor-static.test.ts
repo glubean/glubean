@@ -195,6 +195,34 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("pattern-nested defaults flag; object-method NAMES don't false-positive (S2.13 R11)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow } from "./helpers";
+
+// initializer hidden INSIDE a destructuring pattern default — flagged
+export const nestedDefault = workflow("u-nested-default")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const make = ({ x = b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) }) } = {}) => x;
+    return make();
+  })
+  .build();
+
+// an object METHOD whose name collides with the builder — pure label, clean
+export const methodName = workflow("u-method-name")
+  .setup(async () => ({}))
+  .use((b) => b.action("probe", async (ctx, s) => { await makeFlow({ b() { return 1; } }); return s; }))
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-nested-default": true,
+    "u-method-name": false,
+  });
+});
+
 test("destructured aliases and param-default initializers cannot hide the branch family (S2.13 R10)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

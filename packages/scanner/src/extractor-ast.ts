@@ -253,7 +253,11 @@ function containsLiveIdentifier(expr: AnyNode | undefined, live: ReadonlySet<str
       // non-computed object-property key are labels, not references.
       if (
         (isMemberNode(node) && node.computed !== true && key === "property") ||
-        ((node.type === "ObjectProperty" || node.type === "Property") &&
+        ((node.type === "ObjectProperty" ||
+          node.type === "Property" ||
+          // `{ b() {} }` — a method NAME is a label too (codex S2.13 R11 P2)
+          node.type === "ObjectMethod" ||
+          node.type === "ClassMethod") &&
           (node as { computed?: boolean }).computed !== true &&
           key === "key")
       ) {
@@ -478,15 +482,22 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         // A default-parameter INITIALIZER referencing a live builder executes
         // at call time with the closure's bindings (`const make = (x =
         // b.branch(...)) => x`) — the body-only recursion never sees it, and
-        // the param may BECOME the builder (`(x = b) => x.branch()`). Fail
-        // closed on the reference itself (codex S2.13 R10 P2).
-        if (param.type === "AssignmentPattern") {
-          if (containsLiveIdentifier(param.right as AnyNode, everLive)) {
-            found = true;
-            return;
+        // the param may BECOME the builder (`(x = b) => x.branch()`).
+        // Initializers can hide ANYWHERE in a destructuring pattern
+        // (`({ x = b.branch(...) } = {}) => x` — codex S2.13 R11 P2), so the
+        // WHOLE param subtree is searched. Fail closed on the reference.
+        let liveInitializer = false;
+        walk(param, (n) => {
+          if (
+            n.type === "AssignmentPattern" &&
+            containsLiveIdentifier((n as { right?: AnyNode }).right, everLive)
+          ) {
+            liveInitializer = true;
           }
-          for (const name of boundNames(param.left as AnyNode)) childInherited.delete(name);
-          continue;
+        });
+        if (liveInitializer) {
+          found = true;
+          return;
         }
         for (const name of boundNames(param)) childInherited.delete(name);
       }
