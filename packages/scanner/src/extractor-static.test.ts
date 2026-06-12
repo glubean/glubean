@@ -248,6 +248,24 @@ export const x = wf("id");`,
     ),
   ).toEqual(["wf"]);
 
+  // TYPE-ANNOTATED fixture exports register (codex R13)
+  expect(
+    extractWorkflowExtendAliasesFromSource(
+      `import { workflow } from "@glubean/sdk";
+export const wf: ExtendedWorkflowFactory<MyCtx> = workflow.extend({ a: () => 1 });`,
+    ),
+  ).toEqual(["wf"]);
+
+  // ROOT-LEVEL consumer (no directory separator in its path) resolves ./siblings (codex R13)
+  expect(
+    resolveExternalWorkflowFns(
+      `import { wf } from "./fixtures";
+export const x = wf("id");`,
+      "smoke.test.ts",
+      new Map([["wf", ["fixtures.ts"]]]),
+    ),
+  ).toEqual(["wf"]);
+
   // ESM-style `.js` specifier resolves to the .ts source (codex R10)
   expect(
     resolveExternalWorkflowFns(

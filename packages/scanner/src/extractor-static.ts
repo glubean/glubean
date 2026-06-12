@@ -167,7 +167,9 @@ function stripComments(source: string): string {
 export function extractAliasesFromSource(content: string): string[] {
   const stripped = stripComments(content);
   // Match: [export] const NAME = SOMETHING.extend(
-  const pattern = /(?:export\s+)?const\s+(\w+)\s*=\s*\w+\.extend\s*\(/g;
+  // optional type annotation between name and `=` (no `=>` arrows supported
+  // there — an annotation containing one would stop the match early)
+  const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=]*?)?=\s*\w+\.extend\s*\(/g;
   const aliases: string[] = [];
   let m;
   while ((m = pattern.exec(stripped)) !== null) {
@@ -206,7 +208,7 @@ export function extractWorkflowExtendAliasesFromSource(
   let grew = true;
   while (grew) {
     grew = false;
-    const pattern = /(?:export\s+)?const\s+(\w+)\s*=\s*(\w+)\s*\.extend\s*\(/g;
+    const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=]*?)?=\s*(\w+)\s*\.extend\s*\(/g;
     let m;
     while ((m = pattern.exec(stripped)) !== null) {
       const [, name, base] = m;
@@ -271,7 +273,10 @@ export function resolveExternalWorkflowFns(
   const stripped = stripComments(content);
   const out: string[] = [];
   const importPattern = /import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g;
-  const dir = filePath.replace(/\\/g, "/").replace(/\/[^/]*$/, "");
+  const normPath = filePath.replace(/\\/g, "/");
+  // a root-level file has no separator — its dir is "" (codex S2.15 R13 P2:
+  // the old replace left the FILENAME as dir and broke ./sibling imports)
+  const dir = normPath.includes("/") ? normPath.replace(/\/[^/]*$/, "") : "";
   const normalize = (p: string): string => {
     const parts: string[] = [];
     for (const seg of p.replace(/\\/g, "/").split("/")) {
@@ -285,7 +290,10 @@ export function resolveExternalWorkflowFns(
   while ((m = importPattern.exec(stripped)) !== null) {
     const [, specs, source] = m;
     if (!source.startsWith(".")) continue; // package imports never match project files
-    const resolvedBase = normalize(`${dir}/${source}`).replace(/\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/, "");
+    const resolvedBase = normalize(dir ? `${dir}/${source}` : source).replace(
+      /\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/,
+      "",
+    );
     for (const spec of specs.split(",")) {
       const sm = spec.match(/^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/);
       if (!sm) continue;
