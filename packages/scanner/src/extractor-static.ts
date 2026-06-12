@@ -224,7 +224,9 @@ export function extractWorkflowExtendAliasesFromSource(content: string): string[
 export function resolveExternalWorkflowFns(
   content: string,
   filePath: string,
-  registry: ReadonlyMap<string, string>,
+  /** exported name → DEFINING FILE(s) — multiple fixtures modules may export
+   * the same name (codex S2.15 R8 P2), so each name maps to every definer. */
+  registry: ReadonlyMap<string, readonly string[]>,
 ): string[] {
   if (registry.size === 0) return [];
   const stripped = stripComments(content);
@@ -250,13 +252,16 @@ export function resolveExternalWorkflowFns(
       if (!sm) continue;
       const importedName = sm[1];
       const localName = sm[2] ?? sm[1];
-      const definingFile = registry.get(importedName);
-      if (!definingFile) continue;
-      const definingBase = definingFile
-        .replace(/\\/g, "/")
-        .replace(/\.(ts|tsx|js|jsx|mts|cts)$/, "");
-      if (definingBase === resolvedBase || definingBase === `${resolvedBase}/index`) {
-        out.push(localName);
+      const definingFiles = registry.get(importedName);
+      if (!definingFiles) continue;
+      for (const definingFile of definingFiles) {
+        const definingBase = definingFile
+          .replace(/\\/g, "/")
+          .replace(/\.(ts|tsx|js|jsx|mts|cts)$/, "");
+        if (definingBase === resolvedBase || definingBase === `${resolvedBase}/index`) {
+          out.push(localName);
+          break;
+        }
       }
     }
   }

@@ -186,7 +186,7 @@ export const authedTest = test.extend({ auth: () => "t" });
   // consumer.test.ts: imports wf — module-aware resolution (codex R7): the
   // registry ties names to DEFINING FILES; resolveExternalWorkflowFns walks
   // this file's imports and yields the LOCAL names that genuinely match.
-  const registry = new Map([["wf", "/proj/tests/fixtures.ts"]]);
+  const registry = new Map([["wf", ["/proj/tests/fixtures.ts"]]]);
   const consumer = `
 import { wf } from "./fixtures";
 export const journey = wf("wfx-imported")
@@ -233,6 +233,32 @@ export const notAWorkflow = wf("plain-thing");
   expect(resolveExternalWorkflowFns(unrelatedLocal, "/proj/tests/c.test.ts", registry)).toEqual(
     [],
   );
+
+  // duplicate names across fixtures modules: each definer matches (codex R8)
+  const dupRegistry = new Map([
+    ["wf", ["/proj/a/fixtures.ts", "/proj/b/fixtures.ts"]],
+  ]);
+  expect(
+    resolveExternalWorkflowFns(
+      `import { wf } from "../b/fixtures";
+export const x = wf("id");`,
+      "/proj/c/u.test.ts",
+      dupRegistry,
+    ),
+  ).toEqual(["wf"]);
+
+  // a LOCAL re-extend of an imported factory classifies too (codex R8):
+  // pre-resolved names seed the extend fixed point
+  const reExtend = `
+import { wf } from "./fixtures";
+const authed = wf.extend({ auth: () => "t" });
+export const j = authed("wfx-reextend")
+  .setup(async () => ({}))
+  .compute("c", (s) => s)
+  .build();
+`;
+  const reExtendMetas = extractFromSource(reExtend, ["wf", "authed"], ["wf"]);
+  expect(reExtendMetas[0]).toMatchObject({ id: "wfx-reextend", workflow: true });
 });
 
 test("inline extended each is discovered (S2.15 R4)", () => {

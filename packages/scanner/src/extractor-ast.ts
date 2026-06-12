@@ -797,8 +797,8 @@ function isWorkflowFactoryExpr(expr: AnyNode | undefined, aliases: ReadonlySet<s
   return isWorkflowFactoryExpr(callee.object as AnyNode, aliases);
 }
 
-function collectWorkflowAliases(source: SourceFile): Set<string> {
-  const aliases = new Set<string>(["workflow"]);
+function collectWorkflowAliases(source: SourceFile, seedNames?: string[]): Set<string> {
+  const aliases = new Set<string>(["workflow", ...(seedNames ?? [])]);
   const body = (source.program.body as AnyNode[] | undefined) ?? [];
   for (const stmt of body) {
     if (stmt.type !== "ImportDeclaration") continue;
@@ -1048,9 +1048,10 @@ export function extractFromSource(
     return [];
   }
   const fns = customFns && customFns.length > 0 ? new Set([...BASE_FNS, ...customFns]) : undefined;
-  const workflowAliases = collectWorkflowAliases(source);
-  // Pre-resolved LOCAL names (module-aware resolution happened at the caller)
-  for (const name of externalWorkflowFns ?? []) workflowAliases.add(name);
+  // Pre-resolved LOCAL names seed the alias pass BEFORE its extend fixed
+  // point, so a local re-extend of an imported factory (`const authed =
+  // wf.extend(...)`) classifies too (codex S2.15 R8 P2).
+  const workflowAliases = collectWorkflowAliases(source, externalWorkflowFns);
   const results: ExportMeta[] = [];
   forEachExportedConst(source, (statement, declaration) => {
     const meta = parseTestDeclaration(declaration, statement, fns, workflowAliases);

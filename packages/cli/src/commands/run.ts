@@ -512,7 +512,7 @@ export async function discoverTests(
    * defining file) — lets a `.test.ts` import an extended factory from a
    * shared fixtures file and still be discovered/classified statically
    * (codex S2.15 R7 P2). Optional: single-file callers skip it. */
-  workflowFnRegistry?: ReadonlyMap<string, string>,
+  workflowFnRegistry?: ReadonlyMap<string, readonly string[]>,
 ): Promise<DiscoveredTest[]> {
   // `.bootstrap.ts` files register overlays as a side-effect of import; they
   // produce no runnable tests of their own. We don't even need to import here
@@ -1109,12 +1109,14 @@ export async function runCommand(
   // defining file), so `.test.ts` files importing a shared
   // `workflow.extend(...)` factory are discovered and classified
   // (codex S2.15 R7 P2).
-  const workflowFnRegistry = new Map<string, string>();
+  const workflowFnRegistry = new Map<string, string[]>();
   for (const filePath of testFiles) {
     try {
       const c = await readFile(filePath, "utf-8");
       for (const name of extractWorkflowExtendAliasesFromSource(c)) {
-        workflowFnRegistry.set(name, filePath);
+        const files = workflowFnRegistry.get(name) ?? [];
+        files.push(filePath);
+        workflowFnRegistry.set(name, files);
       }
     } catch {
       // non-fatal — discovery proceeds without this file's registry entries

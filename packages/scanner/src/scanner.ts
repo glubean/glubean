@@ -111,12 +111,14 @@ export class Scanner {
     dir: string,
     skipDirs: string[] = DEFAULT_SKIP_DIRS,
     extensions: string[] = DEFAULT_EXTENSIONS,
-  ): Promise<{ aliases?: string[]; workflowFnRegistry: Map<string, string> }> {
+  ): Promise<{ aliases?: string[]; workflowFnRegistry: Map<string, string[]> }> {
     const aliases = new Set<string>();
-    // exported extended-workflow factory name → DEFINING file. Module-aware:
-    // consumers resolve through their own import specifiers, so renames map
-    // and unrelated same-name imports stay unclassified (codex S2.15 R7 P2).
-    const workflowFnRegistry = new Map<string, string>();
+    // exported extended-workflow factory name → DEFINING file(s). Module-
+    // aware: consumers resolve through their own import specifiers, so
+    // renames map and unrelated same-name imports stay unclassified
+    // (codex S2.15 R7 P2); duplicate names across fixtures modules each keep
+    // their definer (R8 P2).
+    const workflowFnRegistry = new Map<string, string[]>();
     try {
       for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
         const content = await this.fs.readText(filePath);
@@ -124,7 +126,9 @@ export class Scanner {
           aliases.add(alias);
         }
         for (const name of extractWorkflowExtendAliasesFromSource(content)) {
-          workflowFnRegistry.set(name, filePath);
+          const files = workflowFnRegistry.get(name) ?? [];
+          files.push(filePath);
+          workflowFnRegistry.set(name, files);
         }
       }
     } catch {
