@@ -116,6 +116,17 @@ export interface NormalizedCaseMeta {
    * decoration for consumers that want the schema shape when available.
    */
   needsSchema?: unknown;
+  /**
+   * "inbound" = the counterparty calls us (inbound-contract-design §9.2).
+   * Absent = outbound. Inbound cases are never runnable — consumers
+   * enumerating executable cases must skip them (see `runnable`).
+   */
+  direction?: "inbound";
+  /**
+   * `false` = the case registers no Test / runnable-inventory entry
+   * (design §9.5); it exists in contract metadata only. Absent = runnable.
+   */
+  runnable?: boolean;
 }
 
 /**
@@ -621,6 +632,8 @@ export function protocolContractToNormalized(
       runnability: c.runnability,
       hasNeeds: c.hasNeeds,
       needsSchema: c.needsSchema,
+      direction: c.direction,
+      runnable: c.runnable,
     })),
   };
 }

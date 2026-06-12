@@ -44,10 +44,13 @@ import type {
   HttpPayloadSchemas,
   HttpSafeSchemas,
   HttpSecurityScheme,
+  InboundContractCase,
+  InboundExpect,
   NormalizedHeaders,
   ParamValue,
   RequestSpec,
 } from "./types.js";
+import { isInboundCase } from "./types.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
 import { genericMarkdownPart } from "../contract-artifacts.js";
 
@@ -286,6 +289,16 @@ function extractParamMetaSchemas(
  * Keeps request / expect / verify logic identical to the legacy path so
  * behavior stays consistent across attachment modes.
  */
+/** Execution fail-fast: inbound cases are awaited, never run (design §9.5). */
+function assertNotInbound(caseSpec: unknown, spec: HttpContractSpec, entry: string): void {
+  if (isInboundCase(caseSpec)) {
+    throw new Error(
+      `HTTP adapter.${entry}: inbound case cannot be executed — the counterparty ` +
+        `calls us (${spec.endpoint}). Await it with a workflow inbound poll instead.`,
+    );
+  }
+}
+
 async function executeStandaloneCase(
   ctx: TestContext,
   caseSpec: ContractCase<unknown, unknown>,
@@ -388,6 +401,77 @@ async function executeStandaloneCase(
 // project(): HttpContractSpec → ContractProjection<HttpPayloadSchemas>
 // =============================================================================
 
+/**
+ * Construction-time validation for inbound cases (inbound-contract-design
+ * §9.2/§9.5). The InboundContractCase TYPE already forbids outbound-only
+ * fields, but specs are authorable from JS — fail fast with a field-specific
+ * message instead of letting dead config ride along silently.
+ */
+function validateInboundCase(
+  key: string,
+  c: InboundContractCase & Record<string, unknown>,
+  spec: HttpContractSpec,
+): void {
+  const where = `inbound case "${key}" (${spec.endpoint})`;
+  const outboundOnly = [
+    ["body", "the counterparty sends the body — declare its shape in expect.bodySchema"],
+    ["params", "inbound cases have no request to parameterize"],
+    ["query", "inbound cases have no request to parameterize"],
+    ["headers", "request headers are outbound vocabulary — header EXPECTATIONS go in expect.headers"],
+    ["client", "nothing is sent, so there is no client"],
+    ["verify", "inbound assertions are declarative (expect.bodySchema/headers/signature) in v1"],
+    ["verifyRules", "companion of verify() — outbound vocabulary"],
+    ["needs", "logical input is outbound vocabulary; inbound cases are awaited, not run"],
+    ["runnability", "inbound cases are never runnable (design §9.5)"],
+    ["requires", "runnable-inventory vocabulary — inbound cases register no Test"],
+    ["defaultRun", "runnable-inventory vocabulary — inbound cases register no Test"],
+  ] as const;
+  for (const [field, why] of outboundOnly) {
+    if (c[field] !== undefined) {
+      throw new Error(`${where}: "${field}" is not allowed on an inbound case — ${why}.`);
+    }
+  }
+  const expect = c.expect as InboundExpect & Record<string, unknown> | undefined;
+  if (!expect || expect.bodySchema === undefined) {
+    throw new Error(`${where}: expect.bodySchema is required — it IS the promise.`);
+  }
+  if (expect.status !== undefined || expect.schema !== undefined) {
+    throw new Error(
+      `${where}: expect.status/expect.schema are outbound response vocabulary — ` +
+        `an inbound expect declares bodySchema (+ headers/signature/within).`,
+    );
+  }
+  if (expect.within !== undefined && !(Number.isFinite(expect.within) && (expect.within as number) > 0)) {
+    throw new Error(`${where}: expect.within must be a positive number of milliseconds.`);
+  }
+  if (expect.headers !== undefined) {
+    for (const [name, matcher] of Object.entries(expect.headers)) {
+      const m = matcher as Record<string, unknown>;
+      const isPresent = m && m.present === true && m.eq === undefined;
+      const isEq = m && typeof m.eq === "string" && m.present === undefined;
+      if (!isPresent && !isEq) {
+        throw new Error(
+          `${where}: expect.headers["${name}"] must be { present: true } or { eq: "<value>" }.`,
+        );
+      }
+    }
+  }
+  const sig = expect.signature;
+  if (sig !== undefined) {
+    for (const field of ["scheme", "header", "secretRef"] as const) {
+      if (typeof sig[field] !== "string" || sig[field].length === 0) {
+        throw new Error(`${where}: expect.signature.${field} must be a non-empty string.`);
+      }
+    }
+    if (sig.toleranceMs !== undefined && !(Number.isFinite(sig.toleranceMs) && sig.toleranceMs > 0)) {
+      throw new Error(`${where}: expect.signature.toleranceMs must be a positive number of milliseconds.`);
+    }
+    // Scheme registration is checked at MATCH time, not here: plugin
+    // verifiers register via import side effects and module order is not
+    // guaranteed at contract construction.
+  }
+}
+
 function projectHttp(
   spec: HttpContractSpec,
 ): ContractProjection<HttpPayloadSchemas, HttpContractMeta> {
@@ -432,6 +516,36 @@ function projectHttp(
         : c.deferred
           ? "deferred"
           : "active";
+
+      if (isInboundCase(c)) {
+        validateInboundCase(key, c as InboundContractCase & Record<string, unknown>, spec);
+        return {
+          key,
+          description: c.description,
+          lifecycle,
+          severity: c.severity ?? "warning",
+          deferredReason: c.deferred,
+          deprecatedReason: effectiveDeprecated,
+          tags: c.tags,
+          extensions: c.extensions,
+          given: c.given,
+          // §9.5: inbound cases exist in projection/metadata only — the
+          // dispatcher registers no Test and no runnable-inventory entry.
+          direction: "inbound" as const,
+          runnable: false,
+          schemas: {
+            inbound: {
+              body: c.expect.bodySchema,
+              headers: c.expect.headers,
+              // secretRef is a secrets NAME — projection-safe by construction
+              // (blind spot 9); the matcher resolves it at run time.
+              signature: c.expect.signature,
+              within: c.expect.within,
+            },
+          },
+        };
+      }
+
       const paramSchemas = extractParamMetaSchemas(
         c.params as Record<string, unknown> | ((state: unknown) => Record<string, string>) | undefined,
       );
@@ -543,6 +657,8 @@ function normalizeHttp(
       verifyRules: c.verifyRules,
       runnability: c.runnability,
       hasNeeds: c.hasNeeds,
+      direction: c.direction,
+      runnable: c.runnable,
       needsSchema: c.needsSchema
         ? schemaToJsonSchema(c.needsSchema as Parameters<typeof schemaToJsonSchema>[0]) ?? undefined
         : undefined,
@@ -565,6 +681,16 @@ function normalizeHttp(
               ? normalizeParamMetaRecord(c.schemas.query)
               : undefined,
             security: c.schemas.security,
+            inbound: c.schemas.inbound
+              ? {
+                  body: schemaToJsonSchema(c.schemas.inbound.body) ?? undefined,
+                  headers: c.schemas.inbound.headers,
+                  // scheme/header/secretRef are NAMES (blind spot 9) —
+                  // verbatim through normalize, nothing to redact.
+                  signature: c.schemas.inbound.signature,
+                  within: c.schemas.inbound.within,
+                }
+              : undefined,
           }
         : undefined,
     })),
@@ -606,6 +732,15 @@ async function executeCaseInFlowHttp(input: {
   const caseSpec = spec.cases[caseKey];
   if (!caseSpec) {
     throw new Error(`case "${caseKey}" not in contract "${contract._projection.id}"`);
+  }
+  if (isInboundCase(caseSpec)) {
+    // Deepest shared chokepoint for every flow execution path — authoring-
+    // time guards (.call/.step/.bootstrap) give the friendly error first.
+    throw new Error(
+      `case "${caseKey}" in contract "${contract._projection.id}" is inbound — ` +
+        `the counterparty calls us, so it cannot be executed. Await it with a ` +
+        `workflow inbound poll instead.`,
+    );
   }
 
   // v10: `resolvedInputs` is the LOGICAL case input (matches the case's
@@ -808,6 +943,7 @@ export const httpAdapter: ContractProtocolAdapter<
   HttpContractMeta
 > = {
   async execute(ctx, caseSpec, spec) {
+    assertNotInbound(caseSpec, spec, "execute");
     // v10 legacy execute path: used by dispatcher when no bootstrap overlay
     // is registered for the case. With setup/teardown removed from
     // HttpContractCase in Phase 2c Step B+C, this degenerates to "run the
@@ -833,6 +969,7 @@ export const httpAdapter: ContractProtocolAdapter<
           `"${contract._projection.id}".`,
       );
     }
+    assertNotInbound(caseSpec, spec, "executeCase");
     await executeStandaloneCase(ctx, caseSpec, spec, resolvedInput);
   },
 

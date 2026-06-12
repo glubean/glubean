@@ -448,6 +448,25 @@ export type { OpenApiDocument, OpenApiOptions } from "./contract-http/openapi.js
 // inbound-contract-design §9.1)
 export { createLocalInbox } from "./contract-http/inbound.js";
 export type { InboundDelivery, LocalInbox, ReceiverHandle } from "./contract-http/inbound.js";
+// Inbound contract cases (I2, design §9.2): the counterparty calls US.
+export { inboundCase, isInboundCase } from "./contract-http/types.js";
+export type {
+  HttpCase,
+  InboundContractCase,
+  InboundExpect,
+  InboundHeaderMatcher,
+  InboundSignatureSpec,
+} from "./contract-http/types.js";
+export {
+  getSignatureVerifier,
+  registerSignatureVerifier,
+  STRIPE_V1_DEFAULT_TOLERANCE_MS,
+} from "./contract-http/inbound-verify.js";
+export type {
+  SignatureVerifier,
+  SignatureVerifyInput,
+  SignatureVerifyResult,
+} from "./contract-http/inbound-verify.js";
 export type { MarkdownPart } from "./contract-artifacts.js";
 
 export {

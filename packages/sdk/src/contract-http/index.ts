@@ -14,6 +14,17 @@
 export { httpAdapter } from "./adapter.js";
 export { createLocalInbox } from "./inbound.js";
 export type { InboundDelivery, LocalInbox, ReceiverHandle } from "./inbound.js";
+export { inboundCase, isInboundCase } from "./types.js";
+export {
+  getSignatureVerifier,
+  registerSignatureVerifier,
+  STRIPE_V1_DEFAULT_TOLERANCE_MS,
+} from "./inbound-verify.js";
+export type {
+  SignatureVerifier,
+  SignatureVerifyInput,
+  SignatureVerifyResult,
+} from "./inbound-verify.js";
 export { createHttpFactory, createHttpRoot } from "./factory.js";
 export { defineHttpCase } from "./types.js";
 

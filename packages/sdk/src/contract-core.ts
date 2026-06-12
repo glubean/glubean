@@ -322,10 +322,15 @@ function dispatchContract<
 
   const projCaseMap = new Map(projection.cases.map((c) => [c.key, c]));
 
-  const tests: Test[] = Object.entries(cases).map(([caseKey, caseSpec]) => {
+  const tests: Test[] = Object.entries(cases).flatMap(([caseKey, caseSpec]): Test[] => {
     const testId = `${id}.${caseKey}`;
     const testName = `${id} — ${caseKey}`;
     const projCase = projCaseMap.get(caseKey)!;
+
+    // Non-runnable cases (adapter sets `runnable: false`, e.g. inbound
+    // cases — inbound-contract-design §9.5): no Test, no runnable-inventory
+    // entry. The case exists in projection/_extracted only.
+    if (projCase.runnable === false) return [];
 
     const caseTags = caseSpec.tags ?? [];
     const allTags = [...contractTags, ...caseTags];
@@ -661,7 +666,7 @@ function dispatchContract<
       contract: registryMeta,
     });
 
-    return testDef;
+    return [testDef];
   });
 
   // Core injects id into both _projection and _spec carrier
@@ -694,6 +699,7 @@ function dispatchContract<
         key,
         contractObj as unknown as ProtocolContract<Spec, SafeSchemas, SafeMeta>,
         spec as Spec,
+        projCaseMap.get(key)?.direction,
       );
     },
   }) as unknown as ProtocolContract<Spec, SafeSchemas, SafeMeta>;
@@ -752,6 +758,7 @@ function makeContractCaseRef(
   caseKey: string,
   contract: ProtocolContract<any, any, any>,
   spec: unknown,
+  direction?: "inbound",
 ): ContractCaseRef<any, any> {
   const caseSpec = (spec as {
     cases?: Record<string, { runnability?: CaseRunnability }>;
@@ -764,6 +771,7 @@ function makeContractCaseRef(
     target,
     contract,
     ...(caseSpec?.runnability ? { runnability: caseSpec.runnability } : {}),
+    ...(direction ? { direction } : {}),
   };
 }
 
@@ -792,6 +800,13 @@ export function bootstrap<Needs, Params = void>(
   ref: ContractCaseRef<Needs, unknown>,
   spec: Bootstrap<Params, NoInfer<Needs>>,
 ): BootstrapAttachment<Needs, Params> {
+  if (ref.direction === "inbound") {
+    throw new Error(
+      `contract.bootstrap: case "${ref.contractId}.${ref.caseKey}" is inbound — ` +
+        `it is awaited (workflow inbound poll), never executed, so a bootstrap ` +
+        `overlay has no meaning for it.`,
+    );
+  }
   return registerBootstrap(ref, spec as Bootstrap<Params, Needs>);
 }
 
@@ -827,6 +842,13 @@ function buildContractCallStep(
     accept?: readonly unknown[];
   },
 ): RuntimeContractCallStep {
+  if (ref.direction === "inbound") {
+    throw new Error(
+      `contract.flow(${JSON.stringify(flowId)}).step: case ` +
+        `"${ref.contractId}.${ref.caseKey}" is inbound — the counterparty calls ` +
+        `us, so there is nothing to call. Await it with a workflow inbound poll.`,
+    );
+  }
   const adapter = _adapters.get(ref.protocol);
   if (!adapter) {
     throw new Error(
@@ -1050,6 +1072,13 @@ function buildPollStep(
     maxAttempts?: number;
   },
 ): RuntimePollStep {
+  if (ref.direction === "inbound") {
+    throw new Error(
+      `contract.flow(${JSON.stringify(flowId)}).poll: case ` +
+        `"${ref.contractId}.${ref.caseKey}" is inbound — legacy flows cannot ` +
+        `await inbound deliveries; use a workflow inbound poll.`,
+    );
+  }
   const adapter = _adapters.get(ref.protocol);
   if (!adapter) {
     throw new Error(

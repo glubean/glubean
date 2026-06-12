@@ -9,7 +9,7 @@ const post = async (
   url: string,
   body: string | Uint8Array,
   headers: Record<string, string> = {},
-) => fetch(url, { method: "POST", body, headers });
+) => fetch(url, { method: "POST", body: body as BodyInit, headers });
 
 describe("createLocalInbox (I1)", () => {
   it("records deliveries RAW: exact body bytes, lowercased headers, method/path/receivedAt", async () => {

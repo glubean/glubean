@@ -340,6 +340,22 @@ export interface CaseMeta<PayloadSchemas = unknown, Meta = unknown> {
    * the `rawBypass` execution path should appear on an overlay.
    */
   hasNeeds?: boolean;
+
+  /**
+   * Direction of the case relative to the system under test. Absent =
+   * outbound (we call them — the default since contracts began). "inbound"
+   * = the counterparty calls us (inbound-contract-design §9.2); such cases
+   * are awaited via a workflow inbound poll, never executed.
+   */
+  direction?: "inbound";
+
+  /**
+   * Set to `false` by adapters whose case cannot be executed as a Test
+   * (inbound-contract-design §9.5). The dispatcher then registers NO Test
+   * and NO runnable-inventory entry for it — the case exists only in
+   * projection/metadata. Absent = runnable (every pre-existing case).
+   */
+  runnable?: boolean;
 }
 
 /**
@@ -833,6 +849,13 @@ export interface ContractCaseRef<
 
   /** Live ProtocolContract instance — flow runtime uses this, not contractId lookup. */
   readonly contract: ProtocolContract<any, any, any>;
+
+  /**
+   * Mirrors the projection case's direction. Inbound refs are only valid as
+   * the subject of a workflow inbound poll — `.call()`, flow `.step()` and
+   * `contract.bootstrap()` reject them at declaration time.
+   */
+  readonly direction?: "inbound";
 
   /** Phantom fields — do not populate at runtime. TS-only. */
   readonly __phantom_inputs?: CaseInputs;

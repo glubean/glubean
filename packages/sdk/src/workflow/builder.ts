@@ -686,6 +686,13 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       this.assertNoTeardown("call");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(meta, "call");
+      if (ref?.direction === "inbound") {
+        throw new Error(
+          `workflow.call() "${meta.id}": case "${ref.contractId}.${ref.caseKey}" is ` +
+            `inbound — the counterparty calls us, so there is nothing to call. ` +
+            `Await it with an inbound poll instead.`,
+        );
+      }
       const bindings = rest[0] as
         | {
             in?: (state: State) => unknown;
@@ -1072,6 +1079,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       this.assertNoTeardown("poll");
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(meta, "poll");
+      if (ref?.direction === "inbound") {
+        // Inbound polling (.poll(ref, { via, correlate }) — design §9.3)
+        // ships in the next slice; reject now so the ref is never executed
+        // as an outbound request.
+        throw new Error(
+          `workflow.poll() "${meta.id}": case "${ref.contractId}.${ref.caseKey}" is ` +
+            `inbound — inbound polling is not yet supported by this SDK version.`,
+        );
+      }
       const opts = rest[0] as
         | (PollUntil<State, unknown> &
             PollBounds & {

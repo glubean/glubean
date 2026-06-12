@@ -227,6 +227,119 @@ export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
 }
 
 // =============================================================================
+// Inbound case spec (inbound-contract-design §9.2)
+// =============================================================================
+
+/**
+ * Declarative signature expectation for an inbound case. `scheme` is a
+ * REGISTERED verifier name (see `registerSignatureVerifier`); `secretRef`
+ * is a NAME into ctx.secrets — never a value. Projection / OpenAPI / Cloud
+ * only ever see these names (design blind spot 9).
+ */
+export interface InboundSignatureSpec {
+  /** Registered verifier name. Built-ins: "stripe-v1", "hmac-sha256". */
+  scheme: "stripe-v1" | "hmac-sha256" | (string & {});
+  /** Request header carrying the signature (lowercased for lookup). */
+  header: string;
+  /** Secrets NAME — resolved via ctx.secrets at match time, never projected as a value. */
+  secretRef: string;
+  /** Replay window for timestamped schemes (stripe-v1 default 5 min). */
+  toleranceMs?: number;
+}
+
+/** Static header expectation for an inbound case (JSON-safe by construction). */
+export type InboundHeaderMatcher = { present: true } | { eq: string };
+
+/**
+ * What the counterparty PROMISES to deliver. Validation order is the §9.4
+ * taxonomy: signature first (over exact bytes), then parse, then type/
+ * correlation discrimination, then `bodySchema`.
+ */
+export interface InboundExpect<T = unknown> {
+  /** Validated AFTER authentication, on the parsed JSON body. */
+  bodySchema: SchemaLike<T>;
+  /** Static header expectations (checked on authenticated deliveries). */
+  headers?: Record<string, InboundHeaderMatcher>;
+  signature?: InboundSignatureSpec;
+  /**
+   * Latency promise in ms — documentation + the inbound poll's default
+   * timeout. Measured evidence is `receivedAt` vs poll-node start
+   * (design blind spot 4).
+   */
+  within?: number;
+}
+
+/**
+ * An inbound contract case: the counterparty calls US. Declares the PROMISE
+ * ("X will POST shape S, signed with K, within T") — the receiver transport
+ * is supplied at the workflow side (`.poll(ref, { via })`, slice I3).
+ *
+ * NOT runnable (design §9.5): there is nothing to execute without a live
+ * counterparty — no Test is registered, CLI runnable discovery skips it,
+ * and `.call()`/flow `.step()` reject its ref. It appears in projection /
+ * metadata with `direction: "inbound"`.
+ *
+ * `needs`/`runnability`/`requires`/`defaultRun`/`verifyRules` are omitted:
+ * all are vocabulary of outbound execution (logical input / runnable
+ * inventory / verify() companions) and have no meaning for a case that is
+ * awaited, not run.
+ */
+export interface InboundContractCase<T = unknown>
+  extends Omit<
+    BaseCaseSpec,
+    "needs" | "runnability" | "requires" | "defaultRun" | "verifyRules"
+  > {
+  direction: "inbound";
+  /** Why this case exists — required (same rule as outbound cases). */
+  description: string;
+  expect: InboundExpect<T>;
+}
+
+/**
+ * Brand a case spec as inbound — the authoring helper for the `cases` map:
+ *
+ * ```ts
+ * export const stripeWebhooks = api("stripe.webhooks", {
+ *   endpoint: "POST /webhooks/stripe",   // where the counterparty posts
+ *   cases: {
+ *     paymentIntentCreated: inboundCase({
+ *       description: "Stripe posts payment_intent.created, signed",
+ *       expect: {
+ *         bodySchema: PaymentIntentCreatedEvent,
+ *         signature: { scheme: "stripe-v1", header: "stripe-signature", secretRef: "WEBHOOK_SECRET" },
+ *         within: 60_000,
+ *       },
+ *     }),
+ *   },
+ * });
+ * ```
+ *
+ * Writing `direction: "inbound"` inline in the literal is equivalent.
+ */
+export function inboundCase<T = unknown>(
+  spec: Omit<InboundContractCase<T>, "direction">,
+): InboundContractCase<T> {
+  return { ...spec, direction: "inbound" };
+}
+
+/** Runtime discriminator for inbound case specs. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- guard target
+// must be InboundContractCase<any> so union narrowing also excludes
+// InboundContractCase<any> members (an <unknown> target fails to subsume them).
+export function isInboundCase(c: unknown): c is InboundContractCase<any> {
+  return (
+    !!c &&
+    typeof c === "object" &&
+    (c as { direction?: unknown }).direction === "inbound"
+  );
+}
+
+/** Any case authorable in an HTTP contract's `cases` map. */
+export type HttpCase<T = unknown, Needs = void> =
+  | ContractCase<T, Needs>
+  | InboundContractCase<T>;
+
+// =============================================================================
 // Request spec (contract-level)
 // =============================================================================
 
@@ -249,7 +362,7 @@ export type RequestSpec =
 // =============================================================================
 
 export interface HttpContractSpec<
-  Cases extends Record<string, ContractCase<any, any>> = Record<string, ContractCase>,
+  Cases extends Record<string, HttpCase<any, any>> = Record<string, HttpCase>,
 > {
   /** HTTP method + path, e.g. "POST /users" or "GET /runs/:runId". */
   endpoint: string;
@@ -303,6 +416,17 @@ export interface HttpPayloadSchemas {
   security?: HttpSecurityScheme;
 
   /**
+   * Present only on cases with `direction: "inbound"` — the counterparty's
+   * promise. `signature.secretRef` is a secrets NAME, safe by construction.
+   */
+  inbound?: {
+    body?: SchemaLike<unknown>;
+    headers?: Record<string, InboundHeaderMatcher>;
+    signature?: InboundSignatureSpec;
+    within?: number;
+  };
+
+  /**
    * Type-only markers read by core's `InferAcceptKey` / `InferRawOutcome` /
    * `ApplyCaseOutput` hooks so a flow step's `accept` is typed as `number`
    * (status), `out`'s `res` becomes the raw `HttpFlowCaseOutput` under `accept`,
@@ -344,6 +468,14 @@ export interface HttpSafeSchemas {
   params?: Record<string, HttpParamMeta>;
   query?: Record<string, HttpParamMeta>;
   security?: HttpSecurityScheme;
+
+  /** Inbound promise (JSON-safe): `body` is JSON Schema; the rest is verbatim. */
+  inbound?: {
+    body?: unknown;
+    headers?: Record<string, InboundHeaderMatcher>;
+    signature?: InboundSignatureSpec;
+    within?: number;
+  };
 }
 
 export interface HttpParamSchema {
@@ -425,7 +557,7 @@ export interface HttpContractFactory {
   // `expect.schema` — through the `api(id, {cases})` call. Without it the cases
   // object widens to `ContractCase<any,any>` and core's `ApplyCaseOutput` (which
   // reads `Cases[K].expect.schema`) falls back to `unknown` for flow `res.body`.
-  <const Cases extends Record<string, ContractCase<any, any>>>(
+  <const Cases extends Record<string, HttpCase<any, any>>>(
     id: string,
     spec: HttpContractSpec<Cases>,
   ): ProtocolContract<HttpContractSpec<Cases>, HttpPayloadSchemas, HttpContractMeta, Cases>;

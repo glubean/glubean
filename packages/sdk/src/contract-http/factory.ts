@@ -18,7 +18,7 @@ import type { Extensions } from "../contract-types.js";
 import type { ProtocolContract } from "../contract-types.js";
 import type { SchemaLike } from "../types.js";
 import type {
-  ContractCase,
+  HttpCase,
   HttpContractDefaults,
   HttpContractFactory,
   HttpContractRoot,
@@ -27,10 +27,11 @@ import type {
   HttpPayloadSchemas,
   HttpSecurityScheme,
 } from "./types.js";
+import { isInboundCase } from "./types.js";
 
 type InternalDefaults = HttpContractDefaults & { _name?: string };
 
-type HttpDispatch = <Cases extends Record<string, ContractCase<any, any>>>(
+type HttpDispatch = <Cases extends Record<string, HttpCase<any, any>>>(
   id: string,
   spec: HttpContractSpec<Cases>,
 ) => ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
@@ -52,12 +53,15 @@ function isNonSuccessStatus(status: number): boolean {
 }
 
 function mergeErrorEnvelopeDefaults(
-  cases: Record<string, ContractCase<any, any>>,
+  cases: Record<string, HttpCase<any, any>>,
   errorEnvelope: SchemaLike<unknown> | undefined,
-): Record<string, ContractCase<any, any>> {
+): Record<string, HttpCase<any, any>> {
   if (!errorEnvelope) return cases;
   return Object.fromEntries(
     Object.entries(cases).map(([key, c]) => {
+      // Inbound cases have no response status — the envelope is outbound
+      // error-response vocabulary.
+      if (isInboundCase(c)) return [key, c];
       if (!isNonSuccessStatus(c.expect.status) || c.expect.schema) {
         return [key, c];
       }
@@ -111,7 +115,7 @@ export function createHttpFactory(
   dispatch: HttpDispatch,
   defaults?: InternalDefaults,
 ): HttpContractFactory {
-  const factory = <Cases extends Record<string, ContractCase<any, any>>>(
+  const factory = <Cases extends Record<string, HttpCase<any, any>>>(
     id: string,
     spec: HttpContractSpec<Cases>,
   ): ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta> => {

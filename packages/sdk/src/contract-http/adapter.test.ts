@@ -145,7 +145,10 @@ test("scoped factory produces ProtocolContract with _projection + _spec", () => 
   expect(c._projection.target).toBe("POST /users");
   expect(c._projection.instanceName).toBe("api");
   expect(c._spec.endpoint).toBe("POST /users");
-  expect(c._spec.cases.ok.expect.status).toBe(201);
+  // _spec.cases is the HttpCase union since I2 (inbound cases) — narrow for
+  // the outbound-only assertion.
+  const okCase = c._spec.cases.ok as { expect: { status: number } };
+  expect(okCase.expect.status).toBe(201);
 });
 
 // ---------------------------------------------------------------------------
