@@ -296,7 +296,7 @@ export function resolveExternalWorkflowFns(
       for (const definingFile of definingFiles) {
         const definingBase = definingFile
           .replace(/\\/g, "/")
-          .replace(/\.(ts|tsx|js|jsx|mts|cts)$/, "");
+          .replace(/\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/, "");
         if (definingBase === resolvedBase || definingBase === `${resolvedBase}/index`) {
           out.push(localName);
           break;

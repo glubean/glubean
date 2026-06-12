@@ -258,6 +258,16 @@ export const x = wf("id");`,
     ),
   ).toEqual(["wf"]);
 
+  // .mjs fixture modules match symmetrically (codex R11)
+  expect(
+    resolveExternalWorkflowFns(
+      `import { wf } from "./fixtures.mjs";
+export const x = wf("id");`,
+      "/proj/tests/m.test.ts",
+      new Map([["wf", ["/proj/tests/fixtures.mjs"]]]),
+    ),
+  ).toEqual(["wf"]);
+
   // CHAINED fixtures across files reach the registry fixed point (codex R9):
   // base.ts defines wf; auth.ts re-extends it; the consumer imports authed.
   const chainedRegistry = buildWorkflowFnRegistry([
