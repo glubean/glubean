@@ -163,6 +163,31 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test("CHAINED extend in one expression — bound and inline (S2.15 R3)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+const wf = workflow.extend({ a: () => 1 }).extend({ b: () => 2 });
+export const bound = wf("wfx-chain-bound")
+  .setup(async () => ({}))
+  .compute("c", (s) => s)
+  .build();
+
+export const inline = workflow.extend({ a: () => 1 }).extend({ b: () => 2 })("wfx-chain-inline")
+  .setup(async () => ({ ok: true }))
+  .branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c2", (s) => s) })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(
+    result.map((m) => [m.id, [m.workflow ?? false, m.workflowHasBranchOrPoll ?? false]]),
+  );
+  expect(byId).toEqual({
+    "wfx-chain-bound": [true, false],
+    "wfx-chain-inline": [true, true],
+  });
+});
+
 test("INLINE workflow.extend factories are discovered too (S2.15 R2)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

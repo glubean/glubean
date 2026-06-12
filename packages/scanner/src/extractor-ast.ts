@@ -782,6 +782,21 @@ function chainHasBranchFamilyCall(init: AnyNode): boolean {
  * convention (or customFns) would be classified as a plain test and bypass the
  * workflow marker + the --upload branch/poll gate (codex S2.6 R12 P2).
  */
+/** Is `expr` a workflow factory expression — a known alias identifier, or an
+ * `.extend({...})` chain (any depth) rooted at one? (codex S2.15 R3 P2:
+ * `workflow.extend(a).extend(b)` composes in ONE expression.) */
+function isWorkflowFactoryExpr(expr: AnyNode | undefined, aliases: ReadonlySet<string>): boolean {
+  const e = expr ? unwrapExpression(expr) : undefined;
+  if (!e) return false;
+  if (e.type === "Identifier") return aliases.has(e.name as string);
+  if (!isCallNode(e)) return false;
+  const callee = unwrapExpression(e.callee as AnyNode);
+  if (!callee || !isMemberNode(callee) || callee.computed === true) return false;
+  const prop = callee.property as AnyNode;
+  if (prop.type !== "Identifier" || prop.name !== "extend") return false;
+  return isWorkflowFactoryExpr(callee.object as AnyNode, aliases);
+}
+
 function collectWorkflowAliases(source: SourceFile): Set<string> {
   const aliases = new Set<string>(["workflow"]);
   const body = (source.program.body as AnyNode[] | undefined) ?? [];
@@ -822,16 +837,8 @@ function collectWorkflowAliases(source: SourceFile): Set<string> {
         if (id?.type !== "Identifier" || aliases.has(id.name as string)) continue;
         const init = d.init ? unwrapExpression(d.init as AnyNode) : undefined;
         if (!init || !isCallNode(init)) continue;
-        const callee = unwrapExpression(init.callee as AnyNode);
-        if (!callee || !isMemberNode(callee) || callee.computed === true) continue;
-        const prop = callee.property as AnyNode;
-        const obj = unwrapExpression(callee.object as AnyNode);
-        if (
-          prop.type === "Identifier" &&
-          prop.name === "extend" &&
-          obj?.type === "Identifier" &&
-          aliases.has(obj.name as string)
-        ) {
+        // `X.extend({...})` — incl. chains `workflow.extend(a).extend(b)`
+        if (isWorkflowFactoryExpr(init, aliases)) {
           aliases.add(id.name as string);
           grew = true;
         }
@@ -877,11 +884,23 @@ function parseTestDeclaration(
     }
     const object = factoryCallee.object as AnyNode;
     const property = factoryCallee.property as AnyNode;
-    if (object.type !== "Identifier" || property.type !== "Identifier") return undefined;
-    if (property.name === "extend" && workflowAliases?.has(object.name as string)) {
-      factoryName = object.name as string; // classifies as a workflow below
+    if (property.type !== "Identifier") return undefined;
+    if (
+      property.name === "extend" &&
+      workflowAliases &&
+      isWorkflowFactoryExpr(headCallee, workflowAliases)
+    ) {
+      // inline extended factory — possibly a CHAIN of extends; root the
+      // classification at the chain's base identifier (codex S2.15 R3 P2)
+      let baseObj: AnyNode | undefined = unwrapExpression(object);
+      while (baseObj && isCallNode(baseObj)) {
+        const c = unwrapExpression(baseObj.callee as AnyNode);
+        baseObj = c && isMemberNode(c) ? unwrapExpression(c.object as AnyNode) : undefined;
+      }
+      factoryName = baseObj?.type === "Identifier" ? (baseObj.name as string) : undefined;
       metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
     } else {
+      if (object.type !== "Identifier") return undefined;
       if (property.name !== "each" && property.name !== "pick") return undefined;
       factoryName = object.name as string;
       variant = property.name as "each" | "pick";
@@ -895,8 +914,9 @@ function parseTestDeclaration(
   // A workflow import alias is always accepted (even when it matches no
   // test-name convention) and always classified as a workflow — the marker
   // must not depend on what the alias happens to look like (codex S2.6 R12).
+  if (!factoryName) return undefined;
   const isWorkflowFactory = workflowAliases?.has(factoryName) ?? factoryName === "workflow";
-  if (!factoryName || (!isTestFnName(factoryName, customFns) && !isWorkflowFactory)) {
+  if (!isTestFnName(factoryName, customFns) && !isWorkflowFactory) {
     return undefined;
   }
 
