@@ -339,6 +339,11 @@ export function evalPredicate<S>(pred: BranchPredicate<S>, state: S): boolean {
       const actual = resolvePath(state, pred.path);
       if (pred.rhsPath !== undefined) {
         const rhs = resolvePath(state, pred.rhsPath);
+        // A MISSING operand never matches (codex S2.17 R1 P2): undefined ===
+        // undefined would let `profileId eqPath userId` pass against {} —
+        // scalar eq can't even author undefined. Authors asserting absence
+        // use absent() explicitly.
+        if (actual === undefined || rhs === undefined) return false;
         // path-vs-path is eq/ne only in v1; strict === like scalar compare
         return pred.op === "eq" ? actual === rhs : actual !== rhs;
       }

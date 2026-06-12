@@ -154,7 +154,15 @@ export type ExtractedContract = NormalizedContractMeta;
  * duplicated structurally rather than imported).
  */
 export type NormalizedPredicate =
-  | { kind: "compare"; op: string; path: string[]; value: string | number | boolean | null }
+  | {
+      kind: "compare";
+      op: string;
+      path: string[];
+      /** scalar compare — absent on the path-vs-path form (phase4 §7). */
+      value?: string | number | boolean | null;
+      /** path-vs-path compare (eq/ne): the rhs state path. */
+      rhsPath?: string[];
+    }
   | { kind: "in"; path: string[]; values: Array<string | number | boolean | null> }
   | { kind: "presence"; op: string; path: string[] }
   | { kind: "matches"; path: string[]; pattern: string; flags?: string }

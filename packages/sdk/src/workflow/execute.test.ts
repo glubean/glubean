@@ -1268,6 +1268,17 @@ describe("workflow.check — declarative expect[] (phase4 §7)", () => {
     ).toThrow(/requires a check function or/);
   });
 
+  it("eqPath: a MISSING operand never matches (codex R1)", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("ex-missing")
+      .setup(async () => ({} as { profileId?: string; userId?: string }))
+      .check("ids agree", { expect: (w) => [w.when((s) => s.profileId).eqPath((s) => s.userId)] })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed"); // undefined === undefined must NOT pass
+    expect(rec.asserts).toEqual([{ passed: false, message: "profileId == userId" }]);
+  });
+
   it("eqPath: the rhs lens passes the selector-source gate; mismatch fails", async () => {
     const { ctx } = fakeBase();
     const wf = workflow("ex-rel")

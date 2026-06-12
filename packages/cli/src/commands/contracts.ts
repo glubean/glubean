@@ -265,7 +265,10 @@ function formatMappingArrow(m: NormalizedFieldMapping): string {
 function formatPredicate(p: NormalizedPredicate): string {
   switch (p.kind) {
     case "compare":
-      return `${p.path.join(".")} ${p.op} ${JSON.stringify(p.value)}`;
+      // path-vs-path (phase4 §7) renders the rhs PATH, not "undefined"
+      return p.rhsPath !== undefined
+        ? `${p.path.join(".")} ${p.op} ${p.rhsPath.join(".")}`
+        : `${p.path.join(".")} ${p.op} ${JSON.stringify(p.value)}`;
     case "in":
       return `${p.path.join(".")} in [${p.values.map((v) => JSON.stringify(v)).join(", ")}]`;
     case "presence":
