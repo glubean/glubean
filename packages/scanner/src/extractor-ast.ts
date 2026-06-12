@@ -900,9 +900,22 @@ function parseTestDeclaration(
       factoryName = baseObj?.type === "Identifier" ? (baseObj.name as string) : undefined;
       metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
     } else {
-      if (object.type !== "Identifier") return undefined;
       if (property.name !== "each" && property.name !== "pick") return undefined;
-      factoryName = object.name as string;
+      if (object.type === "Identifier") {
+        factoryName = object.name as string;
+      } else if (workflowAliases && isWorkflowFactoryExpr(object, workflowAliases)) {
+        // `workflow.extend({...}).each(rows)(...)` — the each receiver is an
+        // extend chain; root at the base identifier (codex S2.15 R4 P2).
+        let baseObj: AnyNode | undefined = unwrapExpression(object);
+        while (baseObj && isCallNode(baseObj)) {
+          const c = unwrapExpression(baseObj.callee as AnyNode);
+          baseObj = c && isMemberNode(c) ? unwrapExpression(c.object as AnyNode) : undefined;
+        }
+        if (baseObj?.type !== "Identifier") return undefined;
+        factoryName = baseObj.name as string;
+      } else {
+        return undefined;
+      }
       variant = property.name as "each" | "pick";
       eachArgs = (headCallee.arguments as AnyNode[] | undefined) ?? [];
       metaArg = (head.arguments as AnyNode[] | undefined)?.[0];

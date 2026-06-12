@@ -1631,18 +1631,27 @@ function workflowEach<T extends Record<string, unknown>>(
  * instead of the real logger). Keep in sync with makeNodeScope. */
 const WORKFLOW_RESERVED_FIXTURE_KEYS = new Set([
   ...EXTEND_RESERVED_KEYS,
+  // workflow node-scope additions/overrides (makeNodeScope's assign block)
   "signal",
-  "assert",
   "expect",
   "validate",
-  "fail",
-  "skip",
-  "warn",
-  "trace",
-  "metric",
-  "event",
-  "log",
+  // every remaining public TestContext member — a fixture under any of these
+  // names shadows the real API through the scope's prototype chain
+  // (codex S2.15 R4 P2). Keep in sync with the TestContext interface.
   "action",
+  "assert",
+  "event",
+  "fail",
+  "getMemoryUsage",
+  "log",
+  "metric",
+  "pollUntil",
+  "retryCount",
+  "session",
+  "setTimeout",
+  "skip",
+  "trace",
+  "warn",
 ]);
 
 /**

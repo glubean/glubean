@@ -1240,6 +1240,13 @@ describe("workflow.extend — fixtures (phase4 §3)", () => {
       /reserved key "assert"/,
     );
     expect(() => workflow.extend({ event: () => "x" } as never)).toThrow(/reserved key "event"/);
+    // inherited TestContext members shadow through the prototype chain too
+    expect(() => workflow.extend({ session: () => "x" } as never)).toThrow(
+      /reserved key "session"/,
+    );
+    expect(() => workflow.extend({ setTimeout: () => "x" } as never)).toThrow(
+      /reserved key "setTimeout"/,
+    );
   });
 
   it("extended each: every member carries the fixtures", () => {

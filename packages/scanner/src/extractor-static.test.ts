@@ -163,6 +163,19 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test("inline extended each is discovered (S2.15 R4)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const matrix = workflow.extend({ auth: () => "t" }).each([{ region: "us" }])(
+  { id: "wfx-each-$region" },
+  (wf, row) => wf.setup(async (ctx) => ({ t: ctx.auth })).compute("c", (s) => s),
+);
+`;
+  const result = extractFromSource(content);
+  expect(result).toHaveLength(1);
+  expect(result[0]).toMatchObject({ id: "wfx-each-$region", workflow: true });
+});
+
 test("CHAINED extend in one expression — bound and inline (S2.15 R3)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
