@@ -1133,8 +1133,14 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
             }
             const out = v.apply(t, args);
             // A node call advanced the chain → hand back a fresh tip handle.
-            // Non-advancing calls return their own result.
-            return target._nodes.length !== tip ? make(target._nodes.length) : out;
+            if (target._nodes.length !== tip) return make(target._nodes.length);
+            // A NON-advancing chain call (meta/setup/teardown) returns the
+            // raw builder — re-wrap at the same tip so the chain never
+            // escapes the facade, else the final return-value validation
+            // would reject a perfectly valid fragment that starts with
+            // metadata (codex S2.13 R4 P2). Non-builder results (e.g. a
+            // guard's return) pass through untouched.
+            return out === t ? make(tip) : out;
           };
         },
       }) as WorkflowBuilder<S>;

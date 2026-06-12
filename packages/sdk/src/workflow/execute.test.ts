@@ -1225,6 +1225,23 @@ describe("workflow.use — fragments (phase4 §1)", () => {
     // ...and the poisoned trunk refuses to build (half-authored)
   });
 
+  it("a fragment may start with NON-node chain calls (meta) — the chain stays guarded (codex R4)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("use-meta")
+      .setup(async () => ({ n: 1 }))
+      .use((b) => b.meta({ description: "from fragment" }).compute("bump", (s) => ({ n: s.n + 1 })))
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(wf.meta.description).toBe("from fragment");
+    // …and a meta-only (no-node) fragment is a valid identity-with-metadata
+    expect(() =>
+      workflow("use-meta-only")
+        .setup(async () => ({}))
+        .use((b) => b.meta({ description: "annotated" })),
+    ).not.toThrow();
+  });
+
   it("a fragment chaining off a STALE handle throws (tip-guard on the trunk, codex R3)", () => {
     expect(() =>
       workflow("use-stale")
