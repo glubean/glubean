@@ -195,6 +195,41 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a builder hidden in a wrapper object or member access fails closed (S2.13 R7)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow } from "./helpers";
+
+// builder wrapped in an object literal argument — delegation, fail closed
+export const wrapped = workflow("u-wrapped")
+  .setup(async () => ({}))
+  .use((b) => makeFlow({ b }))
+  .build();
+
+// builder stored in a container; chain authored via member access — flagged
+export const viaMember = workflow("u-member")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const h = { b };
+    return h.b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+  })
+  .build();
+
+// a FOREIGN object whose property name merely collides — must NOT flag
+export const propertyName = workflow("u-propname")
+  .setup(async () => ({}))
+  .use((b) => b.action("probe", async (ctx, s) => { await client.b.poll(); return s; }))
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-wrapped": true,
+    "u-member": true,
+    "u-propname": false,
+  });
+});
+
 test("a DESTRUCTURED row parameter stays scannable — no false flag (S2.13 R6)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

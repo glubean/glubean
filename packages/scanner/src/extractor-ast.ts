@@ -194,18 +194,73 @@ const BRANCH_FAMILY_METHODS = new Set(["branch", "poll", "pollAction", "switch",
  * S2.14 adds "group"; S2.13 starts with "use" (phase4 §4's shared rule). */
 const DELEGATING_CHAIN_METHODS = new Set(["use"]);
 
-/** Descend a receiver/initializer expression to its root identifier. */
+/** Descend a receiver/initializer expression to its root identifier —
+ * through call chains AND member access (`h.b.branch(...)` roots at `h`:
+ * a container holding a live builder is itself suspect — codex S2.13 R7). */
 function chainRootOf(expr: AnyNode | undefined): AnyNode | undefined {
   let root: AnyNode | undefined = expr ? unwrapExpression(expr) : undefined;
-  while (root && root.type === "CallExpression") {
-    const innerCallee = unwrapExpression(root.callee as AnyNode);
-    if (innerCallee?.type === "MemberExpression") {
-      root = unwrapExpression(innerCallee.object as AnyNode);
-    } else {
-      break;
+  for (;;) {
+    if (!root) return root;
+    if (root.type === "CallExpression") {
+      const innerCallee = unwrapExpression(root.callee as AnyNode);
+      if (innerCallee?.type === "MemberExpression") {
+        root = unwrapExpression(innerCallee.object as AnyNode);
+        continue;
+      }
+      return root;
     }
+    if (root.type === "MemberExpression" && root.computed !== true) {
+      root = unwrapExpression(root.object as AnyNode);
+      continue;
+    }
+    return root;
   }
-  return root;
+}
+
+/** Does the expression subtree REFERENCE any live builder name? Same-scope
+ * only (nested functions are handled by the scanner's own recursion), and
+ * non-computed member/property KEY identifiers are skipped — `client.b` is a
+ * property name, not a reference (codex S2.13 R7). */
+function containsLiveIdentifier(expr: AnyNode | undefined, live: ReadonlySet<string>): boolean {
+  if (!expr || typeof expr !== "object") return false;
+  let found = false;
+  const visit = (node: AnyNode): void => {
+    if (found || !node || typeof node.type !== "string") return;
+    if (
+      node.type === "ArrowFunctionExpression" ||
+      node.type === "FunctionExpression" ||
+      node.type === "FunctionDeclaration"
+    ) {
+      return; // nested scope — the scanner recurses there separately
+    }
+    if (node.type === "Identifier") {
+      if (live.has(node.name as string)) found = true;
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      // skip NAME positions: a non-computed member's property and a
+      // non-computed object-property key are labels, not references.
+      if (
+        (node.type === "MemberExpression" && node.computed !== true && key === "property") ||
+        ((node.type === "ObjectProperty" || node.type === "Property") &&
+          (node as { computed?: boolean }).computed !== true &&
+          key === "key")
+      ) {
+        continue;
+      }
+      const value = (node as Record<string, unknown>)[key];
+      if (Array.isArray(value)) {
+        for (const v of value) {
+          if (v && typeof (v as AnyNode).type === "string") visit(v as AnyNode);
+        }
+      } else if (value && typeof (value as AnyNode).type === "string") {
+        visit(value as AnyNode);
+      }
+      if (found) return;
+    }
+  };
+  visit(unwrapExpression(expr) ?? expr);
+  return found;
 }
 
 /**
@@ -256,8 +311,10 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
     ): void => {
       if (nameNode?.type !== "Identifier") return;
       const name = nameNode.name as string;
-      const root = chainRootOf(valueExpr);
-      if (root?.type === "Identifier" && live.has(root.name as string)) {
+      // A value that CONTAINS a live builder reference (chain root, or a
+      // wrapper like `{ b }` — codex S2.13 R7) makes the binding suspect:
+      // alias it (fail-closed direction).
+      if (containsLiveIdentifier(valueExpr, live)) {
         live.add(name);
         everLive.add(name);
       } else if (valueExpr !== undefined) {
@@ -302,11 +359,12 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           return;
         }
         // DELEGATION fails closed (codex S2.12 R18 P2): passing a live
-        // builder to any call (`makeFlow(wf)`) hands the graph to code this
-        // scan cannot see.
+        // builder to any call — bare (`makeFlow(wf)`) or WRAPPED
+        // (`makeFlow({ wf })`, codex S2.13 R7) — hands the graph to code
+        // this scan cannot see. Nested-function arguments are exempt (the
+        // scanner recurses into them itself).
         for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
-          const argRoot = chainRootOf(arg);
-          if (argRoot?.type === "Identifier" && live.has(argRoot.name as string)) {
+          if (containsLiveIdentifier(arg, live)) {
             found = true;
             return;
           }
