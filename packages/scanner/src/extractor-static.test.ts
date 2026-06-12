@@ -195,6 +195,32 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("constructor delegation and live-container callbacks fail closed (S2.13 R17)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { Fragment, makeFlow } from "./helpers";
+
+export const ctor = workflow("u-ctor")
+  .setup(async () => ({}))
+  .use((b) => new Fragment(b).chain)
+  .build();
+
+export const containerMethod = workflow("u-container-method")
+  .setup(async () => ({}))
+  .use((b) => {
+    const h = { b, makeFlow };
+    return h.makeFlow(() => b);
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-ctor": true,
+    "u-container-method": true,
+  });
+});
+
 test("TS expression wrappers and logical assignments cannot hide a builder (S2.13 R16)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

@@ -198,6 +198,29 @@ function isMemberNode(n: AnyNode | undefined): boolean {
 /** The branch-family + poll method names the Cloud-render gate flags. */
 const BRANCH_FAMILY_METHODS = new Set(["branch", "poll", "pollAction", "switch", "route"]);
 
+/** The full builder chain surface — used to decide whether a member call on
+ * a live name is the builder's OWN chain call (callbacks handled by the
+ * shadow-aware recursion) or an unknown method on a live CONTAINER
+ * (`h.makeFlow(() => b)`) whose function args must be deep-checked
+ * (codex S2.13 R17 P2). */
+const KNOWN_BUILDER_METHODS = new Set([
+  "setup",
+  "teardown",
+  "meta",
+  "call",
+  "action",
+  "check",
+  "compute",
+  "branch",
+  "switch",
+  "route",
+  "poll",
+  "pollAction",
+  "use",
+  "group",
+  "build",
+]);
+
 /** Chain methods that DELEGATE part of the graph to a callback argument —
  * the callback is scanned like an each-factory; references fail closed.
  * S2.14 adds "group"; S2.13 starts with "use" (phase4 §4's shared rule). */
@@ -454,7 +477,23 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           bind(left, n.right as AnyNode, false);
           return;
         }
-        if (found || !isCallNode(n)) return;
+        if (found) return;
+        // CONSTRUCTOR delegation: `new Fragment(b)` / `new X(() => b)` hands
+        // the builder (or a capturing closure) to uninspectable code — same
+        // fail-closed rule as call arguments (codex S2.13 R17 P2).
+        if (n.type === "NewExpression") {
+          for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
+            const u = unwrapExpression(arg) ?? arg;
+            const isFnArg =
+              u.type === "ArrowFunctionExpression" || u.type === "FunctionExpression";
+            if (containsLiveIdentifier(arg, live, { intoFunctions: isFnArg })) {
+              found = true;
+              return;
+            }
+          }
+          return;
+        }
+        if (!isCallNode(n)) return;
         const callee = unwrapExpression(n.callee as AnyNode);
         // An EXTRACTED method alias (`const branch = b.branch; branch(...)`)
         // calls a live alias directly — no member access to inspect; fail
@@ -513,9 +552,14 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           callee && isMemberNode(callee)
             ? chainRootOf((callee as AnyNode).object as AnyNode)
             : undefined;
+        // The exemption holds only for the builder's OWN chain surface — an
+        // unknown method on a live CONTAINER (`h.makeFlow(() => b)`) is a
+        // foreign call wearing a live root (codex S2.13 R17 P2).
         const calleeIsLiveChain =
           calleeRootForArgs?.type === "Identifier" &&
-          live.has(calleeRootForArgs.name as string);
+          live.has(calleeRootForArgs.name as string) &&
+          methodName !== undefined &&
+          KNOWN_BUILDER_METHODS.has(methodName);
         for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
           const unwrappedArg = unwrapExpression(arg) ?? arg;
           const isFnArg =
