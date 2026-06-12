@@ -195,6 +195,20 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a TS `this` parameter does not displace the builder param (S2.13 R21)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const thisParam = workflow("u-this-param")
+  .setup(async () => ({ ok: true }))
+  .use(function (this: void, b) {
+    return b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("a closure under a block-local shadow is NOT scanned against the outer builder (S2.13 R20)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

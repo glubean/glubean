@@ -336,8 +336,13 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
   ) {
     return undefined;
   }
-  const params = fn.params as AnyNode[] | undefined;
-  const builderParam = params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
+  // TS `this` parameters are erased at runtime but occupy params[0] in the
+  // AST (`function (this: void, b) {...}`) — skip them or the scan tracks
+  // "this" instead of the builder (codex S2.13 R21 P2).
+  const params = ((fn.params as AnyNode[] | undefined) ?? []).filter(
+    (p) => !(p.type === "Identifier" && (p.name as string) === "this"),
+  );
+  const builderParam = params[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
   if (!builderParam) return undefined; // destructured/absent — cannot root the dataflow
   // A default-parameter INITIALIZER can author the delegated chain before the
   // body (`(b, r = b.branch(...)) => r`) — the body-only scan would miss it
