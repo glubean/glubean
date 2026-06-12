@@ -315,22 +315,61 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
   const scanScope = (scopeBody: AnyNode, inherited: ReadonlySet<string>): void => {
     const live = new Set(inherited);
     const everLive = new Set(inherited);
+    // All names BOUND by a target — an Identifier, or every binding inside a
+    // destructuring pattern (`const { b: x } = h` binds x — codex S2.13 R10).
+    const boundNames = (target: AnyNode | undefined): string[] => {
+      if (!target) return [];
+      if (target.type === "Identifier") return [target.name as string];
+      const names: string[] = [];
+      const visit = (node: AnyNode): void => {
+        if (!node || typeof node.type !== "string") return;
+        if (node.type === "Identifier") {
+          names.push(node.name as string);
+          return;
+        }
+        if (node.type === "ObjectPattern") {
+          for (const propNode of (node.properties as AnyNode[] | undefined) ?? []) {
+            if (propNode.type === "ObjectProperty" || propNode.type === "Property") {
+              visit(propNode.value as AnyNode); // the BINDING side, never the key
+            } else if (propNode.type === "RestElement") {
+              visit(propNode.argument as AnyNode);
+            }
+          }
+          return;
+        }
+        if (node.type === "ArrayPattern") {
+          for (const el of (node.elements as AnyNode[] | undefined) ?? []) {
+            if (el) visit(el);
+          }
+          return;
+        }
+        if (node.type === "RestElement") visit(node.argument as AnyNode);
+        if (node.type === "AssignmentPattern") visit(node.left as AnyNode);
+      };
+      visit(target);
+      return names;
+    };
     const bind = (
       nameNode: AnyNode | undefined,
       valueExpr: AnyNode | undefined,
       isDeclaration: boolean,
     ): void => {
-      if (nameNode?.type !== "Identifier") return;
-      const name = nameNode.name as string;
+      const names = boundNames(nameNode);
+      if (names.length === 0) return;
       // A value that CONTAINS a live builder reference (chain root, or a
-      // wrapper like `{ b }` — codex S2.13 R7) makes the binding suspect:
-      // alias it (fail-closed direction).
+      // wrapper like `{ b }` — codex S2.13 R7) makes every bound name
+      // suspect: alias them all (fail-closed; destructuring from a live
+      // container — codex S2.13 R10).
       if (containsLiveIdentifier(valueExpr, live)) {
-        live.add(name);
-        everLive.add(name);
+        for (const name of names) {
+          live.add(name);
+          everLive.add(name);
+        }
       } else if (valueExpr !== undefined) {
-        live.delete(name);
-        if (isDeclaration) everLive.delete(name);
+        for (const name of names) {
+          live.delete(name);
+          if (isDeclaration) everLive.delete(name);
+        }
       }
     };
     const deferredFns: AnyNode[] = [];
@@ -436,7 +475,20 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
     for (const fnNode of deferredFns) {
       const childInherited = new Set(everLive);
       for (const param of (fnNode.params as AnyNode[] | undefined) ?? []) {
-        if (param.type === "Identifier") childInherited.delete(param.name as string);
+        // A default-parameter INITIALIZER referencing a live builder executes
+        // at call time with the closure's bindings (`const make = (x =
+        // b.branch(...)) => x`) — the body-only recursion never sees it, and
+        // the param may BECOME the builder (`(x = b) => x.branch()`). Fail
+        // closed on the reference itself (codex S2.13 R10 P2).
+        if (param.type === "AssignmentPattern") {
+          if (containsLiveIdentifier(param.right as AnyNode, everLive)) {
+            found = true;
+            return;
+          }
+          for (const name of boundNames(param.left as AnyNode)) childInherited.delete(name);
+          continue;
+        }
+        for (const name of boundNames(param)) childInherited.delete(name);
       }
       scanScope(fnNode.body as AnyNode, childInherited);
     }

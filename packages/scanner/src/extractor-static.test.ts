@@ -195,6 +195,37 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("destructured aliases and param-default initializers cannot hide the branch family (S2.13 R10)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+// builder re-extracted via destructuring from a live container — flagged
+export const destructuredAlias = workflow("u-destr-alias")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const h = { b };
+    const { b: x } = h;
+    return x.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) });
+  })
+  .build();
+
+// nested fn's default-parameter initializer authors the chain — flagged
+export const paramDefault = workflow("u-param-default")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const make = (x = b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) })) => x;
+    return make();
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-destr-alias": true,
+    "u-param-default": true,
+  });
+});
+
 test("block-scoped shadows and optional chaining cannot hide the branch family (S2.13 R9)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
