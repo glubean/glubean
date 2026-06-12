@@ -186,6 +186,15 @@ function walkSameScope(
   }
 }
 
+/** Babel emits Optional* variants for `?.` — every call/member check must
+ * accept both or optional chaining bypasses the gate (codex S2.13 R9 P2). */
+function isCallNode(n: AnyNode | undefined): boolean {
+  return n?.type === "CallExpression" || n?.type === "OptionalCallExpression";
+}
+function isMemberNode(n: AnyNode | undefined): boolean {
+  return n?.type === "MemberExpression" || n?.type === "OptionalMemberExpression";
+}
+
 /** The branch-family + poll method names the Cloud-render gate flags. */
 const BRANCH_FAMILY_METHODS = new Set(["branch", "poll", "pollAction", "switch", "route"]);
 
@@ -201,15 +210,15 @@ function chainRootOf(expr: AnyNode | undefined): AnyNode | undefined {
   let root: AnyNode | undefined = expr ? unwrapExpression(expr) : undefined;
   for (;;) {
     if (!root) return root;
-    if (root.type === "CallExpression") {
+    if (isCallNode(root)) {
       const innerCallee = unwrapExpression(root.callee as AnyNode);
-      if (innerCallee?.type === "MemberExpression") {
-        root = unwrapExpression(innerCallee.object as AnyNode);
+      if (isMemberNode(innerCallee)) {
+        root = unwrapExpression(innerCallee!.object as AnyNode);
         continue;
       }
       return root;
     }
-    if (root.type === "MemberExpression") {
+    if (isMemberNode(root)) {
       // computed or not — for ROOT tracking, descending the object is the
       // fail-closed direction (`h["b"].branch(...)` roots at h — codex R8).
       root = unwrapExpression(root.object as AnyNode);
@@ -243,7 +252,7 @@ function containsLiveIdentifier(expr: AnyNode | undefined, live: ReadonlySet<str
       // skip NAME positions: a non-computed member's property and a
       // non-computed object-property key are labels, not references.
       if (
-        (node.type === "MemberExpression" && node.computed !== true && key === "property") ||
+        (isMemberNode(node) && node.computed !== true && key === "property") ||
         ((node.type === "ObjectProperty" || node.type === "Property") &&
           (node as { computed?: boolean }).computed !== true &&
           key === "key")
@@ -325,9 +334,13 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
       }
     };
     const deferredFns: AnyNode[] = [];
-    walkSameScope(
-      scopeBody,
-      (n) => {
+    // Block-aware traversal (codex S2.13 R9 P2): a block-scoped shadow
+    // (`{ const b = client; }`) must not delete the outer builder for the
+    // REST of the function. On block exit the pre-block names are UNIONED
+    // back in: block-local deletions are undone, block-born aliases leak
+    // outward (fail-closed direction; a block-local `b = client` assignment
+    // being undone is the same conservative trade).
+    const handleNode = (n: AnyNode): void => {
         if (n.type === "VariableDeclarator") {
           bind(n.id as AnyNode, n.init as AnyNode | undefined, true);
           return;
@@ -336,10 +349,10 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode, false);
           return;
         }
-        if (found || n.type !== "CallExpression") return;
+        if (found || !isCallNode(n)) return;
         const callee = unwrapExpression(n.callee as AnyNode);
         let methodName: string | undefined;
-        if (callee?.type === "MemberExpression") {
+        if (callee && isMemberNode(callee)) {
           const prop = unwrapExpression(callee.property as AnyNode);
           if (callee.computed !== true && prop?.type === "Identifier") {
             methodName = prop.name as string;
@@ -385,13 +398,41 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           }
         }
         if (methodName === undefined || !BRANCH_FAMILY_METHODS.has(methodName)) return;
-        const root = chainRootOf(callee!.object as AnyNode);
+        const root = chainRootOf((callee as AnyNode).object as AnyNode);
         if (root?.type === "Identifier" && live.has(root.name as string)) {
           found = true;
         }
-      },
-      (fnNode) => deferredFns.push(fnNode),
-    );
+    };
+    const visitTree = (node: AnyNode): void => {
+      if (
+        node.type === "ArrowFunctionExpression" ||
+        node.type === "FunctionExpression" ||
+        node.type === "FunctionDeclaration"
+      ) {
+        deferredFns.push(node);
+        return;
+      }
+      const isBlock = node.type === "BlockStatement" && node !== scopeBody;
+      const liveSnap = isBlock ? new Set(live) : undefined;
+      const everSnap = isBlock ? new Set(everLive) : undefined;
+      handleNode(node);
+      for (const key of Object.keys(node)) {
+        const value = (node as Record<string, unknown>)[key];
+        const visitChild = (v: unknown): void => {
+          if (!v || typeof v !== "object") return;
+          const child = v as AnyNode;
+          if (typeof child.type !== "string") return;
+          visitTree(child);
+        };
+        if (Array.isArray(value)) value.forEach(visitChild);
+        else visitChild(value);
+      }
+      if (isBlock) {
+        for (const n of liveSnap!) live.add(n);
+        for (const n of everSnap!) everLive.add(n);
+      }
+    };
+    visitTree(scopeBody);
     for (const fnNode of deferredFns) {
       const childInherited = new Set(everLive);
       for (const param of (fnNode.params as AnyNode[] | undefined) ?? []) {
@@ -408,10 +449,10 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
  * branch-family call? */
 function chainHasBranchFamilyCall(init: AnyNode): boolean {
   let node: AnyNode | undefined = unwrapExpression(init);
-  while (node && node.type === "CallExpression") {
+  while (node && isCallNode(node)) {
     const callee = unwrapExpression(node.callee as AnyNode);
     if (!callee) return false;
-    if (callee.type === "MemberExpression") {
+    if (isMemberNode(callee)) {
       const prop = unwrapExpression(callee.property as AnyNode);
       let name: string | undefined;
       if (callee.computed !== true && prop?.type === "Identifier") name = prop.name as string;

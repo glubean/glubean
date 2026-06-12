@@ -195,6 +195,40 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("block-scoped shadows and optional chaining cannot hide the branch family (S2.13 R9)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow } from "./helpers";
+
+// a block-scoped shadow must not kill the outer builder for the rest of the fn
+export const blockShadow = workflow("u-block-shadow")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    { const b = makeClient(); b.poll(); } // block-local foreign b
+    return b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+  })
+  .build();
+
+// optional chaining — both delegation and method forms
+export const optionalDelegate = workflow("u-opt-delegate")
+  .setup(async () => ({}))
+  .use((b) => makeFlow?.(b))
+  .build();
+
+export const optionalBranch = workflow("u-opt-branch")
+  .setup(async () => ({ ok: true }))
+  .use((b) => b?.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) }))
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-block-shadow": true,
+    "u-opt-delegate": true,
+    "u-opt-branch": true,
+  });
+});
+
 test("computed access cannot hide the branch family (S2.13 R8)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
