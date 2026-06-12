@@ -12,6 +12,12 @@ import { test, expect, beforeEach } from "vitest";
 import { contract, inboundCase, isInboundCase, workflow } from "../index.js";
 import { httpAdapter } from "./adapter.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
+import {
+  markdownArtifact,
+  openapiArtifact,
+  renderArtifact,
+  renderArtifactWithSummary,
+} from "../contract-artifacts.js";
 import type {
   HttpContractSpec,
   HttpPayloadSchemas,
@@ -281,6 +287,39 @@ test("OpenAPI: an inbound-only contract emits NO path (null part, not a fake ope
     },
   }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
   expect(buildOpenApiPartForHttp(c._extracted as never)).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Markdown (inbound-artifact-design route C) + null-part pipeline (D6)
+// ---------------------------------------------------------------------------
+
+test("markdown renders the inbound promise: 📥 marker, signature, withinMs, summary facet", () => {
+  const c = stripeContract();
+  const doc = renderArtifact(markdownArtifact, [c._extracted as never]);
+  expect(doc).toContain("📥 **paymentIntentCreated**");
+  expect(doc).toContain(
+    "signed: stripe-v1 via `stripe-signature` (secret: WEBHOOK_SECRET, tolerance 60000ms)",
+  );
+  expect(doc).toContain("within: 60000ms");
+  expect(doc).toContain("1 inbound");
+  // The outbound sibling renders without the inbound marker.
+  expect(doc).toMatch(/- \*\*ack\*\*/);
+});
+
+test("inbound-only contract: openapi producer returns null → recorded skip, NOT an empty part (D6)", () => {
+  const api = makeApi();
+  const c = api("hooks.inonly", {
+    endpoint: "POST /hooks",
+    cases: {
+      evt: inboundCase({ description: "evt", expect: { bodySchema: eventSchema } }),
+    },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const summary = renderArtifactWithSummary(openapiArtifact, [c._extracted as never]);
+  expect(summary.usedEmptyFallback).toBe(true); // zero parts — no fabricated {} reached merge
+  expect(summary.skipped).toEqual([
+    { contractId: "hooks.inonly", protocol: "http", reason: "producer-returned-null" },
+  ]);
+  expect(summary.contributions).toEqual([]);
 });
 
 // ---------------------------------------------------------------------------

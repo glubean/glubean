@@ -92,11 +92,16 @@ export interface ArtifactKind<Final, Part = Final, Options = void> {
    * `ExtractedContractProjection`. Omitted for kinds that only make sense
    * for specific protocols (e.g. openapi has no defaultRender — non-HTTP
    * contracts are skipped).
+   *
+   * Returning `null` means "this contract contributes nothing to this kind"
+   * — the contract is recorded in `skipped`, never pushed as an empty part
+   * (inbound-artifact-design D6: the old "null parts are filtered" comment
+   * described behavior that never existed).
    */
   readonly defaultRender?: (
     projection: ExtractedContractProjection<unknown, unknown>,
     options?: Options,
-  ) => Part;
+  ) => Part | null;
 
   /**
    * Required: the value returned by `renderArtifact` when no contract
@@ -208,7 +213,14 @@ export interface ArtifactContribution {
 export interface ArtifactSkip {
   contractId: string;
   protocol: string;
-  reason: "no-producer-no-default-render" | "prefer-default-render-no-default";
+  reason:
+    | "no-producer-no-default-render"
+    | "prefer-default-render-no-default"
+    /** Producer/defaultRender returned null — deliberate non-contribution
+     * (e.g. an inbound-only contract has no OpenAPI operation until the
+     * webhooks artifact lands — inbound-artifact-design D6). */
+    | "producer-returned-null"
+    | "default-render-returned-null";
 }
 
 export interface ArtifactRenderSummary<Final> {
@@ -257,13 +269,26 @@ function runRender<Final, Part, Options>(
                 (
                   p: ExtractedContractProjection<unknown, unknown>,
                   options?: Options,
-                ) => Part
+                ) => Part | null | undefined
               >
             | undefined)?.[kind.name]
         : undefined;
 
     if (explicitProducer) {
-      parts.push(explicitProducer(c, options));
+      // `null`/`undefined` = deliberate non-contribution (D6): record the
+      // skip instead of pushing an empty part into merge. Before this,
+      // adapters had to fabricate `{}` ("null parts are filtered" was an
+      // assumption the pipeline never implemented).
+      const part = explicitProducer(c, options);
+      if (part === null || part === undefined) {
+        skipped.push({
+          contractId: c.id,
+          protocol: c.protocol,
+          reason: "producer-returned-null",
+        });
+        continue;
+      }
+      parts.push(part);
       contributions.push({
         contractId: c.id,
         protocol: c.protocol,
@@ -273,7 +298,16 @@ function runRender<Final, Part, Options>(
     }
 
     if (kind.defaultRender) {
-      parts.push(kind.defaultRender(c, options));
+      const part = kind.defaultRender(c, options);
+      if (part === null || part === undefined) {
+        skipped.push({
+          contractId: c.id,
+          protocol: c.protocol,
+          reason: "default-render-returned-null",
+        });
+        continue;
+      }
+      parts.push(part);
       contributions.push({
         contractId: c.id,
         protocol: c.protocol,
@@ -487,6 +521,21 @@ export interface MarkdownPart {
     given?: string;
     hasVerify?: boolean;
     verifyRules?: VerifyRule[];
+    /**
+     * Present iff the case is inbound (the counterparty calls us —
+     * direction: "inbound"). Carries the human-relevant promise details;
+     * secretRef is a secrets NAME, never a value
+     * (inbound-artifact-design, route C).
+     */
+    inbound?: {
+      signature?: {
+        scheme: string;
+        header: string;
+        secretRef: string;
+        toleranceMs?: number;
+      };
+      withinMs?: number;
+    };
   }>;
 }
 
@@ -525,6 +574,28 @@ export function genericMarkdownPart(
       given: c.given,
       hasVerify: c.hasVerify,
       verifyRules: c.verifyRules,
+      // direction is a core CaseMeta field; the promise details live in the
+      // adapter's schemas slot — duck-read (markdown is human-facing and the
+      // shape is the HTTP adapter's published `inbound` block).
+      ...(c.direction === "inbound"
+        ? {
+            inbound: (() => {
+              // The adapter's safe-schemas block names the latency field
+              // `within` (HttpSafeSchemas); the part re-exposes it with the
+              // unit in the name (design D4).
+              const inb = (c.schemas as {
+                inbound?: {
+                  signature?: NonNullable<MarkdownPart["cases"][number]["inbound"]>["signature"];
+                  within?: number;
+                };
+              } | undefined)?.inbound;
+              return {
+                ...(inb?.signature ? { signature: inb.signature } : {}),
+                ...(inb?.within !== undefined ? { withinMs: inb.within } : {}),
+              };
+            })(),
+          }
+        : {}),
     })),
   };
 }
@@ -537,6 +608,7 @@ interface _ProjectionSummary {
   deferred: number;
   deprecated: number;
   gated: number;
+  inbound: number;
 }
 
 function computeMarkdownSummary(parts: MarkdownPart[]): _ProjectionSummary {
@@ -544,9 +616,13 @@ function computeMarkdownSummary(parts: MarkdownPart[]): _ProjectionSummary {
   let deferred = 0;
   let deprecated = 0;
   let gated = 0;
+  let inbound = 0;
   for (const p of parts) {
     for (const c of p.cases) {
       total++;
+      // Inbound cases are active promises (counted in `active`) — `inbound`
+      // is an additional facet, not a lifecycle.
+      if (c.inbound) inbound++;
       if (c.lifecycle === "deprecated") deprecated++;
       else if (c.lifecycle === "deferred") deferred++;
       else if (c.requires === "browser" || c.requires === "out-of-band") gated++;
@@ -558,6 +634,7 @@ function computeMarkdownSummary(parts: MarkdownPart[]): _ProjectionSummary {
     deferred,
     deprecated,
     gated,
+    inbound,
   };
 }
 
@@ -569,6 +646,19 @@ function formatVerifyRule(rule: VerifyRule): string {
 
 function formatCaseProjectionNotes(c: MarkdownPart["cases"][number]): string {
   const notes: string[] = [];
+  if (c.inbound) {
+    const sig = c.inbound.signature;
+    if (sig) {
+      const tolerance =
+        sig.toleranceMs !== undefined ? `, tolerance ${sig.toleranceMs}ms` : "";
+      notes.push(
+        `signed: ${sig.scheme} via \`${sig.header}\` (secret: ${sig.secretRef}${tolerance})`,
+      );
+    }
+    if (c.inbound.withinMs !== undefined) {
+      notes.push(`within: ${c.inbound.withinMs}ms`);
+    }
+  }
   if (c.given) notes.push(`given: ${c.given}`);
   if (c.verifyRules && c.verifyRules.length > 0) {
     notes.push(`verifies: ${c.verifyRules.map(formatVerifyRule).join("; ")}`);
@@ -595,6 +685,11 @@ function formatMarkdownCase(c: MarkdownPart["cases"][number]): string {
   const severityTag =
     c.severity === "critical" ? " 🔴" : c.severity === "info" ? " ℹ️" : "";
   const suffix = c.defaultRun === "opt-in" ? " *(opt-in)*" : "";
+  // Inbound cases: the counterparty calls US — visually distinct so a doc
+  // reader never mistakes the promise direction (route C of the design).
+  if (c.inbound) {
+    return `- 📥 **${c.key}**${desc}${projectionNotes}${severityTag}`;
+  }
   return `- **${c.key}**${desc}${projectionNotes}${suffix}${severityTag}`;
 }
 
@@ -650,6 +745,7 @@ export function assembleMarkdownDocument(parts: MarkdownPart[]): string {
   if (summary.deprecated > 0)
     summaryParts.push(`${summary.deprecated} deprecated`);
   if (summary.gated > 0) summaryParts.push(`${summary.gated} gated`);
+  if (summary.inbound > 0) summaryParts.push(`${summary.inbound} inbound`);
   lines.push(summaryParts.join(" | "));
   lines.push("");
 

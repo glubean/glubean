@@ -552,7 +552,10 @@ export interface ContractProtocolAdapter<
     [K in keyof KnownArtifacts]?: (
       projection: ExtractedContractProjection<SafeSchemas, SafeMeta>,
       options?: KnownArtifactOptions[K],
-    ) => KnownArtifactParts[K];
+    ) => KnownArtifactParts[K] | null;
+    // `null` = this contract deliberately contributes nothing to the kind —
+    // the render pipeline records a skip instead of merging an empty part
+    // (inbound-artifact-design D6).
   };
 
 

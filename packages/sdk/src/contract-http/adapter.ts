@@ -995,14 +995,12 @@ export const httpAdapter: ContractProtocolAdapter<
   },
 
   artifacts: {
-    openapi: (projection) => {
-      const part = buildOpenApiPartForHttp(projection);
-      // `null` parts are filtered by the render pipeline; we never emit
-      // one for HTTP contracts since protocol="http" always matches here,
-      // but defend against malformed targets which buildOpenApiPart returns
-      // null for.
-      return part ?? {};
-    },
+    // `null` = deliberate non-contribution, recorded as a skip by the render
+    // pipeline (inbound-artifact-design D6) — inbound-only contracts and
+    // malformed targets emit NO OpenAPI part (previously this fabricated an
+    // empty `{}` part because the old "null parts are filtered" assumption
+    // was never implemented by the pipeline).
+    openapi: (projection) => buildOpenApiPartForHttp(projection),
     // Markdown uses the kind's generic structured renderer — HTTP has no
     // protocol-specific augmentations to contribute.
     markdown: (projection) => genericMarkdownPart(projection),
