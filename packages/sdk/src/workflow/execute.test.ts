@@ -1201,6 +1201,18 @@ describe("runWorkflow — branch (§17 #6)", () => {
 
 describe("workflow.extend — fixtures (phase4 §3)", () => {
   it("the fixture map rides Test.fixtures; bodies see the augmented Ctx type", async () => {
+    // lifecycle-form fixture withOUT manual annotations: `use`'s instance
+    // type must infer (codex R6 — an unknown-constrained E erased it)
+    const lc = workflow.extend({
+      db: async (_ctx, use) => {
+        await use({ query: (q: string) => q.length });
+      },
+    });
+    lc("wfx-lifecycle")
+      .setup(async (ctx) => ({ n: ctx.db.query("abc") })) // typed: number
+      .compute("noop", (s) => s)
+      .build();
+
     const wf = workflow.extend({
       inbox: () => ({ take: () => "msg-1" }),
     });

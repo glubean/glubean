@@ -1669,7 +1669,8 @@ export interface ExtendedWorkflowFactory<Ctx extends WorkflowContext> {
     meta: WorkflowEachMeta<T>,
     factory: (wf: WorkflowBuilder<undefined, Ctx>, row: T) => unknown,
   ) => BuiltWorkflow[];
-  extend<E extends Record<string, ExtensionFn<unknown>>>(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extend<E extends Record<string, ExtensionFn<any>>>(
     extensions: E,
   ): ExtendedWorkflowFactory<Omit<Ctx, keyof ResolveExtensions<E>> & WorkflowContext & ResolveExtensions<E>>;
 }
@@ -1711,7 +1712,8 @@ function makeExtendedWorkflow(allFixtures: Record<string, ExtensionFn<any>>): un
  * decision 2026-06-12. */
 export const workflow = Object.assign(workflowFn, {
   each: workflowEach,
-  extend: makeExtendedWorkflow as <E extends Record<string, ExtensionFn<unknown>>>(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extend: makeExtendedWorkflow as <E extends Record<string, ExtensionFn<any>>>(
     extensions: E,
   ) => ExtendedWorkflowFactory<WorkflowContext & ResolveExtensions<E>>,
 });

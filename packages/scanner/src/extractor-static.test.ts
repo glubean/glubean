@@ -196,6 +196,25 @@ export const journey = wf("wfx-imported")
     workflow: true,
     workflowHasBranchOrPoll: true,
   });
+
+  // import RENAME maps to the local name (codex R6)
+  const renamed = `
+import { wf as journey } from "./fixtures";
+export const j = journey("wfx-renamed")
+  .setup(async (ctx) => ({}))
+  .compute("c", (s) => s)
+  .build();
+`;
+  const viaRename = extractFromSource(renamed, ["wf", "journey"], ["wf"]);
+  expect(viaRename[0]).toMatchObject({ id: "wfx-renamed", workflow: true });
+
+  // an unrelated LOCAL `wf` must NOT inherit the classification
+  const unrelated = `
+const wf = (id) => makeSomething(id);
+export const notAWorkflow = wf("plain-thing");
+`;
+  const noFalseClass = extractFromSource(unrelated, ["wf"], ["wf"]);
+  expect(noFalseClass.every((m) => m.workflow !== true)).toBe(true);
 });
 
 test("inline extended each is discovered (S2.15 R4)", () => {
