@@ -345,8 +345,10 @@ export function predicateScope<S>(): PredicateScope<S> {
 
 // --- runtime evaluation ------------------------------------------------------
 
-/** Safe path traversal: returns `undefined` if any intermediate is null/undefined. */
-function resolvePath(state: unknown, path: readonly string[]): unknown {
+/** Safe path traversal: returns `undefined` if any intermediate is null/undefined.
+ * Shared with the inbound matcher (codex I3 R1: walking the EXTRACTED path can
+ * never throw, unlike calling a `e => e.data.id` lens on a shape-less body). */
+export function resolvePath(state: unknown, path: readonly string[]): unknown {
   let cur: any = state;
   for (const seg of path) {
     if (cur === null || cur === undefined) return undefined;

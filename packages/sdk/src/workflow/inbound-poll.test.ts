@@ -293,6 +293,46 @@ describe("execution — the await loop (§9.3/§9.4a)", () => {
     expect(inbox.deliveries()).toHaveLength(1);
   });
 
+  it("with correlate: an unrelated shape (no `data` at all) is a probe, never a node fail (codex R1)", async () => {
+    const { ctx, rec } = baseCtx();
+    // A direct `e => e.data.id` lens would throw here; the path walk must classify.
+    const inbox = fakeInbox([makeDelivery('{"ping":true}')]);
+    const wf = workflow("w")
+      .setup(async () => ({ inbox, piId: "pi_1" }))
+      .poll("wait", makeContract(30_000).case("created") as never, {
+        via: (s: { inbox: unknown }) => s.inbox,
+        correlate: {
+          event: (e: { data: { id: string } }) => e.data.id,
+          state: (s: { piId: string }) => s.piId,
+        },
+        timeout: 5_000,
+        every: 10,
+      } as never)
+      .build();
+    setTimeout(() => inbox.push(makeDelivery('{"type":"created","data":{"id":"pi_1"}}')), 30);
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(attemptsOf(rec)[0]).toMatchObject({ outcome: "probe", classification: "type-mismatch" });
+  });
+
+  it("correlate.state resolving undefined fails fast with a named error (missing-operand rule)", async () => {
+    const { ctx } = baseCtx();
+    const inbox = fakeInbox([makeDelivery('{"type":"created","data":{"id":"pi_1"}}')]);
+    const wf = workflow("w")
+      .setup(async () => ({ inbox })) // piId NOT in state
+      .poll("wait", makeContract(30_000).case("created") as never, {
+        via: (s: { inbox: unknown }) => s.inbox,
+        correlate: {
+          event: (e: { data: { id: string } }) => e.data.id,
+          state: (s: { piId?: string }) => s.piId,
+        },
+      } as never)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(inbox.claimedIds()).toHaveLength(0); // undefined === undefined never matched anything
+  });
+
   it("a forged delivery FAILS the node (first terminal wins) — nothing is claimed", async () => {
     const { ctx, rec } = baseCtx({ WH_SECRET: "whsec_test" });
     const body = '{"type":"created"}';

@@ -655,16 +655,18 @@ export interface ContractProtocolAdapter<
    * Preflight errors (unknown verifier scheme, missing secret) MUST throw —
    * bad config must never hide as a probe (§9.4 preflight row).
    *
-   * The poll resolves the state lens itself (it owns the state) and hands
-   * the matcher the concrete value + the event lens (§9.4: the matcher
-   * cannot classify correlation-mismatch without these inputs). `nowMs` is
-   * injected so staleness windows are testable.
+   * The poll resolves the state side itself (it owns the state) and hands
+   * the matcher the concrete value + the event's EXTRACTED selector path —
+   * a path, not the lens, because the matcher must walk unrelated webhook
+   * shapes safely: `e => e.data.id` THROWS on a body without `data`, while
+   * a safe path walk yields `undefined` → `type-mismatch` probe (codex I3
+   * R1 P2). `nowMs` is injected so staleness windows are testable.
    */
   matchInboundCase?: (input: {
     caseSpec: unknown;
     delivery: InboundDelivery;
     secrets: SecretsAccessor;
-    correlate?: { eventLens: (event: unknown) => unknown; stateValue: unknown };
+    correlate?: { eventPath: readonly string[]; stateValue: unknown };
     nowMs: number;
   }) => InboundMatchResult;
 }

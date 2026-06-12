@@ -45,7 +45,7 @@ const plainCase = inboundCase({ description: "d", expect: { bodySchema: createdS
 const match = (
   caseSpec: unknown,
   delivery: InboundDelivery,
-  correlate?: { eventLens: (e: unknown) => unknown; stateValue: unknown },
+  correlate?: { eventPath: readonly string[]; stateValue: unknown },
 ) => matchInboundCaseHttp({ caseSpec, delivery, secrets, correlate, nowMs: 5000 });
 
 describe("preflight (§9.4 row P) — bad config never hides as a probe", () => {
@@ -124,17 +124,25 @@ describe("content = attribution only (§9.4a rows 4–6, all probes)", () => {
     expect(r.kind).toBe("type-mismatch");
   });
 
-  it("with correlate: lens path missing → type-mismatch", () => {
+  it("with correlate: missing path → type-mismatch, NEVER a throw (codex R1)", () => {
+    // The R1 scenario: a direct `e => e.data.id` lens would THROW on a body
+    // without `data`; the safe path walk classifies instead.
     const r = match(plainCase, makeDelivery('{"type":"created"}'), {
-      eventLens: (e) => (e as { data?: { id?: string } }).data?.id,
+      eventPath: ["data", "id"],
       stateValue: "pi_1",
     });
     expect(r.kind).toBe("type-mismatch");
+    // Deeper unrelated shapes too — `data` present but not an object.
+    const r2 = match(plainCase, makeDelivery('{"type":"created","data":42}'), {
+      eventPath: ["data", "id", "nested"],
+      stateValue: "pi_1",
+    });
+    expect(r2.kind).toBe("type-mismatch");
   });
 
   it("with correlate: value differs → correlation-mismatch (sibling run)", () => {
     const r = match(plainCase, makeDelivery('{"type":"created","data":{"id":"pi_OTHER"}}'), {
-      eventLens: (e) => (e as { data: { id: string } }).data.id,
+      eventPath: ["data", "id"],
       stateValue: "pi_1",
     });
     expect(r.kind).toBe("correlation-mismatch");
@@ -144,7 +152,7 @@ describe("content = attribution only (§9.4a rows 4–6, all probes)", () => {
     // The §9.4a #2 scenario: payment_intent.succeeded for OUR object while we
     // wait for created — attribution says ours, shape says another event.
     const r = match(plainCase, makeDelivery('{"type":"succeeded","data":{"id":"pi_1"}}'), {
-      eventLens: (e) => (e as { data: { id: string } }).data.id,
+      eventPath: ["data", "id"],
       stateValue: "pi_1",
     });
     expect(r.kind).toBe("schema-mismatch");
@@ -160,7 +168,7 @@ describe("content = attribution only (§9.4a rows 4–6, all probes)", () => {
       },
     });
     const r = match(c, makeDelivery('{"type":"created","data":{"id":"pi_1"}}'), {
-      eventLens: (e) => (e as { data: { id: string } }).data.id,
+      eventPath: ["data", "id"],
       stateValue: "pi_1",
     });
     expect(r.kind).toBe("matched");

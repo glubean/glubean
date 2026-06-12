@@ -37,7 +37,7 @@ import type {
 import { GlubeanSkipError } from "../types.js";
 import { Expectation } from "../expect.js";
 import { getAdapter, validateNeedsOutput } from "../contract-core.js";
-import { evalPredicate, extractPredicate } from "../contract-flow-condition.js";
+import { evalPredicate, extractPredicate, resolvePath } from "../contract-flow-condition.js";
 import type { ExtractedPredicate } from "../contract-flow-condition.js";
 import type { BranchPredicate, OpaquePredicate } from "../contract-flow-condition.js";
 import {
@@ -1391,12 +1391,25 @@ function runInboundAttempt(
       `workflow poll "${label}": case "${ref.caseKey}" not found in contract "${ref.contractId}"`,
     );
   }
-  const correlate = inbound.correlate
-    ? {
-        eventLens: inbound.correlate.event as (e: unknown) => unknown,
-        stateValue: inbound.correlate.state(state),
-      }
-    : undefined;
+  // Both correlate sides resolve via EXTRACTED paths (safe traversal) — a
+  // lens call (`s => s.a.b`) throws on a missing intermediate. Event side:
+  // missing path = type-mismatch probe (the matcher walks it). State side:
+  // state is OURS and deterministic, so a missing/undefined correlation
+  // value is an authoring bug — fail fast with a named error instead of
+  // letting `undefined === undefined` match someone else's event or probing
+  // silently to exhaustion (the missing-operand rule, same as eqPath).
+  let correlate: { eventPath: readonly string[]; stateValue: unknown } | undefined;
+  if (inbound.correlate) {
+    const stateValue = resolvePath(state, inbound.correlate.statePath);
+    if (stateValue === undefined) {
+      throw new Error(
+        `workflow poll "${label}": correlate.state resolved \`undefined\` at ` +
+          `path "${inbound.correlate.statePath.join(".")}" — the value to ` +
+          `correlate on must be in state before the poll starts.`,
+      );
+    }
+    correlate = { eventPath: inbound.correlate.eventPath, stateValue };
+  }
 
   type Handle = { deliveries(): readonly { id: string; receivedAt: number }[]; claim(id: string): void };
   let last: InboundAttemptResult = { matched: false, classification: "no-delivery" };

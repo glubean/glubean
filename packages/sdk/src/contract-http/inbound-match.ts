@@ -16,12 +16,19 @@ import type { SchemaLike, SecretsAccessor } from "../types.js";
 import type { InboundContractCase } from "./types.js";
 import { isInboundCase } from "./types.js";
 import { getSignatureVerifier } from "./inbound-verify.js";
+import { resolvePath } from "../contract-flow-condition.js";
 
 export interface MatchInboundInput {
   caseSpec: unknown;
   delivery: InboundDelivery;
   secrets: SecretsAccessor;
-  correlate?: { eventLens: (event: unknown) => unknown; stateValue: unknown };
+  /**
+   * `eventPath` is the EXTRACTED selector path (builder-gated), not the lens:
+   * walking a path is shape-safe — an unrelated body without the path yields
+   * `undefined` → type-mismatch probe, where calling `e => e.data.id` would
+   * throw and wrongly fail the node (codex I3 R1 P2).
+   */
+  correlate?: { eventPath: readonly string[]; stateValue: unknown };
   nowMs: number;
 }
 
@@ -113,7 +120,7 @@ export function matchInboundCaseHttp(input: MatchInboundInput): InboundMatchResu
 
   // ── Content: attribution only (§9.4a rows 4–6, all probes) ─────────────
   if (correlate) {
-    const eventValue = correlate.eventLens(parsed);
+    const eventValue = resolvePath(parsed, correlate.eventPath);
     if (eventValue === undefined) return { kind: "type-mismatch" };
     if (eventValue !== correlate.stateValue) return { kind: "correlation-mismatch" };
     // Instance attributed — shape violations classify as schema-mismatch
