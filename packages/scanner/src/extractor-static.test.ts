@@ -1493,12 +1493,18 @@ test("extractAliasesFromSource handles annotations and type arguments", () => {
 import { test } from "@glubean/sdk";
 export const typed: ExtendedTest<MyCtx> = test.extend({ auth: authFixture });
 export const generic = test.extend<{
-  db: { query: (q: string) => number };
+  db: { query: (q: string) => number },
 }>({ db: dbFixture });
 declare const foo: SomeType;
 export const after = test.extend({ page: pageFixture });
 `;
   expect(extractAliasesFromSource(content)).toEqual(["typed", "generic", "after"]);
+  // an instantiation EXPRESSION (no call) must not swallow a later real call
+  const tricky = `
+const factory = test.extend<MyCtx>;
+export const real = test.extend<OtherCtx>({ a: fixture });
+`;
+  expect(extractAliasesFromSource(tricky)).toEqual(["real"]);
 });
 
 test("extractAliasesFromSource ignores extend in comments", () => {

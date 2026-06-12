@@ -167,11 +167,12 @@ function stripComments(source: string): string {
 export function extractAliasesFromSource(content: string): string[] {
   const stripped = stripComments(content);
   // Match: [export] const NAME[: Type] = SOMETHING.extend[<TypeArgs>](
-  // (optional type annotation bounded to the declaration; optional —
-  // possibly multiline — type-argument list. Kept from the S2.15 work:
-  // these forms are just as valid on test.extend.)
+  // The annotation is bounded to its declaration; the type-argument list may
+  // span lines but may NOT contain `;` — an unbounded match could cross a
+  // statement boundary (`test.extend<MyCtx>;` then a real call) and swallow
+  // the real alias. Separate multiline type-literal members with commas.
   const pattern =
-    /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*(?:<[\s\S]*?>)?\s*\(/g;
+    /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*(?:<[^;]*?>)?\s*\(/g;
   const aliases: string[] = [];
   let m;
   while ((m = pattern.exec(stripped)) !== null) {
