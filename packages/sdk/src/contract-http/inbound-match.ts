@@ -29,20 +29,27 @@ export interface MatchInboundInput {
    * throw and wrongly fail the node (codex I3 R1 P2).
    */
   correlate?: { eventPath: readonly string[]; stateValue: unknown };
-  nowMs: number;
 }
 
-/** Validate a parsed body against the case's SchemaLike. */
-function schemaAccepts(schema: SchemaLike<unknown>, value: unknown): boolean {
+/**
+ * Validate a parsed body against the case's SchemaLike, PRESERVING the
+ * schema's output — transforms/coercions/strips/defaults must reach the
+ * poll's `out` lens, same as the HTTP response validation path (codex I3
+ * R2 P2). `parse()` fallback returns its result for the same reason.
+ */
+function applySchema(
+  schema: SchemaLike<unknown>,
+  value: unknown,
+): { ok: true; data: unknown } | { ok: false } {
   if (typeof schema.safeParse === "function") {
-    return schema.safeParse(value).success;
+    const r = schema.safeParse(value);
+    return r.success ? { ok: true, data: r.data } : { ok: false };
   }
   if (typeof schema.parse === "function") {
     try {
-      schema.parse(value);
-      return true;
+      return { ok: true, data: schema.parse(value) };
     } catch {
-      return false;
+      return { ok: false };
     }
   }
   // A schema with neither method can never accept — surface as config error
@@ -68,7 +75,7 @@ function headersAccept(c: InboundContractCase, delivery: InboundDelivery): boole
 }
 
 export function matchInboundCaseHttp(input: MatchInboundInput): InboundMatchResult {
-  const { caseSpec, delivery, secrets, correlate, nowMs } = input;
+  const { caseSpec, delivery, secrets, correlate } = input;
   if (!isInboundCase(caseSpec)) {
     throw new Error(
       "matchInboundCase: case is not an inbound case — the workflow inbound " +
@@ -105,7 +112,10 @@ export function matchInboundCaseHttp(input: MatchInboundInput): InboundMatchResu
       headerValue,
       secret,
       toleranceMs: sig.toleranceMs,
-      nowMs,
+      // Staleness is measured at RECEIPT, not at poll time — a pre-existing
+      // valid delivery must not turn stale because the poll started late
+      // (allowed evidence, §9.4a #3; codex I3 R2 P2).
+      nowMs: delivery.receivedAt,
     });
     if (!result.ok) return { kind: result.reason };
   }
@@ -125,17 +135,19 @@ export function matchInboundCaseHttp(input: MatchInboundInput): InboundMatchResu
     if (eventValue !== correlate.stateValue) return { kind: "correlation-mismatch" };
     // Instance attributed — shape violations classify as schema-mismatch
     // for diagnosis, but stay probes (consult #2).
-    if (!schemaAccepts(c.expect.bodySchema, parsed) || !headersAccept(c, delivery)) {
+    const validated = applySchema(c.expect.bodySchema, parsed);
+    if (!validated.ok || !headersAccept(c, delivery)) {
       return { kind: "schema-mismatch" };
     }
-    return { kind: "matched", parsed };
+    return { kind: "matched", parsed: validated.data };
   }
 
   // Without correlate, bodySchema (+ header matchers) IS the positive
   // matcher; a non-fitting body is indistinguishable from someone else's
   // event (§9.4a) — type-mismatch, keep waiting.
-  if (!schemaAccepts(c.expect.bodySchema, parsed) || !headersAccept(c, delivery)) {
+  const validated = applySchema(c.expect.bodySchema, parsed);
+  if (!validated.ok || !headersAccept(c, delivery)) {
     return { kind: "type-mismatch" };
   }
-  return { kind: "matched", parsed };
+  return { kind: "matched", parsed: validated.data };
 }

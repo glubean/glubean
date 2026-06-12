@@ -660,14 +660,19 @@ export interface ContractProtocolAdapter<
    * a path, not the lens, because the matcher must walk unrelated webhook
    * shapes safely: `e => e.data.id` THROWS on a body without `data`, while
    * a safe path walk yields `undefined` → `type-mismatch` probe (codex I3
-   * R1 P2). `nowMs` is injected so staleness windows are testable.
+   * R1 P2).
+   *
+   * The staleness clock for timestamped signature schemes is the delivery's
+   * own `receivedAt` — verification must reflect RECEIPT time, not whenever
+   * the poll happened to scan the inbox, or a pre-existing valid delivery
+   * (allowed evidence, §9.4a #3) would misclassify as stale after a slow
+   * setup (codex I3 R2 P2).
    */
   matchInboundCase?: (input: {
     caseSpec: unknown;
     delivery: InboundDelivery;
     secrets: SecretsAccessor;
     correlate?: { eventPath: readonly string[]; stateValue: unknown };
-    nowMs: number;
   }) => InboundMatchResult;
 }
 

@@ -1419,7 +1419,6 @@ function runInboundAttempt(
       delivery: delivery as Parameters<NonNullable<typeof adapter.matchInboundCase>>[0]["delivery"],
       secrets: ctx.secrets,
       correlate,
-      nowMs: Date.now(),
     });
     if (result.kind === "matched") {
       (handle as Handle).claim(delivery.id);

@@ -46,7 +46,7 @@ const match = (
   caseSpec: unknown,
   delivery: InboundDelivery,
   correlate?: { eventPath: readonly string[]; stateValue: unknown },
-) => matchInboundCaseHttp({ caseSpec, delivery, secrets, correlate, nowMs: 5000 });
+) => matchInboundCaseHttp({ caseSpec, delivery, secrets, correlate });
 
 describe("preflight (§9.4 row P) — bad config never hides as a probe", () => {
   it("unknown verifier scheme throws", () => {
@@ -103,6 +103,27 @@ describe("authentication first (§9.4 rows 1–3)", () => {
     expect(r).toEqual({ kind: "matched", parsed: { type: "created" } });
   });
 
+  it("staleness clock is RECEIPT time, not poll time (codex R2): an early valid delivery never turns stale", () => {
+    const t = 1_700_000_000; // signature timestamp (unix seconds)
+    const body = '{"type":"created"}';
+    const stripeCase = inboundCase({
+      description: "d",
+      expect: {
+        bodySchema: createdSchema,
+        signature: { scheme: "stripe-v1", header: "stripe-signature", secretRef: "WH_SECRET" },
+      },
+    });
+    const v1 = createHmac("sha256", "whsec_test").update(`${t}.${body}`).digest("hex");
+    const header = { "stripe-signature": `t=${t},v1=${v1}` };
+    // Received within tolerance of its own timestamp — matched, no matter how
+    // long ago that was relative to "now" (the matcher never reads Date.now()).
+    const fresh: InboundDelivery = { ...makeDelivery(body, header), receivedAt: t * 1000 + 1000 };
+    expect(match(stripeCase, fresh).kind).toBe("matched");
+    // Received OUTSIDE tolerance of its timestamp — replay suspicion → stale.
+    const replayed: InboundDelivery = { ...makeDelivery(body, header), receivedAt: t * 1000 + 600_000 };
+    expect(match(stripeCase, replayed).kind).toBe("stale");
+  });
+
   it("authenticated but non-JSON → unparseable (promise violated)", () => {
     const body = "not json {";
     const r = match(signedCase, makeDelivery(body, { "x-sig": sign(body) }));
@@ -156,6 +177,25 @@ describe("content = attribution only (§9.4a rows 4–6, all probes)", () => {
       stateValue: "pi_1",
     });
     expect(r.kind).toBe("schema-mismatch");
+  });
+
+  it("matched preserves the SCHEMA OUTPUT — transforms/defaults reach `out` (codex R2)", () => {
+    const transforming = inboundCase({
+      description: "d",
+      expect: {
+        bodySchema: {
+          // Strips unknown keys + defaults a field — the validated shape, not raw JSON.
+          safeParse: (d: unknown) => {
+            const o = d as { type?: string };
+            return o?.type === "created"
+              ? { success: true as const, data: { type: o.type, amount: 0 } }
+              : { success: false as const, error: { issues: [{ message: "no" }] } };
+          },
+        },
+      },
+    });
+    const r = match(transforming, makeDelivery('{"type":"created","junk":"x"}'));
+    expect(r).toEqual({ kind: "matched", parsed: { type: "created", amount: 0 } });
   });
 
   it("with correlate: attributed + fitting → matched", () => {
