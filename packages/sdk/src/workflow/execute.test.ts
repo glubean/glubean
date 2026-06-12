@@ -1197,6 +1197,94 @@ describe("runWorkflow — branch (§17 #6)", () => {
   });
 });
 
+// --- declarative check expect[] (S2.17, phase4 §7 / addendum §2) ---------------
+
+describe("workflow.check — declarative expect[] (phase4 §7)", () => {
+  it("evaluates each item purely, emits one soft assertion per item, grade full", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("ex-basic")
+      .setup(async () => ({ status: "paid", paymentId: "pi_1", profileId: "u1", userId: "u1" }))
+      .check("order settled correctly", {
+        expect: (w) => [
+          w.when((s) => s.status).eq("paid"),
+          w.when((s) => s.paymentId).exists(),
+          w.when((s) => s.profileId).eqPath((s) => s.userId),
+        ],
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(rec.asserts).toEqual([
+      { passed: true, message: 'status == "paid"' },
+      { passed: true, message: "paymentId exists" },
+      { passed: true, message: "profileId == userId" },
+    ]);
+    const proj = projectWorkflow(wf);
+    const node = proj.nodes[0];
+    expect(node.grade).toBe("full");
+    expect(node.expects).toEqual([
+      { kind: "compare", op: "eq", path: ["status"], value: "paid" },
+      { kind: "presence", op: "exists", path: ["paymentId"] },
+      { kind: "compare", op: "eq", path: ["profileId"], rhsPath: ["userId"] },
+    ]);
+  });
+
+  it("soft semantics: a failing item fails the node AFTER all items evaluated", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("ex-soft")
+      .setup(async () => ({ status: "pending", paymentId: "pi_1" }))
+      .check("settled", {
+        expect: (w) => [
+          w.when((s) => s.status).eq("paid"),   // fails
+          w.when((s) => s.paymentId).exists(),  // still evaluated + reported
+        ],
+      })
+      .compute("never", (s) => s)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(rec.asserts.map((a) => a.passed)).toEqual([false, true]);
+    expect(res.nodes.map((n) => [n.id, n.status])).toEqual([
+      ["settled", "failed"],
+      ["never", "skipped"],
+    ]);
+  });
+
+  it("build-time validation: empty array, opaque item, neither-form rejected", () => {
+    expect(() =>
+      workflow("ex-empty")
+        .setup(async () => ({}))
+        .check("c", { expect: () => [] }),
+    ).toThrow(/non-empty array/);
+    expect(() =>
+      workflow("ex-opaque")
+        .setup(async () => ({}))
+        .check("c", { expect: (() => [{ kind: "opaque" }]) as never }),
+    ).toThrow(/check "c" expect/);
+    expect(() =>
+      workflow("ex-neither")
+        .setup(async () => ({}))
+        .check("c", 42 as never),
+    ).toThrow(/requires a check function or/);
+  });
+
+  it("eqPath: the rhs lens passes the selector-source gate; mismatch fails", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("ex-rel")
+      .setup(async () => ({ a: 1, b: 2 }))
+      .check("a equals b", { expect: (w) => [w.when((s) => s.a).eqPath((s) => s.b)] })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed"); // 1 !== 2
+    // non-selector rhs is rejected at build time
+    expect(() =>
+      workflow("ex-badlens")
+        .setup(async () => ({ a: 1 }))
+        .check("c", { expect: (w) => [w.when((s) => s.a).eqPath((() => Math.random()) as never)] }),
+    ).toThrow();
+  });
+});
+
 // --- lifecycle hints + projection visibility (S2.16, phase4 §6) ---------------
 
 describe("lifecycle hints + projection visibility (phase4 §6)", () => {

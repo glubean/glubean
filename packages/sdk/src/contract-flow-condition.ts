@@ -45,6 +45,17 @@ export type BranchPredicate<S = unknown> = { readonly [PREDICATE_BRAND]: true } 
       readonly lens: (s: S) => unknown;
       readonly path: readonly string[];
       readonly value: JsonScalar;
+      readonly rhsPath?: undefined;
+    }
+  | {
+      /** path-vs-path compare (phase4 §7 / addendum §2): the most common
+       * RELATIONAL assertion (`s.profileId == s.userId`). eq/ne only in v1. */
+      readonly kind: "compare";
+      readonly op: "eq" | "ne";
+      readonly lens: (s: S) => unknown;
+      readonly path: readonly string[];
+      readonly value?: undefined;
+      readonly rhsPath: readonly string[];
     }
   | {
       readonly kind: "in";
@@ -83,6 +94,10 @@ export interface WhenClause<S, V> {
   lt(value: [Exclude<V, null | undefined>] extends [number] ? number : never): BranchPredicate<S>;
   lte(value: [Exclude<V, null | undefined>] extends [number] ? number : never): BranchPredicate<S>;
   matches(pattern: [Exclude<V, null | undefined>] extends [string] ? string | RegExp : never): BranchPredicate<S>;
+  /** path-vs-path equality: compares this selection against ANOTHER state
+   * path (phase4 §7). The rhs lens passes the same P0 selector-source gate. */
+  eqPath(rhs: (s: S) => V): BranchPredicate<S>;
+  nePath(rhs: (s: S) => V): BranchPredicate<S>;
 }
 
 /** Scoped predicate builder; `S` flows from `condition`'s generic into each lens. */
@@ -285,6 +300,10 @@ export function predicateScope<S>(): PredicateScope<S> {
           ...(re.flags ? { flags: re.flags } : {}),
         });
       },
+      eqPath: (rhs: (s: any) => unknown) =>
+        brandFreeze({ kind: "compare", op: "eq", lens, path, rhsPath: selectorPath(rhs) }),
+      nePath: (rhs: (s: any) => unknown) =>
+        brandFreeze({ kind: "compare", op: "ne", lens, path, rhsPath: selectorPath(rhs) }),
     };
   };
   const combine = (kind: "and" | "or", clauses: BranchPredicate<any>[]) => {
@@ -318,6 +337,11 @@ export function evalPredicate<S>(pred: BranchPredicate<S>, state: S): boolean {
   switch (pred.kind) {
     case "compare": {
       const actual = resolvePath(state, pred.path);
+      if (pred.rhsPath !== undefined) {
+        const rhs = resolvePath(state, pred.rhsPath);
+        // path-vs-path is eq/ne only in v1; strict === like scalar compare
+        return pred.op === "eq" ? actual === rhs : actual !== rhs;
+      }
       switch (pred.op) {
         case "eq":
           return actual === pred.value;
@@ -404,11 +428,22 @@ export function assertL2Predicate(node: unknown, op = "condition"): void {
   const n = node as { kind?: unknown };
   switch (n.kind) {
     case "compare": {
-      const c = node as { op?: unknown; path?: unknown; value?: unknown };
+      const c = node as { op?: unknown; path?: unknown; value?: unknown; rhsPath?: unknown };
       if (typeof c.op !== "string" || !COMPARE_OPS.has(c.op)) {
         throw new LensPurityError(op, `invalid compare op ${JSON.stringify(c.op)}`);
       }
       assertPath(c.path, op);
+      if (c.rhsPath !== undefined) {
+        // path-vs-path (phase4 §7): eq/ne only; value must be absent
+        if (c.op !== "eq" && c.op !== "ne") {
+          throw new LensPurityError(op, `path-vs-path compare supports eq/ne only; got ${c.op}`);
+        }
+        if (c.value !== undefined) {
+          throw new LensPurityError(op, `compare cannot carry both value and rhsPath`);
+        }
+        assertPath(c.rhsPath, op);
+        return;
+      }
       assertJsonScalar(c.value, op);
       assertFiniteScalar(c.value, op);
       assertRelationalOperand(c.op, c.value);
@@ -575,7 +610,7 @@ export async function selectBranchSteps(
 
 /** JSON-safe predicate shape for a predicate-mode case. */
 export type ExtractedPredicate =
-  | { kind: "compare"; op: string; path: string[]; value: JsonScalar }
+  | { kind: "compare"; op: string; path: string[]; value?: JsonScalar; rhsPath?: string[] }
   | { kind: "in"; path: string[]; values: JsonScalar[] }
   | { kind: "presence"; op: string; path: string[] }
   | { kind: "matches"; path: string[]; pattern: string; flags?: string }
@@ -609,7 +644,9 @@ export function extractPredicate(
   }
   switch (pred.kind) {
     case "compare":
-      return { kind: "compare", op: pred.op, path: [...pred.path], value: pred.value };
+      return pred.rhsPath !== undefined
+        ? { kind: "compare", op: pred.op, path: [...pred.path], rhsPath: [...pred.rhsPath] }
+        : { kind: "compare", op: pred.op, path: [...pred.path], value: pred.value };
     case "in":
       return { kind: "in", path: [...pred.path], values: [...pred.values] };
     case "presence":

@@ -37,7 +37,8 @@ import type {
 import { GlubeanSkipError } from "../types.js";
 import { Expectation } from "../expect.js";
 import { getAdapter, validateNeedsOutput } from "../contract-core.js";
-import { evalPredicate } from "../contract-flow-condition.js";
+import { evalPredicate, extractPredicate } from "../contract-flow-condition.js";
+import type { ExtractedPredicate } from "../contract-flow-condition.js";
 import type { BranchPredicate, OpaquePredicate } from "../contract-flow-condition.js";
 import {
   quarantinedCtx,
@@ -65,6 +66,36 @@ import type {
   WorkflowContext,
   WorkflowNode,
 } from "./types.js";
+
+/**
+ * Human-readable label for a declarative expect item (phase4 §7.2) — derived
+ * from the extracted predicate, never authored, so it cannot drift from what
+ * actually evaluates. Used for assertion-event messages.
+ */
+export function predicateLabel(p: ExtractedPredicate): string {
+  switch (p.kind) {
+    case "compare": {
+      const OPS: Record<string, string> = { eq: "==", ne: "!=", gt: ">", gte: ">=", lt: "<", lte: "<=" };
+      const lhs = p.path.join(".") || "<state>";
+      const rhs = p.rhsPath !== undefined ? p.rhsPath.join(".") : JSON.stringify(p.value);
+      return `${lhs} ${OPS[p.op] ?? p.op} ${rhs}`;
+    }
+    case "in":
+      return `${p.path.join(".")} in ${JSON.stringify(p.values)}`;
+    case "presence":
+      return `${p.path.join(".")} ${p.op}`;
+    case "matches":
+      return `${p.path.join(".")} matches /${p.pattern}/${p.flags ?? ""}`;
+    case "and":
+      return p.clauses.map(predicateLabel).join(" && ");
+    case "or":
+      return `(${p.clauses.map(predicateLabel).join(" || ")})`;
+    case "not":
+      return `not(${predicateLabel(p.clause)})`;
+    case "opaque":
+      return "<opaque predicate>";
+  }
+}
 
 // =============================================================================
 // Active-node context channel (§17 #9/#12 — the ctx.http rebind, S2.10)
@@ -639,10 +670,23 @@ function runBody(
   switch (node.kind) {
     case "action":
       return Promise.resolve((node as ActionNode).fn(ctx, state));
-    case "check":
+    case "check": {
+      const check = node as CheckNode;
+      // DECLARATIVE form (phase4 §7): pure evaluation, one assertion event
+      // per item, soft semantics (§17 #5) — the node fails iff any item
+      // failed, via the scope's existing hasFailure aggregation. No user
+      // code runs.
+      if (check.expects !== undefined) {
+        for (const item of check.expects) {
+          const extracted = extractPredicate(item as Parameters<typeof extractPredicate>[0]);
+          ctx.assert(evalPredicate(item, state), predicateLabel(extracted));
+        }
+        return Promise.resolve(undefined);
+      }
       // A check returns void → it never changes state (resolve to `undefined` so
       // the caller's §17 #2 "void preserves" rule keeps the prior state).
-      return Promise.resolve((node as CheckNode).fn(ctx, state)).then(() => undefined);
+      return Promise.resolve(check.fn!(ctx, state)).then(() => undefined);
+    }
     case "compute": {
       // Pure synchronous transform; the return REPLACES state (§17 #2/#13). The
       // builder rejects `async` compute syntactically; here we also catch a sync fn

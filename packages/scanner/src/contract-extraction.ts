@@ -309,6 +309,8 @@ export interface NormalizedWorkflowNode {
   maxAttempts?: number;
   /** call/action: explicit-intent retry. */
   retry?: { attempts: number; delay?: number; reason: string };
+  /** check (declarative form): extracted L2 predicates — assertions as data. */
+  expects?: unknown[];
   /** call/action/check: per-node terminal timeout (§17 #4). */
   nodeTimeoutMs?: number;
 }

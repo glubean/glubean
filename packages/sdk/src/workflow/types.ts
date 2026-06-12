@@ -158,11 +158,19 @@ export interface ActionNode<State = any> {
   retry?: RetryMeta;
 }
 
-/** Arbitrary assertion that may not map to a contract case. */
+/**
+ * Assertion node — two forms (phase4 §7 / addendum §2):
+ * - INLINE: arbitrary fn (grade: partial with `project.asserts`, else opaque;
+ *   runtime evidence may promote to trace).
+ * - DECLARATIVE: `expects` — L2 predicates over state; assertions are DATA
+ *   (grade: full; each item projects and emits its own assertion event).
+ */
 export interface CheckNode<State = any> {
   kind: "check";
   meta: NodeMeta;
-  fn: (ctx: WorkflowContext, state: State) => void | Promise<void>;
+  fn?: (ctx: WorkflowContext, state: State) => void | Promise<void>;
+  /** Declarative form: live L2 predicates (extracted at projection time). */
+  expects?: ReadonlyArray<BranchPredicate<State>>;
   project?: CheckProjection;
 }
 
@@ -432,6 +440,9 @@ export interface ProjectedWorkflowNode {
   maxAttempts?: number;
   /** call/action: explicit-intent retry (§17 #7) — intent is projectable. */
   retry?: RetryMeta;
+  /** check (declarative form, phase4 §7): the extracted L2 predicates —
+   * assertions as DATA, individually renderable/auditable. */
+  expects?: ExtractedPredicate[];
   /** call/action/check: per-node terminal timeout (§17 #4). (Poll's own
    * bounds already project via timeoutMs/perAttemptTimeoutMs/maxAttempts.) */
   nodeTimeoutMs?: number;

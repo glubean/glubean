@@ -358,6 +358,17 @@ export interface WorkflowBuilder<State> {
     opts?: { project?: ActionProjection; retry?: RetryMeta },
   ): ChainedWorkflowBuilder<NewState>;
   /** Arbitrary assertion (graded partial w/ asserts hint, else opaque/trace). */
+  /**
+   * DECLARATIVE check (phase4 §7 / addendum §2): assertions as DATA — each
+   * item is an L2 predicate over state, projects individually (grade: full)
+   * and emits its own assertion event with soft semantics (§17 #5). Cheaper
+   * than inline at runtime: pure evaluation, no user code. Opaque logic
+   * belongs in the inline form below.
+   */
+  check(
+    idOrMeta: NodeMetaInput,
+    opts: { expect: (w: PredicateScope<State>) => BranchPredicate<State>[] },
+  ): ChainedWorkflowBuilder<State>;
   check(
     idOrMeta: NodeMetaInput,
     fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
@@ -722,19 +733,50 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     });
   }
 
-  check(
-    idOrMeta: NodeMetaInput,
-    fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
-    opts?: { project?: CheckProjection },
-  ): ChainedWorkflowBuilder<State> {
+  // Broad impl satisfies both check overloads; call sites use the interface.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  check(idOrMeta: NodeMetaInput, fnOrOpts: unknown, opts?: { project?: CheckProjection }): any {
     return this.authoring(() => {
       this.assertNoTeardown("check");
       const checkMeta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(checkMeta, "check");
+      // Declarative form: { expect: (w) => [...] } (phase4 §7)
+      if (
+        fnOrOpts !== null &&
+        typeof fnOrOpts === "object" &&
+        typeof (fnOrOpts as { expect?: unknown }).expect === "function"
+      ) {
+        const expectFn = (fnOrOpts as {
+          expect: (w: PredicateScope<State>) => BranchPredicate<State>[];
+        }).expect;
+        const items = expectFn(predicateScope<State>());
+        if (!Array.isArray(items) || items.length === 0) {
+          throw new Error(
+            `workflow.check() "${checkMeta.id}": \`expect\` must return a non-empty array of predicates`,
+          );
+        }
+        for (const item of items) {
+          // every item must be L2 declarative — an opaque predicate here is a
+          // contradiction in terms; use the inline form for opaque logic.
+          assertL2Predicate(item as never, `check "${checkMeta.id}" expect`);
+        }
+        const node: CheckNode<State> = {
+          kind: "check",
+          meta: checkMeta,
+          expects: Object.freeze([...items]),
+        };
+        this._nodes.push(node as WorkflowNode);
+        return this.chained();
+      }
+      if (typeof fnOrOpts !== "function") {
+        throw new Error(
+          `workflow.check() "${checkMeta.id}" requires a check function or { expect: (w) => [...] }`,
+        );
+      }
       const node: CheckNode<State> = {
         kind: "check",
         meta: checkMeta,
-        fn: fn as CheckNode<State>["fn"],
+        fn: fnOrOpts as CheckNode<State>["fn"],
         project: opts?.project,
       };
       this._nodes.push(node as WorkflowNode);

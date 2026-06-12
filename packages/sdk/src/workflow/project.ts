@@ -64,8 +64,10 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
       return p && (p.reads?.length || p.writes?.length || p.note) ? "partial" : "opaque";
     }
     case "check": {
-      const p = (node as CheckNode).project;
-      return p?.asserts ? "partial" : "opaque";
+      const c = node as CheckNode;
+      // declarative expects → assertions are DATA (phase4 §7) — full.
+      if (c.expects !== undefined) return "full";
+      return c.project?.asserts ? "partial" : "opaque";
     }
     case "group":
       return (node as GroupNode).nodes.reduce(
@@ -158,6 +160,13 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         grade,
         reads: p?.reads,
         asserts: p?.asserts,
+        ...(c.expects !== undefined
+          ? {
+              expects: c.expects.map((item) =>
+                extractPredicate(item as Parameters<typeof extractPredicate>[0]),
+              ),
+            }
+          : {}),
         ...(c.meta.timeout !== undefined ? { nodeTimeoutMs: c.meta.timeout } : {}),
       };
     }
