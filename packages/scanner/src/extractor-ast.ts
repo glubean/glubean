@@ -456,7 +456,7 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         }
       }
     };
-    const deferredFns: AnyNode[] = [];
+    const deferredFns: Array<{ fn: AnyNode; excluded: Set<string> }> = [];
     // Block-aware traversal (codex S2.13 R9 P2): a block-scoped shadow
     // (`{ const b = client; }`) must not delete the outer builder for the
     // REST of the function. On block exit the pre-block names are UNIONED
@@ -635,7 +635,7 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         node.type === "FunctionExpression" ||
         node.type === "FunctionDeclaration"
       ) {
-        deferredFns.push(node);
+        deferredFns.push({ fn: node, excluded: new Set() });
         return;
       }
       const isBlock = node.type === "BlockStatement" && node !== scopeBody;
@@ -643,6 +643,7 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
       const everSnap = isBlock ? new Set(everLive) : undefined;
       const directSnap = isBlock ? new Set(liveDirect) : undefined;
       const everDirectSnap = isBlock ? new Set(everDirect) : undefined;
+      const deferredStart = isBlock ? deferredFns.length : 0;
       handleNode(node);
       for (const key of Object.keys(node)) {
         const value = (node as Record<string, unknown>)[key];
@@ -656,6 +657,20 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         else visitChild(value);
       }
       if (isBlock) {
+        // Names a block-local DECLARATION shadowed (present before, deleted
+        // by a declaration inside): closures defined IN this block captured
+        // the shadow binding, not the outer builder — scanning them against
+        // the restored outer names would false-positive a linear workflow
+        // (codex S2.13 R20 P2). Record exclusions before the union restore.
+        // Late-ASSIGNED aliases (R15) are unaffected: assignments never
+        // delete from everLive, so they don't appear here.
+        for (const name of everSnap!) {
+          if (!everLive.has(name)) {
+            for (let i = deferredStart; i < deferredFns.length; i++) {
+              deferredFns[i].excluded.add(name);
+            }
+          }
+        }
         for (const n of liveSnap!) live.add(n);
         for (const n of everSnap!) everLive.add(n);
         for (const n of directSnap!) liveDirect.add(n);
@@ -666,9 +681,13 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
     const fnQueue = [...deferredFns];
     while (fnQueue.length > 0) {
       if (found) return;
-      const fnNode = fnQueue.shift()!;
+      const { fn: fnNode, excluded } = fnQueue.shift()!;
       const childInherited = new Set(everLive);
       const childDirect = new Set(everDirect);
+      for (const name of excluded) {
+        childInherited.delete(name);
+        childDirect.delete(name);
+      }
       for (const param of (fnNode.params as AnyNode[] | undefined) ?? []) {
         // A default-parameter INITIALIZER referencing a live builder executes
         // at call time with the closure's bindings (`const make = (x =
@@ -690,7 +709,7 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
             liveInitializer = true;
           }
           if (n.type === "ArrowFunctionExpression" || n.type === "FunctionExpression") {
-            fnQueue.push(n);
+            fnQueue.push({ fn: n, excluded: new Set(excluded) });
           }
         });
         if (liveInitializer) {

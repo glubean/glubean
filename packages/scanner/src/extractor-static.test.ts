@@ -195,6 +195,24 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a closure under a block-local shadow is NOT scanned against the outer builder (S2.13 R20)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeClient, retry } from "./helpers";
+export const blockClosure = workflow("u-block-closure")
+  .setup(async () => ({}))
+  .use((b) => b.action("probe", async () => {
+    {
+      const b = makeClient();          // block-local foreign shadow
+      await retry(() => b.poll());     // closure captures the SHADOW, not the builder
+    }
+  }))
+  .build();
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll ?? false).toBe(false); // linear — no false flag
+});
+
 test("a foreign 'use' on a tainted container fails closed (S2.13 R19)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
