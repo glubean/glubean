@@ -1488,24 +1488,14 @@ export const health = test("health", async (ctx) => {});
   expect(extractAliasesFromSource(content)).toEqual([]);
 });
 
-test("extractAliasesFromSource handles annotations and type arguments", () => {
+test("extractAliasesFromSource handles annotated bindings; ambient declares don't bleed", () => {
   const content = `
 import { test } from "@glubean/sdk";
 export const typed: ExtendedTest<MyCtx> = test.extend({ auth: authFixture });
-export const generic = test.extend<{
-  db: { query: (q: string) => number };
-  page: Page;
-}>({ db: dbFixture, page: pageFixture });
 declare const foo: SomeType;
 export const after = test.extend({ page: pageFixture });
 `;
-  expect(extractAliasesFromSource(content)).toEqual(["typed", "generic", "after"]);
-  // an instantiation EXPRESSION (no call) must not swallow a later real call
-  const tricky = `
-const factory = test.extend<MyCtx>;
-export const real = test.extend<OtherCtx>({ a: fixture });
-`;
-  expect(extractAliasesFromSource(tricky)).toEqual(["real"]);
+  expect(extractAliasesFromSource(content)).toEqual(["typed", "after"]);
 });
 
 test("extractAliasesFromSource ignores extend in comments", () => {

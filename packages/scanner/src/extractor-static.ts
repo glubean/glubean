@@ -166,15 +166,14 @@ function stripComments(source: string): string {
  */
 export function extractAliasesFromSource(content: string): string[] {
   const stripped = stripComments(content);
-  // Match: [export] const NAME[: Type] = SOMETHING.extend[<TypeArgs>](
-  // The annotation is bounded to its declaration. The type-argument list may
-  // span lines and contain `;`-separated type-literal members, but a bare
-  // `=` is rejected (only `=>` arrows pass) — crossing into the NEXT
-  // statement requires an assignment, so an instantiation expression
-  // (`test.extend<MyCtx>;`) can never swallow a later real call. Known
-  // limit: default type params (`<T = X>`) won't match.
-  const pattern =
-    /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*(?:<(?:[^=]|=>)*?>)?\s*\(/g;
+  // Match: [export] const NAME[: Type] = SOMETHING.extend(
+  // The optional type ANNOTATION is bounded to its declaration (no `;`/
+  // newline/`=`). Explicit type ARGUMENTS (`test.extend<T>({...})`) are
+  // deliberately NOT matched: a regex cannot bound a generic segment to one
+  // statement without an expression parser (three codex rounds of
+  // counterexamples), and the form has no real usage — annotate the binding
+  // instead.
+  const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*\(/g;
   const aliases: string[] = [];
   let m;
   while ((m = pattern.exec(stripped)) !== null) {
