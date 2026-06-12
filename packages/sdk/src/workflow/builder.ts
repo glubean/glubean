@@ -485,7 +485,20 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     // author caught the error (codex S2.5 R3 P2).
     if (!_isChild) {
       queueMicrotask(() => {
-        if (!this._built && this._poisoned === undefined) this.build();
+        if (this._built || this._poisoned !== undefined) return;
+        try {
+          this.build();
+        } catch (e) {
+          // Auto-build is fire-and-forget on a microtask — a build-time
+          // validation error (e.g. duplicate node ids) must not become an
+          // unhandled exception (codex S2.13 R1 P1). The builder is poisoned
+          // (build() did that) so it never registers; surface the cause
+          // loudly enough to find.
+          console.error(
+            `[glubean] workflow "${this._meta.id}" failed to auto-build and will not be registered: ` +
+              (e instanceof Error ? e.message : String(e)),
+          );
+        }
       });
     }
   }
@@ -1179,7 +1192,16 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         `workflow "${this._meta.id}" cannot build — an earlier authoring call failed: ${causeMsg}`,
       );
     }
-    WorkflowBuilderImpl.assertUniqueNodeIds(this._nodes, this._meta.id);
+    try {
+      WorkflowBuilderImpl.assertUniqueNodeIds(this._nodes, this._meta.id);
+    } catch (e) {
+      // Build-time validation failure must POISON the builder: the queued
+      // auto-build would otherwise call build() again on the next microtask
+      // and throw UNHANDLED even though the caller caught this one
+      // (codex S2.13 R1 P1).
+      this._poisoned ??= e;
+      throw e;
+    }
     const meta = this._meta;
 
     // The single simple Test that executes the graph (mirrors the flow's
