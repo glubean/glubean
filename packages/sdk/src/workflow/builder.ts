@@ -1227,17 +1227,25 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
           "loses any steps added after an await",
       );
     }
-    // Belt-and-suspenders for the same fork: a returned handle that is NOT the
-    // chain's tip means steps were added after it — the callback returned a
-    // stale prefix of its own chain.
-    if (typeof result === "object" && result !== null) {
-      const returnedTip = tipOf(result);
-      if (returnedTip !== undefined && returnedTip !== child._nodes.length) {
-        throw new Error(
-          `workflow side under "${idPrefix}" returned a stale chain handle — ` +
-            `return the value of the LAST chain call`,
-        );
-      }
+    // The callback MUST return its own facade chain (codex S2.14 R2 P2): a
+    // body closing over a DIFFERENT builder (`group("g", () => other.compute(
+    // ...))`) type-checks when shapes match, but the sub-graph would be EMPTY
+    // while the other builder mutates — silently dropping every member. And a
+    // returned handle that is not the chain's tip means steps were added
+    // after it (stale prefix — codex S2.8 R3).
+    const returnedTip = tipOf(result);
+    if (returnedTip === undefined) {
+      throw new Error(
+        `workflow sub-graph under "${idPrefix}": the callback must return the chain built ` +
+          `from the builder it was given — it returned ` +
+          `${result === undefined ? "undefined" : "a different builder/value"}`,
+      );
+    }
+    if (returnedTip !== child._nodes.length) {
+      throw new Error(
+        `workflow side under "${idPrefix}" returned a stale chain handle — ` +
+          `return the value of the LAST chain call`,
+      );
     }
     if (child._setup || child._teardown) {
       throw new Error("a workflow sub-graph callback (branch side / group body) cannot declare setup/teardown");

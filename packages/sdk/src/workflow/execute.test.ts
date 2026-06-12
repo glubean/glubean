@@ -1343,6 +1343,24 @@ describe("workflow.group — display-only bracket (phase4 §2)", () => {
     expect(bracket.grade).toBe("full"); // NOT opaque from the skipped else-side
   });
 
+  it("a group body returning ANOTHER builder's chain is rejected — no empty bracket (codex R2)", () => {
+    const other = workflow("g-other").setup(async () => ({}));
+    expect(() =>
+      workflow("g-foreign")
+        .setup(async () => ({}))
+        .group("g", (() => other.compute("stray", (s) => s)) as never),
+    ).toThrow(/must return the chain built from the builder it was given/);
+    // …and the same rule protects branch sides
+    expect(() =>
+      workflow("g-foreign-branch")
+        .setup(async () => ({ ok: true }))
+        .branch("route", {
+          when: (w) => w.when((s: { ok: boolean }) => s.ok).eq(true),
+          then: (() => other.compute("stray2", (s) => s)) as never,
+        }),
+    ).toThrow(/must return the chain built from the builder it was given/);
+  });
+
   it("group projects with children and worst-of static grade", () => {
     const wf = workflow("g-proj")
       .setup(async () => ({}))
