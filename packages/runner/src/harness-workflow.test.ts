@@ -405,35 +405,3 @@ export const wf = workflow("wf-group")
   expect(summary.nodeTotal).toBe(2); // bump + verify
   expect(summary.nodePassed).toBe(2);
 });
-
-test("workflow.extend fixtures resolve around the WHOLE graph: setup sees them, teardown ordering holds (S2.15)", async () => {
-  const src = `
-import { workflow as base } from "@glubean/sdk";
-
-const order: string[] = [];
-const workflow = base.extend({
-  inbox: async (ctx, use) => {
-    order.push("fixture-setup");
-    await use({ take: () => "msg-1" });
-    order.push("fixture-teardown");
-    ctx.log("order: " + order.join(","));
-  },
-});
-
-export const wf = workflow("wfx-e2e")
-  .setup(async (ctx) => ({ got: ctx.inbox.take() }))
-  .check("verify", async (ctx, s) => ctx.assert(s.got === "msg-1", "fixture reached setup"))
-  .teardown(async (ctx) => {
-    order.push("wf-teardown");
-  })
-  .build();
-`;
-  const r = await run(src, "wfx-e2e");
-  expect(r.success).toBe(true);
-  expect(nodeEnds(r.events).map((e) => [e.nodeId, e.status])).toEqual([["verify", "passed"]]);
-  // fixture teardown runs AFTER the workflow's own teardown (whole-workflow scope)
-  const logLine = r.events.find(
-    (e) => e.type === "log" && String((e as { message?: unknown }).message).startsWith("order:"),
-  ) as { message: string } | undefined;
-  expect(logLine?.message).toBe("order: fixture-setup,wf-teardown,fixture-teardown");
-});

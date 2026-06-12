@@ -782,23 +782,8 @@ function chainHasBranchFamilyCall(init: AnyNode): boolean {
  * convention (or customFns) would be classified as a plain test and bypass the
  * workflow marker + the --upload branch/poll gate (codex S2.6 R12 P2).
  */
-/** Is `expr` a workflow factory expression — a known alias identifier, or an
- * `.extend({...})` chain (any depth) rooted at one? (codex S2.15 R3 P2:
- * `workflow.extend(a).extend(b)` composes in ONE expression.) */
-function isWorkflowFactoryExpr(expr: AnyNode | undefined, aliases: ReadonlySet<string>): boolean {
-  const e = expr ? unwrapExpression(expr) : undefined;
-  if (!e) return false;
-  if (e.type === "Identifier") return aliases.has(e.name as string);
-  if (!isCallNode(e)) return false;
-  const callee = unwrapExpression(e.callee as AnyNode);
-  if (!callee || !isMemberNode(callee) || callee.computed === true) return false;
-  const prop = callee.property as AnyNode;
-  if (prop.type !== "Identifier" || prop.name !== "extend") return false;
-  return isWorkflowFactoryExpr(callee.object as AnyNode, aliases);
-}
-
-function collectWorkflowAliases(source: SourceFile, seedNames?: string[]): Set<string> {
-  const aliases = new Set<string>(["workflow", ...(seedNames ?? [])]);
+function collectWorkflowAliases(source: SourceFile): Set<string> {
+  const aliases = new Set<string>(["workflow"]);
   const body = (source.program.body as AnyNode[] | undefined) ?? [];
   for (const stmt of body) {
     if (stmt.type !== "ImportDeclaration") continue;
@@ -811,38 +796,8 @@ function collectWorkflowAliases(source: SourceFile, seedNames?: string[]): Set<s
           ? (imported.name as string)
           : (imported?.value as string | undefined); // string import names
       const local = spec.local as AnyNode | undefined;
-      if (local?.type !== "Identifier") continue;
-      if (importedName === "workflow") {
+      if (importedName === "workflow" && local?.type === "Identifier") {
         aliases.add(local.name as string);
-      }
-    }
-  }
-  // `workflow.extend({...})` factories (S2.15): the binding becomes a
-  // workflow factory itself, incl. chained extends — same shape the
-  // test.extend alias collection recognizes. Iterate to a fixed point so
-  // out-of-order chains still resolve (small files; bounded by decl count).
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const stmt of body) {
-      const decl =
-        stmt.type === "VariableDeclaration"
-          ? stmt
-          : stmt.type === "ExportNamedDeclaration" &&
-              (stmt.declaration as AnyNode | undefined)?.type === "VariableDeclaration"
-            ? (stmt.declaration as AnyNode)
-            : undefined;
-      if (!decl) continue;
-      for (const d of (decl.declarations as AnyNode[] | undefined) ?? []) {
-        const id = d.id as AnyNode | undefined;
-        if (id?.type !== "Identifier" || aliases.has(id.name as string)) continue;
-        const init = d.init ? unwrapExpression(d.init as AnyNode) : undefined;
-        if (!init || !isCallNode(init)) continue;
-        // `X.extend({...})` — incl. chains `workflow.extend(a).extend(b)`
-        if (isWorkflowFactoryExpr(init, aliases)) {
-          aliases.add(id.name as string);
-          grew = true;
-        }
       }
     }
   }
@@ -875,52 +830,19 @@ function parseTestDeclaration(
     factoryName = headCallee.name as string;
     metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
   } else if (headCallee.type === "CallExpression") {
-    // Curried: `test.each(data)(...)` / `test.pick(examples)(...)`, or an
-    // INLINE extended factory `workflow.extend({...})("id")` (codex S2.15
-    // R2 P2 — single-use extends never bind an alias, so the alias pass
-    // can't see them).
+    // Curried: `test.each(data)(...)` / `test.pick(examples)(...)`.
     const factoryCallee = unwrapExpression(headCallee.callee as AnyNode);
     if (!factoryCallee || factoryCallee.type !== "MemberExpression" || factoryCallee.computed === true) {
       return undefined;
     }
     const object = factoryCallee.object as AnyNode;
     const property = factoryCallee.property as AnyNode;
-    if (property.type !== "Identifier") return undefined;
-    if (
-      property.name === "extend" &&
-      workflowAliases &&
-      isWorkflowFactoryExpr(headCallee, workflowAliases)
-    ) {
-      // inline extended factory — possibly a CHAIN of extends; root the
-      // classification at the chain's base identifier (codex S2.15 R3 P2)
-      let baseObj: AnyNode | undefined = unwrapExpression(object);
-      while (baseObj && isCallNode(baseObj)) {
-        const c = unwrapExpression(baseObj.callee as AnyNode);
-        baseObj = c && isMemberNode(c) ? unwrapExpression(c.object as AnyNode) : undefined;
-      }
-      factoryName = baseObj?.type === "Identifier" ? (baseObj.name as string) : undefined;
-      metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
-    } else {
-      if (property.name !== "each" && property.name !== "pick") return undefined;
-      if (object.type === "Identifier") {
-        factoryName = object.name as string;
-      } else if (workflowAliases && isWorkflowFactoryExpr(object, workflowAliases)) {
-        // `workflow.extend({...}).each(rows)(...)` — the each receiver is an
-        // extend chain; root at the base identifier (codex S2.15 R4 P2).
-        let baseObj: AnyNode | undefined = unwrapExpression(object);
-        while (baseObj && isCallNode(baseObj)) {
-          const c = unwrapExpression(baseObj.callee as AnyNode);
-          baseObj = c && isMemberNode(c) ? unwrapExpression(c.object as AnyNode) : undefined;
-        }
-        if (baseObj?.type !== "Identifier") return undefined;
-        factoryName = baseObj.name as string;
-      } else {
-        return undefined;
-      }
-      variant = property.name as "each" | "pick";
-      eachArgs = (headCallee.arguments as AnyNode[] | undefined) ?? [];
-      metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
-    }
+    if (object.type !== "Identifier" || property.type !== "Identifier") return undefined;
+    if (property.name !== "each" && property.name !== "pick") return undefined;
+    factoryName = object.name as string;
+    variant = property.name as "each" | "pick";
+    eachArgs = (headCallee.arguments as AnyNode[] | undefined) ?? [];
+    metaArg = (head.arguments as AnyNode[] | undefined)?.[0];
   } else {
     return undefined;
   }
@@ -928,9 +850,8 @@ function parseTestDeclaration(
   // A workflow import alias is always accepted (even when it matches no
   // test-name convention) and always classified as a workflow — the marker
   // must not depend on what the alias happens to look like (codex S2.6 R12).
-  if (!factoryName) return undefined;
   const isWorkflowFactory = workflowAliases?.has(factoryName) ?? factoryName === "workflow";
-  if (!isTestFnName(factoryName, customFns) && !isWorkflowFactory) {
+  if (!factoryName || (!isTestFnName(factoryName, customFns) && !isWorkflowFactory)) {
     return undefined;
   }
 
@@ -1032,15 +953,7 @@ function parseTestDeclaration(
  * — so a malformed file is skipped, not fatal (mirrors the regex version, which
  * never threw).
  */
-export function extractFromSource(
-  content: string,
-  customFns?: string[],
-  /** LOCAL names of imported extended workflow factories, PRE-RESOLVED for
-   * this file by the caller via `resolveExternalWorkflowFns` (codex S2.15
-   * R5/R6/R7 — resolution must be module-aware: renames map, unrelated
-   * same-name imports don't). */
-  externalWorkflowFns?: string[],
-): ExportMeta[] {
+export function extractFromSource(content: string, customFns?: string[]): ExportMeta[] {
   let source;
   try {
     source = parseSource(content);
@@ -1048,10 +961,7 @@ export function extractFromSource(
     return [];
   }
   const fns = customFns && customFns.length > 0 ? new Set([...BASE_FNS, ...customFns]) : undefined;
-  // Pre-resolved LOCAL names seed the alias pass BEFORE its extend fixed
-  // point, so a local re-extend of an imported factory (`const authed =
-  // wf.extend(...)`) classifies too (codex S2.15 R8 P2).
-  const workflowAliases = collectWorkflowAliases(source, externalWorkflowFns);
+  const workflowAliases = collectWorkflowAliases(source);
   const results: ExportMeta[] = [];
   forEachExportedConst(source, (statement, declaration) => {
     const meta = parseTestDeclaration(declaration, statement, fns, workflowAliases);
@@ -1490,21 +1400,13 @@ export function extractPickExamples(
 export function createStaticExtractor(
   readFile: (path: string) => Promise<string>,
   customFns?: string[],
-): (
-  filePath: string,
-  runtimeFns?: string[],
-  workflowFns?: string[],
-) => Promise<ExportMeta[]> {
-  return async (
-    filePath: string,
-    runtimeFns?: string[],
-    workflowFns?: string[],
-  ): Promise<ExportMeta[]> => {
+): (filePath: string, runtimeFns?: string[]) => Promise<ExportMeta[]> {
+  return async (filePath: string, runtimeFns?: string[]): Promise<ExportMeta[]> => {
     const content = await readFile(filePath);
     const merged =
       customFns || runtimeFns
         ? [...new Set([...(customFns ?? []), ...(runtimeFns ?? [])])]
         : undefined;
-    return extractFromSource(content, merged, workflowFns);
+    return extractFromSource(content, merged);
   };
 }

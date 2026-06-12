@@ -7,9 +7,8 @@ import type {
 } from "../contract-flow-condition.js";
 import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
 import { registerTest } from "../internal.js";
-import { EXTEND_RESERVED_KEYS } from "../test/extend.js";
 import { interpolateTemplate, normalizeEachTable } from "../test/utils.js";
-import type { ExtensionFn, Test, TestContext } from "../types.js";
+import type { Test, TestContext } from "../types.js";
 import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
 import { projectWorkflow } from "./project.js";
 import type {
@@ -44,9 +43,7 @@ import type {
  * trunk pre-declared (optional fields / one tagged-union FIELD — never a
  * whole-state union).
  */
-export type StrictSide<State, Ctx extends WorkflowContext = WorkflowContext> = (
-  b: WorkflowBuilder<State, Ctx>,
-) => ChainedWorkflowBuilder<State, Ctx>;
+export type StrictSide<State> = (b: WorkflowBuilder<State>) => ChainedWorkflowBuilder<State>;
 
 /** Phantom brand for builders that came off a CHAIN CALL (not the raw side
  * parameter). Closes the block-body strict-S bypass (codex S2.8 R1 P1):
@@ -58,8 +55,7 @@ export type StrictSide<State, Ctx extends WorkflowContext = WorkflowContext> = (
  * still collects both; that is `as never` territory, same as every other
  * type-layer bypass.) */
 declare const CHAINED: unique symbol;
-export interface ChainedWorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowContext>
-  extends WorkflowBuilder<State, Ctx> {
+export interface ChainedWorkflowBuilder<State> extends WorkflowBuilder<State> {
   readonly [CHAINED]: true;
 }
 
@@ -68,20 +64,20 @@ export interface ChainedWorkflowBuilder<State, Ctx extends WorkflowContext = Wor
  * projectable → `full`) XOR a runtime `whenRuntime` (opaque, requires
  * `message`). `then`/`else` are STRICT-S sub-builders over the same state.
  */
-export type BranchOpts<State, Ctx extends WorkflowContext = WorkflowContext> =
+export type BranchOpts<State> =
   | {
       when: (w: PredicateScope<State>) => BranchPredicate<State>;
       whenRuntime?: never;
       message?: string;
-      then: StrictSide<State, Ctx>;
-      else?: StrictSide<State, Ctx>;
+      then: StrictSide<State>;
+      else?: StrictSide<State>;
     }
   | {
       when?: never;
-      whenRuntime: (ctx: Ctx, state: State) => boolean | Promise<boolean>;
+      whenRuntime: (ctx: WorkflowContext, state: State) => boolean | Promise<boolean>;
       message: string;
-      then: StrictSide<State, Ctx>;
-      else?: StrictSide<State, Ctx>;
+      then: StrictSide<State>;
+      else?: StrictSide<State>;
     };
 
 /**
@@ -92,26 +88,22 @@ export type BranchOpts<State, Ctx extends WorkflowContext = WorkflowContext> =
  * Case predicates are L2-only (a clean decision table — an opaque N-way gate
  * is a nested `branch` with `whenRuntime`, not a switch).
  */
-export type SwitchOpts<State, Ctx extends WorkflowContext = WorkflowContext> =
+export type SwitchOpts<State> =
   | {
       /** value mode: pure lens state → a JSON-scalar discriminant. */
       on: (state: State) => BranchCaseValue | undefined;
-      cases: ReadonlyArray<{
-        value: BranchCaseValue;
-        then: StrictSide<State, Ctx>;
-        label?: string;
-      }>;
-      default?: StrictSide<State, Ctx>;
+      cases: ReadonlyArray<{ value: BranchCaseValue; then: StrictSide<State>; label?: string }>;
+      default?: StrictSide<State>;
     }
   | {
       on?: never;
       /** predicate mode: ordered, possibly-overlapping L2 predicates; first-match. */
       cases: ReadonlyArray<{
         when: (w: PredicateScope<State>) => BranchPredicate<State>;
-        then: StrictSide<State, Ctx>;
+        then: StrictSide<State>;
         label?: string;
       }>;
-      default?: StrictSide<State, Ctx>;
+      default?: StrictSide<State>;
     };
 
 /**
@@ -120,24 +112,24 @@ export type SwitchOpts<State, Ctx extends WorkflowContext = WorkflowContext> =
  * lie to, so strict-S has nothing to protect. `default` is REQUIRED (a
  * no-match must be defined). After `.route()` only `.teardown()/.build()`.
  */
-export type RouteOpts<State, Ctx extends WorkflowContext = WorkflowContext> =
+export type RouteOpts<State> =
   | {
       on: (state: State) => BranchCaseValue | undefined;
       cases: ReadonlyArray<{
         value: BranchCaseValue;
-        then: (b: WorkflowBuilder<State, Ctx>) => WorkflowBuilder<any, Ctx>;
+        then: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
         label?: string;
       }>;
-      default: (b: WorkflowBuilder<State, Ctx>) => WorkflowBuilder<any, Ctx>;
+      default: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
     }
   | {
       on?: never;
       cases: ReadonlyArray<{
         when: (w: PredicateScope<State>) => BranchPredicate<State>;
-        then: (b: WorkflowBuilder<State, Ctx>) => WorkflowBuilder<any, Ctx>;
+        then: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
         label?: string;
       }>;
-      default: (b: WorkflowBuilder<State, Ctx>) => WorkflowBuilder<any, Ctx>;
+      default: (b: WorkflowBuilder<State>) => WorkflowBuilder<any>;
     };
 
 /**
@@ -148,11 +140,8 @@ export type RouteOpts<State, Ctx extends WorkflowContext = WorkflowContext> =
  * accessible without narrowing, which §9 accepts as the contained compromise
  * at the last station.
  */
-export interface TerminalWorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowContext> {
-  teardown(
-    fn: WorkflowTeardown<State, Ctx>,
-    opts?: { timeout?: number },
-  ): TerminalWorkflowBuilder<State, Ctx>;
+export interface TerminalWorkflowBuilder<State> {
+  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): TerminalWorkflowBuilder<State>;
   build(): BuiltWorkflow<State>;
 }
 
@@ -163,7 +152,7 @@ export interface TerminalWorkflowBuilder<State, Ctx extends WorkflowContext = Wo
  * `when`/`whenRuntime` split: the two forms cannot share one key because both
  * are functions and the builder cannot soundly tell them apart.
  */
-export type PollUntil<State, Res, Ctx extends WorkflowContext = WorkflowContext> =
+export type PollUntil<State, Res> =
   | {
       until: (w: PredicateScope<Res>) => BranchPredicate<Res>;
       untilRuntime?: never;
@@ -171,7 +160,11 @@ export type PollUntil<State, Res, Ctx extends WorkflowContext = WorkflowContext>
     }
   | {
       until?: never;
-      untilRuntime: (ctx: Ctx, res: Res, state: State) => boolean | Promise<boolean>;
+      untilRuntime: (
+        ctx: WorkflowContext,
+        res: Res,
+        state: State,
+      ) => boolean | Promise<boolean>;
       message: string;
     };
 
@@ -202,8 +195,7 @@ export type PollOpts<
   RawOutcome,
   AcceptKey,
   Accept extends ReadonlyArray<AcceptKey> = never,
-  Ctx extends WorkflowContext = WorkflowContext,
-> = PollUntil<State, CallResponse<Accept, CaseOutput, RawOutcome>, Ctx> &
+> = PollUntil<State, CallResponse<Accept, CaseOutput, RawOutcome>> &
   PollBounds & {
     /** Pure lens folding the SATISFYING response into the next state. */
     out?: (state: State, res: CallResponse<Accept, CaseOutput, RawOutcome>) => NewState;
@@ -220,8 +212,7 @@ export type PollOptsWithInput<
   RawOutcome,
   AcceptKey,
   Accept extends ReadonlyArray<AcceptKey> = never,
-  Ctx extends WorkflowContext = WorkflowContext,
-> = PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept, Ctx> & {
+> = PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept> & {
   /** Pure lens: workflow state → the case's logical input (required). */
   in: (state: State) => CaseInputs;
 };
@@ -314,20 +305,17 @@ export interface CallBindingsWithInput<
   in: (state: State) => CaseInputs;
 }
 
-export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowContext> {
+export interface WorkflowBuilder<State> {
   /** Merge workflow-level metadata (id is fixed at creation). */
   meta(
     meta: Omit<Partial<WorkflowMeta>, "id" | "templateId" | "groupId" | "parallel">,
-  ): ChainedWorkflowBuilder<State, Ctx>;
+  ): ChainedWorkflowBuilder<State>;
   /** The one I/O-capable initializer; its return is the initial state.
    * `timeout` (ms, §17 #4) is TERMINAL — a timed-out setup fails the run. */
-  setup<S>(fn: WorkflowSetup<S, Ctx>, opts?: { timeout?: number }): ChainedWorkflowBuilder<S, Ctx>;
+  setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number }): ChainedWorkflowBuilder<S>;
   /** Always-run cleanup (see lifecycle decision in the plan's self-consistency
    * corpus). `timeout` (ms, §17 #4) is TERMINAL — logged, never masks the cause. */
-  teardown(
-    fn: WorkflowTeardown<State, Ctx>,
-    opts?: { timeout?: number },
-  ): ChainedWorkflowBuilder<State, Ctx>;
+  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): ChainedWorkflowBuilder<State>;
   /**
    * Use a reusable contract interaction. First arg: node id or `{...NodeMeta}`.
    * Preserves the case's generics (codex slice-1 P2): when the case requires
@@ -346,7 +334,7 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
     ...rest: [CaseInputs] extends [void]
       ? [bindings?: CallBindings<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
       : [bindings: CallBindingsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
-  ): ChainedWorkflowBuilder<NewState, Ctx>;
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * Arbitrary ASYNC state-producing glue (graded partial w/ hints, else opaque).
    * A void-returning action PRESERVES the state type; a value-returning one
@@ -355,20 +343,20 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
    */
   action(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: Ctx, state: State) => Promise<void>,
+    fn: (ctx: WorkflowContext, state: State) => Promise<void>,
     opts?: { project?: ActionProjection; retry?: RetryMeta },
-  ): ChainedWorkflowBuilder<State, Ctx>;
+  ): ChainedWorkflowBuilder<State>;
   action<NewState>(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: Ctx, state: State) => Promise<NewState>,
+    fn: (ctx: WorkflowContext, state: State) => Promise<NewState>,
     opts?: { project?: ActionProjection; retry?: RetryMeta },
-  ): ChainedWorkflowBuilder<NewState, Ctx>;
+  ): ChainedWorkflowBuilder<NewState>;
   /** Arbitrary assertion (graded partial w/ asserts hint, else opaque/trace). */
   check(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: Ctx, state: State) => void | Promise<void>,
+    fn: (ctx: WorkflowContext, state: State) => void | Promise<void>,
     opts?: { project?: CheckProjection },
-  ): ChainedWorkflowBuilder<State, Ctx>;
+  ): ChainedWorkflowBuilder<State>;
   /**
    * Pure SYNCHRONOUS state transform. First arg: node id or `{...NodeMeta}`.
    * Async callbacks are rejected at RUNTIME (the impl throws) — route async work
@@ -377,7 +365,7 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
   compute<NewState = State>(
     idOrMeta: NodeMetaInput,
     fn: (state: State) => NewState,
-  ): ChainedWorkflowBuilder<NewState, Ctx>;
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * 2-way branch (§6.6): run `then` when the predicate holds, else `else`. ONLY the
    * taken side executes; the other is reported `skipped` (§17 #6). Declarative `when`
@@ -395,8 +383,8 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
    * uniqueness).
    */
   use<NewState>(
-    fragment: (b: WorkflowBuilder<State, Ctx>) => ChainedWorkflowBuilder<NewState, Ctx>,
-  ): ChainedWorkflowBuilder<NewState, Ctx>;
+    fragment: (b: WorkflowBuilder<State>) => ChainedWorkflowBuilder<NewState>,
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * A DISPLAY-ONLY grouping bracket (phase4 §2, owner-decided): members run
    * exactly as if the wrapper were absent — same order, same state flow, same
@@ -409,9 +397,9 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
    */
   group<NewState>(
     idOrMeta: NodeMetaInput,
-    body: (b: WorkflowBuilder<State, Ctx>) => ChainedWorkflowBuilder<NewState, Ctx>,
-  ): ChainedWorkflowBuilder<NewState, Ctx>;
-  branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State, Ctx>): ChainedWorkflowBuilder<State, Ctx>;
+    body: (b: WorkflowBuilder<State>) => ChainedWorkflowBuilder<NewState>,
+  ): ChainedWorkflowBuilder<NewState>;
+  branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): ChainedWorkflowBuilder<State>;
   /**
    * N-way CONVERGING dispatch (addendum §9 #4) — the heir of flow's
    * switchOn/switchCond. Value mode (`on` lens + literal case table, ===) XOR
@@ -419,7 +407,7 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
    * STRICT-S; `default` is optional = identity pass-through. Only the taken
    * case executes; the rest are reported skipped (§17 #6).
    */
-  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State, Ctx>): ChainedWorkflowBuilder<State, Ctx>;
+  switch(idOrMeta: NodeMetaInput, opts: SwitchOpts<State>): ChainedWorkflowBuilder<State>;
   /**
    * N-way TERMINAL tree (addendum §9 #5) — paths own their futures; no trunk
    * continues. Cases are unconstrained (`(b) => WorkflowBuilder<any>`);
@@ -427,7 +415,7 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
    * `.teardown()/.build()`. teardown sees the taken leaf's runtime state
    * (typed against the trunk State — §9's contained compromise).
    */
-  route(idOrMeta: NodeMetaInput, opts: RouteOpts<State, Ctx>): TerminalWorkflowBuilder<State, Ctx>;
+  route(idOrMeta: NodeMetaInput, opts: RouteOpts<State>): TerminalWorkflowBuilder<State>;
   /**
    * Bounded poll-until (§6.7, §17 #3): repeat ONE contract case until the exit
    * predicate over the RESPONSE holds. Declarative `until` projects to `full`;
@@ -447,20 +435,9 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
     idOrMeta: NodeMetaInput,
     ref: ContractCaseRef<CaseInputs, CaseOutput, AcceptKey, RawOutcome>,
     ...rest: [CaseInputs] extends [void]
-      ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept, Ctx>]
-      : [
-          opts: PollOptsWithInput<
-            State,
-            NewState,
-            CaseInputs,
-            CaseOutput,
-            RawOutcome,
-            AcceptKey,
-            Accept,
-            Ctx
-          >,
-        ]
-  ): ChainedWorkflowBuilder<NewState, Ctx>;
+      ? [opts: PollOpts<State, NewState, CaseOutput, RawOutcome, AcceptKey, Accept>]
+      : [opts: PollOptsWithInput<State, NewState, CaseInputs, CaseOutput, RawOutcome, AcceptKey, Accept>]
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * Bounded poll over an ARBITRARY async attempt (addendum §4 — the webhook/
    * inbox customer): `.poll`'s twin where the probe is a function instead of a
@@ -472,15 +449,15 @@ export interface WorkflowBuilder<State, Ctx extends WorkflowContext = WorkflowCo
    */
   pollAction<Res, NewState = State>(
     idOrMeta: NodeMetaInput,
-    fn: (ctx: Ctx, state: State) => Res | Promise<Res>,
-    opts: PollUntil<State, Res, Ctx> &
+    fn: (ctx: WorkflowContext, state: State) => Res | Promise<Res>,
+    opts: PollUntil<State, Res> &
       PollBounds & {
         /** Pure lens folding the SATISFYING probe result into the next state. */
         out?: (state: State, res: Res) => NewState;
         /** Dataflow hints for the opaque attempt (projection only). */
         project?: ActionProjection;
       },
-  ): ChainedWorkflowBuilder<NewState, Ctx>;
+  ): ChainedWorkflowBuilder<NewState>;
   /**
    * Finalize into a `BuiltWorkflow`: the Workflow IR + a one-element `Test[]`
    * (a simple test that executes the graph via `runWorkflow`), registered for
@@ -510,12 +487,6 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   /** workflow.each: registration is deferred until EVERY row passes the
    * one-structure validation — set by the engine, never by users. */
   _suppressRegistration = false;
-
-  /** Fixtures from `workflow.extend()` — resolved by the HOST's existing
-   * test-fixture resolver around the whole node graph (phase4 §3: whole-test
-   * scope IS whole-workflow scope; zero executor change). Engine-set. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  _fixtures?: Record<string, ExtensionFn<any>>;
 
   constructor(
     meta: WorkflowMeta,
@@ -1382,7 +1353,6 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         ...(meta.only !== undefined ? { only: meta.only } : {}),
       },
       type: "simple",
-      ...(this._fixtures ? { fixtures: this._fixtures } : {}),
       fn: async (ctx: TestContext) => {
         // No early meta.skip exit here: runWorkflow owns the meta.skip branch
         // and emits each authored node as `skipped` — an explicitly-run
@@ -1492,8 +1462,6 @@ function buildEachMembers<T extends Record<string, unknown>>(
   rows: readonly T[],
   meta: WorkflowEachMeta<T>,
   factory: WorkflowEachFactory<T>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fixtures?: Record<string, ExtensionFn<any>>,
 ): BuiltWorkflow[] {
   {
     if (typeof meta?.id !== "string" || meta.id.length === 0) {
@@ -1561,7 +1529,6 @@ function buildEachMembers<T extends Record<string, unknown>>(
         parallel: meta.parallel === true ? true : undefined,
       } as WorkflowMeta);
       builder._suppressRegistration = true; // registered only after ALL rows validate
-      if (fixtures) builder._fixtures = fixtures;
       const result = factory(builder, row as T);
       // An async factory would add nodes after we build — same hazard as an
       // async branch side (codex S2.4a R5): reject thenables. Consume the
@@ -1597,131 +1564,28 @@ function buildEachMembers<T extends Record<string, unknown>>(
   }
 }
 
-/** Internal each runner — fixtures stay OFF the public surface so the only
- * injection path is workflow.extend()'s validated map (codex S2.15 R1 P2). */
-function runEachInternal<T extends Record<string, unknown>>(
+function workflowEach<T extends Record<string, unknown>>(
   table: readonly T[] | Record<string, T>,
-  meta: WorkflowEachMeta<T>,
-  factory: WorkflowEachFactory<T>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fixtures?: Record<string, ExtensionFn<any>>,
-): BuiltWorkflow[] {
+): (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>) => BuiltWorkflow[] {
   const rows = normalizeEachTable(table);
-  {
-    const members = buildEachMembers(rows, meta, factory, fixtures);
+  return (meta, factory) => {
+    const members = buildEachMembers(rows, meta, factory);
     // Every row validated against the canonical structure — register now
     // (a rejected matrix never reaches the registry; codex S2.12 R3 P2).
     for (const m of members) {
       (m as unknown as { _pendingRegistration?: () => void })._pendingRegistration?.();
     }
     return members;
-  }
-}
-
-function workflowEach<T extends Record<string, unknown>>(
-  table: readonly T[] | Record<string, T>,
-): (meta: WorkflowEachMeta<T>, factory: WorkflowEachFactory<T>) => BuiltWorkflow[] {
-  return (meta, factory) => runEachInternal(table, meta, factory);
-}
-
-/** Reserved fixture names: the test set, plus EVERY ctx member the workflow
- * node scope installs (makeNodeScope's Object.assign keys — codex S2.15 R2
- * P2: a fixture named e.g. "log" would be shadowed by the scope's wrapper,
- * and the wrapper's delegation to base.log would hit the fixture VALUE
- * instead of the real logger). Keep in sync with makeNodeScope. */
-const WORKFLOW_RESERVED_FIXTURE_KEYS = new Set([
-  ...EXTEND_RESERVED_KEYS,
-  // workflow node-scope additions/overrides (makeNodeScope's assign block)
-  "signal",
-  "expect",
-  "validate",
-  // every remaining public TestContext member — a fixture under any of these
-  // names shadows the real API through the scope's prototype chain
-  // (codex S2.15 R4 P2). Keep in sync with the TestContext interface.
-  "action",
-  "assert",
-  "event",
-  "fail",
-  "getMemoryUsage",
-  "log",
-  "metric",
-  "pollUntil",
-  "retryCount",
-  "session",
-  "setTimeout",
-  "skip",
-  "trace",
-  "warn",
-]);
-
-/**
- * An extended `workflow` factory (phase4 §3 — plan fork (b)/(f)): same
- * builder, every body's ctx augmented with the resolved fixtures. ONE fixture
- * system: the map rides `Test.fixtures` and the host's existing test-fixture
- * resolver wraps the whole node graph (resolved before setup, torn down after
- * teardown — whole-workflow scope). Chaining composes maps like test.extend.
- */
-export interface ExtendedWorkflowFactory<Ctx extends WorkflowContext> {
-  (idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined, Ctx>;
-  each<T extends Record<string, unknown>>(
-    table: readonly T[] | Record<string, T>,
-  ): (
-    meta: WorkflowEachMeta<T>,
-    factory: (wf: WorkflowBuilder<undefined, Ctx>, row: T) => unknown,
-  ) => BuiltWorkflow[];
-  /**
-   * Compose more fixtures. Lifecycle fixtures get STRICT typing via an
-   * explicit type argument (Playwright-style — codex S2.15 R16: TS cannot
-   * back-infer `use`'s instance type from a context-sensitive lambda, and an
-   * `any` fallback would forge types):
-   * `wf.extend<{ db: DbClient }>({ db: async (ctx, use) => { ... } })`.
-   * Simple factories (`auth: () => client`) infer without the argument; an
-   * unannotated lifecycle fixture resolves to `unknown` (honest — narrow or
-   * annotate).
-   */
-  extend<F extends Record<string, unknown>>(
-    extensions: { [K in keyof F]: ExtensionFn<F[K]> },
-  ): ExtendedWorkflowFactory<Omit<Ctx, keyof F> & WorkflowContext & F>;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeExtendedWorkflow(allFixtures: Record<string, ExtensionFn<any>>): unknown {
-  for (const key of Object.keys(allFixtures)) {
-    if (WORKFLOW_RESERVED_FIXTURE_KEYS.has(key)) {
-      throw new Error(
-        `Cannot extend workflow context with reserved key "${key}". ` +
-          `Reserved keys: ${[...WORKFLOW_RESERVED_FIXTURE_KEYS].join(", ")}.`,
-      );
-    }
-  }
-  const factory = (idOrMeta: string | WorkflowMeta): WorkflowBuilder<undefined> => {
-    const b = workflowFn(idOrMeta);
-    (b as WorkflowBuilderImpl<undefined>)._fixtures = allFixtures;
-    return b;
   };
-  return Object.assign(factory, {
-    each: <T extends Record<string, unknown>>(table: readonly T[] | Record<string, T>) => {
-      return (meta: WorkflowEachMeta<T>, factoryFn: WorkflowEachFactory<T>) =>
-        runEachInternal(table, meta, factoryFn, allFixtures);
-    },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    extend: (more: Record<string, ExtensionFn<any>>) =>
-      makeExtendedWorkflow({ ...allFixtures, ...more }),
-  });
 }
 
 /** Create a workflow builder. `id` is required (string or `WorkflowMeta`).
  * `workflow.each(table)(metaTemplate, factory)` authors data-driven matrices
- * (addendum §3). `workflow.extend(fixtures)` augments every body's ctx via
- * the host's ONE fixture system (phase4 §3). There is deliberately NO
- * `workflow.pick`: random selection is a test-layer idea — a workflow's
- * declaration inventory must be deterministic (canonicalHash, one version ×
- * N runs), and "hand-run one member" is already covered because every each
- * member is an addressable test (`glubean run -t checkout-us`). Owner
- * decision 2026-06-12. */
+ * (addendum §3). There is deliberately NO `workflow.pick`: random selection
+ * is a test-layer idea — a workflow's declaration inventory must be
+ * deterministic (canonicalHash, one version × N runs), and "hand-run one
+ * member" is already covered because every each member is an addressable
+ * test (`glubean run -t checkout-us`). Owner decision 2026-06-12. */
 export const workflow = Object.assign(workflowFn, {
   each: workflowEach,
-  extend: makeExtendedWorkflow as <F extends Record<string, unknown>>(
-    extensions: { [K in keyof F]: ExtensionFn<F[K]> },
-  ) => ExtendedWorkflowFactory<WorkflowContext & F>,
 });

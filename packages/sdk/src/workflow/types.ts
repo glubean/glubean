@@ -327,17 +327,15 @@ export type V1WorkflowNodeKind =
   | "poll"
   | "group";
 
-export type WorkflowSetup<State, Ctx extends WorkflowContext = WorkflowContext> = (
-  ctx: Ctx,
-) => State | Promise<State>;
+export type WorkflowSetup<State> = (ctx: WorkflowContext) => State | Promise<State>;
 /**
  * Cleanup — ALWAYS runs (§17 #1), even when setup threw. On a setup failure the
  * graph never produced a state, so `state` is `undefined` and `cause` carries the
  * error that aborted the run (otherwise `undefined`). A teardown that itself
  * throws is logged and NEVER masks the primary `cause`.
  */
-export type WorkflowTeardown<State, Ctx extends WorkflowContext = WorkflowContext> = (
-  ctx: Ctx,
+export type WorkflowTeardown<State> = (
+  ctx: WorkflowContext,
   state: State | undefined,
   cause?: unknown,
 ) => void | Promise<void>;

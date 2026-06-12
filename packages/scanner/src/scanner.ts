@@ -7,11 +7,7 @@
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
 import { extractContractCases } from "./extractor-ast.js";
-import {
-  extractAliasesFromSource,
-  buildWorkflowFnRegistry,
-  resolveExternalWorkflowFns,
-} from "./extractor-static.js";
+import { extractAliasesFromSource } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedFlowMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
@@ -45,12 +41,7 @@ export interface Hasher {
 }
 
 /** Metadata extractor interface (runtime-specific) */
-export type MetadataExtractor = (
-  filePath: string,
-  customFns?: string[],
-  /** Project-level workflow.extend factory names (codex S2.15 R5 P2). */
-  workflowFns?: string[],
-) => Promise<ExportMeta[]>;
+export type MetadataExtractor = (filePath: string, customFns?: string[]) => Promise<ExportMeta[]>;
 
 const DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build"];
 const DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"];
@@ -111,40 +102,19 @@ export class Scanner {
     dir: string,
     skipDirs: string[] = DEFAULT_SKIP_DIRS,
     extensions: string[] = DEFAULT_EXTENSIONS,
-  ): Promise<{ aliases?: string[]; workflowFnRegistry: Map<string, string[]> }> {
+  ): Promise<string[] | undefined> {
     const aliases = new Set<string>();
-    // exported extended-workflow factory name → DEFINING file(s). Module-
-    // aware: consumers resolve through their own import specifiers, so
-    // renames map and unrelated same-name imports stay unclassified
-    // (codex S2.15 R7 P2); duplicate names across fixtures modules each keep
-    // their definer (R8 P2).
-    let workflowFnRegistry = new Map<string, string[]>();
     try {
-      const sources: Array<{ path: string; content: string }> = [];
       for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
-        sources.push({ path: filePath, content: await this.fs.readText(filePath) });
-      }
-      // fixed-point build: fixtures files may re-extend each other's exports
-      // across files at any depth (codex S2.15 R9 P2)
-      workflowFnRegistry = buildWorkflowFnRegistry(sources);
-      // Generic (test) aliases come SECOND, excluding names this very file
-      // contributes to the workflow registry — otherwise a workflow factory
-      // name leaks into customFns and an unrelated same-name import is
-      // accepted as a plain test, defeating the module-aware guard
-      // (codex S2.15 R15 P2).
-      for (const { path: filePath, content } of sources) {
+        const content = await this.fs.readText(filePath);
         for (const alias of extractAliasesFromSource(content)) {
-          if (workflowFnRegistry.get(alias)?.includes(filePath)) continue;
           aliases.add(alias);
         }
       }
     } catch {
       // Non-fatal — continue without aliases
     }
-    return {
-      aliases: aliases.size > 0 ? [...aliases] : undefined,
-      workflowFnRegistry,
-    };
+    return aliases.size > 0 ? [...aliases] : undefined;
   }
 
   /**
@@ -264,7 +234,7 @@ export class Scanner {
     }
 
     // Phase 1: collect .extend() aliases from all .ts files
-    const { aliases, workflowFnRegistry } = await this.collectAliases(dir, skipDirs, extensions);
+    const aliases = await this.collectAliases(dir, skipDirs, extensions);
 
     // Phase 2: collect test, contract, and flow files
     const testFiles: string[] = [];
@@ -279,13 +249,7 @@ export class Scanner {
     // Phase 3: Extract test metadata from each test file
     for (const filePath of testFiles) {
       try {
-        const fileContent = await this.fs.readText(filePath);
-        const workflowFns = resolveExternalWorkflowFns(fileContent, filePath, workflowFnRegistry);
-        const exports = await this.extractor(
-          filePath,
-          aliases,
-          workflowFns.length > 0 ? workflowFns : undefined,
-        );
+        const exports = await this.extractor(filePath, aliases);
 
         if (exports.length > 0) {
           const relativePath = this.fs.relative(dir, filePath);
