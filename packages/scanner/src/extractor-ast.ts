@@ -476,7 +476,10 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
       }
     };
     visitTree(scopeBody);
-    for (const fnNode of deferredFns) {
+    const fnQueue = [...deferredFns];
+    while (fnQueue.length > 0) {
+      if (found) return;
+      const fnNode = fnQueue.shift()!;
       const childInherited = new Set(everLive);
       for (const param of (fnNode.params as AnyNode[] | undefined) ?? []) {
         // A default-parameter INITIALIZER referencing a live builder executes
@@ -486,6 +489,10 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         // Initializers can hide ANYWHERE in a destructuring pattern
         // (`({ x = b.branch(...) } = {}) => x` — codex S2.13 R11 P2), so the
         // WHOLE param subtree is searched. Fail closed on the reference.
+        // A CLOSURE inside an initializer (`(x = () => b.branch(...)) =>`)
+        // is invisible to containsLiveIdentifier (it skips nested fns) —
+        // queue it for the same recursive scan as any other nested function
+        // (codex S2.13 R12 P2).
         let liveInitializer = false;
         walk(param, (n) => {
           if (
@@ -493,6 +500,9 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
             containsLiveIdentifier((n as { right?: AnyNode }).right, everLive)
           ) {
             liveInitializer = true;
+          }
+          if (n.type === "ArrowFunctionExpression" || n.type === "FunctionExpression") {
+            fnQueue.push(n);
           }
         });
         if (liveInitializer) {

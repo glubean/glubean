@@ -195,6 +195,21 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a closure inside a parameter default cannot hide a branch (S2.13 R12)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const initClosure = workflow("u-init-closure")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const make = (x = () => b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) })) => x();
+    return make();
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("pattern-nested defaults flag; object-method NAMES don't false-positive (S2.13 R11)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
