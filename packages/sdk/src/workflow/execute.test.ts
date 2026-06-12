@@ -5,6 +5,7 @@ import { contract, __unregisterProtocolForTesting } from "../contract-core.js";
 import { getRegistry as getRegistryForEach } from "../internal.js";
 import type { ContractCaseRef } from "../contract-types.js";
 import { workflow } from "./builder.js";
+import type { WorkflowBuilder } from "./builder.js";
 import { projectWorkflow } from "./project.js";
 import { PollExhaustedError } from "../contract-flow-poll.js";
 import {
@@ -607,16 +608,16 @@ describe("runWorkflow — lifecycle + state threading", () => {
     expect(cause).toBeInstanceOf(WorkflowPhaseFailedError);
   });
 
-  it("duplicate node ids each still get a skipped outcome (codex S2.1 R3 P3)", async () => {
-    const { ctx } = fakeBase();
-    const wf = workflow("dup-ids")
-      .meta({ skip: "discoverable only" })
-      .action({ id: "dup" }, async (_c, s) => s)
-      .action({ id: "dup" }, async (_c, s) => s)
-      .build();
-    const res = await runWorkflow(wf, ctx);
-    expect(res.nodes).toHaveLength(2); // both reported despite the shared id
-    expect(res.nodes.every((n) => n.status === "skipped")).toBe(true);
+  it("duplicate node ids are rejected at BUILD time (S2.13 — supersedes the S2.1 runtime tolerance)", () => {
+    // S2.1 R3 made the executor tolerate duplicates defensively; S2.13 makes
+    // them unreachable: ids address evidence and must be unique.
+    expect(() =>
+      workflow("dup-ids")
+        .meta({ skip: "discoverable only" })
+        .action({ id: "dup" }, async (_c, s) => s)
+        .action({ id: "dup" }, async (_c, s) => s)
+        .build(),
+    ).toThrow(/duplicate node id "dup"/);
   });
 
   it("a node ctx.skip() skips the whole workflow (status skipped, not passed) (codex S2.1 R2)", async () => {
@@ -1193,6 +1194,76 @@ describe("runWorkflow — branch (§17 #6)", () => {
         then: (b: unknown) => b,
       } as never),
     ).toThrow(/requires a non-empty `message`/);
+  });
+});
+
+// --- .use() fragments + duplicate-node-id validation (S2.13, phase4 §1) -------
+
+describe("workflow.use — fragments (phase4 §1)", () => {
+  const withBump = <S extends { n: number }>(b: WorkflowBuilder<S>) =>
+    b.compute("bump", (s) => ({ ...s, n: s.n + 1 }));
+
+  it("applies the fragment in-chain: nodes land on the trunk, state type flows", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("use-basic")
+      .setup(async () => ({ n: 1 }))
+      .use(withBump)
+      .check("verify", async (c, s) => c.assert(s.n === 2, "bumped"))
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.nodes.map((n) => n.id)).toEqual(["bump", "verify"]);
+  });
+
+  it("a fragment returning a DIFFERENT builder's chain throws (identity check)", () => {
+    const other = workflow("use-other").setup(async () => ({ n: 0 }));
+    expect(() =>
+      workflow("use-redirect")
+        .setup(async () => ({ n: 1 }))
+        .use((() => other.compute("stray", (s) => s)) as never),
+    ).toThrow(/must return the chain built from the builder it was given/);
+    // ...and the poisoned trunk refuses to build (half-authored)
+  });
+
+  it("an async fragment is rejected", () => {
+    expect(() =>
+      workflow("use-async")
+        .setup(async () => ({}))
+        .use((async (b: unknown) => b) as never),
+    ).toThrow(/must be synchronous/);
+  });
+
+  it("build() rejects duplicate node ids — incl. a fragment used twice", () => {
+    expect(() =>
+      workflow("use-dup")
+        .setup(async () => ({ n: 1 }))
+        .use(withBump)
+        .use(withBump)
+        .build(),
+    ).toThrow(/duplicate node id "bump"/);
+    // parameterized fragments are the documented answer
+    const makeBump = (prefix: string) => <S extends { n: number }>(b: WorkflowBuilder<S>) =>
+      b.compute(`${prefix}.bump`, (s) => ({ ...s, n: s.n + 1 }));
+    expect(() =>
+      workflow("use-param")
+        .setup(async () => ({ n: 1 }))
+        .use(makeBump("a"))
+        .use(makeBump("b"))
+        .build(),
+    ).not.toThrow();
+  });
+
+  it("duplicate ids inside branch cases are caught too", () => {
+    expect(() =>
+      workflow("dup-nested")
+        .setup(async () => ({ ok: true }))
+        .check("probe", async () => {})
+        .branch("route", {
+          when: (w) => w.when((s: { ok: boolean }) => s.ok).eq(true),
+          then: (b) => b.check("probe", async () => {}), // collides with trunk "probe"
+        })
+        .build(),
+    ).toThrow(/duplicate node id "probe"/);
   });
 });
 

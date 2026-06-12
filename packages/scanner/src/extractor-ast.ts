@@ -189,6 +189,135 @@ function walkSameScope(
 /** The branch-family + poll method names the Cloud-render gate flags. */
 const BRANCH_FAMILY_METHODS = new Set(["branch", "poll", "pollAction", "switch", "route"]);
 
+/** Chain methods that DELEGATE part of the graph to a callback argument —
+ * the callback is scanned like an each-factory; references fail closed.
+ * S2.14 adds "group"; S2.13 starts with "use" (phase4 §4's shared rule). */
+const DELEGATING_CHAIN_METHODS = new Set(["use"]);
+
+/** Descend a receiver/initializer expression to its root identifier. */
+function chainRootOf(expr: AnyNode | undefined): AnyNode | undefined {
+  let root: AnyNode | undefined = expr ? unwrapExpression(expr) : undefined;
+  while (root && root.type === "CallExpression") {
+    const innerCallee = unwrapExpression(root.callee as AnyNode);
+    if (innerCallee?.type === "MemberExpression") {
+      root = unwrapExpression(innerCallee.object as AnyNode);
+    } else {
+      break;
+    }
+  }
+  return root;
+}
+
+/**
+ * The ONE shared rule (phase4 §4): any construct handing graph authorship to
+ * a callback — each/pick factories, `.use(` fragments, (S2.14) `.group(`
+ * bodies — is scanned with the binding-aware live/everLive dataflow
+ * (codex S2.12 R2/R4/R10/R12/R13/R14/R15/R18) when INLINE.
+ *
+ * Returns `true` (branch-family call rooted at the builder found), `false`
+ * (inline and clean), or `undefined` (not an inspectable inline function —
+ * the caller fails CLOSED).
+ */
+function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefined {
+  if (
+    !fn ||
+    (fn.type !== "ArrowFunctionExpression" && fn.type !== "FunctionExpression")
+  ) {
+    return undefined;
+  }
+  const params = fn.params as AnyNode[] | undefined;
+  const builderParam = params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
+  if (!builderParam) return undefined; // destructured/absent — cannot root the dataflow
+  let found = false;
+  // Per-scope dataflow: every scope folds its own bindings into the inherited
+  // builder-name set in SOURCE ORDER, detects calls against the live set, then
+  // recurses into nested functions with the everLive snapshot (closures
+  // capture bindings — see the S2.12 R14/R15 commit messages for the cases).
+  const scanScope = (scopeBody: AnyNode, inherited: ReadonlySet<string>): void => {
+    const live = new Set(inherited);
+    const everLive = new Set(inherited);
+    const bind = (
+      nameNode: AnyNode | undefined,
+      valueExpr: AnyNode | undefined,
+      isDeclaration: boolean,
+    ): void => {
+      if (nameNode?.type !== "Identifier") return;
+      const name = nameNode.name as string;
+      const root = chainRootOf(valueExpr);
+      if (root?.type === "Identifier" && live.has(root.name as string)) {
+        live.add(name);
+        everLive.add(name);
+      } else if (valueExpr !== undefined) {
+        live.delete(name);
+        if (isDeclaration) everLive.delete(name);
+      }
+    };
+    const deferredFns: AnyNode[] = [];
+    walkSameScope(
+      scopeBody,
+      (n) => {
+        if (n.type === "VariableDeclarator") {
+          bind(n.id as AnyNode, n.init as AnyNode | undefined, true);
+          return;
+        }
+        if (n.type === "AssignmentExpression" && n.operator === "=") {
+          bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode, false);
+          return;
+        }
+        if (found || n.type !== "CallExpression") return;
+        const callee = unwrapExpression(n.callee as AnyNode);
+        const calleeProp =
+          callee?.type === "MemberExpression" && callee.computed !== true
+            ? (callee.property as AnyNode)
+            : undefined;
+        const methodName = calleeProp?.type === "Identifier" ? (calleeProp.name as string) : undefined;
+        // Nested delegation (`b.use(innerFragment)`): recurse into inline
+        // callbacks; references fail closed — BEFORE the generic
+        // argument-delegation check so an inline-and-clean fragment doesn't
+        // false-positive on its own builder argument.
+        if (
+          methodName !== undefined &&
+          DELEGATING_CHAIN_METHODS.has(methodName) &&
+          (() => {
+            const root = chainRootOf(callee!.object as AnyNode);
+            return root?.type === "Identifier" && live.has(root.name as string);
+          })()
+        ) {
+          const arg = (n.arguments as AnyNode[] | undefined)?.[0];
+          const verdict = scanCallbackForBranchFamily(arg ? unwrapExpression(arg) : undefined);
+          if (verdict !== false) found = true;
+          return;
+        }
+        // DELEGATION fails closed (codex S2.12 R18 P2): passing a live
+        // builder to any call (`makeFlow(wf)`) hands the graph to code this
+        // scan cannot see.
+        for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
+          const argRoot = chainRootOf(arg);
+          if (argRoot?.type === "Identifier" && live.has(argRoot.name as string)) {
+            found = true;
+            return;
+          }
+        }
+        if (methodName === undefined || !BRANCH_FAMILY_METHODS.has(methodName)) return;
+        const root = chainRootOf(callee!.object as AnyNode);
+        if (root?.type === "Identifier" && live.has(root.name as string)) {
+          found = true;
+        }
+      },
+      (fnNode) => deferredFns.push(fnNode),
+    );
+    for (const fnNode of deferredFns) {
+      const childInherited = new Set(everLive);
+      for (const param of (fnNode.params as AnyNode[] | undefined) ?? []) {
+        if (param.type === "Identifier") childInherited.delete(param.name as string);
+      }
+      scanScope(fnNode.body as AnyNode, childInherited);
+    }
+  };
+  scanScope(fn.body as AnyNode, new Set([builderParam]));
+  return found;
+}
+
 /** Does the builder chain ITSELF (callee descent, never arguments) contain a
  * branch-family call? */
 function chainHasBranchFamilyCall(init: AnyNode): boolean {
@@ -198,8 +327,16 @@ function chainHasBranchFamilyCall(init: AnyNode): boolean {
     if (!callee) return false;
     if (callee.type === "MemberExpression" && callee.computed !== true) {
       const property = callee.property as AnyNode;
-      if (property.type === "Identifier" && BRANCH_FAMILY_METHODS.has(property.name as string)) {
-        return true;
+      if (property.type === "Identifier") {
+        const name = property.name as string;
+        if (BRANCH_FAMILY_METHODS.has(name)) return true;
+        if (DELEGATING_CHAIN_METHODS.has(name)) {
+          // `.use(fragment)` on the chain: scan an inline fragment; a
+          // reference fails closed (phase4 §1.4 / §4 — the R18 rule).
+          const arg = ((node as AnyNode).arguments as AnyNode[] | undefined)?.[0];
+          const verdict = scanCallbackForBranchFamily(arg ? unwrapExpression(arg) : undefined);
+          if (verdict !== false) return true;
+        }
       }
       node = unwrapExpression(callee.object as AnyNode);
     } else {
@@ -366,140 +503,13 @@ function parseTestDeclaration(
     // (codex S2.12 R1 P1).
     if (!hasBranchOrPoll && (variant === "each" || variant === "pick")) {
       const factoryArg = (head.arguments as AnyNode[] | undefined)?.[1];
-      const factory = factoryArg ? unwrapExpression(factoryArg) : undefined;
-      if (
-        factory &&
-        factory.type !== "ArrowFunctionExpression" &&
-        factory.type !== "FunctionExpression"
-      ) {
-        // A helper-reference factory (`workflow.each(rows)(meta, makeFlow)`)
-        // cannot be inspected statically, and test files are never runtime
-        // re-extracted — fail CLOSED so a branch/poll graph inside the helper
-        // can't slip past the upload gate (codex S2.12 R9 P2). Inline the
-        // factory (or move the workflow to a .flow.ts) to lift the flag.
-        hasBranchOrPoll = true;
-      } else if (
-        factory &&
-        (factory.type === "ArrowFunctionExpression" || factory.type === "FunctionExpression")
-      ) {
-        const params = factory.params as AnyNode[] | undefined;
-        const builderParam =
-          params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
-        if (builderParam) {
-          const rootOf = (expr: AnyNode | undefined): AnyNode | undefined => {
-            let root: AnyNode | undefined = expr ? unwrapExpression(expr) : undefined;
-            while (root && root.type === "CallExpression") {
-              const innerCallee = unwrapExpression(root.callee as AnyNode);
-              if (innerCallee?.type === "MemberExpression") {
-                root = unwrapExpression(innerCallee.object as AnyNode);
-              } else {
-                break;
-              }
-            }
-            return root;
-          };
-          // Per-scope dataflow (codex S2.12 R2/R4/R10/R12/R13): every scope —
-          // the factory body and each nested function — first folds its own
-          // bindings into the inherited builder-name set, then detects calls,
-          // then recurses. A declaration/assignment whose right side roots at
-          // a live builder name ADDS an alias (`const base = wf.setup(...)`,
-          // `let b; b = wf.setup(...)` — top-level or nested); one rooting
-          // anywhere else SHADOWS the name (`const wf = makeClient()`).
-          // Nested function params that collide also shadow.
-          // ONE source-order traversal per scope: bindings mutate the live
-          // name set as they are encountered, so `let b = wf; b.branch(...);
-          // b = client` flags (the call precedes the reassignment) while
-          // `b = client; b.branch(...)` stays clean (codex S2.12 R14 P2).
-          // Nested functions are recursed with a SNAPSHOT of the names live at
-          // their definition point.
-          // Two name sets per scope (codex S2.12 R15 P2 — closures capture
-          // BINDINGS, not snapshot values):
-          //  - `live`: precise source-order state, used for THIS scope's call
-          //    detection (`b = client; b.branch()` stays clean).
-          //  - `everLive`: what nested closures inherit. A DECLARATION creates
-          //    a new binding, so a foreign-initialized declaration removes the
-          //    name from both. A plain ASSIGNMENT mutates an existing binding
-          //    whose read time a closure controls — once a builder flowed
-          //    through it, the name stays in everLive (fail closed:
-          //    `let base; const make = () => base.branch(...); base =
-          //    wf.setup(...)` flags).
-          const scanScope = (scopeBody: AnyNode, inherited: ReadonlySet<string>): void => {
-            const live = new Set(inherited);
-            const everLive = new Set(inherited);
-            const bind = (
-              nameNode: AnyNode | undefined,
-              valueExpr: AnyNode | undefined,
-              isDeclaration: boolean,
-            ): void => {
-              if (nameNode?.type !== "Identifier") return;
-              const name = nameNode.name as string;
-              const root = rootOf(valueExpr);
-              if (root?.type === "Identifier" && live.has(root.name as string)) {
-                live.add(name);
-                everLive.add(name);
-              } else if (valueExpr !== undefined) {
-                live.delete(name);
-                if (isDeclaration) everLive.delete(name);
-              }
-            };
-            const deferredFns: AnyNode[] = [];
-            walkSameScope(
-              scopeBody,
-              (n) => {
-                if (n.type === "VariableDeclarator") {
-                  bind(n.id as AnyNode, n.init as AnyNode | undefined, true);
-                  return;
-                }
-                if (n.type === "AssignmentExpression" && n.operator === "=") {
-                  bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode, false);
-                  return;
-                }
-                if (hasBranchOrPoll || n.type !== "CallExpression") return;
-                // DELEGATION fails closed (codex S2.12 R18 P2): passing a
-                // live builder to any call (`makeFlow(wf)`) hands the graph
-                // to code this scan cannot see — and test files are never
-                // runtime re-extracted. Inline the graph (or move it to a
-                // .flow.ts) to lift the flag.
-                for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
-                  const argRoot = rootOf(arg);
-                  if (argRoot?.type === "Identifier" && live.has(argRoot.name as string)) {
-                    hasBranchOrPoll = true;
-                    return;
-                  }
-                }
-                const callee = unwrapExpression(n.callee as AnyNode);
-                if (!callee || callee.type !== "MemberExpression" || callee.computed === true) {
-                  return;
-                }
-                const property = callee.property as AnyNode;
-                if (
-                  property.type !== "Identifier" ||
-                  !BRANCH_FAMILY_METHODS.has(property.name as string)
-                ) {
-                  return;
-                }
-                // Only calls whose receiver chain bottoms out at a LIVE
-                // builder name count — foreign receivers stay clean.
-                const root = rootOf(callee.object as AnyNode);
-                if (root?.type === "Identifier" && live.has(root.name as string)) {
-                  hasBranchOrPoll = true;
-                }
-              },
-              (fn) => deferredFns.push(fn),
-            );
-            // Recurse AFTER the full scope is processed — closures see the
-            // binding's whole lifetime, not its state at the definition line.
-            for (const fn of deferredFns) {
-              const childInherited = new Set(everLive);
-              for (const param of (fn.params as AnyNode[] | undefined) ?? []) {
-                if (param.type === "Identifier") childInherited.delete(param.name as string);
-              }
-              scanScope(fn.body as AnyNode, childInherited);
-            }
-          };
-          scanScope(factory.body as AnyNode, new Set([builderParam]));
-        }
-      }
+      // The graph lives in the factory callback. Inline bodies get the
+      // binding-aware scan; references fail CLOSED (codex S2.12 R9/R18 —
+      // test files are never runtime re-extracted).
+      const verdict = scanCallbackForBranchFamily(
+        factoryArg ? unwrapExpression(factoryArg) : undefined,
+      );
+      if (verdict !== false) hasBranchOrPoll = true;
     }
     if (hasBranchOrPoll) result.workflowHasBranchOrPoll = true;
   }

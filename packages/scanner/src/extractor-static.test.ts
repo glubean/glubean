@@ -163,6 +163,38 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test(".use() fragments: inline scanned precisely; references fail closed (S2.13)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { importedFragment } from "./fragments";
+
+// inline fragment WITH a branch — must flag
+export const inlineBranch = workflow("u-branch")
+  .setup(async () => ({ ok: true }))
+  .use((b) => b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) }))
+  .build();
+
+// inline LINEAR fragment — must NOT flag
+export const inlineLinear = workflow("u-linear")
+  .setup(async () => ({ n: 1 }))
+  .use((b) => b.compute("bump", (s) => ({ n: s.n + 1 })))
+  .build();
+
+// imported fragment reference — uninspectable, fails closed
+export const delegated = workflow("u-delegated")
+  .setup(async () => ({}))
+  .use(importedFragment)
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-branch": true,
+    "u-linear": false,
+    "u-delegated": true, // fail closed
+  });
+});
+
 test("DELEGATING the builder to an uninspectable call fails closed (S2.12 R18)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

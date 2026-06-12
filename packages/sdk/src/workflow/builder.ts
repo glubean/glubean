@@ -369,6 +369,19 @@ export interface WorkflowBuilder<State> {
    * projects to `full`; runtime `whenRuntime` is opaque and needs a `message`. The
    * branch does not change the State type — sub-graph state writes apply at runtime.
    */
+  /**
+   * Apply a reusable FRAGMENT in-chain (phase4 §1): a fragment is a plain
+   * typed function over the builder; `.use(f)` is `f(this)` without breaking
+   * the chain. Zero new semantics — the fragment's nodes land on the trunk
+   * exactly as if hand-written. The fragment must return ITS OWN chain (the
+   * CHAINED brand rejects the bare parameter at the type level, and a
+   * runtime check rejects a chain from a DIFFERENT builder). A fragment
+   * meant for reuse parameterizes its node ids (build() enforces global
+   * uniqueness).
+   */
+  use<NewState>(
+    fragment: (b: WorkflowBuilder<State>) => ChainedWorkflowBuilder<NewState>,
+  ): ChainedWorkflowBuilder<NewState>;
   branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): ChainedWorkflowBuilder<State>;
   /**
    * N-way CONVERGING dispatch (addendum §9 #4) — the heir of flow's
@@ -682,6 +695,36 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       };
       this._nodes.push(node as WorkflowNode);
       return this;
+    });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  use(fragment: (b: WorkflowBuilder<State>) => unknown): any {
+    return this.authoring(() => {
+      this.assertNotBuilt("use");
+      if (typeof fragment !== "function") {
+        throw new Error(`workflow.use() on "${this._meta.id}": a fragment function is required`);
+      }
+      const result = fragment(this);
+      // An async fragment would add nodes after the chain moved on — same
+      // hazard as an async branch side (codex S2.4a R5).
+      if (result && typeof (result as { then?: unknown }).then === "function") {
+        throw new Error(
+          `workflow.use() on "${this._meta.id}": the fragment must be synchronous — an ` +
+            `async fragment loses any steps added after an await`,
+        );
+      }
+      // The CHAINED brand is type-only — a fragment returning a chain built
+      // from a DIFFERENT workflow() satisfies the type while redirecting
+      // every subsequent trunk call to that other builder and leaving this
+      // one half-authored (codex phase4 design-R1). Identity, not shape.
+      if (result !== this) {
+        throw new Error(
+          `workflow.use() on "${this._meta.id}": the fragment must return the chain built ` +
+            `from the builder it was given — it returned ${result === undefined ? "undefined" : "a different builder/value"}`,
+        );
+      }
+      return this.chained();
     });
   }
 
@@ -1085,6 +1128,36 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     return child._nodes.slice();
   }
 
+  /**
+   * Node ids must be UNIQUE across the whole graph (S2.13 / phase4 §1.3):
+   * evidence addressing (§17 #9), summary folding (per-nodeId last-wins) and
+   * Cloud rendering all assume it, and a fragment used twice (.use) would
+   * silently collide. Walks the trunk plus branch-family cases/default and
+   * group children; throws naming both occurrences.
+   */
+  private static assertUniqueNodeIds(nodes: readonly WorkflowNode[], wfId: string): void {
+    const seen = new Map<string, string>();
+    const visit = (node: WorkflowNode, path: string): void => {
+      const where = path ? `${path} > ${node.meta.id}` : node.meta.id;
+      const prior = seen.get(node.meta.id);
+      if (prior !== undefined) {
+        throw new Error(
+          `workflow "${wfId}": duplicate node id "${node.meta.id}" (first at ${prior}, ` +
+            `again at ${where}) — node ids address evidence and must be unique; a reused ` +
+            `fragment should parameterize its ids (e.g. makeLogin(prefix))`,
+        );
+      }
+      seen.set(node.meta.id, where);
+      if (node.kind === "branch") {
+        for (const c of node.cases) for (const n of c.nodes) visit(n, where);
+        for (const n of node.default ?? []) visit(n, where);
+      } else if (node.kind === "group") {
+        for (const n of node.nodes) visit(n, where);
+      }
+    };
+    for (const n of nodes) visit(n, "");
+  }
+
   build(): BuiltWorkflow<State> {
     // A branch/poll sub-builder is not an independent workflow: building one
     // would register a bogus top-level entry under the parent id carrying only
@@ -1106,6 +1179,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         `workflow "${this._meta.id}" cannot build — an earlier authoring call failed: ${causeMsg}`,
       );
     }
+    WorkflowBuilderImpl.assertUniqueNodeIds(this._nodes, this._meta.id);
     const meta = this._meta;
 
     // The single simple Test that executes the graph (mirrors the flow's
