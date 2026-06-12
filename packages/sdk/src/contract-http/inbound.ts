@@ -67,17 +67,26 @@ export async function createLocalInbox(options?: {
   path?: string;
   /** Port to listen on (default 0 = ephemeral). */
   port?: number;
+  /** Host to bind (default 127.0.0.1 — loopback only; wildcard binding
+   * would expose the receiver on external interfaces and trips
+   * loopback-only sandbox policies — codex I1-R1 P2). */
+  host?: string;
 }): Promise<ReceiverHandle> {
   const unclaimed: InboundDelivery[] = [];
   const claimed = new Set<string>();
   let seq = 0;
 
   const server: Server = createServer((req, res) => {
-    let body = "";
-    req.on("data", (chunk: Buffer | string) => {
-      body += chunk;
+    // Collect raw Buffer chunks and decode ONCE: per-chunk string coercion
+    // would decode each chunk separately, corrupting multi-byte UTF-8
+    // sequences split across TCP chunks — and rawBody is the HMAC input
+    // (codex I1-R1 P2).
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });
     req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
       const url = new URL(req.url ?? "/", "http://localhost");
       if (options?.path !== undefined && url.pathname !== options.path) {
         res.statusCode = 404;
@@ -103,9 +112,10 @@ export async function createLocalInbox(options?: {
     });
   });
 
+  const host = options?.host ?? "127.0.0.1";
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(options?.port ?? 0, () => resolve());
+    server.listen(options?.port ?? 0, host, () => resolve());
   });
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;
@@ -115,7 +125,7 @@ export async function createLocalInbox(options?: {
     claim: (id: string) => {
       claimed.add(id);
     },
-    url: `http://127.0.0.1:${port}${options?.path ?? ""}`,
+    url: `http://${host}:${port}${options?.path ?? ""}`,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));

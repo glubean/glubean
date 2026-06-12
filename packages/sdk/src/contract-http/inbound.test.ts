@@ -26,6 +26,17 @@ describe("createLocalInbox (I1)", () => {
     }
   });
 
+  it("multi-byte UTF-8 bodies survive chunked transfer intact (HMAC fidelity, codex R1)", async () => {
+    const inbox = await createLocalInbox();
+    try {
+      const raw = JSON.stringify({ note: "支付完成 ✓ — naïve café", emoji: "🎉".repeat(2000) });
+      await post(inbox.url, raw, { "content-type": "application/json" });
+      expect(inbox.deliveries()[0].rawBody).toBe(raw); // byte-faithful through chunking
+    } finally {
+      await inbox.close();
+    }
+  });
+
   it("claim is NON-DESTRUCTIVE for others: only the claimed delivery disappears", async () => {
     const inbox = await createLocalInbox();
     try {
