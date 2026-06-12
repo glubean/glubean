@@ -1197,6 +1197,67 @@ describe("runWorkflow — branch (§17 #6)", () => {
   });
 });
 
+// --- workflow.extend(): fixtures via the ONE fixture system (S2.15, phase4 §3) -
+
+describe("workflow.extend — fixtures (phase4 §3)", () => {
+  it("the fixture map rides Test.fixtures; bodies see the augmented Ctx type", async () => {
+    const wf = workflow.extend({
+      inbox: () => ({ take: () => "msg-1" }),
+    });
+    const built = wf("wfx-basic")
+      .setup(async (ctx) => ({ got: ctx.inbox.take() })) // typed: ctx.inbox
+      .check("verify", async (ctx, s) => {
+        ctx.assert(s.got === "msg-1" || typeof s.got === "string", "fixture value flowed");
+      })
+      .build();
+    // the runnable half carries the fixtures for the HOST's resolver
+    const test = built[0] as { fixtures?: Record<string, unknown> };
+    expect(typeof test.fixtures?.inbox).toBe("function");
+    // registry/projection untouched by fixtures (capability plumbing, not graph)
+    expect(built._projection.nodes.map((n) => n.id)).toEqual(["verify"]);
+  });
+
+  it("chained extend composes maps; later keys win", () => {
+    const base = workflow.extend({ a: () => 1 });
+    const both = base.extend({ b: () => 2 });
+    const built = both("wfx-chain")
+      .setup(async (ctx) => ({ sum: (ctx.a as number) + (ctx.b as number) }))
+      .compute("noop", (s) => s)
+      .build();
+    const test = built[0] as { fixtures?: Record<string, unknown> };
+    expect(Object.keys(test.fixtures ?? {}).sort()).toEqual(["a", "b"]);
+  });
+
+  it("reserved keys are rejected — incl. workflow's own `signal`", () => {
+    expect(() => workflow.extend({ signal: () => "x" } as never)).toThrow(
+      /reserved key "signal"/,
+    );
+    expect(() => workflow.extend({ vars: () => "x" } as never)).toThrow(/reserved key "vars"/);
+  });
+
+  it("extended each: every member carries the fixtures", () => {
+    const wf = workflow.extend({ auth: () => "token" });
+    const members = wf.each([{ region: "us" }, { region: "eu" }])(
+      { id: "wfx-$region" },
+      (b, row) => b.setup(async (ctx) => ({ t: ctx.auth, r: row.region })),
+    );
+    expect(members).toHaveLength(2);
+    for (const m of members) {
+      expect(typeof (m[0] as { fixtures?: Record<string, unknown> }).fixtures?.auth).toBe(
+        "function",
+      );
+    }
+  });
+
+  it("plain workflow() stays fixture-free", () => {
+    const built = workflow("wfx-plain")
+      .setup(async () => ({}))
+      .compute("c", (s) => s)
+      .build();
+    expect((built[0] as { fixtures?: unknown }).fixtures).toBeUndefined();
+  });
+});
+
 // --- .group(): display-only bracket (S2.14, phase4 §2) -------------------------
 
 describe("workflow.group — display-only bracket (phase4 §2)", () => {

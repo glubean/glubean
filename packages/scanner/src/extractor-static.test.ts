@@ -163,6 +163,33 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test("workflow.extend factories are recognized as workflow factories (S2.15)", () => {
+  const content = `
+import { workflow as base } from "@glubean/sdk";
+
+const workflow2 = base.extend({ inbox: () => ({}) });
+const workflow3 = workflow2.extend({ auth: () => "t" });
+
+export const extended = workflow2("wfx-one")
+  .setup(async (ctx) => ({}))
+  .compute("c", (s) => s)
+  .build();
+
+export const chained = workflow3("wfx-two")
+  .setup(async (ctx) => ({ ok: true }))
+  .branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c2", (s) => s) })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(
+    result.map((m) => [m.id, [m.workflow ?? false, m.workflowHasBranchOrPoll ?? false]]),
+  );
+  expect(byId).toEqual({
+    "wfx-one": [true, false],
+    "wfx-two": [true, true], // chained extend + branch still gated
+  });
+});
+
 test(".group() bodies are scanned like fragments (S2.14)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

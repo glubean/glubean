@@ -801,6 +801,43 @@ function collectWorkflowAliases(source: SourceFile): Set<string> {
       }
     }
   }
+  // `workflow.extend({...})` factories (S2.15): the binding becomes a
+  // workflow factory itself, incl. chained extends — same shape the
+  // test.extend alias collection recognizes. Iterate to a fixed point so
+  // out-of-order chains still resolve (small files; bounded by decl count).
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const stmt of body) {
+      const decl =
+        stmt.type === "VariableDeclaration"
+          ? stmt
+          : stmt.type === "ExportNamedDeclaration" &&
+              (stmt.declaration as AnyNode | undefined)?.type === "VariableDeclaration"
+            ? (stmt.declaration as AnyNode)
+            : undefined;
+      if (!decl) continue;
+      for (const d of (decl.declarations as AnyNode[] | undefined) ?? []) {
+        const id = d.id as AnyNode | undefined;
+        if (id?.type !== "Identifier" || aliases.has(id.name as string)) continue;
+        const init = d.init ? unwrapExpression(d.init as AnyNode) : undefined;
+        if (!init || !isCallNode(init)) continue;
+        const callee = unwrapExpression(init.callee as AnyNode);
+        if (!callee || !isMemberNode(callee) || callee.computed === true) continue;
+        const prop = callee.property as AnyNode;
+        const obj = unwrapExpression(callee.object as AnyNode);
+        if (
+          prop.type === "Identifier" &&
+          prop.name === "extend" &&
+          obj?.type === "Identifier" &&
+          aliases.has(obj.name as string)
+        ) {
+          aliases.add(id.name as string);
+          grew = true;
+        }
+      }
+    }
+  }
   return aliases;
 }
 
