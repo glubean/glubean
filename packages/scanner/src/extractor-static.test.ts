@@ -311,6 +311,50 @@ export const x = authed("id");`,
     ),
   ).toEqual(["authed"]);
 
+  // BARREL re-exports make the barrel a definer too (codex R14)
+  const barrelRegistry = buildWorkflowFnRegistry([
+    {
+      path: "/proj/fixtures/base.ts",
+      content: `import { workflow } from "@glubean/sdk";
+export const wf = workflow.extend({ a: () => 1 });`,
+    },
+    {
+      path: "/proj/fixtures/index.ts",
+      content: `export { wf } from "./base";
+export { wf as journey } from "./base";`,
+    },
+  ]);
+  expect(barrelRegistry.get("wf")?.sort()).toEqual([
+    "/proj/fixtures/base.ts",
+    "/proj/fixtures/index.ts",
+  ]);
+  expect(barrelRegistry.get("journey")).toEqual(["/proj/fixtures/index.ts"]);
+  expect(
+    resolveExternalWorkflowFns(
+      `import { wf } from "../fixtures";
+export const x = wf("id");`,
+      "/proj/tests/z.test.ts",
+      barrelRegistry,
+    ),
+  ).toEqual(["wf"]);
+
+  // export * barrels forward every name (codex R14)
+  const starRegistry = buildWorkflowFnRegistry([
+    {
+      path: "/proj/fixtures/base.ts",
+      content: `import { workflow } from "@glubean/sdk";
+export const wf = workflow.extend({ a: () => 1 });`,
+    },
+    {
+      path: "/proj/fixtures/index.ts",
+      content: `export * from "./base";`,
+    },
+  ]);
+  expect(starRegistry.get("wf")?.sort()).toEqual([
+    "/proj/fixtures/base.ts",
+    "/proj/fixtures/index.ts",
+  ]);
+
   // a LOCAL re-extend of an imported factory classifies too (codex R8):
   // pre-resolved names seed the extend fixed point
   const reExtend = `

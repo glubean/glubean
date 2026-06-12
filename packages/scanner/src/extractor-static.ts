@@ -241,6 +241,12 @@ export function buildWorkflowFnRegistry(
     registry.set(name, existing);
     return true;
   };
+  // SUPPORTED module-graph shapes end here (option-D boundary): direct
+  // imports, renames, cross-file extend chains, js/mjs/cjs specifiers,
+  // annotated exports, root-level files, and the barrel re-exports below.
+  // Dynamic shapes (tsconfig path aliases, package self-references,
+  // computed re-exports) are answered by the authoring conventions in
+  // CLAUDE.md, not more resolution code.
   let grew = true;
   while (grew) {
     grew = false;
@@ -249,9 +255,51 @@ export function buildWorkflowFnRegistry(
       for (const name of extractWorkflowExtendAliasesFromSource(content, seeds)) {
         if (add(name, path)) grew = true;
       }
+      // Barrel re-exports (codex S2.15 R14 P2): `export { wf } from "./base"`
+      // (with optional rename) and `export * from "./base"` make the BARREL
+      // a defining file for those names too, so consumers importing the
+      // barrel resolve.
+      const stripped = stripComments(content);
+      const named = /export\s*\{([^}]*)\}\s*from\s*["'](\.[^"']+)["']/g;
+      let nm;
+      while ((nm = named.exec(stripped)) !== null) {
+        const [, specs, source] = nm;
+        for (const spec of specs.split(",")) {
+          const sm = spec.match(/^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/);
+          if (!sm) continue;
+          const fromName = sm[1];
+          const toName = sm[2] ?? sm[1];
+          if (sourceDefines(path, source, fromName, registry) && add(toName, path)) grew = true;
+        }
+      }
+      const star = /export\s*\*\s*from\s*["'](\.[^"']+)["']/g;
+      let sm2;
+      while ((sm2 = star.exec(stripped)) !== null) {
+        const source = sm2[1];
+        for (const name of [...registry.keys()]) {
+          if (sourceDefines(path, source, name, registry) && add(name, path)) grew = true;
+        }
+      }
     }
   }
   return registry;
+}
+
+/** Does `source` (a relative specifier in the file at `fromPath`) resolve to
+ * a file the registry lists as a definer of `name`? */
+function sourceDefines(
+  fromPath: string,
+  source: string,
+  name: string,
+  registry: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  return (
+    resolveExternalWorkflowFns(
+      `import { ${name} } from "${source}";`,
+      fromPath,
+      registry,
+    ).length > 0
+  );
 }
 
 /**
