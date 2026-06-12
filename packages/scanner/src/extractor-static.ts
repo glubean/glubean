@@ -166,14 +166,13 @@ function stripComments(source: string): string {
  */
 export function extractAliasesFromSource(content: string): string[] {
   const stripped = stripComments(content);
-  // Match: [export] const NAME[: Type] = SOMETHING.extend(
-  // The optional type ANNOTATION is bounded to its declaration (no `;`/
-  // newline/`=`). Explicit type ARGUMENTS (`test.extend<T>({...})`) are
-  // deliberately NOT matched: a regex cannot bound a generic segment to one
-  // statement without an expression parser (three codex rounds of
-  // counterexamples), and the form has no real usage — annotate the binding
-  // instead.
-  const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*\(/g;
+  // Match: [export] const NAME = SOMETHING.extend(
+  // Deliberately UNTYPED-FORM ONLY: type annotations and explicit type
+  // arguments are not matched — a regex cannot bound either to one statement
+  // without an expression parser (four codex rounds of counterexamples
+  // during the S2.15 removal), and extend's return type infers, so the
+  // unannotated form is the only one with real usage.
+  const pattern = /(?:export\s+)?const\s+(\w+)\s*=\s*\w+\.extend\s*\(/g;
   const aliases: string[] = [];
   let m;
   while ((m = pattern.exec(stripped)) !== null) {

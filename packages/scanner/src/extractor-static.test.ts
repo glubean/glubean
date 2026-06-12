@@ -1488,14 +1488,15 @@ export const health = test("health", async (ctx) => {});
   expect(extractAliasesFromSource(content)).toEqual([]);
 });
 
-test("extractAliasesFromSource handles annotated bindings; ambient declares don't bleed", () => {
+test("extractAliasesFromSource matches the untyped form only (annotations/type args unsupported)", () => {
   const content = `
 import { test } from "@glubean/sdk";
 export const typed: ExtendedTest<MyCtx> = test.extend({ auth: authFixture });
-declare const foo: SomeType;
-export const after = test.extend({ page: pageFixture });
+export const plain = test.extend({ page: pageFixture });
 `;
-  expect(extractAliasesFromSource(content)).toEqual(["typed", "after"]);
+  // annotated bindings are documented as unsupported — extend's return type
+  // infers, so the unannotated form is the convention
+  expect(extractAliasesFromSource(content)).toEqual(["plain"]);
 });
 
 test("extractAliasesFromSource ignores extend in comments", () => {
