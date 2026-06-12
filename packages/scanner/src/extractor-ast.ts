@@ -1031,7 +1031,15 @@ function parseTestDeclaration(
  * — so a malformed file is skipped, not fatal (mirrors the regex version, which
  * never threw).
  */
-export function extractFromSource(content: string, customFns?: string[]): ExportMeta[] {
+export function extractFromSource(
+  content: string,
+  customFns?: string[],
+  /** Project-level workflow factory names: `workflow.extend(...)` exports
+   * defined in OTHER files and imported here (codex S2.15 R5 P2) — without
+   * them an imported extended factory classifies as a plain test and loses
+   * the workflow/branch-gate markers. */
+  externalWorkflowFns?: string[],
+): ExportMeta[] {
   let source;
   try {
     source = parseSource(content);
@@ -1040,6 +1048,7 @@ export function extractFromSource(content: string, customFns?: string[]): Export
   }
   const fns = customFns && customFns.length > 0 ? new Set([...BASE_FNS, ...customFns]) : undefined;
   const workflowAliases = collectWorkflowAliases(source);
+  for (const name of externalWorkflowFns ?? []) workflowAliases.add(name);
   const results: ExportMeta[] = [];
   forEachExportedConst(source, (statement, declaration) => {
     const meta = parseTestDeclaration(declaration, statement, fns, workflowAliases);
@@ -1478,13 +1487,21 @@ export function extractPickExamples(
 export function createStaticExtractor(
   readFile: (path: string) => Promise<string>,
   customFns?: string[],
-): (filePath: string, runtimeFns?: string[]) => Promise<ExportMeta[]> {
-  return async (filePath: string, runtimeFns?: string[]): Promise<ExportMeta[]> => {
+): (
+  filePath: string,
+  runtimeFns?: string[],
+  workflowFns?: string[],
+) => Promise<ExportMeta[]> {
+  return async (
+    filePath: string,
+    runtimeFns?: string[],
+    workflowFns?: string[],
+  ): Promise<ExportMeta[]> => {
     const content = await readFile(filePath);
     const merged =
       customFns || runtimeFns
         ? [...new Set([...(customFns ?? []), ...(runtimeFns ?? [])])]
         : undefined;
-    return extractFromSource(content, merged);
+    return extractFromSource(content, merged, workflowFns);
   };
 }

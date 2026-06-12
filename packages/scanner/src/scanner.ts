@@ -7,7 +7,10 @@
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
 import { extractContractCases } from "./extractor-ast.js";
-import { extractAliasesFromSource } from "./extractor-static.js";
+import {
+  extractAliasesFromSource,
+  extractWorkflowExtendAliasesFromSource,
+} from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedFlowMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
@@ -41,7 +44,12 @@ export interface Hasher {
 }
 
 /** Metadata extractor interface (runtime-specific) */
-export type MetadataExtractor = (filePath: string, customFns?: string[]) => Promise<ExportMeta[]>;
+export type MetadataExtractor = (
+  filePath: string,
+  customFns?: string[],
+  /** Project-level workflow.extend factory names (codex S2.15 R5 P2). */
+  workflowFns?: string[],
+) => Promise<ExportMeta[]>;
 
 const DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build"];
 const DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"];
@@ -102,19 +110,29 @@ export class Scanner {
     dir: string,
     skipDirs: string[] = DEFAULT_SKIP_DIRS,
     extensions: string[] = DEFAULT_EXTENSIONS,
-  ): Promise<string[] | undefined> {
+  ): Promise<{ aliases?: string[]; workflowFns?: string[] }> {
     const aliases = new Set<string>();
+    const workflowFns = new Set<string>();
     try {
       for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
         const content = await this.fs.readText(filePath);
         for (const alias of extractAliasesFromSource(content)) {
           aliases.add(alias);
         }
+        // workflow-rooted extends carry CLASSIFICATION, not just callability
+        // (codex S2.15 R5 P2): an imported extended factory must still mark
+        // its exports as workflows for the branch/poll gate.
+        for (const name of extractWorkflowExtendAliasesFromSource(content)) {
+          workflowFns.add(name);
+        }
       }
     } catch {
       // Non-fatal — continue without aliases
     }
-    return aliases.size > 0 ? [...aliases] : undefined;
+    return {
+      aliases: aliases.size > 0 ? [...aliases] : undefined,
+      workflowFns: workflowFns.size > 0 ? [...workflowFns] : undefined,
+    };
   }
 
   /**
@@ -234,7 +252,7 @@ export class Scanner {
     }
 
     // Phase 1: collect .extend() aliases from all .ts files
-    const aliases = await this.collectAliases(dir, skipDirs, extensions);
+    const { aliases, workflowFns } = await this.collectAliases(dir, skipDirs, extensions);
 
     // Phase 2: collect test, contract, and flow files
     const testFiles: string[] = [];
@@ -249,7 +267,7 @@ export class Scanner {
     // Phase 3: Extract test metadata from each test file
     for (const filePath of testFiles) {
       try {
-        const exports = await this.extractor(filePath, aliases);
+        const exports = await this.extractor(filePath, aliases, workflowFns);
 
         if (exports.length > 0) {
           const relativePath = this.fs.relative(dir, filePath);

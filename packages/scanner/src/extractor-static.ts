@@ -176,6 +176,43 @@ export function extractAliasesFromSource(content: string): string[] {
   return aliases;
 }
 
+/**
+ * WORKFLOW-rooted extend aliases (codex S2.15 R5 P2): `const wf =
+ * workflow.extend({...})` (and chains re-extending such a binding) define
+ * factories that other files import — the consuming file's extractor needs
+ * these names to CLASSIFY the export as a workflow (branch/poll gate
+ * included), not merely accept it as runnable. Regex-level like the test
+ * alias pass; the workflow root is the literal `workflow` import name or a
+ * `workflow as X` alias.
+ */
+export function extractWorkflowExtendAliasesFromSource(content: string): string[] {
+  const stripped = stripComments(content);
+  const roots = new Set<string>(["workflow"]);
+  const importPattern = /import\s*\{([^}]*)\}\s*from/g;
+  let im;
+  while ((im = importPattern.exec(stripped)) !== null) {
+    for (const spec of im[1].split(",")) {
+      const am = spec.match(/^\s*workflow\s+as\s+(\w+)\s*$/);
+      if (am) roots.add(am[1]);
+    }
+  }
+  const names = new Set<string>();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    const pattern = /(?:export\s+)?const\s+(\w+)\s*=\s*(\w+)\s*\.extend\s*\(/g;
+    let m;
+    while ((m = pattern.exec(stripped)) !== null) {
+      const [, name, base] = m;
+      if ((roots.has(base) || names.has(base)) && !names.has(name)) {
+        names.add(name);
+        grew = true;
+      }
+    }
+  }
+  return [...names];
+}
+
 // ---------------------------------------------------------------------------
 // test.pick() example metadata (for CodeLens and other consumers)
 // ---------------------------------------------------------------------------

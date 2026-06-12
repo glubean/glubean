@@ -1671,7 +1671,7 @@ export interface ExtendedWorkflowFactory<Ctx extends WorkflowContext> {
   ) => BuiltWorkflow[];
   extend<E extends Record<string, ExtensionFn<unknown>>>(
     extensions: E,
-  ): ExtendedWorkflowFactory<Ctx & ResolveExtensions<E>>;
+  ): ExtendedWorkflowFactory<Omit<Ctx, keyof ResolveExtensions<E>> & WorkflowContext & ResolveExtensions<E>>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

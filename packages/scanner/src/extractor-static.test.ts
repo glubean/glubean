@@ -1,5 +1,9 @@
 import { test, expect } from "vitest";
-import { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
+import {
+  extractAliasesFromSource,
+  extractWorkflowExtendAliasesFromSource,
+  isGlubeanFile,
+} from "./extractor-static.js";
 // P1/P2/P1-pick: extractFromSource + extractContractCases + extractPickExamples are
 // now AST-based (@babel/parser). The existing suites run unchanged against them as
 // the conformance contract.
@@ -161,6 +165,37 @@ export const redeclared = workflow.each([{ region: "us" }])(
   const result = extractFromSource(content);
   const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
+});
+
+test("imported extended factories classify via externalWorkflowFns (S2.15 R5)", () => {
+  // fixtures.ts: export const wf = workflow.extend({...})
+  const fixturesContent = `
+import { workflow } from "@glubean/sdk";
+export const wf = workflow.extend({ inbox: () => ({}) });
+export const wf2 = wf.extend({ auth: () => "t" });
+`;
+  expect(extractWorkflowExtendAliasesFromSource(fixturesContent).sort()).toEqual(["wf", "wf2"]);
+  // …and a NON-workflow extend (test.extend) is NOT classified as workflow
+  const testFixtures = `
+import { test } from "@glubean/sdk";
+export const authedTest = test.extend({ auth: () => "t" });
+`;
+  expect(extractWorkflowExtendAliasesFromSource(testFixtures)).toEqual([]);
+
+  // consumer.test.ts: imports wf — classification arrives via the 3rd param
+  const consumer = `
+import { wf } from "./fixtures";
+export const journey = wf("wfx-imported")
+  .setup(async (ctx) => ({ ok: true }))
+  .branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) })
+  .build();
+`;
+  const withClassification = extractFromSource(consumer, ["wf"], ["wf"]);
+  expect(withClassification[0]).toMatchObject({
+    id: "wfx-imported",
+    workflow: true,
+    workflowHasBranchOrPoll: true,
+  });
 });
 
 test("inline extended each is discovered (S2.15 R4)", () => {
