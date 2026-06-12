@@ -209,7 +209,9 @@ function chainRootOf(expr: AnyNode | undefined): AnyNode | undefined {
       }
       return root;
     }
-    if (root.type === "MemberExpression" && root.computed !== true) {
+    if (root.type === "MemberExpression") {
+      // computed or not — for ROOT tracking, descending the object is the
+      // fail-closed direction (`h["b"].branch(...)` roots at h — codex R8).
       root = unwrapExpression(root.object as AnyNode);
       continue;
     }
@@ -336,11 +338,24 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         }
         if (found || n.type !== "CallExpression") return;
         const callee = unwrapExpression(n.callee as AnyNode);
-        const calleeProp =
-          callee?.type === "MemberExpression" && callee.computed !== true
-            ? (callee.property as AnyNode)
-            : undefined;
-        const methodName = calleeProp?.type === "Identifier" ? (calleeProp.name as string) : undefined;
+        let methodName: string | undefined;
+        if (callee?.type === "MemberExpression") {
+          const prop = unwrapExpression(callee.property as AnyNode);
+          if (callee.computed !== true && prop?.type === "Identifier") {
+            methodName = prop.name as string;
+          } else if (callee.computed === true && prop?.type === "StringLiteral") {
+            // bracket syntax with a literal name resolves statically
+            methodName = prop.value as string;
+          } else if (
+            callee.computed === true &&
+            containsLiveIdentifier(callee.object as AnyNode, live)
+          ) {
+            // a DYNAMIC method on a live builder cannot be resolved — fail
+            // closed (codex S2.13 R8 P2).
+            found = true;
+            return;
+          }
+        }
         // Nested delegation (`b.use(innerFragment)`): recurse into inline
         // callbacks; references fail closed — BEFORE the generic
         // argument-delegation check so an inline-and-clean fragment doesn't
@@ -396,10 +411,13 @@ function chainHasBranchFamilyCall(init: AnyNode): boolean {
   while (node && node.type === "CallExpression") {
     const callee = unwrapExpression(node.callee as AnyNode);
     if (!callee) return false;
-    if (callee.type === "MemberExpression" && callee.computed !== true) {
-      const property = callee.property as AnyNode;
-      if (property.type === "Identifier") {
-        const name = property.name as string;
+    if (callee.type === "MemberExpression") {
+      const prop = unwrapExpression(callee.property as AnyNode);
+      let name: string | undefined;
+      if (callee.computed !== true && prop?.type === "Identifier") name = prop.name as string;
+      else if (callee.computed === true && prop?.type === "StringLiteral") name = prop.value as string;
+      else if (callee.computed === true) return true; // dynamic method on the chain — fail closed (R8)
+      if (name !== undefined) {
         if (BRANCH_FAMILY_METHODS.has(name)) return true;
         if (DELEGATING_CHAIN_METHODS.has(name)) {
           // `.use(fragment)` on the chain: scan an inline fragment; a

@@ -195,6 +195,40 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("computed access cannot hide the branch family (S2.13 R8)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+
+// bracket syntax with a literal name resolves statically — flagged
+export const literalKey = workflow("u-literal-key")
+  .setup(async () => ({ ok: true }))
+  .use((b) => b["branch"]("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) }))
+  .build();
+
+// wrapper + computed hop — roots at the live container, flagged
+export const computedHop = workflow("u-computed-hop")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const h = { b };
+    return h["b"].branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) });
+  })
+  .build();
+
+// dynamic method name on the live builder — unresolvable, fails closed
+export const dynamicKey = workflow("u-dynamic-key")
+  .setup(async () => ({}))
+  .use((b) => { const m = pickMethod(); return b[m]("x", (s) => s); })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-literal-key": true,
+    "u-computed-hop": true,
+    "u-dynamic-key": true,
+  });
+});
+
 test("a builder hidden in a wrapper object or member access fails closed (S2.13 R7)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
