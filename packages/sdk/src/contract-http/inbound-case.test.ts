@@ -322,6 +322,41 @@ test("inbound-only contract: openapi producer returns null → recorded skip, NO
   expect(summary.contributions).toEqual([]);
 });
 
+test("inbound-only project: user OpenAPI options survive the zero-contribution render (codex C-R1 P2)", () => {
+  const api = makeApi();
+  const c = api("hooks.optonly", {
+    endpoint: "POST /hooks",
+    cases: {
+      evt: inboundCase({ description: "evt", expect: { bodySchema: eventSchema } }),
+    },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const doc = renderArtifact(openapiArtifact, [c._extracted as never], {
+    title: "My API",
+    version: "2.1.0",
+  });
+  // merge([], options) ran — the document carries the user's info block.
+  expect((doc as { info: { title: string; version: string } }).info).toMatchObject({
+    title: "My API",
+    version: "2.1.0",
+  });
+});
+
+test("a deferred inbound case keeps its 📥 direction cue (codex C-R1 P3)", () => {
+  const api = makeApi();
+  const c = api("hooks.deferred", {
+    endpoint: "POST /hooks",
+    cases: {
+      evt: inboundCase({
+        description: "evt",
+        deferred: "tunnel not provisioned yet",
+        expect: { bodySchema: eventSchema },
+      }),
+    },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const doc = renderArtifact(markdownArtifact, [c._extracted as never]);
+  expect(doc).toContain("📥 ⊘ **evt** — deferred: tunnel not provisioned yet");
+});
+
 // ---------------------------------------------------------------------------
 // Mixed-direction typing smoke (compile-time): inline outbound + helper inbound
 // ---------------------------------------------------------------------------

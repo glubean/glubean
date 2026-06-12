@@ -641,14 +641,3 @@ export function mergeOpenApiParts(
   return doc;
 }
 
-/**
- * Empty OpenAPI 3.1 skeleton returned when no HTTP contract contributes a
- * part (e.g. a project with only gRPC / GraphQL contracts, or an empty
- * project). Used as `openapiArtifact.empty` so callers always receive a
- * valid `OpenApiDocument`.
- */
-export const emptyOpenApiDocument: OpenApiDocument = {
-  openapi: "3.1.0",
-  info: { title: "", version: "0.0.0" },
-  paths: {},
-};

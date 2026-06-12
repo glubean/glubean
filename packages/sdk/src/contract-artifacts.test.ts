@@ -89,7 +89,6 @@ describe("defineArtifactKind + registry", () => {
     const kind = defineArtifactKind<string>({
       name: "auto-register-case",
       merge: (parts) => parts.join(""),
-      empty: "",
     });
     expect(getArtifactKind("auto-register-case")).toBe(kind);
     expect(listArtifactKinds()).toContain("auto-register-case");
@@ -99,7 +98,6 @@ describe("defineArtifactKind + registry", () => {
     const kind = defineArtifactKind<string>({
       name: "idempotent-case",
       merge: (parts) => parts.join(""),
-      empty: "",
     });
     expect(() => registerArtifactKind(kind)).not.toThrow();
     expect(getArtifactKind("idempotent-case")).toBe(kind);
@@ -109,12 +107,10 @@ describe("defineArtifactKind + registry", () => {
     defineArtifactKind<string>({
       name: "collision-case",
       merge: (parts) => parts.join(""),
-      empty: "",
     });
     const rival: ArtifactKind<string> = {
       name: "collision-case",
       merge: (parts) => parts.join("|"),
-      empty: "different",
     };
     expect(() => registerArtifactKind(rival)).toThrow(
       /already registered with a different instance/,
@@ -135,7 +131,6 @@ describe("renderArtifact", () => {
     const kind = defineArtifactKind<string>({
       name: "concat",
       merge: (parts) => parts.join("+"),
-      empty: "<empty>",
     });
     contract.register(
       "p1",
@@ -153,17 +148,19 @@ describe("renderArtifact", () => {
     expect(output).toBe("p1:a+p2:b");
   });
 
-  test("returns kind.empty when no contract contributes a part", () => {
-    const kind = defineArtifactKind<string>({
+  test("zero contributions: value comes from merge([], options) — options survive", () => {
+    const kind = defineArtifactKind<string, string, { title?: string }>({
       name: "empty-fallback",
-      merge: (parts) => parts.join("+"),
-      empty: "<nothing here>",
+      // merge must handle parts=[] (it is the only place options can reach
+      // the zero-contribution document — codex inbound-artifact C-R1 P2).
+      merge: (parts, options) =>
+        parts.length === 0 ? `<empty:${options?.title ?? "untitled"}>` : parts.join("+"),
     });
     // p3 has no artifacts.empty-fallback; kind has no defaultRender.
     contract.register("p3", makeAdapter());
 
-    const output = renderArtifact(kind, [makeContract("p3", "x")]);
-    expect(output).toBe("<nothing here>");
+    const output = renderArtifact(kind, [makeContract("p3", "x")], { title: "T" });
+    expect(output).toBe("<empty:T>");
   });
 
   test("falls back to kind.defaultRender when adapter has no producer", () => {
@@ -171,7 +168,6 @@ describe("renderArtifact", () => {
       name: "with-default-render",
       merge: (parts) => parts.join("|"),
       defaultRender: (p) => `default:${p.id}`,
-      empty: "",
     });
     contract.register("p4", makeAdapter());
 
@@ -201,7 +197,6 @@ describe("renderArtifact", () => {
         if (opts) seen.defaultRender.push(opts);
         return `${opts?.prefix ?? ""}default:${p.id}`;
       },
-      empty: "",
     });
     contract.register(
       "p5",
@@ -231,7 +226,6 @@ describe("renderArtifact", () => {
       name: "prefer-default",
       merge: (parts) => parts.join("/"),
       defaultRender: (p) => `default-${p.id}`,
-      empty: "",
     });
     contract.register(
       "p7",
@@ -257,7 +251,6 @@ describe("renderArtifact", () => {
     const kind = defineArtifactKind<string>({
       name: "no-default-no-explicit",
       merge: (parts) => parts.join("/"),
-      empty: "<empty>",
     });
     contract.register(
       "p8",
@@ -273,8 +266,9 @@ describe("renderArtifact", () => {
       undefined,
       { preferDefaultRender: true },
     );
-    // No producer used (preferDefault forced), no defaultRender → 0 parts → empty
-    expect(output).toBe("<empty>");
+    // No producer used (preferDefault forced), no defaultRender → 0 parts →
+    // merge([], options) renders the zero-contribution value.
+    expect(output).toBe("");
   });
 
   test("markdown default renderer surfaces given and verify markers", () => {
@@ -315,7 +309,6 @@ describe("renderArtifactWithSummary", () => {
     const kind = defineArtifactKind<string>({
       name: "summary-explicit",
       merge: (parts) => parts.join(","),
-      empty: "",
     });
     contract.register(
       "p9",
@@ -342,7 +335,6 @@ describe("renderArtifactWithSummary", () => {
       name: "summary-default",
       merge: (parts) => parts.join(","),
       defaultRender: (p) => `d:${p.id}`,
-      empty: "",
     });
     contract.register("p10", makeAdapter()); // no producer
 
@@ -361,7 +353,6 @@ describe("renderArtifactWithSummary", () => {
     const kind = defineArtifactKind<string>({
       name: "summary-skip",
       merge: (parts) => parts.join(","),
-      empty: "",
     });
     contract.register("p11", makeAdapter()); // no producer
 
@@ -384,11 +375,10 @@ describe("renderArtifactWithSummary", () => {
     const kind = defineArtifactKind<string>({
       name: "summary-empty-input",
       merge: (parts) => parts.join(","),
-      empty: "<empty>",
     });
     const summary = renderArtifactWithSummary(kind, []);
     expect(summary.usedEmptyFallback).toBe(true);
-    expect(summary.value).toBe("<empty>");
+    expect(summary.value).toBe(""); // merge([], options) — join of zero parts
     expect(summary.contributions).toEqual([]);
     expect(summary.skipped).toEqual([]);
   });
@@ -400,11 +390,9 @@ describe("renderArtifactWithSummary", () => {
     interface Doc {
       items: string[];
     }
-    const empty: Doc = { items: [] };
     const kind = defineArtifactKind<Doc>({
       name: "summary-object-final",
       merge: (parts) => ({ items: parts.flatMap((p) => p.items) }),
-      empty,
     });
     contract.register(
       "p12",
@@ -420,15 +408,12 @@ describe("renderArtifactWithSummary", () => {
     ]);
     expect(summary.usedEmptyFallback).toBe(false);
     expect(summary.value).toEqual({ items: ["only"] });
-    // Critical: value is NOT identity-equal to kind.empty, even though it's structurally close
-    expect(summary.value).not.toBe(empty);
   });
 
   test("preferDefaultRender skipped reason is distinct from no-producer case", () => {
     const kind = defineArtifactKind<string>({
       name: "summary-prefer-default-no-default",
       merge: (parts) => parts.join(","),
-      empty: "",
     });
     contract.register(
       "p13",
@@ -463,7 +448,6 @@ describe("renderArtifactByName", () => {
     defineArtifactKind<string>({
       name: "by-name",
       merge: (parts) => parts.join("~"),
-      empty: "",
     });
     contract.register(
       "p14",
@@ -482,7 +466,6 @@ describe("renderArtifactByName", () => {
     defineArtifactKind<string>({
       name: "registered-a",
       merge: (parts) => parts.join(""),
-      empty: "",
     });
     expect(() => renderArtifactByName("does-not-exist", [])).toThrow(
       /Unknown artifact kind "does-not-exist".*registered-a/s,
@@ -499,7 +482,6 @@ describe("listArtifactProducers / listArtifactCapability", () => {
     defineArtifactKind<string>({
       name: "cap-a",
       merge: (p) => p.join(""),
-      empty: "",
     });
     contract.register(
       "proto1",
@@ -515,12 +497,10 @@ describe("listArtifactProducers / listArtifactCapability", () => {
       name: "cap-with-default",
       merge: (p) => p.join(""),
       defaultRender: (p) => `d:${p.id}`,
-      empty: "",
     });
     defineArtifactKind<string>({
       name: "cap-no-default",
       merge: (p) => p.join(""),
-      empty: "",
     });
     contract.register(
       "proto_x",
@@ -570,7 +550,6 @@ describe("Part != Final types", () => {
           .map(([g, ps]) => `[${g}] ${ps.map((p) => p.body).join(",")}`)
           .join(" | ");
       },
-      empty: "",
     });
     contract.register("proto_md", makeAdapter());
 

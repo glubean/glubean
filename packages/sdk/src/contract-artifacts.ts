@@ -27,7 +27,7 @@
  * **Consumers**: `renderArtifact(kind, contracts, options?, control?)`
  * dispatches across all registered adapters; fallback to kind.defaultRender
  * where the adapter doesn't implement the kind; ultimate fallback to
- * kind.empty when no contract contributes a part.
+ * merge([], options) when no contract contributes a part.
  *
  * ## Types
  *
@@ -47,7 +47,6 @@ import type {
   VerifyRule,
 } from "./contract-types.js";
 import {
-  emptyOpenApiDocument,
   mergeOpenApiParts,
 } from "./contract-http/openapi.js";
 import type {
@@ -81,8 +80,11 @@ export interface ArtifactKind<Final, Part = Final, Options = void> {
 
   /**
    * Combine per-contract parts into the final artifact. Called once per
-   * render; receives the collected parts and the same options that were
-   * passed to producers / defaultRender.
+   * render — INCLUDING when zero parts were collected (`parts = []`):
+   * options like a user-supplied OpenAPI title/version/servers must reach
+   * the final document even when every contract skipped (codex
+   * inbound-artifact C-R1 P2 — a static `empty` value can't carry them,
+   * which is why this interface has no `empty` field).
    */
   readonly merge: (parts: Part[], options?: Options) => Final;
 
@@ -103,13 +105,6 @@ export interface ArtifactKind<Final, Part = Final, Options = void> {
     options?: Options,
   ) => Part | null;
 
-  /**
-   * Required: the value returned by `renderArtifact` when no contract
-   * contributes a part. Must be a valid Final. Lets `renderArtifact` promise
-   * `Final` (not `Final | undefined`) and forces kind authors to think
-   * about the zero-contribution scenario explicitly.
-   */
-  readonly empty: Final;
 }
 
 // =============================================================================
@@ -231,11 +226,9 @@ export interface ArtifactRenderSummary<Final> {
   /** Contracts that did not produce a part (with reason). */
   skipped: ArtifactSkip[];
   /**
-   * True iff `value === kind.empty` was returned because zero parts were
-   * collected. False when `kind.merge(parts, options)` was called. Callers
-   * should use this instead of comparing `value === kind.empty`
-   * themselves — merge typically returns a fresh object for object-typed
-   * Final, so identity / structural equality are not reliable.
+   * True iff ZERO parts were collected — `value` came from
+   * `kind.merge([], options)` (so user options still reach the document).
+   * Callers should use this flag instead of probing the value shape.
    */
   usedEmptyFallback: boolean;
 }
@@ -325,28 +318,22 @@ function runRender<Final, Part, Options>(
     });
   }
 
-  if (parts.length === 0) {
-    return {
-      value: kind.empty,
-      contributions,
-      skipped,
-      usedEmptyFallback: true,
-    };
-  }
-
+  // Zero parts still goes through merge — `merge([], options)` is the only
+  // place that can thread user options (title/version/servers) into the
+  // zero-contribution document (codex inbound-artifact C-R1 P2).
   return {
     value: kind.merge(parts, options),
     contributions,
     skipped,
-    usedEmptyFallback: false,
+    usedEmptyFallback: parts.length === 0,
   };
 }
 
 /**
  * Render an artifact of the given kind from a list of contracts. Threads
  * `options` through the producer / defaultRender / merge pipeline. When no
- * contract contributes a part, returns `kind.empty` (guaranteed valid
- * `Final`).
+ * contract contributes a part, returns `kind.merge([], options)` — the
+ * zero-contribution document still carries user options.
  *
  * Strong-typed entry point: kind argument is a concrete `ArtifactKind<...>`
  * object, so `options` type and return type are inferred at compile time.
@@ -363,9 +350,9 @@ export function renderArtifact<Final, Part, Options>(
 /**
  * Render an artifact and return the full summary (value + contributions +
  * skipped + usedEmptyFallback). Use this when you need to distinguish
- * "zero contribution" from "merged to kind.empty-shaped value" — the
+ * "zero contribution" from "merged from real parts" — the
  * `usedEmptyFallback` field is the authoritative signal (do not compare
- * `value === kind.empty` yourself for object-typed Final).
+ * the value shape yourself for object-typed Final).
  */
 export function renderArtifactWithSummary<Final, Part, Options>(
   kind: ArtifactKind<Final, Part, Options>,
@@ -476,7 +463,6 @@ export const openapiArtifact = defineArtifactKind<
 >({
   name: "openapi",
   merge: (parts, options) => mergeOpenApiParts(parts, options),
-  empty: emptyOpenApiDocument,
 });
 
 // ---------------------------------------------------------------------------
@@ -671,26 +657,27 @@ function formatCaseProjectionNotes(c: MarkdownPart["cases"][number]): string {
 function formatMarkdownCase(c: MarkdownPart["cases"][number]): string {
   const desc = c.description ? ` — ${c.description}` : "";
   const projectionNotes = formatCaseProjectionNotes(c);
+  // Inbound cases: the counterparty calls US — the direction cue rides EVERY
+  // lifecycle branch (a deferred/deprecated inbound case is still inbound;
+  // codex C-R1 P3), so it prefixes rather than replaces the line shape.
+  const marker = c.inbound ? "📥 " : "";
   if (c.lifecycle === "deprecated") {
     const reason = c.deprecatedReason ?? "deprecated";
-    return `- ⊘ **${c.key}** — deprecated: ${reason}${projectionNotes}`;
+    return `- ${marker}⊘ **${c.key}** — deprecated: ${reason}${projectionNotes}`;
   }
   if (c.lifecycle === "deferred") {
     const reason = c.deferredReason ?? "deferred";
-    return `- ⊘ **${c.key}** — deferred: ${reason}${projectionNotes}`;
+    return `- ${marker}⊘ **${c.key}** — deferred: ${reason}${projectionNotes}`;
   }
   if (c.requires === "browser" || c.requires === "out-of-band") {
-    return `- ⊘ **${c.key}** — requires: ${c.requires}${projectionNotes}`;
+    return `- ${marker}⊘ **${c.key}** — requires: ${c.requires}${projectionNotes}`;
   }
   const severityTag =
     c.severity === "critical" ? " 🔴" : c.severity === "info" ? " ℹ️" : "";
-  const suffix = c.defaultRun === "opt-in" ? " *(opt-in)*" : "";
-  // Inbound cases: the counterparty calls US — visually distinct so a doc
-  // reader never mistakes the promise direction (route C of the design).
-  if (c.inbound) {
-    return `- 📥 **${c.key}**${desc}${projectionNotes}${severityTag}`;
-  }
-  return `- **${c.key}**${desc}${projectionNotes}${suffix}${severityTag}`;
+  // defaultRun is runnable vocabulary — meaningless on a never-runnable
+  // inbound case, so the opt-in suffix never applies there.
+  const suffix = c.inbound ? "" : c.defaultRun === "opt-in" ? " *(opt-in)*" : "";
+  return `- ${marker}**${c.key}**${desc}${projectionNotes}${suffix}${severityTag}`;
 }
 
 /**
@@ -778,5 +765,4 @@ export const markdownArtifact = defineArtifactKind<string, MarkdownPart>({
   name: "markdown",
   defaultRender: (projection) => genericMarkdownPart(projection),
   merge: (parts) => assembleMarkdownDocument(parts),
-  empty: "",
 });
