@@ -16,7 +16,12 @@ import { resolveEnvFileName } from "../lib/active_env.js";
 import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
-import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
+import {
+  extractContractCases,
+  extractFromSource,
+  extractWorkflowExtendAliasesFromSource,
+  resolveExternalWorkflowFns,
+} from "@glubean/scanner/static";
 import {
   extractContractFromFile,
   findTemplateMatch,
@@ -501,7 +506,14 @@ interface DiscoveredTest {
   meta: DiscoveredTestMeta;
 }
 
-export async function discoverTests(filePath: string): Promise<DiscoveredTest[]> {
+export async function discoverTests(
+  filePath: string,
+  /** Project-level extended-workflow factory registry (exported name →
+   * defining file) — lets a `.test.ts` import an extended factory from a
+   * shared fixtures file and still be discovered/classified statically
+   * (codex S2.15 R7 P2). Optional: single-file callers skip it. */
+  workflowFnRegistry?: ReadonlyMap<string, string>,
+): Promise<DiscoveredTest[]> {
   // `.bootstrap.ts` files register overlays as a side-effect of import; they
   // produce no runnable tests of their own. We don't even need to import here
   // because the project-wide `loadProjectOverlays()` ran before discovery.
@@ -666,7 +678,14 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     return [];
   }
 
-  const metas = extractFromSource(content);
+  const externalWorkflowFns = workflowFnRegistry
+    ? resolveExternalWorkflowFns(content, filePath, workflowFnRegistry)
+    : [];
+  const metas = extractFromSource(
+    content,
+    undefined,
+    externalWorkflowFns.length > 0 ? externalWorkflowFns : undefined,
+  );
   return metas.map((m) => {
     // Mirror the contract-case path so .test.ts authors who declare
     // `requires: "browser"` / `defaultRun: "opt-in"` see the same
@@ -1086,9 +1105,25 @@ export async function runCommand(
   const allFileTests: FileTest[] = [];
   let totalDiscovered = 0;
 
+  // Prepass: project-level extended-workflow factory registry (name →
+  // defining file), so `.test.ts` files importing a shared
+  // `workflow.extend(...)` factory are discovered and classified
+  // (codex S2.15 R7 P2).
+  const workflowFnRegistry = new Map<string, string>();
   for (const filePath of testFiles) {
     try {
-      const tests = await discoverTests(filePath);
+      const c = await readFile(filePath, "utf-8");
+      for (const name of extractWorkflowExtendAliasesFromSource(c)) {
+        workflowFnRegistry.set(name, filePath);
+      }
+    } catch {
+      // non-fatal — discovery proceeds without this file's registry entries
+    }
+  }
+
+  for (const filePath of testFiles) {
+    try {
+      const tests = await discoverTests(filePath, workflowFnRegistry);
       // Phase 4 multi-suite: enforce suite.kinds at the runnable level
       // (not just file-level). A `.contract.ts` exporting an inline
       // `contract.flow(...)` produces a flow runnable; if the contributing

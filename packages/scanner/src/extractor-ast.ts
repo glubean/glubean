@@ -797,10 +797,7 @@ function isWorkflowFactoryExpr(expr: AnyNode | undefined, aliases: ReadonlySet<s
   return isWorkflowFactoryExpr(callee.object as AnyNode, aliases);
 }
 
-function collectWorkflowAliases(
-  source: SourceFile,
-  externalWorkflowFns?: ReadonlySet<string>,
-): Set<string> {
+function collectWorkflowAliases(source: SourceFile): Set<string> {
   const aliases = new Set<string>(["workflow"]);
   const body = (source.program.body as AnyNode[] | undefined) ?? [];
   for (const stmt of body) {
@@ -815,12 +812,7 @@ function collectWorkflowAliases(
           : (imported?.value as string | undefined); // string import names
       const local = spec.local as AnyNode | undefined;
       if (local?.type !== "Identifier") continue;
-      if (
-        importedName === "workflow" ||
-        // project-level workflow.extend exports — resolved through the import,
-        // under the LOCAL name (codex S2.15 R6 P2)
-        (importedName !== undefined && externalWorkflowFns?.has(importedName))
-      ) {
+      if (importedName === "workflow") {
         aliases.add(local.name as string);
       }
     }
@@ -1043,10 +1035,10 @@ function parseTestDeclaration(
 export function extractFromSource(
   content: string,
   customFns?: string[],
-  /** Project-level workflow factory names: `workflow.extend(...)` exports
-   * defined in OTHER files and imported here (codex S2.15 R5 P2) — without
-   * them an imported extended factory classifies as a plain test and loses
-   * the workflow/branch-gate markers. */
+  /** LOCAL names of imported extended workflow factories, PRE-RESOLVED for
+   * this file by the caller via `resolveExternalWorkflowFns` (codex S2.15
+   * R5/R6/R7 — resolution must be module-aware: renames map, unrelated
+   * same-name imports don't). */
   externalWorkflowFns?: string[],
 ): ExportMeta[] {
   let source;
@@ -1056,10 +1048,9 @@ export function extractFromSource(
     return [];
   }
   const fns = customFns && customFns.length > 0 ? new Set([...BASE_FNS, ...customFns]) : undefined;
-  // External names map through THIS file's import specifiers — `import { wf
-  // as journey }` must classify `journey`, and an unrelated local `wf` must
-  // NOT inherit the classification (codex S2.15 R6 P2).
-  const workflowAliases = collectWorkflowAliases(source, new Set(externalWorkflowFns ?? []));
+  const workflowAliases = collectWorkflowAliases(source);
+  // Pre-resolved LOCAL names (module-aware resolution happened at the caller)
+  for (const name of externalWorkflowFns ?? []) workflowAliases.add(name);
   const results: ExportMeta[] = [];
   forEachExportedConst(source, (statement, declaration) => {
     const meta = parseTestDeclaration(declaration, statement, fns, workflowAliases);

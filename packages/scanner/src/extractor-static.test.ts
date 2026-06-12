@@ -2,6 +2,7 @@ import { test, expect } from "vitest";
 import {
   extractAliasesFromSource,
   extractWorkflowExtendAliasesFromSource,
+  resolveExternalWorkflowFns,
   isGlubeanFile,
 } from "./extractor-static.js";
 // P1/P2/P1-pick: extractFromSource + extractContractCases + extractPickExamples are
@@ -182,7 +183,10 @@ export const authedTest = test.extend({ auth: () => "t" });
 `;
   expect(extractWorkflowExtendAliasesFromSource(testFixtures)).toEqual([]);
 
-  // consumer.test.ts: imports wf — classification arrives via the 3rd param
+  // consumer.test.ts: imports wf — module-aware resolution (codex R7): the
+  // registry ties names to DEFINING FILES; resolveExternalWorkflowFns walks
+  // this file's imports and yields the LOCAL names that genuinely match.
+  const registry = new Map([["wf", "/proj/tests/fixtures.ts"]]);
   const consumer = `
 import { wf } from "./fixtures";
 export const journey = wf("wfx-imported")
@@ -190,14 +194,16 @@ export const journey = wf("wfx-imported")
   .branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) })
   .build();
 `;
-  const withClassification = extractFromSource(consumer, ["wf"], ["wf"]);
+  const resolved = resolveExternalWorkflowFns(consumer, "/proj/tests/checkout.test.ts", registry);
+  expect(resolved).toEqual(["wf"]);
+  const withClassification = extractFromSource(consumer, ["wf"], resolved);
   expect(withClassification[0]).toMatchObject({
     id: "wfx-imported",
     workflow: true,
     workflowHasBranchOrPoll: true,
   });
 
-  // import RENAME maps to the local name (codex R6)
+  // import RENAME maps to the LOCAL name (codex R6/R7)
   const renamed = `
 import { wf as journey } from "./fixtures";
 export const j = journey("wfx-renamed")
@@ -205,16 +211,28 @@ export const j = journey("wfx-renamed")
   .compute("c", (s) => s)
   .build();
 `;
-  const viaRename = extractFromSource(renamed, ["wf", "journey"], ["wf"]);
+  const renResolved = resolveExternalWorkflowFns(renamed, "/proj/tests/a.test.ts", registry);
+  expect(renResolved).toEqual(["journey"]);
+  const viaRename = extractFromSource(renamed, ["wf", "journey"], renResolved);
   expect(viaRename[0]).toMatchObject({ id: "wfx-renamed", workflow: true });
 
-  // an unrelated LOCAL `wf` must NOT inherit the classification
-  const unrelated = `
+  // an import of an UNRELATED same-name symbol (different source file) — no match
+  const unrelatedImport = `
+import { wf } from "./helpers/other";
+export const notAWorkflow = wf("plain-thing");
+`;
+  expect(
+    resolveExternalWorkflowFns(unrelatedImport, "/proj/tests/b.test.ts", registry),
+  ).toEqual([]);
+
+  // a LOCAL `wf` (no import at all) — no match either
+  const unrelatedLocal = `
 const wf = (id) => makeSomething(id);
 export const notAWorkflow = wf("plain-thing");
 `;
-  const noFalseClass = extractFromSource(unrelated, ["wf"], ["wf"]);
-  expect(noFalseClass.every((m) => m.workflow !== true)).toBe(true);
+  expect(resolveExternalWorkflowFns(unrelatedLocal, "/proj/tests/c.test.ts", registry)).toEqual(
+    [],
+  );
 });
 
 test("inline extended each is discovered (S2.15 R4)", () => {

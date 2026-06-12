@@ -10,6 +10,7 @@ import { extractContractCases } from "./extractor-ast.js";
 import {
   extractAliasesFromSource,
   extractWorkflowExtendAliasesFromSource,
+  resolveExternalWorkflowFns,
 } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
@@ -110,20 +111,20 @@ export class Scanner {
     dir: string,
     skipDirs: string[] = DEFAULT_SKIP_DIRS,
     extensions: string[] = DEFAULT_EXTENSIONS,
-  ): Promise<{ aliases?: string[]; workflowFns?: string[] }> {
+  ): Promise<{ aliases?: string[]; workflowFnRegistry: Map<string, string> }> {
     const aliases = new Set<string>();
-    const workflowFns = new Set<string>();
+    // exported extended-workflow factory name → DEFINING file. Module-aware:
+    // consumers resolve through their own import specifiers, so renames map
+    // and unrelated same-name imports stay unclassified (codex S2.15 R7 P2).
+    const workflowFnRegistry = new Map<string, string>();
     try {
       for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
         const content = await this.fs.readText(filePath);
         for (const alias of extractAliasesFromSource(content)) {
           aliases.add(alias);
         }
-        // workflow-rooted extends carry CLASSIFICATION, not just callability
-        // (codex S2.15 R5 P2): an imported extended factory must still mark
-        // its exports as workflows for the branch/poll gate.
         for (const name of extractWorkflowExtendAliasesFromSource(content)) {
-          workflowFns.add(name);
+          workflowFnRegistry.set(name, filePath);
         }
       }
     } catch {
@@ -131,7 +132,7 @@ export class Scanner {
     }
     return {
       aliases: aliases.size > 0 ? [...aliases] : undefined,
-      workflowFns: workflowFns.size > 0 ? [...workflowFns] : undefined,
+      workflowFnRegistry,
     };
   }
 
@@ -252,7 +253,7 @@ export class Scanner {
     }
 
     // Phase 1: collect .extend() aliases from all .ts files
-    const { aliases, workflowFns } = await this.collectAliases(dir, skipDirs, extensions);
+    const { aliases, workflowFnRegistry } = await this.collectAliases(dir, skipDirs, extensions);
 
     // Phase 2: collect test, contract, and flow files
     const testFiles: string[] = [];
@@ -267,7 +268,13 @@ export class Scanner {
     // Phase 3: Extract test metadata from each test file
     for (const filePath of testFiles) {
       try {
-        const exports = await this.extractor(filePath, aliases, workflowFns);
+        const fileContent = await this.fs.readText(filePath);
+        const workflowFns = resolveExternalWorkflowFns(fileContent, filePath, workflowFnRegistry);
+        const exports = await this.extractor(
+          filePath,
+          aliases,
+          workflowFns.length > 0 ? workflowFns : undefined,
+        );
 
         if (exports.length > 0) {
           const relativePath = this.fs.relative(dir, filePath);

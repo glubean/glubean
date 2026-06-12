@@ -48,7 +48,12 @@ export type { FileSystem, Hasher, MetadataExtractor } from "./scanner.js";
 // + extractContractCases are AST-based via @babel/parser; the rest stay regex —
 // see extractor-ast.ts).
 export { createStaticExtractor, extractFromSource, extractContractCases, extractFlows } from "./extractor-ast.js";
-export { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
+export {
+  extractAliasesFromSource,
+  extractWorkflowExtendAliasesFromSource,
+  resolveExternalWorkflowFns,
+  isGlubeanFile,
+} from "./extractor-static.js";
 export type { ContractStaticMeta, ContractCaseStaticMeta, FlowStaticMeta } from "./extractor-static.js";
 export {
   findTemplateMatch,

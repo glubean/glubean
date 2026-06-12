@@ -31,7 +31,12 @@ export {
   extractPickExamples,
   extractFlows,
 } from "./extractor-ast.js";
-export { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
+export {
+  extractAliasesFromSource,
+  extractWorkflowExtendAliasesFromSource,
+  resolveExternalWorkflowFns,
+  isGlubeanFile,
+} from "./extractor-static.js";
 
 export type { ExportMeta } from "./types.js";
 export type {

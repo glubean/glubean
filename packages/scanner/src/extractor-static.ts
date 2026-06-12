@@ -213,6 +213,56 @@ export function extractWorkflowExtendAliasesFromSource(content: string): string[
   return [...names];
 }
 
+/**
+ * Resolve which PROJECT-LEVEL extended workflow factories apply to ONE file
+ * (codex S2.15 R7 P2 — a registry keyed by symbol name alone misclassifies
+ * unrelated same-name imports and misses renames): walks the file's import
+ * statements, and for each specifier whose imported name exists in the
+ * registry AND whose source resolves to the registry's DEFINING file, yields
+ * the LOCAL binding name. Pure string/path logic — no fs access.
+ */
+export function resolveExternalWorkflowFns(
+  content: string,
+  filePath: string,
+  registry: ReadonlyMap<string, string>,
+): string[] {
+  if (registry.size === 0) return [];
+  const stripped = stripComments(content);
+  const out: string[] = [];
+  const importPattern = /import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g;
+  const dir = filePath.replace(/\\/g, "/").replace(/\/[^/]*$/, "");
+  const normalize = (p: string): string => {
+    const parts: string[] = [];
+    for (const seg of p.replace(/\\/g, "/").split("/")) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") parts.pop();
+      else parts.push(seg);
+    }
+    return (p.startsWith("/") ? "/" : "") + parts.join("/");
+  };
+  let m;
+  while ((m = importPattern.exec(stripped)) !== null) {
+    const [, specs, source] = m;
+    if (!source.startsWith(".")) continue; // package imports never match project files
+    const resolvedBase = normalize(`${dir}/${source}`).replace(/\.(ts|tsx|js|jsx|mts|cts)$/, "");
+    for (const spec of specs.split(",")) {
+      const sm = spec.match(/^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/);
+      if (!sm) continue;
+      const importedName = sm[1];
+      const localName = sm[2] ?? sm[1];
+      const definingFile = registry.get(importedName);
+      if (!definingFile) continue;
+      const definingBase = definingFile
+        .replace(/\\/g, "/")
+        .replace(/\.(ts|tsx|js|jsx|mts|cts)$/, "");
+      if (definingBase === resolvedBase || definingBase === `${resolvedBase}/index`) {
+        out.push(localName);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // test.pick() example metadata (for CodeLens and other consumers)
 // ---------------------------------------------------------------------------
