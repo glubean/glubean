@@ -321,6 +321,10 @@ export interface NormalizedWorkflowMeta {
   templateId?: string;
   /** Trace-grouping id (parallel matrices). */
   groupId?: string;
+  /** Lifecycle visibility (phase4 §6): presence ⟺ the phase is declared;
+   * note is the author's natural-language hint. Not a node — no grade. */
+  setup?: { note?: string; timeoutMs?: number };
+  teardown?: { note?: string; timeoutMs?: number };
   /** Members of this group may run in parallel. */
   parallel?: boolean;
   exportName: string;

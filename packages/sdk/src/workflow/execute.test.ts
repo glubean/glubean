@@ -1197,6 +1197,68 @@ describe("runWorkflow — branch (§17 #6)", () => {
   });
 });
 
+// --- lifecycle hints + projection visibility (S2.16, phase4 §6) ---------------
+
+describe("lifecycle hints + projection visibility (phase4 §6)", () => {
+  it("setup/teardown notes ride the projection; presence is the object itself", () => {
+    const wf = workflow("lh-basic")
+      .setup(async () => ({}), {
+        timeout: 10_000,
+        note: "starts a local receiver + smee tunnel; returns the inbox handle",
+      })
+      .compute("c", (s) => s)
+      .teardown(async () => {}, { note: "deletes the Stripe endpoint and closes the tunnel" })
+      .build();
+    const proj = projectWorkflow(wf);
+    expect(proj.setup).toEqual({
+      note: "starts a local receiver + smee tunnel; returns the inbox handle",
+      timeoutMs: 10_000,
+    });
+    expect(proj.teardown).toEqual({
+      note: "deletes the Stripe endpoint and closes the tunnel",
+    });
+    // lifecycle never joins the node grade rollup
+    expect(proj.gradeSummary).toEqual({ full: 1, partial: 0, opaque: 0 });
+  });
+
+  it("presence without notes still projects; absence projects nothing", () => {
+    const withSetup = workflow("lh-bare")
+      .setup(async () => ({}))
+      .compute("c", (s) => s)
+      .build();
+    expect(projectWorkflow(withSetup).setup).toEqual({});
+    expect(projectWorkflow(withSetup).teardown).toBeUndefined();
+    const noLifecycle = workflow("lh-none")
+      .compute("c", (s) => s)
+      .build();
+    expect(projectWorkflow(noLifecycle).setup).toBeUndefined();
+  });
+
+  it("blank notes are rejected — omit instead", () => {
+    expect(() => workflow("lh-blank").setup(async () => ({}), { note: "   " })).toThrow(
+      /note.*must be a non-empty string/,
+    );
+    expect(() =>
+      workflow("lh-blank2")
+        .setup(async () => ({}))
+        .teardown(async () => {}, { note: "" }),
+    ).toThrow(/note.*must be a non-empty string/);
+  });
+
+  it("each: a row-varying lifecycle note breaks the one-structure contract", () => {
+    expect(() =>
+      workflow.each([{ r: "us" }, { r: "eu" }])({ id: "lh-$r" }, (wf, row) =>
+        wf.setup(async () => ({}), { note: `region ${row.r} setup` }).compute("c", (s) => s),
+      ),
+    ).toThrow(/DIFFERENT structure/);
+    expect(() =>
+      workflow.each([{ r: "us" }, { r: "eu" }])({ id: "lh2-$r" }, (wf) =>
+        wf.setup(async () => ({}), { note: "shared setup" }).compute("c", (s) => s),
+      ),
+    ).not.toThrow();
+  });
+});
+
 // --- .group(): display-only bracket (S2.14, phase4 §2) -------------------------
 
 describe("workflow.group — display-only bracket (phase4 §2)", () => {

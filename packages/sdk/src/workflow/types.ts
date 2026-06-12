@@ -347,9 +347,15 @@ export interface Workflow<State = any> {
   readonly setup?: WorkflowSetup<any>;
   /** Terminal timeout for setup (ms, §17 #4) — a timed-out setup fails the run. */
   readonly setupTimeoutMs?: number;
+  /** Natural-language hint: what setup does (phase4 §6 — a DECLARATION, the
+   * same trust tier as action hints; lifecycle is otherwise the one opaque
+   * position with no outlet). */
+  readonly setupNote?: string;
   readonly teardown?: WorkflowTeardown<State>;
   /** Terminal timeout for teardown (ms, §17 #4) — logged, never masks the cause. */
   readonly teardownTimeoutMs?: number;
+  /** Natural-language hint: what teardown does (phase4 §6). */
+  readonly teardownNote?: string;
   readonly nodes: readonly WorkflowNode[];
 }
 
@@ -450,6 +456,16 @@ export interface WorkflowProjection {
   /** Focus filter. */
   only?: boolean;
   extensions?: Record<string, unknown>;
+  /**
+   * Lifecycle visibility (phase4 §6): object presence ⟺ the workflow declares
+   * that phase. NOT a node — never joins gradeSummary/node counts; a render
+   * layer may style a noteless lifecycle as opaque-looking, but that is
+   * presentation. Before this, setup/teardown were ZERO information to
+   * Cloud/agents (the receiver glue in a webhook journey — typically the most
+   * opaque code in the whole test — was simply invisible).
+   */
+  setup?: { note?: string; timeoutMs?: number };
+  teardown?: { note?: string; timeoutMs?: number };
   nodes: ProjectedWorkflowNode[];
   /** Count of node static grades (rollup for the workflow-level summary, §7.2). */
   gradeSummary: Record<StaticGrade, number>;

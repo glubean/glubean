@@ -141,7 +141,10 @@ export type RouteOpts<State> =
  * at the last station.
  */
 export interface TerminalWorkflowBuilder<State> {
-  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): TerminalWorkflowBuilder<State>;
+  teardown(
+    fn: WorkflowTeardown<State>,
+    opts?: { timeout?: number; note?: string },
+  ): TerminalWorkflowBuilder<State>;
   build(): BuiltWorkflow<State>;
 }
 
@@ -312,10 +315,13 @@ export interface WorkflowBuilder<State> {
   ): ChainedWorkflowBuilder<State>;
   /** The one I/O-capable initializer; its return is the initial state.
    * `timeout` (ms, §17 #4) is TERMINAL — a timed-out setup fails the run. */
-  setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number }): ChainedWorkflowBuilder<S>;
+  setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number; note?: string }): ChainedWorkflowBuilder<S>;
   /** Always-run cleanup (see lifecycle decision in the plan's self-consistency
    * corpus). `timeout` (ms, §17 #4) is TERMINAL — logged, never masks the cause. */
-  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): ChainedWorkflowBuilder<State>;
+  teardown(
+    fn: WorkflowTeardown<State>,
+    opts?: { timeout?: number; note?: string },
+  ): ChainedWorkflowBuilder<State>;
   /**
    * Use a reusable contract interaction. First arg: node id or `{...NodeMeta}`.
    * Preserves the case's generics (codex slice-1 P2): when the case requires
@@ -475,8 +481,10 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   private _meta: WorkflowMeta;
   private _setup?: WorkflowSetup<any>;
   private _setupTimeoutMs?: number;
+  private _setupNote?: string;
   private _teardown?: WorkflowTeardown<any>;
   private _teardownTimeoutMs?: number;
+  private _teardownNote?: string;
   private readonly _nodes: WorkflowNode[] = [];
   private _built?: BuiltWorkflow<State>;
   /** The first authoring error, if any — a poisoned builder never finalizes. */
@@ -560,6 +568,16 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     });
   }
 
+  /** A blank hint is noise pretending to be signal (phase4 §6.1). */
+  private static validateLifecycleNote(phase: string, note: string | undefined): void {
+    if (note === undefined) return;
+    if (typeof note !== "string" || note.trim().length === 0) {
+      throw new Error(
+        `workflow.${phase}(): \`note\` must be a non-empty string — omit it instead of leaving it blank`,
+      );
+    }
+  }
+
   private static validateLifecycleTimeout(phase: string, timeout: number | undefined): void {
     if (timeout === undefined) return;
     if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
@@ -569,7 +587,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     }
   }
 
-  setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number }): ChainedWorkflowBuilder<S> {
+  setup<S>(fn: WorkflowSetup<S>, opts?: { timeout?: number; note?: string }): ChainedWorkflowBuilder<S> {
     return this.authoring(() => {
       this.assertNotBuilt("setup");
       // setup runs first at execution, so authoring it after a node OR after
@@ -591,13 +609,18 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         );
       }
       WorkflowBuilderImpl.validateLifecycleTimeout("setup", opts?.timeout);
+      WorkflowBuilderImpl.validateLifecycleNote("setup", opts?.note);
       this._setup = fn;
       this._setupTimeoutMs = opts?.timeout;
+      this._setupNote = opts?.note;
       return this as unknown as ChainedWorkflowBuilder<S>;
     });
   }
 
-  teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): ChainedWorkflowBuilder<State> {
+  teardown(
+    fn: WorkflowTeardown<State>,
+    opts?: { timeout?: number; note?: string },
+  ): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNotBuilt("teardown");
       if (this._fragmentDepth > 0) {
@@ -607,8 +630,10 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         );
       }
       WorkflowBuilderImpl.validateLifecycleTimeout("teardown", opts?.timeout);
+      WorkflowBuilderImpl.validateLifecycleNote("teardown", opts?.note);
       this._teardown = fn;
       this._teardownTimeoutMs = opts?.timeout;
+      this._teardownNote = opts?.note;
       return this.chained();
     });
   }
@@ -1378,10 +1403,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       meta,
       setup: this._setup,
       ...(this._setupTimeoutMs !== undefined ? { setupTimeoutMs: this._setupTimeoutMs } : {}),
+      ...(this._setupNote !== undefined ? { setupNote: this._setupNote } : {}),
       teardown: this._teardown,
       ...(this._teardownTimeoutMs !== undefined
         ? { teardownTimeoutMs: this._teardownTimeoutMs }
         : {}),
+      ...(this._teardownNote !== undefined ? { teardownNote: this._teardownNote } : {}),
       nodes: this._nodes.slice(),
     }) as unknown as BuiltWorkflow<State>;
 
@@ -1504,8 +1531,12 @@ function buildEachMembers<T extends Record<string, unknown>>(
         skip: handle.meta.skip ?? null,
         only: handle.meta.only ?? null,
         extensions: handle.meta.extensions ?? null,
-        setup: handle.setup ? { timeoutMs: handle.setupTimeoutMs ?? null } : null,
-        teardown: handle.teardown ? { timeoutMs: handle.teardownTimeoutMs ?? null } : null,
+        setup: handle.setup
+          ? { timeoutMs: handle.setupTimeoutMs ?? null, note: handle.setupNote ?? null }
+          : null,
+        teardown: handle.teardown
+          ? { timeoutMs: handle.teardownTimeoutMs ?? null, note: handle.teardownNote ?? null }
+          : null,
       });
 
     return filtered.map((row, index) => {

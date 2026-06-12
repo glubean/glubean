@@ -160,6 +160,26 @@ export const keyed = workflow.each({
   expect(ids).toEqual(["keyed-alpha", "keyed-beta"]); // concrete rows, no template collapse
 });
 
+test("lifecycle notes reach scan metadata (S2.16, phase4 §6)", async () => {
+  const dir = join(FIXTURE_ROOT, "6");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "hooks.flow.ts"),
+    `
+import { workflow } from "@glubean/sdk";
+export const wf = workflow("lh-meta")
+  .setup(async () => ({}), { note: "boots the receiver glue" })
+  .compute("c", (s) => s)
+  .teardown(async () => {}, { note: "tears the tunnel down", timeout: 5000 })
+  .build();
+`,
+  );
+  const scanResult = await scan(dir);
+  const wf = (scanResult.workflows ?? []).find((w) => w.id === "lh-meta");
+  expect(wf?.setup).toEqual({ note: "boots the receiver glue" });
+  expect(wf?.teardown).toEqual({ note: "tears the tunnel down", timeoutMs: 5000 });
+});
+
 test("a workflow-ONLY project scans as non-empty (no false warning) and still builds metadata", async () => {
   const dir = join(FIXTURE_ROOT, "2");
   await mkdir(dir, { recursive: true });

@@ -66,3 +66,12 @@ ways to "hide" a builder in test files are answered by these conventions
 (upstream prevention), not by new scanner code. The whole gate is deleted
 when Cloud branch/poll rendering ships. When vNext is released, migrate these
 three rules into the `skill` repo's authoring guidance.
+
+### Hint discipline (phase4 §6.4, owner decision 2026-06-12)
+
+When writing workflows, FILL THE HINT SLOT of every opaque/partial position
+you author — `note` on setup/teardown/actions, `asserts` on checks, `message`
+on runtime predicates — in the same edit as the implementation, not as a
+separate pass. Hints are declarations the projection renders; an agent that
+just wrote the code can state what it does at zero cost. (Migrate into the
+skill repo at vNext release, together with the three conventions above.)

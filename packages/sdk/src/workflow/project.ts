@@ -264,6 +264,25 @@ export function projectWorkflow(wf: Workflow): WorkflowProjection {
     skip: wf.meta.skip,
     only: wf.meta.only,
     extensions: wf.meta.extensions,
+    // Lifecycle visibility (phase4 §6): presence + note + timeout. Without
+    // this, setup/teardown — often the most opaque code in a journey — were
+    // zero information to every projection consumer.
+    ...(wf.setup
+      ? {
+          setup: {
+            ...(wf.setupNote !== undefined ? { note: wf.setupNote } : {}),
+            ...(wf.setupTimeoutMs !== undefined ? { timeoutMs: wf.setupTimeoutMs } : {}),
+          },
+        }
+      : {}),
+    ...(wf.teardown
+      ? {
+          teardown: {
+            ...(wf.teardownNote !== undefined ? { note: wf.teardownNote } : {}),
+            ...(wf.teardownTimeoutMs !== undefined ? { timeoutMs: wf.teardownTimeoutMs } : {}),
+          },
+        }
+      : {}),
     nodes,
     gradeSummary,
   };
