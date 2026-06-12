@@ -402,7 +402,20 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           return;
         }
         if (n.type === "AssignmentExpression" && n.operator === "=") {
-          bind(unwrapExpression(n.left as AnyNode), n.right as AnyNode, false);
+          const left = unwrapExpression(n.left as AnyNode);
+          // A MEMBER write storing a live builder taints the container:
+          // `h.b = b; h.b.branch(...)` (codex S2.13 R14 P2).
+          if (left && isMemberNode(left)) {
+            if (containsLiveIdentifier(n.right as AnyNode, live)) {
+              const root = chainRootOf(left);
+              if (root?.type === "Identifier") {
+                live.add(root.name as string);
+                everLive.add(root.name as string);
+              }
+            }
+            return;
+          }
+          bind(left, n.right as AnyNode, false);
           return;
         }
         if (found || !isCallNode(n)) return;
@@ -462,7 +475,14 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         }
         if (methodName === undefined || !BRANCH_FAMILY_METHODS.has(methodName)) return;
         const root = chainRootOf((callee as AnyNode).object as AnyNode);
-        if (root?.type === "Identifier" && live.has(root.name as string)) {
+        if (root?.type === "Identifier") {
+          if (live.has(root.name as string)) found = true;
+          return;
+        }
+        // The receiver didn't root at an identifier — a conditional/sequence
+        // or other expression (`(cond ? b : other).branch(...)`). If it
+        // CONTAINS a live builder anywhere, fail closed (codex S2.13 R14 P2).
+        if (containsLiveIdentifier((callee as AnyNode).object as AnyNode, live)) {
           found = true;
         }
     };

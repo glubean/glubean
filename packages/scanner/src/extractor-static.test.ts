@@ -195,6 +195,33 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("member writes and expression receivers cannot hide a branch (S2.13 R14)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { other } from "./helpers";
+
+export const memberWrite = workflow("u-member-write")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    const h = {};
+    h.b = b;
+    return h.b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) });
+  })
+  .build();
+
+export const condReceiver = workflow("u-cond-receiver")
+  .setup(async () => ({ ok: true }))
+  .use((b) => (Math.random() > 0.5 ? b : other).branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) }))
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-member-write": true,
+    "u-cond-receiver": true,
+  });
+});
+
 test("destructuring defaults and extracted method aliases cannot hide a branch (S2.13 R13)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
