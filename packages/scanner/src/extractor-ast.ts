@@ -357,9 +357,19 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
   // builder-name set in SOURCE ORDER, detects calls against the live set, then
   // recurses into nested functions with the everLive snapshot (closures
   // capture bindings — see the S2.12 R14/R15 commit messages for the cases).
-  const scanScope = (scopeBody: AnyNode, inherited: ReadonlySet<string>): void => {
+  const scanScope = (
+    scopeBody: AnyNode,
+    inherited: ReadonlySet<string>,
+    inheritedDirect: ReadonlySet<string>,
+  ): void => {
     const live = new Set(inherited);
     const everLive = new Set(inherited);
+    // DIRECT builder aliases (the chain itself) vs tainted CONTAINERS — the
+    // own-chain callback exemption may only apply to direct aliases: a
+    // container can carry a foreign function under a builder-method name
+    // (`{ b, compute: makeFlow }` — codex S2.13 R18 P2).
+    const liveDirect = new Set(inheritedDirect);
+    const everDirect = new Set(inheritedDirect);
     // All names BOUND by a target — an Identifier, or every binding inside a
     // destructuring pattern (`const { b: x } = h` binds x — codex S2.13 R10).
     const boundNames = (target: AnyNode | undefined): string[] => {
@@ -419,14 +429,30 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
       // suspect: alias them all (fail-closed; destructuring from a live
       // container — codex S2.13 R10).
       if (patternDefaultIsLive || containsLiveIdentifier(valueExpr, live)) {
+        // A plain Identifier bound to a chain rooted at a DIRECT alias is
+        // itself direct (`const c = b.compute(...)`); anything else (wrapper
+        // objects, destructured pulls, pattern defaults) is tainted-only.
+        const valueRoot = chainRootOf(valueExpr);
+        const isDirectChain =
+          nameNode?.type === "Identifier" &&
+          valueRoot?.type === "Identifier" &&
+          liveDirect.has(valueRoot.name as string);
         for (const name of names) {
           live.add(name);
           everLive.add(name);
+          if (isDirectChain) {
+            liveDirect.add(name);
+            everDirect.add(name);
+          }
         }
       } else if (valueExpr !== undefined) {
         for (const name of names) {
           live.delete(name);
-          if (isDeclaration) everLive.delete(name);
+          liveDirect.delete(name);
+          if (isDeclaration) {
+            everLive.delete(name);
+            everDirect.delete(name);
+          }
         }
       }
     };
@@ -468,6 +494,7 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           }
           if (conditional) {
             // taint-only path: add aliases when the RHS is live, never delete
+            // (and never as DIRECT — the assignment may not happen)
             if (left?.type === "Identifier" && containsLiveIdentifier(n.right as AnyNode, live)) {
               live.add(left.name as string);
               everLive.add(left.name as string);
@@ -557,7 +584,7 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         // foreign call wearing a live root (codex S2.13 R17 P2).
         const calleeIsLiveChain =
           calleeRootForArgs?.type === "Identifier" &&
-          live.has(calleeRootForArgs.name as string) &&
+          liveDirect.has(calleeRootForArgs.name as string) &&
           methodName !== undefined &&
           KNOWN_BUILDER_METHODS.has(methodName);
         for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
@@ -599,6 +626,8 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
       const isBlock = node.type === "BlockStatement" && node !== scopeBody;
       const liveSnap = isBlock ? new Set(live) : undefined;
       const everSnap = isBlock ? new Set(everLive) : undefined;
+      const directSnap = isBlock ? new Set(liveDirect) : undefined;
+      const everDirectSnap = isBlock ? new Set(everDirect) : undefined;
       handleNode(node);
       for (const key of Object.keys(node)) {
         const value = (node as Record<string, unknown>)[key];
@@ -614,6 +643,8 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
       if (isBlock) {
         for (const n of liveSnap!) live.add(n);
         for (const n of everSnap!) everLive.add(n);
+        for (const n of directSnap!) liveDirect.add(n);
+        for (const n of everDirectSnap!) everDirect.add(n);
       }
     };
     visitTree(scopeBody);
@@ -622,6 +653,7 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
       if (found) return;
       const fnNode = fnQueue.shift()!;
       const childInherited = new Set(everLive);
+      const childDirect = new Set(everDirect);
       for (const param of (fnNode.params as AnyNode[] | undefined) ?? []) {
         // A default-parameter INITIALIZER referencing a live builder executes
         // at call time with the closure's bindings (`const make = (x =
@@ -650,12 +682,15 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           found = true;
           return;
         }
-        for (const name of boundNames(param)) childInherited.delete(name);
+        for (const name of boundNames(param)) {
+          childInherited.delete(name);
+          childDirect.delete(name);
+        }
       }
-      scanScope(fnNode.body as AnyNode, childInherited);
+      scanScope(fnNode.body as AnyNode, childInherited, childDirect);
     }
   };
-  scanScope(fn.body as AnyNode, new Set([builderParam]));
+  scanScope(fn.body as AnyNode, new Set([builderParam]), new Set([builderParam]));
   return found;
 }
 

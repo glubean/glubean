@@ -195,6 +195,37 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a builder-method NAME on a tainted container is still foreign (S2.13 R18)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow } from "./helpers";
+
+// container smuggles a foreign fn under a builder-method name — closure deep-checked
+export const disguised = workflow("u-disguised")
+  .setup(async () => ({}))
+  .use((b) => {
+    const h = { b, compute: makeFlow };
+    return h.compute(() => b);
+  })
+  .build();
+
+// …while a DIRECT chain alias keeps the own-chain exemption (no false flag)
+export const directAlias = workflow("u-direct-alias")
+  .setup(async () => ({ n: 1 }))
+  .use((b) => {
+    const c = b.compute("bump", (s) => ({ n: s.n + 1 }));
+    return c.check("ok", async (ctx, s) => { const fn = () => s.n; fn(); });
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-disguised": true,
+    "u-direct-alias": false,
+  });
+});
+
 test("constructor delegation and live-container callbacks fail closed (S2.13 R17)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
