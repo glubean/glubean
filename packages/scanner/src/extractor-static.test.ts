@@ -1493,8 +1493,9 @@ test("extractAliasesFromSource handles annotations and type arguments", () => {
 import { test } from "@glubean/sdk";
 export const typed: ExtendedTest<MyCtx> = test.extend({ auth: authFixture });
 export const generic = test.extend<{
-  db: { query: (q: string) => number },
-}>({ db: dbFixture });
+  db: { query: (q: string) => number };
+  page: Page;
+}>({ db: dbFixture, page: pageFixture });
 declare const foo: SomeType;
 export const after = test.extend({ page: pageFixture });
 `;

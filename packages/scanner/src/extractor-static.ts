@@ -167,12 +167,14 @@ function stripComments(source: string): string {
 export function extractAliasesFromSource(content: string): string[] {
   const stripped = stripComments(content);
   // Match: [export] const NAME[: Type] = SOMETHING.extend[<TypeArgs>](
-  // The annotation is bounded to its declaration; the type-argument list may
-  // span lines but may NOT contain `;` — an unbounded match could cross a
-  // statement boundary (`test.extend<MyCtx>;` then a real call) and swallow
-  // the real alias. Separate multiline type-literal members with commas.
+  // The annotation is bounded to its declaration. The type-argument list may
+  // span lines and contain `;`-separated type-literal members, but a bare
+  // `=` is rejected (only `=>` arrows pass) — crossing into the NEXT
+  // statement requires an assignment, so an instantiation expression
+  // (`test.extend<MyCtx>;`) can never swallow a later real call. Known
+  // limit: default type params (`<T = X>`) won't match.
   const pattern =
-    /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*(?:<[^;]*?>)?\s*\(/g;
+    /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*(?:<(?:[^=]|=>)*?>)?\s*\(/g;
   const aliases: string[] = [];
   let m;
   while ((m = pattern.exec(stripped)) !== null) {
