@@ -228,6 +228,12 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
   const params = fn.params as AnyNode[] | undefined;
   const builderParam = params?.[0]?.type === "Identifier" ? (params[0].name as string) : undefined;
   if (!builderParam) return undefined; // destructured/absent — cannot root the dataflow
+  // A default-parameter initializer can author the delegated chain BEFORE the
+  // body (`(b, r = b.branch(...)) => r`) — the body-only scan would miss it.
+  // Any non-simple parameter fails closed (codex S2.13 R5 P2).
+  for (const param of params ?? []) {
+    if (param.type !== "Identifier") return undefined;
+  }
   let found = false;
   // Per-scope dataflow: every scope folds its own bindings into the inherited
   // builder-name set in SOURCE ORDER, detects calls against the live set, then

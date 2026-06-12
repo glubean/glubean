@@ -195,6 +195,18 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("a default-parameter initializer authoring the chain fails closed (S2.13 R5)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+export const paramInit = workflow("u-param-init")
+  .setup(async () => ({ ok: true }))
+  .use((b, r = b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) })) => r)
+  .build();
+`;
+  const result = extractFromSource(content);
+  expect(result[0].workflowHasBranchOrPoll).toBe(true);
+});
+
 test("DELEGATING the builder to an uninspectable call fails closed (S2.12 R18)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";

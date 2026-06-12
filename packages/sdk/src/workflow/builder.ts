@@ -562,6 +562,17 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
           "workflow.setup() must be called before any step (call/action/check/compute) or teardown",
         );
       }
+      // Lifecycle belongs to the WORKFLOW AUTHOR: a fragment silently
+      // replacing the host's setup (and reshaping runtime state invisibly to
+      // the tip guard, which only tracks nodes) is exactly the stale-handle
+      // hazard again (codex S2.13 R5 P2). meta() stays allowed — display
+      // annotation, not behavior.
+      if (this._fragmentDepth > 0) {
+        throw new Error(
+          `workflow "${this._meta.id}": a .use() fragment cannot declare setup — ` +
+            `lifecycle belongs to the workflow author`,
+        );
+      }
       WorkflowBuilderImpl.validateLifecycleTimeout("setup", opts?.timeout);
       this._setup = fn;
       this._setupTimeoutMs = opts?.timeout;
@@ -572,6 +583,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
   teardown(fn: WorkflowTeardown<State>, opts?: { timeout?: number }): ChainedWorkflowBuilder<State> {
     return this.authoring(() => {
       this.assertNotBuilt("teardown");
+      if (this._fragmentDepth > 0) {
+        throw new Error(
+          `workflow "${this._meta.id}": a .use() fragment cannot declare teardown — ` +
+            `lifecycle belongs to the workflow author`,
+        );
+      }
       WorkflowBuilderImpl.validateLifecycleTimeout("teardown", opts?.timeout);
       this._teardown = fn;
       this._teardownTimeoutMs = opts?.timeout;

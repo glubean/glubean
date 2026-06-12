@@ -1242,6 +1242,19 @@ describe("workflow.use — fragments (phase4 §1)", () => {
     ).not.toThrow();
   });
 
+  it("a fragment cannot declare setup/teardown — lifecycle belongs to the author (codex R5)", () => {
+    expect(() =>
+      workflow("use-setup")
+        .setup(async () => ({ n: 1 }))
+        .use(((b: { setup: (f: unknown) => unknown }) => b.setup(async () => ({ hijacked: true }))) as never),
+    ).toThrow(/fragment cannot declare setup/);
+    expect(() =>
+      workflow("use-teardown")
+        .setup(async () => ({}))
+        .use(((b: { teardown: (f: unknown) => unknown }) => b.teardown(async () => {})) as never),
+    ).toThrow(/fragment cannot declare teardown/);
+  });
+
   it("a fragment chaining off a STALE handle throws (tip-guard on the trunk, codex R3)", () => {
     expect(() =>
       workflow("use-stale")
