@@ -356,6 +356,32 @@ export const x = wf("id");`,
     ),
   ).toEqual(["wf"]);
 
+  // MULTILINE generic + import-then-bare-export barrel (codex R18)
+  expect(
+    extractWorkflowExtendAliasesFromSource(
+      `import { workflow } from "@glubean/sdk";
+export const wf = workflow.extend<{
+  db: { query: (q: string) => number };
+}>({ db: async (c, use) => {} });`,
+    ),
+  ).toEqual(["wf"]);
+  const bareBarrelRegistry = buildWorkflowFnRegistry([
+    {
+      path: "/proj/fixtures/base.ts",
+      content: `import { workflow } from "@glubean/sdk";
+export const wf = workflow.extend({ a: () => 1 });`,
+    },
+    {
+      path: "/proj/fixtures/index.ts",
+      content: `import { wf } from "./base";
+export { wf };`,
+    },
+  ]);
+  expect(bareBarrelRegistry.get("wf")?.sort()).toEqual([
+    "/proj/fixtures/base.ts",
+    "/proj/fixtures/index.ts",
+  ]);
+
   // export * barrels forward every name (codex R14)
   const starRegistry = buildWorkflowFnRegistry([
     {

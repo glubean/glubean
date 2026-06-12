@@ -169,7 +169,7 @@ export function extractAliasesFromSource(content: string): string[] {
   // Match: [export] const NAME = SOMETHING.extend(
   // optional type annotation between name and `=` (no `=>` arrows supported
   // there — an annotation containing one would stop the match early)
-  const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*(?:<.*?>)?\s*\(/g;
+  const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*\w+\.extend\s*(?:<[\s\S]*?>)?\s*\(/g;
   const aliases: string[] = [];
   let m;
   while ((m = pattern.exec(stripped)) !== null) {
@@ -208,7 +208,7 @@ export function extractWorkflowExtendAliasesFromSource(
   let grew = true;
   while (grew) {
     grew = false;
-    const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*(\w+)\s*\.extend\s*(?:<.*?>)?\s*\(/g;
+    const pattern = /(?:export\s+)?const\s+(\w+)\s*(?::[^=;\n]*?)?=\s*(\w+)\s*\.extend\s*(?:<[\s\S]*?>)?\s*\(/g;
     let m;
     while ((m = pattern.exec(stripped)) !== null) {
       const [, name, base] = m;
@@ -270,6 +270,21 @@ export function buildWorkflowFnRegistry(
           const fromName = sm[1];
           const toName = sm[2] ?? sm[1];
           if (sourceDefines(path, source, fromName, registry) && add(toName, path)) grew = true;
+        }
+      }
+      // `import { wf } from "./base"; export { wf };` — a barrel that
+      // imports then re-exports WITHOUT `from` (codex S2.15 R18 P2). The
+      // seeds are this file's resolved imported-factory LOCAL names; a bare
+      // export clause publishing one makes this file a definer too.
+      if (seeds.length > 0) {
+        const bare = /export\s*\{([^}]*)\}(?!\s*from)/g;
+        let bm;
+        while ((bm = bare.exec(stripped)) !== null) {
+          for (const spec of bm[1].split(",")) {
+            const smb = spec.match(/^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/);
+            if (!smb) continue;
+            if (seeds.includes(smb[1]) && add(smb[2] ?? smb[1], path)) grew = true;
+          }
         }
       }
       const star = /export\s*\*\s*from\s*["'](\.[^"']+)["']/g;
