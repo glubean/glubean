@@ -776,7 +776,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       const node: CheckNode<State> = {
         kind: "check",
         meta: checkMeta,
-        fn: fnOrOpts as CheckNode<State>["fn"],
+        fn: fnOrOpts as (ctx: WorkflowContext, state: State) => void | Promise<void>,
         project: opts?.project,
       };
       this._nodes.push(node as WorkflowNode);

@@ -165,14 +165,23 @@ export interface ActionNode<State = any> {
  * - DECLARATIVE: `expects` — L2 predicates over state; assertions are DATA
  *   (grade: full; each item projects and emits its own assertion event).
  */
-export interface CheckNode<State = any> {
+export type CheckNode<State = any> = {
   kind: "check";
   meta: NodeMeta;
-  fn?: (ctx: WorkflowContext, state: State) => void | Promise<void>;
-  /** Declarative form: live L2 predicates (extracted at projection time). */
-  expects?: ReadonlyArray<BranchPredicate<State>>;
-  project?: CheckProjection;
-}
+} & (
+  | {
+      fn: (ctx: WorkflowContext, state: State) => void | Promise<void>;
+      expects?: undefined;
+      project?: CheckProjection;
+    }
+  | {
+      fn?: undefined;
+      /** Declarative form: live L2 predicates (extracted at projection time). */
+      expects: ReadonlyArray<BranchPredicate<State>>;
+      /** hints belong to the inline form — the declarative form IS the data. */
+      project?: undefined;
+    }
+);
 
 /** Pure synchronous state transform. */
 export interface ComputeNode<State = any> {

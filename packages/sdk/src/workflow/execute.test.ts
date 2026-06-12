@@ -112,7 +112,10 @@ const actionNode = (
   project?: ActionNode["project"],
 ): ActionNode => ({ kind: "action", meta: { id, name: id }, fn, project });
 
-const checkNode = (id: string, fn: CheckNode["fn"]): CheckNode => ({
+const checkNode = (
+  id: string,
+  fn: (ctx: WorkflowContext, state: any) => void | Promise<void>,
+): CheckNode => ({
   kind: "check",
   meta: { id, name: id },
   fn,

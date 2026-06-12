@@ -683,9 +683,16 @@ function runBody(
         }
         return Promise.resolve(undefined);
       }
+      // `as any`/JS construction can hand a check with NEITHER form — the
+      // type is an XOR union, but fail fast for bypassers (codex S2.17 R2).
+      if (typeof check.fn !== "function") {
+        throw new Error(
+          `workflow check "${node.meta.id}": needs an inline fn or { expect: [...] }`,
+        );
+      }
       // A check returns void → it never changes state (resolve to `undefined` so
       // the caller's §17 #2 "void preserves" rule keeps the prior state).
-      return Promise.resolve(check.fn!(ctx, state)).then(() => undefined);
+      return Promise.resolve(check.fn(ctx, state)).then(() => undefined);
     }
     case "compute": {
       // Pure synchronous transform; the return REPLACES state (§17 #2/#13). The
