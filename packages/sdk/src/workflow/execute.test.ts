@@ -1225,6 +1225,47 @@ describe("workflow.use — fragments (phase4 §1)", () => {
     // ...and the poisoned trunk refuses to build (half-authored)
   });
 
+  it("a fragment chaining off a STALE handle throws (tip-guard on the trunk, codex R3)", () => {
+    expect(() =>
+      workflow("use-stale")
+        .setup(async () => ({ n: 1 }))
+        .use(((b: WorkflowBuilder<{ n: number }>) => {
+          const next = b.compute("drop", () => ({})); // reshapes away n
+          (b as unknown as { check: (id: string, f: unknown) => unknown }).check("late", async () => {});
+          return next;
+        }) as never),
+    ).toThrow(/forked its chain/);
+  });
+
+  it("NESTED fragments keep the build() guard armed (depth counter, codex R3)", () => {
+    const inner = <S,>(b: WorkflowBuilder<S>) => b.compute("inner", (s) => s);
+    expect(() =>
+      workflow("use-nested-build")
+        .setup(async () => ({}))
+        .use(((b: WorkflowBuilder<object>) => {
+          const afterInner = b.use(inner) as unknown as { build: () => unknown };
+          afterInner.build(); // inner use() returned — a boolean flag would have disarmed here
+          return afterInner;
+        }) as never),
+    ).toThrow(/build\(\) cannot be called inside a \.use\(\) fragment/);
+    expect(getRegistryForEach().some((r) => r.id === "use-nested-build")).toBe(false);
+  });
+
+  it("plain nested fragments compose fine", async () => {
+    const inner = <S extends { n: number }>(b: WorkflowBuilder<S>) =>
+      b.compute("inner-bump", (s) => ({ ...s, n: s.n + 1 }));
+    const outer = <S extends { n: number }>(b: WorkflowBuilder<S>) =>
+      b.use(inner).compute("outer-bump", (s) => ({ ...s, n: s.n + 1 }));
+    const { ctx } = fakeBase();
+    const wf = workflow("use-nested")
+      .setup(async () => ({ n: 0 }))
+      .use(outer)
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.state).toEqual({ n: 2 });
+  });
+
   it("a fragment calling b.build() is rejected — no premature registration (codex R2)", () => {
     expect(() =>
       workflow("use-build")

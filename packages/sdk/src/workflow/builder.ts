@@ -711,11 +711,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     });
   }
 
-  /** Set while a `.use()` fragment is executing — a fragment finalizing the
+  /** DEPTH of currently-executing `.use()` fragments (nested fragments
+   * compose — a boolean would be cleared by the inner finally, reopening the
+   * premature-build hole; codex S2.13 R3 P2). A fragment finalizing the
    * workflow (`b.build()` via JS/as-any) would register it BEFORE use() can
-   * reject the handle, and the set `_built` would defeat poisoning
-   * (codex S2.13 R2 P2). */
-  private _inFragment = false;
+   * reject the handle, and the set `_built` would defeat poisoning. */
+  private _fragmentDepth = 0;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   use(fragment: (b: WorkflowBuilder<State>) => unknown): any {
@@ -724,12 +725,20 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       if (typeof fragment !== "function") {
         throw new Error(`workflow.use() on "${this._meta.id}": a fragment function is required`);
       }
+      // The fragment gets a TIP-GUARDED FACADE, not the raw builder — the
+      // same stale-handle hazard branch sides have exists on the trunk: a
+      // block-body fragment could chain off a pre-reshape handle and run a
+      // check against state that no longer exists (codex S2.13 R3 P2).
+      const { facade, tipOf } = WorkflowBuilderImpl.makeTipGuardedFacade(
+        this,
+        `fragment in "${this._meta.id}"`,
+      );
       let result: unknown;
-      this._inFragment = true;
+      this._fragmentDepth += 1;
       try {
-        result = fragment(this);
+        result = fragment(facade);
       } finally {
-        this._inFragment = false;
+        this._fragmentDepth -= 1;
       }
       // An async fragment would add nodes after the chain moved on — same
       // hazard as an async branch side (codex S2.4a R5). Consume the promise
@@ -748,11 +757,20 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       // The CHAINED brand is type-only — a fragment returning a chain built
       // from a DIFFERENT workflow() satisfies the type while redirecting
       // every subsequent trunk call to that other builder and leaving this
-      // one half-authored (codex phase4 design-R1). Identity, not shape.
-      if (result !== this) {
+      // one half-authored (codex phase4 design-R1). The returned handle must
+      // be THIS use()'s facade chain AND its tip (a stale prefix means steps
+      // were appended after it — same belt-and-suspenders as branch sides).
+      const returnedTip = tipOf(result);
+      if (returnedTip === undefined) {
         throw new Error(
           `workflow.use() on "${this._meta.id}": the fragment must return the chain built ` +
             `from the builder it was given — it returned ${result === undefined ? "undefined" : "a different builder/value"}`,
+        );
+      }
+      if (returnedTip !== this._nodes.length) {
+        throw new Error(
+          `workflow.use() on "${this._meta.id}": the fragment returned a stale chain handle — ` +
+            `return the value of the LAST chain call`,
         );
       }
       return this.chained();
@@ -1085,43 +1103,63 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
 
   // Collect a then/else sub-graph by running its callback on a fresh child builder.
   // A branch side may NOT declare setup/teardown (those are workflow-scoped).
+  /**
+   * Tip-guarded facade over a builder (codex S2.8 R3 / S2.13 R3): the CHAINED
+   * brand catches `return b`, but a FORKED chain needs a runtime guard — e.g.
+   * `b.compute(reshape); return b.check(noop)` compiles (the second chain is
+   * S→S) while the discarded reshaping chain still lands in the node list.
+   * Every facade remembers the chain length at its creation; a node call from
+   * a handle whose tip is no longer the chain's end IS the fork — throw at
+   * authoring time. Sequential chains (incl. `const c = b.x(); return c`)
+   * pass untouched. Shared by branch-family sides (collectSubNodes) AND
+   * `.use()` fragments — the same stale-handle hazard exists on the trunk.
+   */
+  private static makeTipGuardedFacade<S>(
+    target: WorkflowBuilderImpl<S>,
+    label: string,
+  ): { facade: WorkflowBuilder<S>; tipOf: (v: unknown) => number | undefined } {
+    const tips = new WeakMap<object, number>();
+    const make = (tip: number): WorkflowBuilder<S> => {
+      const proxy = new Proxy(target as object, {
+        get: (t, prop) => {
+          const v = Reflect.get(t, prop, t);
+          if (typeof v !== "function") return v;
+          return (...args: unknown[]) => {
+            if (target._nodes.length !== tip) {
+              throw new Error(
+                `workflow ${label} forked its chain — continue from the ` +
+                  `latest chain return value; don't call off an earlier handle`,
+              );
+            }
+            const out = v.apply(t, args);
+            // A node call advanced the chain → hand back a fresh tip handle.
+            // Non-advancing calls return their own result.
+            return target._nodes.length !== tip ? make(target._nodes.length) : out;
+          };
+        },
+      }) as WorkflowBuilder<S>;
+      tips.set(proxy as object, tip);
+      return proxy;
+    };
+    // The facade starts at the CURRENT chain end — a trunk facade (.use) is
+    // created mid-chain, so tip 0 would instantly false-positive the fork
+    // guard on the first call; a child builder starts empty so this is 0.
+    return {
+      facade: make(target._nodes.length),
+      tipOf: (v) => (typeof v === "object" && v !== null ? tips.get(v as object) : undefined),
+    };
+  }
+
   private collectSubNodes(
     fn: (b: WorkflowBuilder<State>) => unknown,
     idPrefix: string,
   ): WorkflowNode[] {
     const child = new WorkflowBuilderImpl<State>({ id: this._meta.id }, idPrefix, true);
-    // Tip-guarded facade (codex S2.8 R3 P2): the CHAINED brand catches
-    // `return b`, but a FORKED chain needs a runtime guard — e.g.
-    // `b.compute(reshape); return b.check(noop)` compiles (the second chain is
-    // S→S) while the discarded reshaping chain still lands in child._nodes.
-    // Every facade remembers the chain length at its creation; a node call from
-    // a handle whose tip is no longer the chain's end IS the fork — throw at
-    // authoring time. Sequential chains (incl. `const c = b.x(); return c`)
-    // always call from the tip and pass untouched.
-    const tips = new WeakMap<object, number>();
-    const makeFacade = (tip: number): WorkflowBuilder<State> => {
-      const proxy = new Proxy(child as object, {
-        get: (target, prop) => {
-          const v = Reflect.get(target, prop, target);
-          if (typeof v !== "function") return v;
-          return (...args: unknown[]) => {
-            if (child._nodes.length !== tip) {
-              throw new Error(
-                `workflow side under "${idPrefix}" forked its chain — continue from the ` +
-                  `latest chain return value; don't call off an earlier handle`,
-              );
-            }
-            const out = v.apply(target, args);
-            // A node call advanced the chain → hand back a fresh tip handle.
-            // Non-advancing calls return their own result.
-            return child._nodes.length !== tip ? makeFacade(child._nodes.length) : out;
-          };
-        },
-      }) as WorkflowBuilder<State>;
-      tips.set(proxy as object, tip);
-      return proxy;
-    };
-    const result = fn(makeFacade(0));
+    const { facade, tipOf } = WorkflowBuilderImpl.makeTipGuardedFacade(
+      child,
+      `side under "${idPrefix}"`,
+    );
+    const result = fn(facade);
     // An async then/else callback would snapshot child._nodes BEFORE its post-await
     // steps are added — silently dropping them. Reject thenables (codex S2.4a R5).
     if (result && typeof (result as { then?: unknown }).then === "function") {
@@ -1134,7 +1172,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     // chain's tip means steps were added after it — the callback returned a
     // stale prefix of its own chain.
     if (typeof result === "object" && result !== null) {
-      const returnedTip = tips.get(result as object);
+      const returnedTip = tipOf(result);
       if (returnedTip !== undefined && returnedTip !== child._nodes.length) {
         throw new Error(
           `workflow side under "${idPrefix}" returned a stale chain handle — ` +
@@ -1202,7 +1240,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     // A fragment finalizing its host would register the workflow before
     // use() can validate the return — and `_built` would then defeat the
     // poison path (codex S2.13 R2 P2).
-    if (this._inFragment) {
+    if (this._fragmentDepth > 0) {
       throw new Error(
         `workflow "${this._meta.id}": build() cannot be called inside a .use() fragment — ` +
           `return the chain; the workflow's author builds it`,
