@@ -44,3 +44,25 @@ The CI workflow handles this automatically. Do not change the order without upda
 ## Commit gate
 
 See [`~/.claude/CLAUDE.md`](/Users/peisong/.claude/CLAUDE.md) (global) for the converge gate + propose-skip categories. This repo follows the global rule unchanged. Test runner here is `vitest` (per-package).
+
+## vNext workflow authoring conventions (owner decision 2026-06-12, "option D")
+
+When writing `workflow()` code anywhere (tests, fixtures, cookbook, dogfood):
+
+1. **A workflow containing branch/poll/switch/route/pollAction goes in a
+   `.flow.ts` file**, never a `.test.ts`. (`.flow.ts` is runtime-extracted —
+   always precise; `.test.ts` relies on a static AST gate that is a TEMPORARY
+   stopgap until Cloud renders branch/poll nodes.)
+2. **Inside fragments / each-factories / group bodies, use the builder ONLY in
+   direct chains**: `b.x().y()` or `const c = b.x(); return c.y()`.
+3. **Never store the builder in objects/arrays, destructure it, or pass it to
+   other functions** (the `.use(fragment)` argument is the one sanctioned way
+   to hand it off).
+
+Rationale: the `.test.ts` static branch/poll upload gate (scanner
+`extractor-ast.ts`) is FROZEN at its S2.13 R19 state by owner decision — do
+not extend its adversarial-JS detection further. Codex findings about new
+ways to "hide" a builder in test files are answered by these conventions
+(upstream prevention), not by new scanner code. The whole gate is deleted
+when Cloud branch/poll rendering ships. When vNext is released, migrate these
+three rules into the `skill` repo's authoring guidance.
