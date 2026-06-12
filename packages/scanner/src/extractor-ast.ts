@@ -243,8 +243,13 @@ function containsLiveIdentifier(
     if (found || !node || typeof node.type !== "string") return;
     // TYPE-ONLY subtrees never hold runtime references — a type argument
     // named like the builder (`makeClient<b>()`) must not taint anything
-    // (codex S2.13 R15 P2).
-    if ((node.type as string).startsWith("TS")) return;
+    // (codex S2.13 R15 P2). But TS EXPRESSION wrappers (`b as any`, `b!`)
+    // carry a real runtime expression — descend into it (codex R16 P2).
+    if ((node.type as string).startsWith("TS")) {
+      const inner = (node as { expression?: AnyNode }).expression;
+      if (inner && typeof inner.type === "string") visit(inner);
+      return;
+    }
     if (
       !opts?.intoFunctions &&
       (node.type === "ArrowFunctionExpression" ||
@@ -414,7 +419,17 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
           bind(n.id as AnyNode, n.init as AnyNode | undefined, true);
           return;
         }
-        if (n.type === "AssignmentExpression" && n.operator === "=") {
+        if (
+          n.type === "AssignmentExpression" &&
+          (n.operator === "=" ||
+            // logical assignments MAY assign at runtime — taint like plain
+            // `=` on the live side; never delete on the foreign side (the
+            // old value may survive) — codex S2.13 R16 P2.
+            n.operator === "??=" ||
+            n.operator === "||=" ||
+            n.operator === "&&=")
+        ) {
+          const conditional = n.operator !== "=";
           const left = unwrapExpression(n.left as AnyNode);
           // A MEMBER write storing a live builder taints the container:
           // `h.b = b; h.b.branch(...)` (codex S2.13 R14 P2).
@@ -425,6 +440,14 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
                 live.add(root.name as string);
                 everLive.add(root.name as string);
               }
+            }
+            return;
+          }
+          if (conditional) {
+            // taint-only path: add aliases when the RHS is live, never delete
+            if (left?.type === "Identifier" && containsLiveIdentifier(n.right as AnyNode, live)) {
+              live.add(left.name as string);
+              everLive.add(left.name as string);
             }
             return;
           }

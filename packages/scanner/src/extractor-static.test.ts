@@ -195,6 +195,35 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("TS expression wrappers and logical assignments cannot hide a builder (S2.13 R16)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow } from "./helpers";
+
+// builder behind \`as any\` inside a wrapper object — still delegation
+export const asAny = workflow("u-as-any")
+  .setup(async () => ({}))
+  .use((b) => makeFlow({ b: b as any }))
+  .build();
+
+// builder stored via logical assignment — alias taints
+export const logicalAssign = workflow("u-logical-assign")
+  .setup(async () => ({ ok: true }))
+  .use((b) => {
+    let x;
+    x ??= b;
+    return x.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (y) => y.compute("c", (s) => s) });
+  })
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-as-any": true,
+    "u-logical-assign": true,
+  });
+});
+
 test("closure capture to foreign calls flags; TS type args don't taint (S2.13 R15)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
