@@ -232,15 +232,24 @@ function chainRootOf(expr: AnyNode | undefined): AnyNode | undefined {
  * only (nested functions are handled by the scanner's own recursion), and
  * non-computed member/property KEY identifiers are skipped — `client.b` is a
  * property name, not a reference (codex S2.13 R7). */
-function containsLiveIdentifier(expr: AnyNode | undefined, live: ReadonlySet<string>): boolean {
+function containsLiveIdentifier(
+  expr: AnyNode | undefined,
+  live: ReadonlySet<string>,
+  opts?: { intoFunctions?: boolean },
+): boolean {
   if (!expr || typeof expr !== "object") return false;
   let found = false;
   const visit = (node: AnyNode): void => {
     if (found || !node || typeof node.type !== "string") return;
+    // TYPE-ONLY subtrees never hold runtime references — a type argument
+    // named like the builder (`makeClient<b>()`) must not taint anything
+    // (codex S2.13 R15 P2).
+    if ((node.type as string).startsWith("TS")) return;
     if (
-      node.type === "ArrowFunctionExpression" ||
-      node.type === "FunctionExpression" ||
-      node.type === "FunctionDeclaration"
+      !opts?.intoFunctions &&
+      (node.type === "ArrowFunctionExpression" ||
+        node.type === "FunctionExpression" ||
+        node.type === "FunctionDeclaration")
     ) {
       return; // nested scope — the scanner recurses there separately
     }
@@ -252,6 +261,10 @@ function containsLiveIdentifier(expr: AnyNode | undefined, live: ReadonlySet<str
       // skip NAME positions: a non-computed member's property and a
       // non-computed object-property key are labels, not references.
       if (
+        key === "typeParameters" ||
+        key === "typeAnnotation" ||
+        key === "returnType" ||
+        key === "superTypeParameters" ||
         (isMemberNode(node) && node.computed !== true && key === "property") ||
         ((node.type === "ObjectProperty" ||
           node.type === "Property" ||
@@ -467,8 +480,29 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
         // (`makeFlow({ wf })`, codex S2.13 R7) — hands the graph to code
         // this scan cannot see. Nested-function arguments are exempt (the
         // scanner recurses into them itself).
+        // Whose call is this? A live builder's OWN chain call (`b.action("x",
+        // cb)`) hands its callbacks to the runtime — the recursion scans them
+        // shadow-aware. A FOREIGN call's function argument capturing the
+        // builder (`makeFlow(() => b)`) hands authoring capability to code we
+        // can't see — deep-check those (codex S2.13 R15 P2; shadow-unaware by
+        // design, fail-closed).
+        const calleeRootForArgs =
+          callee && isMemberNode(callee)
+            ? chainRootOf((callee as AnyNode).object as AnyNode)
+            : undefined;
+        const calleeIsLiveChain =
+          calleeRootForArgs?.type === "Identifier" &&
+          live.has(calleeRootForArgs.name as string);
         for (const arg of (n.arguments as AnyNode[] | undefined) ?? []) {
-          if (containsLiveIdentifier(arg, live)) {
+          const unwrappedArg = unwrapExpression(arg) ?? arg;
+          const isFnArg =
+            unwrappedArg.type === "ArrowFunctionExpression" ||
+            unwrappedArg.type === "FunctionExpression";
+          if (
+            containsLiveIdentifier(arg, live, {
+              intoFunctions: isFnArg && !calleeIsLiveChain,
+            })
+          ) {
             found = true;
             return;
           }

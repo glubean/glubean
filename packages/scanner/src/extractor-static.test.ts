@@ -195,6 +195,35 @@ export const delegated = workflow("u-delegated")
   });
 });
 
+test("closure capture to foreign calls flags; TS type args don't taint (S2.13 R15)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { makeFlow, makeClient } from "./helpers";
+
+// a closure CAPTURING the builder handed to a foreign call — fail closed
+export const closureCapture = workflow("u-closure-capture")
+  .setup(async () => ({}))
+  .use((b) => makeFlow(() => b))
+  .build();
+
+// a TYPE argument colliding with the builder name — type-only, clean
+export const typeArg = workflow("u-type-arg")
+  .setup(async () => ({}))
+  .use((b) => b.action("probe", async (ctx, s) => {
+    const client = makeClient<b>();
+    await client.poll();
+    return s;
+  }))
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "u-closure-capture": true,
+    "u-type-arg": false,
+  });
+});
+
 test("member writes and expression receivers cannot hide a branch (S2.13 R14)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
