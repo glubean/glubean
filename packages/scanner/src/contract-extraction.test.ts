@@ -339,6 +339,22 @@ test("synthesize: each case seeds a kind:'raw' entry by default", () => {
   ]);
 });
 
+test("synthesize: runnable:false cases (inbound, §9.5) seed NO raw entry", () => {
+  const c = makeContract("stripe.webhooks", "ack", "stripeWebhooks");
+  c.cases.push({
+    key: "paymentIntentCreated",
+    lifecycle: "active",
+    severity: "warning",
+    direction: "inbound",
+    runnable: false,
+  });
+  const { attachments, errors } = synthesizeAttachments([c], [], []);
+  expect(errors).toEqual([]);
+  // Only the outbound case is advertised — the SDK registered no Test for
+  // the inbound one (codex I2 R1 P1).
+  expect(attachments.map((a) => a.testId)).toEqual(["stripe.webhooks.ack"]);
+});
+
 test("synthesize: bootstrap overlay REPLACES the raw entry for the same testId", () => {
   const c = makeContract("orders.create", "success", "ordersCreate");
   const marker = {

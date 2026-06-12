@@ -11,6 +11,7 @@ import { test, expect, beforeEach } from "vitest";
 // Main index so the HTTP adapter side-effect registration fires.
 import { contract, inboundCase, isInboundCase, workflow } from "../index.js";
 import { httpAdapter } from "./adapter.js";
+import { buildOpenApiPartForHttp } from "./openapi.js";
 import type {
   HttpContractSpec,
   HttpPayloadSchemas,
@@ -240,6 +241,44 @@ test("adapter execution entry points fail fast on inbound case specs", async () 
       resolvedInputs: undefined,
     }) as Promise<unknown>,
   ).rejects.toThrow(/is inbound/);
+});
+
+// ---------------------------------------------------------------------------
+// OpenAPI (codex I2 R1 P2): no fabricated 200 for inbound promises
+// ---------------------------------------------------------------------------
+
+test("OpenAPI: inbound cases never fabricate responses; direction rides x-glubean-cases", () => {
+  const api = makeApi();
+  const c = api("stripe.webhooks", {
+    endpoint: "POST /webhooks/stripe",
+    cases: {
+      ack: { description: "we ACK", expect: { status: 201 } },
+      evt: inboundCase({ description: "signed event", expect: { bodySchema: eventSchema } }),
+    },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const part = buildOpenApiPartForHttp(c._extracted as never)!;
+  const op = (part.paths as Record<string, Record<string, Record<string, unknown>>>)[
+    "/webhooks/stripe"
+  ].post;
+  // Only the outbound case contributes a response — no dummy 200 from `evt`.
+  expect(Object.keys(op.responses as Record<string, unknown>)).toEqual(["201"]);
+  const cases = op["x-glubean-cases"] as Array<Record<string, unknown>>;
+  const evt = cases.find((x) => x.key === "evt")!;
+  expect(evt.direction).toBe("inbound");
+  expect(evt.description).toBe("signed event");
+  const ack = cases.find((x) => x.key === "ack");
+  expect(ack?.direction).toBeUndefined();
+});
+
+test("OpenAPI: an inbound-only contract emits NO path (null part, not a fake operation)", () => {
+  const api = makeApi();
+  const c = api("stripe.webhooks.inonly", {
+    endpoint: "POST /webhooks/stripe",
+    cases: {
+      evt: inboundCase({ description: "signed event", expect: { bodySchema: eventSchema } }),
+    },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  expect(buildOpenApiPartForHttp(c._extracted as never)).toBeNull();
 });
 
 // ---------------------------------------------------------------------------

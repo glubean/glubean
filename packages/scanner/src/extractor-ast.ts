@@ -1050,16 +1050,38 @@ function readCases(casesObj: AnyNode): ContractCaseStaticMeta[] {
     if (property.type !== "ObjectProperty") continue;
     const key = propertyNameText(property);
     if (key === undefined) continue;
-    const body = objectFromExpression(property.value as AnyNode);
+
+    // `evt: inboundCase({...})` (I2 authoring helper) — unwrap to the spec
+    // argument so description etc. stay readable, and mark the direction so
+    // static-fallback discovery never advertises a non-runnable case.
+    const rawValue = unwrapExpression(property.value as AnyNode);
+    let inbound = false;
+    let bodySource: AnyNode | undefined = rawValue;
+    if (rawValue?.type === "CallExpression") {
+      const callee = unwrapExpression(rawValue.callee as AnyNode);
+      if (callee?.type === "Identifier" && callee.name === "inboundCase") {
+        inbound = true;
+        bodySource = (rawValue.arguments as AnyNode[] | undefined)?.[0];
+      }
+    }
+
+    const body = objectFromExpression(bodySource);
     if (!body) {
       // Reference / shorthand case value (`cases: { ok }` or `ok: sharedCase`):
       // the case body isn't an inline object, so per-case fields can't be read,
       // but the KEY is still a real case — preserve it (VSCode discovery needs it).
-      out.push({ key, line: lineOf((property.key as AnyNode) ?? (property.value as AnyNode)) });
+      out.push({
+        key,
+        line: lineOf((property.key as AnyNode) ?? (property.value as AnyNode)),
+        ...(inbound ? { direction: "inbound" as const } : {}),
+      });
       continue;
     }
 
     const meta: ContractCaseStaticMeta = { key, line: lineOf(property.value as AnyNode) };
+    if (inbound || stringProperty(body, "direction") === "inbound") {
+      meta.direction = "inbound";
+    }
 
     const description = stringProperty(body, "description");
     if (description !== undefined) meta.description = description;

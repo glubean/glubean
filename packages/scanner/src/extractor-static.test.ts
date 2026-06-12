@@ -1906,6 +1906,45 @@ export const createUser = contract.http("create-user", {
   expect(result[0].cases[1].expectStatus).toBe(400);
 });
 
+test("extractContractCases — inbound cases are marked (helper call + direction literal)", () => {
+  const source = `
+import { contract, inboundCase } from "@glubean/sdk";
+
+export const stripeWebhooks = contract.http("stripe.webhooks", {
+  endpoint: "POST /webhooks/stripe",
+  cases: {
+    ack: {
+      description: "we ACK",
+      expect: { status: 200 },
+    },
+    viaHelper: inboundCase({
+      description: "Stripe posts payment_intent.created",
+      expect: { bodySchema: Evt },
+    }),
+    viaLiteral: {
+      direction: "inbound",
+      description: "literal form",
+      expect: { bodySchema: Evt },
+    },
+    viaRef: sharedCase,
+  },
+});
+`;
+  const result = extractContractCases(source);
+  expect(result).toHaveLength(1);
+  const byKey = Object.fromEntries(result[0].cases.map((c) => [c.key, c]));
+  expect(byKey.ack.direction).toBeUndefined();
+  expect(byKey.ack.expectStatus).toBe(200);
+  // Helper call: direction marked AND the spec arg stays readable.
+  expect(byKey.viaHelper.direction).toBe("inbound");
+  expect(byKey.viaHelper.description).toBe("Stripe posts payment_intent.created");
+  expect(byKey.viaHelper.expectStatus).toBeUndefined();
+  expect(byKey.viaLiteral.direction).toBe("inbound");
+  // Reference values can't be classified statically — documented authoring
+  // convention (inline inbound cases); the key survives, unmarked.
+  expect(byKey.viaRef.direction).toBeUndefined();
+});
+
 test("extractContractCases — deferred case", () => {
   const source = `
 export const cancelRun = contract.http("cancel-run", {

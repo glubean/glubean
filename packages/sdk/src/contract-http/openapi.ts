@@ -93,6 +93,7 @@ type OpenApiSourceContract = {
     verifyRules?: unknown[];
     lifecycle?: string;
     severity?: string;
+    direction?: "inbound";
     [k: string]: unknown;
   }>;
   [k: string]: unknown;
@@ -263,6 +264,18 @@ export function buildOpenApiPartForHttp(
   // Convert :param to {param} for OpenAPI
   apiPath = apiPath.replace(/:(\w+)/g, "{$1}");
 
+  // Inbound cases (direction: "inbound", inbound-contract-design §9.2) have
+  // no response of ours to document — running them through the response
+  // merge below would fabricate a dummy 200 (codex I2 R1 P2). They are
+  // excluded from responses/params and surfaced via x-glubean-cases; full
+  // inbound rendering (OpenAPI 3.1 `webhooks` / AsyncAPI) is slice I4.
+  const outboundCases = c.cases.filter((cas) => cas.direction !== "inbound");
+  // An inbound-only contract has NO callable operation — emitting a path
+  // with empty/fabricated responses misdocuments it. Null parts are
+  // filtered by the render pipeline; the contract stays visible in
+  // markdown/metadata until I4 gives it a real artifact.
+  if (outboundCases.length === 0) return null;
+
   // Dual-shape field reads (nested v0.2+ / flat pre-v0.2 fixtures)
   const fields = readContractFields(c);
 
@@ -284,7 +297,7 @@ export function buildOpenApiPartForHttp(
   };
   const responses: Record<string, StatusBucket> = {};
 
-  for (const cas of c.cases) {
+  for (const cas of outboundCases) {
     const casFields = readCaseFields(cas);
     const statusCode = String(casFields.status ?? 200);
     const contentType = casFields.responseContentType ?? "application/json";
@@ -362,12 +375,16 @@ export function buildOpenApiPartForHttp(
 
   const glubeanCases = c.cases
     .map((cas) => {
+      // Inbound cases always surface here (their direction + promise are the
+      // projection content); outbound cases only when they carry a marker.
       const hasProjectionMarker =
+        cas.direction === "inbound" ||
         cas.given !== undefined ||
         cas.hasVerify !== undefined ||
         cas.verifyRules !== undefined;
       if (!hasProjectionMarker) return null;
       const out: Record<string, unknown> = { key: cas.key };
+      if (cas.direction) out.direction = cas.direction;
       if (cas.description) out.description = cas.description;
       if (cas.given) out.given = cas.given;
       if (cas.hasVerify !== undefined) out.hasVerify = cas.hasVerify;
@@ -431,7 +448,7 @@ export function buildOpenApiPartForHttp(
   };
   const mergedParamMetas: ParamMetaMap = {};
   const mergedQueryMetas: ParamMetaMap = {};
-  for (const cas of c.cases) {
+  for (const cas of outboundCases) {
     const casFields = readCaseFields(cas);
     mergeFieldLevel(mergedParamMetas, casFields.paramSchemas);
     mergeFieldLevel(mergedQueryMetas, casFields.querySchemas);

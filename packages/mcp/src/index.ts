@@ -497,7 +497,11 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
     const result = await sharedExtractFromFile(absolutePath);
     if (result.contracts.length > 0) {
       tests = result.contracts.flatMap((c) =>
-        c.cases.map((cas) => ({
+        c.cases
+          // Non-runnable cases (direction: "inbound", design §9.5): the SDK
+          // registered no Test — never advertise them as runnable (codex I2 R1).
+          .filter((cas) => cas.runnable !== false)
+          .map((cas) => ({
           exportName: c.exportName,
           id: `${c.id}.${cas.key}`,
           name: `${c.target} — ${cas.key}`,
@@ -524,7 +528,10 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
       const contracts = (hasHttp && !hasNonHttp && !hasWorkflow) ? extractContractCases(content) : [];
       if (contracts.length > 0) {
         tests = contracts.flatMap((contract) =>
-          contract.cases.map((c) => ({
+          contract.cases
+            // Static-fallback mirror of the runnable filter above.
+            .filter((c) => c.direction !== "inbound")
+            .map((c) => ({
             exportName: contract.exportName,
             id: `${contract.contractId}.${c.key}`,
             name: `${contract.endpoint} — ${c.key}`,

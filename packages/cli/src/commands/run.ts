@@ -525,6 +525,10 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
     for (const ec of result.contracts) {
       const contractTags = ec.tags ?? [];
       for (const c of ec.cases) {
+        // Non-runnable cases (direction: "inbound", design §9.5): the SDK
+        // registered no Test — advertising them here would schedule an id
+        // that can never resolve (codex I2 R1 P1).
+        if (c.runnable === false) continue;
         // Mirror SDK dispatchContract: finalTags = contract + case + runtime
         // synthetic. Without this, pre-spawn excludeTags / --tag filtering
         // skips contract cases entirely (Phase 1 filter reads meta.tags).
@@ -627,6 +631,9 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
       if (contracts.length > 0) {
         for (const c of contracts) {
           for (const caseItem of c.cases) {
+            // Static-fallback mirror of the runnable filter above (the AST
+            // extractor marks inboundCase()/direction literals).
+            if (caseItem.direction === "inbound") continue;
             const requires = caseItem.requires ?? "headless";
             const defaultRun =
               caseItem.defaultRun ??

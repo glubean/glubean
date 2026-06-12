@@ -952,6 +952,10 @@ export function synthesizeAttachments(
   // first-class field, no longer hidden under `extensions`).
   const byTestId = new Map<string, NormalizedAttachmentMeta>();
   for (const [testId, { contract, case: c }] of caseByTestId) {
+    // Non-runnable cases (direction: "inbound", inbound-contract-design §9.5)
+    // never enter the runnable inventory: the SDK dispatcher registered no
+    // Test for them, so advertising a raw attachment would point at nothing.
+    if (c.runnable === false) continue;
     const runnability = normalizeRunnability(c.runnability);
     byTestId.set(testId, {
       kind: "raw",

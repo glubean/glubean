@@ -262,6 +262,15 @@ export interface ContractCaseStaticMeta {
   hasVerify?: boolean;
   /** Projectable companion rules for opaque verify() callbacks */
   verifyRules?: ContractVerifyRule[];
+  /**
+   * "inbound" when the case is statically recognizable as an inbound case
+   * (an `inboundCase({...})` call or a literal `direction: "inbound"` —
+   * inbound-contract-design §9.2). Inbound cases are never runnable; the
+   * static-fallback discovery paths must skip them. A case routed through
+   * an alias/reference can evade static recognition — authoring convention
+   * (same stance as OPTION D): write inbound cases inline.
+   */
+  direction?: "inbound";
 }
 
 /** Metadata for a discovered contract.http() call. */
