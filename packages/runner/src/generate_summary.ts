@@ -84,6 +84,10 @@ export function generateSummary(events: TimelineEvent[]): Summary {
         break;
 
       case "node_end": {
+        // A group bracket is DISPLAY-ONLY (phase4 §2): its members each emit
+        // their own node_end — counting the container would double-count and
+        // dilute grades. Render layers still see the bracket on the timeline.
+        if (e.kind === "group") break;
         const verdict: NodeVerdict = { status: e.status, grade: e.grade };
         const retryOfPrevious =
           e.attempt !== undefined && e.attempt > 1 && lastIndexByNodeId.has(e.nodeId);

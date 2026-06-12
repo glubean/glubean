@@ -1197,6 +1197,145 @@ describe("runWorkflow — branch (§17 #6)", () => {
   });
 });
 
+// --- .group(): display-only bracket (S2.14, phase4 §2) -------------------------
+
+describe("workflow.group — display-only bracket (phase4 §2)", () => {
+  it("members run exactly as without the wrapper; bracket reports aggregate + worst grade", async () => {
+    const { ctx, rec } = fakeBase();
+    const wf = workflow("g-basic")
+      .setup(async () => ({ n: 1 }))
+      .group("payment", (b) =>
+        b
+          .compute("bump", (s) => ({ ...s, n: s.n + 1 }))
+          .action("seed", async (_c, s) => s) // opaque — worst member
+          .check("verify", async (c, s) => c.assert(s.n === 2, "bumped")),
+      )
+      .check("after", async (c, s) => c.assert(s.n === 2, "state flowed out"))
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+    expect(res.state).toEqual({ n: 2 });
+    // outcomes: members first (anonymous ids under the group prefix keep
+    // their explicit ids), bracket last with worst grade
+    const ids = res.nodes.map((n) => n.id);
+    expect(ids).toEqual(["bump", "seed", "verify", "payment", "after"]);
+    const bracket = res.nodes.find((n) => n.id === "payment")!;
+    expect(bracket.status).toBe("passed");
+    expect(bracket.grade).toBe("opaque"); // worst member (seed, no hints)
+    // bracket emits first-class node events with kind:"group"
+    const groupEnds = rec.events.filter(
+      (e) => e.type === "workflow:node_end" && (e.data as { kind?: string }).kind === "group",
+    );
+    expect(groupEnds).toHaveLength(1);
+  });
+
+  it("fail-stop inside the group: remaining members + trunk rest skipped; bracket failed", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("g-fail")
+      .setup(async () => ({}))
+      .group("pay", (b) =>
+        b
+          .check("boom", async (c) => c.assert(false, "no"))
+          .compute("never", (s) => s),
+      )
+      .check("after", async () => {})
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    const byId = Object.fromEntries(res.nodes.map((n) => [n.id, n.status]));
+    expect(byId).toEqual({
+      boom: "failed",
+      never: "skipped",
+      pay: "failed",
+      after: "skipped",
+    });
+  });
+
+  it("a member ctx.skip() surfaces the bracket as SKIPPED, not passed (design-R2)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("g-skip")
+      .setup(async () => ({}))
+      .group("opt", (b) =>
+        b.action("gate", async (c, s) => {
+          c.skip("feature off");
+          return s;
+        }),
+      )
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("skipped");
+    expect(res.skipReason).toBe("feature off");
+    expect(res.nodes.find((n) => n.id === "opt")!.status).toBe("skipped");
+  });
+
+  it("a group SKIPPED by an earlier failure reports each member recursively (design-R1/R2)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("g-skipped-whole")
+      .setup(async () => ({}))
+      .check("first", async (c) => c.assert(false, "fail early"))
+      .group("later", (b) => b.compute("a", (s) => s).compute("c2", (s) => s))
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    const byId = Object.fromEntries(res.nodes.map((n) => [n.id, n.status]));
+    expect(byId).toEqual({
+      first: "failed",
+      later: "skipped",
+      a: "skipped", // members reported, not swallowed by the container
+      c2: "skipped",
+    });
+  });
+
+  it("nesting: prefixes accumulate; type flows through (In → Out)", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("g-nest")
+      .setup(async () => ({ n: 0 }))
+      .group("outer", (b) =>
+        b
+          .group("inner", (bb) => bb.compute("bump", (s) => ({ n: s.n + 1 })))
+          .compute("double", (s) => ({ n: s.n * 2, label: "x" })),
+      )
+      .check("end", async (c, s) => {
+        c.assert(s.n === 2 && s.label === "x", "typed state flowed");
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("passed");
+  });
+
+  it("build-time rejections: timeout on the group; setup/teardown in the body; dup ids across groups", () => {
+    expect(() =>
+      workflow("g-t")
+        .setup(async () => ({}))
+        .group({ id: "g", timeout: 50 }, (b) => b.compute("c", (s) => s)),
+    ).toThrow(/display-only bracket/);
+    expect(() =>
+      workflow("g-s")
+        .setup(async () => ({}))
+        .group("g", ((b: { setup: (f: unknown) => unknown }) => b.setup(async () => ({}))) as never),
+    ).toThrow(/cannot declare setup/);
+    expect(() =>
+      workflow("g-dup")
+        .setup(async () => ({}))
+        .compute("x", (s) => s)
+        .group("g", (b) => b.compute("x", (s) => s))
+        .build(),
+    ).toThrow(/duplicate node id "x"/);
+  });
+
+  it("group projects with children and worst-of static grade", () => {
+    const wf = workflow("g-proj")
+      .setup(async () => ({}))
+      .group("pay", (b) =>
+        b.compute("c", (s) => s).action("a", async (_c, s) => s),
+      )
+      .build();
+    const g = projectWorkflow(wf).nodes[0];
+    expect(g.kind).toBe("group");
+    expect(g.grade).toBe("opaque"); // worst child
+    expect(g.nodes?.map((n) => n.id)).toEqual(["c", "a"]);
+  });
+});
+
 // --- .use() fragments + duplicate-node-id validation (S2.13, phase4 §1) -------
 
 describe("workflow.use — fragments (phase4 §1)", () => {

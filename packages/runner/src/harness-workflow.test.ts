@@ -380,3 +380,28 @@ export const matrix = workflow.each([
   }
   expect(r.success).toBe(true);
 });
+
+test("group brackets reach the timeline as kind:'group'; summary counts MEMBERS only (S2.14)", async () => {
+  const src = `
+import { workflow } from "@glubean/sdk";
+export const wf = workflow("wf-group")
+  .setup(async () => ({ n: 1 }))
+  .group("payment", (b) =>
+    b.compute("bump", (s) => ({ n: s.n + 1 }))
+     .check("verify", async (c, s) => c.assert(s.n === 2, "bumped")),
+  )
+  .build();
+`;
+  const r = await run(src, "wf-group");
+  expect(r.success).toBe(true);
+  const ends = nodeEnds(r.events);
+  // the bracket is ON the timeline (render layers collapse it)…
+  const bracket = ends.find((e) => (e as { kind?: string }).kind === "group");
+  expect(bracket).toBeDefined();
+  expect(bracket!.nodeId).toBe("payment");
+  expect(bracket!.status).toBe("passed");
+  // …but summary counts members, never the container
+  const summary = generateSummary(r.events as never);
+  expect(summary.nodeTotal).toBe(2); // bump + verify
+  expect(summary.nodePassed).toBe(2);
+});

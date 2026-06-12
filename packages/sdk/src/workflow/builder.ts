@@ -13,6 +13,7 @@ import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./exec
 import { projectWorkflow } from "./project.js";
 import type {
   ActionNode,
+  GroupNode,
   ActionProjection,
   BranchCase,
   BranchCaseValue,
@@ -231,7 +232,9 @@ function validateNodeTimeout(meta: NodeMeta, kind: string): void {
           ? "a poll owns its own bounds (timeout/perAttemptTimeout/maxAttempts)"
           : kind === "compute"
             ? "compute is synchronous by contract"
-            : "the branch family's decision has no timeout semantics"),
+            : kind === "group"
+              ? "a group is a display-only bracket; members carry their own timeouts"
+              : "the branch family's decision has no timeout semantics"),
     );
   }
   if (typeof meta.timeout !== "number" || !Number.isFinite(meta.timeout) || meta.timeout <= 0) {
@@ -381,6 +384,20 @@ export interface WorkflowBuilder<State> {
    */
   use<NewState>(
     fragment: (b: WorkflowBuilder<State>) => ChainedWorkflowBuilder<NewState>,
+  ): ChainedWorkflowBuilder<NewState>;
+  /**
+   * A DISPLAY-ONLY grouping bracket (phase4 §2, owner-decided): members run
+   * exactly as if the wrapper were absent — same order, same state flow, same
+   * fail-stop. The group only adds a collapsible node_start/node_end bracket
+   * for CLI/Cloud rendering (status = failed > skipped > passed aggregate;
+   * grade = worst member). TYPE-TRANSPARENT, not strict-S: a group is a
+   * linear trunk segment, so state may evolve through it (strict-S is a
+   * property of CONVERGENCE points — branch sides — not segments). The body
+   * cannot declare setup/teardown; the group node takes no timeout/retry.
+   */
+  group<NewState>(
+    idOrMeta: NodeMetaInput,
+    body: (b: WorkflowBuilder<State>) => ChainedWorkflowBuilder<NewState>,
   ): ChainedWorkflowBuilder<NewState>;
   branch(idOrMeta: NodeMetaInput, opts: BranchOpts<State>): ChainedWorkflowBuilder<State>;
   /**
@@ -790,6 +807,25 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
             `return the value of the LAST chain call`,
         );
       }
+      return this.chained();
+    });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  group(idOrMeta: NodeMetaInput, body: (b: WorkflowBuilder<State>) => unknown): any {
+    return this.authoring(() => {
+      this.assertNoTeardown("group");
+      const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
+      validateNodeTimeout(meta, "group");
+      if (typeof body !== "function") {
+        throw new Error(`workflow.group() "${meta.id}" requires a body function`);
+      }
+      const node: GroupNode = {
+        kind: "group",
+        meta,
+        nodes: this.collectSubNodes(body, `${meta.id}.`),
+      };
+      this._nodes.push(node as WorkflowNode);
       return this.chained();
     });
   }
@@ -1204,7 +1240,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       }
     }
     if (child._setup || child._teardown) {
-      throw new Error("workflow.branch() then/else cannot declare setup/teardown");
+      throw new Error("a workflow sub-graph callback (branch side / group body) cannot declare setup/teardown");
     }
     // A poisoned child holds a half-authored side (the callback caught an
     // authoring error on it) — accepting its nodes would smuggle the partial
@@ -1214,7 +1250,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       const causeMsg =
         child._poisoned instanceof Error ? child._poisoned.message : String(child._poisoned);
       throw new Error(
-        `workflow.branch() then/else side is half-authored — a sub-builder call failed: ${causeMsg}`,
+        `workflow sub-graph (branch side / group body) is half-authored — a sub-builder call failed: ${causeMsg}`,
       );
     }
     return child._nodes.slice();

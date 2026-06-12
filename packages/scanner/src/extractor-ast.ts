@@ -221,10 +221,21 @@ const KNOWN_BUILDER_METHODS = new Set([
   "build",
 ]);
 
+/** The delegated callback of a use/group call: the FIRST function-shaped
+ * argument (use carries it at 0, group at 1 behind the id). None found →
+ * undefined → the caller fails closed. */
+function delegatedCallbackOf(args: AnyNode[] | undefined): AnyNode | undefined {
+  for (const arg of args ?? []) {
+    const u = unwrapExpression(arg);
+    if (u?.type === "ArrowFunctionExpression" || u?.type === "FunctionExpression") return u;
+  }
+  return undefined;
+}
+
 /** Chain methods that DELEGATE part of the graph to a callback argument —
  * the callback is scanned like an each-factory; references fail closed.
- * S2.14 adds "group"; S2.13 starts with "use" (phase4 §4's shared rule). */
-const DELEGATING_CHAIN_METHODS = new Set(["use"]);
+ * "use" (S2.13) and "group" (S2.14) — phase4 §4's shared rule. */
+const DELEGATING_CHAIN_METHODS = new Set(["use", "group"]);
 
 /** Descend a receiver/initializer expression to its root identifier —
  * through call chains AND member access (`h.b.branch(...)` roots at `h`:
@@ -567,8 +578,8 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
             return root?.type === "Identifier" && liveDirect.has(root.name as string);
           })()
         ) {
-          const arg = (n.arguments as AnyNode[] | undefined)?.[0];
-          const verdict = scanCallbackForBranchFamily(arg ? unwrapExpression(arg) : undefined);
+          const cb = delegatedCallbackOf(n.arguments as AnyNode[] | undefined);
+          const verdict = scanCallbackForBranchFamily(cb);
           if (verdict !== false) found = true;
           return;
         }
@@ -749,10 +760,10 @@ function chainHasBranchFamilyCall(init: AnyNode): boolean {
       if (name !== undefined) {
         if (BRANCH_FAMILY_METHODS.has(name)) return true;
         if (DELEGATING_CHAIN_METHODS.has(name)) {
-          // `.use(fragment)` on the chain: scan an inline fragment; a
-          // reference fails closed (phase4 §1.4 / §4 — the R18 rule).
-          const arg = ((node as AnyNode).arguments as AnyNode[] | undefined)?.[0];
-          const verdict = scanCallbackForBranchFamily(arg ? unwrapExpression(arg) : undefined);
+          // `.use(fragment)` / `.group(id, body)` on the chain: scan an inline
+          // callback; a reference fails closed (phase4 §1.4/§2.5/§4 — R18).
+          const cb = delegatedCallbackOf((node as AnyNode).arguments as AnyNode[] | undefined);
+          const verdict = scanCallbackForBranchFamily(cb);
           if (verdict !== false) return true;
         }
       }

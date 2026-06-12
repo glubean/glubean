@@ -295,7 +295,12 @@ export interface PollNode<State = any> {
   maxAttempts?: number;
 }
 
-/** Grouping with its own execution/cleanup scope (Phase 4). */
+/**
+ * A DISPLAY-ONLY grouping bracket (phase4 §2, owner decision 2026-06-12 —
+ * "this was always meant as a visualization capability"): members execute
+ * exactly as if the wrapper were absent; no own lifecycle/scope. Summary
+ * counts members, never the container.
+ */
 export interface GroupNode {
   kind: "group";
   meta: NodeMeta;

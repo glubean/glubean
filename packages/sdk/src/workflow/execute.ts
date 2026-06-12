@@ -50,6 +50,7 @@ import {
 import { staticGradeOf } from "./project.js";
 import type {
   ActionNode,
+  GroupNode,
   BranchNode,
   CheckNode,
   ComputeNode,
@@ -833,6 +834,18 @@ function emitNodesSkipped(
     const grade = staticGradeOf(node);
     emitNodeEnd(baseCtx, node, "skipped", grade, 0);
     outcomes.push({ id: node.meta.id, status: "skipped", grade });
+    // RECURSIVE (phase4 §2.4 / design-R2): summary and Cloud count nodes from
+    // per-child node_end events. A skipped GROUP's members are a definite
+    // execution list — they must each report. A skipped BRANCH's case
+    // sub-graphs get the same treatment for consistency with the executed
+    // branch path, which emits skipped node_ends for every non-taken case.
+    if (node.kind === "group") {
+      emitNodesSkipped(baseCtx, (node as GroupNode).nodes, outcomes, 0);
+    } else if (node.kind === "branch") {
+      const b = node as BranchNode;
+      for (const c of b.cases) emitNodesSkipped(baseCtx, c.nodes, outcomes, 0);
+      if (b.default) emitNodesSkipped(baseCtx, b.default, outcomes, 0);
+    }
   }
 }
 
@@ -1516,7 +1529,9 @@ async function runNodeList(
         ? await runBranch(baseCtx, workflowId, node as BranchNode, state, outcomes)
         : node.kind === "poll"
           ? await runPollNode(baseCtx, workflowId, node as PollNode, state, outcomes)
-          : await runLeafNode(baseCtx, workflowId, node, state, outcomes);
+          : node.kind === "group"
+            ? await runGroup(baseCtx, workflowId, node as GroupNode, state, outcomes)
+            : await runLeafNode(baseCtx, workflowId, node, state, outcomes);
     state = r.state;
     if (r.status === "passed") {
       // A terminal route completed: the trunk ends here (§9 #5). Anything
@@ -1532,6 +1547,40 @@ async function runNodeList(
     return r;
   }
   return { state, status: "passed" };
+}
+
+/**
+ * Run a `.group()` node — a DISPLAY-ONLY container (phase4 §2, owner-decided):
+ * members execute sequentially on the trunk's state exactly as if the group
+ * wrapper were absent; deleting the group changes nothing about execution.
+ * The group adds ONLY a node_start/node_end bracket so CLI/Cloud can render a
+ * collapsible section. Aggregate status precedence: failed > skipped > passed
+ * (design-R2 — a member ctx.skip() must not render a "passed" bracket).
+ * Grade = worst member RUNTIME grade (promotions included). Summary counts
+ * MEMBERS, not the bracket (kind:"group" on node_end is the discriminator).
+ * No own lifecycle, no timeout, no retry — those were rejected at build time.
+ */
+async function runGroup(
+  baseCtx: TestContext,
+  workflowId: string,
+  node: GroupNode,
+  state: unknown,
+  outcomes: WorkflowNodeOutcome[],
+): Promise<NodeListOutcome> {
+  const started = Date.now();
+  emitNodeStart(baseCtx, node);
+  const before = outcomes.length;
+  const r = await runNodeList(baseCtx, workflowId, node.nodes, state, outcomes);
+  // worst member grade, over what actually ran/skipped inside the bracket
+  const RANK: Record<ProjectionGrade, number> = { full: 0, partial: 1, trace: 2, opaque: 3 };
+  let grade: ProjectionGrade = "full";
+  for (let i = before; i < outcomes.length; i++) {
+    if (RANK[outcomes[i].grade] > RANK[grade]) grade = outcomes[i].grade;
+  }
+  if (node.nodes.length === 0) grade = staticGradeOf(node);
+  outcomes.push({ id: node.meta.id, status: r.status, grade });
+  emitNodeEnd(baseCtx, node, r.status, grade, Date.now() - started);
+  return r;
 }
 
 /**

@@ -163,6 +163,38 @@ export const redeclared = workflow.each([{ region: "us" }])(
   expect(byId).toEqual({ "hi-$region": true, "re-$region": false });
 });
 
+test(".group() bodies are scanned like fragments (S2.14)", () => {
+  const content = `
+import { workflow } from "@glubean/sdk";
+import { payBody } from "./helpers";
+
+// inline group body with a branch — flagged
+export const gBranch = workflow("g-branch")
+  .setup(async () => ({ ok: true }))
+  .group("pay", (b) => b.branch("route", { when: (w) => w.when((s) => s.ok).eq(true), then: (x) => x.compute("c", (s) => s) }))
+  .build();
+
+// inline LINEAR group — clean
+export const gLinear = workflow("g-linear")
+  .setup(async () => ({ n: 1 }))
+  .group("pay", (b) => b.compute("bump", (s) => ({ n: s.n + 1 })))
+  .build();
+
+// delegated body — fail closed
+export const gDelegated = workflow("g-delegated")
+  .setup(async () => ({}))
+  .group("pay", payBody)
+  .build();
+`;
+  const result = extractFromSource(content);
+  const byId = Object.fromEntries(result.map((m) => [m.id, m.workflowHasBranchOrPoll ?? false]));
+  expect(byId).toEqual({
+    "g-branch": true,
+    "g-linear": false,
+    "g-delegated": true,
+  });
+});
+
 test(".use() fragments: inline scanned precisely; references fail closed (S2.13)", () => {
   const content = `
 import { workflow } from "@glubean/sdk";
