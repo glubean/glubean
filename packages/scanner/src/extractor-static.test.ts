@@ -258,6 +258,14 @@ export const wf = workflow.extend({ a: () => 1 });`,
     ),
   ).toEqual(["wf"]);
 
+  // the R16 explicit-generic lifecycle form registers too (codex R17)
+  expect(
+    extractWorkflowExtendAliasesFromSource(
+      `import { workflow } from "@glubean/sdk";
+export const wf = workflow.extend<{ db: { query: (q: string) => number } }>({ db: async (c, use) => {} });`,
+    ),
+  ).toEqual(["wf"]);
+
   // TYPE-ANNOTATED fixture exports register (codex R13)
   expect(
     extractWorkflowExtendAliasesFromSource(
