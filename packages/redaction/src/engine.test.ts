@@ -1053,6 +1053,50 @@ describe("redactValue", () => {
     expect(result.schemas.request.headers.authorization).toBe("[REDACTED]");
   });
 
+  test("masks array-valued sensitive keys element-wise (codex 0.6 P1)", () => {
+    // Multi-value headers/cookies arrive as ARRAYS under a sensitive key. Each
+    // element is values-of-the-secret and must be masked, even when it matches
+    // no value pattern — array elements are visited under "0"/"1", which no
+    // plugin sees as sensitive, so a naive recurse would leak them.
+    const projection = {
+      schemas: {
+        request: {
+          headers: {
+            // pattern-miss scalar values — only key-sensitivity can catch them
+            authorization: ["dev-token", "ci-token"],
+            "set-cookie": ["sid=abc", "csrf=xyz"],
+          },
+        },
+      },
+      // A non-sensitive structural array must NOT be masked (regression guard).
+      required: ["password", "token"],
+    };
+
+    const result = redactValue(projection, {
+      globalRules: {
+        sensitiveKeys: ["authorization", "set-cookie"],
+        patterns: [],
+        customPatterns: [],
+      },
+      replacementFormat: "simple",
+    }) as any;
+
+    // Every element of the sensitive arrays is masked, array shape preserved.
+    expect(result.schemas.request.headers.authorization).toEqual(["[REDACTED]", "[REDACTED]"]);
+    expect(result.schemas.request.headers["set-cookie"]).toEqual(["[REDACTED]", "[REDACTED]"]);
+    // Structural field-name array (under non-sensitive `required`) survives.
+    expect(result.required).toEqual(["password", "token"]);
+  });
+
+  test("masks nested array-of-arrays under a sensitive key (codex 0.6 P1)", () => {
+    const projection = { authorization: [["a", "b"], ["c"]] };
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: ["authorization"], patterns: [], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as any;
+    expect(result.authorization).toEqual([["[REDACTED]", "[REDACTED]"], ["[REDACTED]"]]);
+  });
+
   test("redacts pattern matches deep inside arrays (examples)", () => {
     const projection = {
       examples: [

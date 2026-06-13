@@ -214,6 +214,36 @@ describe("redactMetadataForUpload", () => {
     expect(when.path).toEqual(["headers", "authorization"]);
   });
 
+  test("masks array-valued sensitive headers in the projection (codex 0.6 P1)", () => {
+    // A contract's default/request headers can be multi-value ARRAYS under a
+    // sensitive key. The pattern-miss values must still be masked by key.
+    const metadata: UploadMetadata = {
+      ...baseMetadata(),
+      contractsProjection: [
+        {
+          id: "POST /charge",
+          cases: {
+            ok: {
+              schemas: {
+                request: {
+                  headers: {
+                    authorization: ["dev-token", "ci-token"],
+                    "set-cookie": ["sid=abc"],
+                  },
+                },
+              },
+            },
+          },
+        },
+      ] as unknown[],
+    };
+
+    const result = redactMetadataForUpload(metadata, REDACTION);
+    const headers = (result.contractsProjection as any[])[0].cases.ok.schemas.request.headers;
+    expect(headers.authorization).toEqual(["[REDACTED]", "[REDACTED]"]);
+    expect(headers["set-cookie"]).toEqual(["[REDACTED]"]);
+  });
+
   test("NEVER touches files[].hash / rootHash (hexKeys must not mangle sha256)", () => {
     const metadata: UploadMetadata = {
       ...baseMetadata(),

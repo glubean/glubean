@@ -165,14 +165,38 @@ export class RedactionEngine {
       }
 
       if (keySensitive) {
-        // Recurse-mode: a sensitive key over a container (object/array) keeps
-        // its structure — recurse so JSON-Schema nodes aren't flattened to a
-        // redaction string. Scalar leaves still fall through to masking.
+        // Recurse-mode: a sensitive key over a container keeps its structure
+        // so JSON-Schema nodes aren't flattened to a redaction string.
+        //
+        // OBJECT vs ARRAY split (codex 0.6 P1): an OBJECT under a sensitive key
+        // is treated as schema structure — recurse, and (by the documented
+        // boundary) inner scalars under NON-sensitive sub-keys are left alone.
+        // But an ARRAY directly under a sensitive key is values-OF-the-secret,
+        // not structure: a multi-value header/cookie like
+        // `authorization: ["dev-token"]` / `set-cookie: ["sid=abc"]`. Its
+        // elements are visited under "0"/"1", which no plugin sees as
+        // sensitive, so plain recursion would leak them unless they happened to
+        // match a value pattern. The array's scalar elements therefore INHERIT
+        // the parent key's sensitivity and must be masked (object elements stay
+        // recursed to preserve nested schema + catch nested sensitive keys).
         const isContainer = value !== null && typeof value === "object";
         if (this.sensitiveKeyRecurse && isContainer) {
-          const redacted = this.walkValue(value, scope, keyPath, details, depth + 1);
-          result[key] = redacted.value;
-          if (redacted.didRedact) didRedact = true;
+          if (Array.isArray(value)) {
+            const r = this.maskSensitiveArray(
+              value,
+              scope,
+              keyPath,
+              details,
+              depth + 1,
+              keyPluginName,
+            );
+            result[key] = r.value;
+            if (r.didRedact) didRedact = true;
+          } else {
+            const redacted = this.walkValue(value, scope, keyPath, details, depth + 1);
+            result[key] = redacted.value;
+            if (redacted.didRedact) didRedact = true;
+          }
           continue;
         }
         if (this.replacementFormat === "partial") {
@@ -204,6 +228,50 @@ export class RedactionEngine {
     }
 
     return { value: result, didRedact };
+  }
+
+  /**
+   * Mask an ARRAY found directly under a sensitive key (recurse-mode only).
+   * The array's scalar elements carry the parent key's sensitivity (a
+   * multi-value header/cookie) and are masked element-wise, preserving array
+   * shape. Nested arrays recurse the same way; OBJECT elements go back through
+   * the normal walk so their structure (and any nested sensitive keys) is
+   * handled by the standard rules. See the call site (codex 0.6 P1).
+   */
+  private maskSensitiveArray(
+    arr: unknown[],
+    scope: string,
+    path: string[],
+    details: RedactionResult["details"],
+    depth: number,
+    pluginName: string,
+  ): { value: unknown[]; didRedact: boolean } {
+    let didRedact = false;
+    const value = arr.map((el, i) => {
+      const elPath = [...path, String(i)];
+      if (Array.isArray(el)) {
+        const r = this.maskSensitiveArray(el, scope, elPath, details, depth + 1, pluginName);
+        if (r.didRedact) didRedact = true;
+        return r.value;
+      }
+      if (el !== null && typeof el === "object") {
+        // Object element — preserve structure via the normal walk.
+        const r = this.walkValue(el, scope, elPath, details, depth + 1);
+        if (r.didRedact) didRedact = true;
+        return r.value;
+      }
+      // Scalar element — inherits the sensitive key, mask it.
+      didRedact = true;
+      details.push({
+        path: elPath.join("."),
+        plugin: pluginName,
+        original: typeof el === "string" ? el : undefined,
+      });
+      return this.replacementFormat === "partial"
+        ? genericPartialMask(el === null || el === undefined ? "" : String(el))
+        : "[REDACTED]";
+    });
+    return { value, didRedact };
   }
 
   private walkString(
