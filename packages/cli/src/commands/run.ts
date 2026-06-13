@@ -517,11 +517,15 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
 
   const content = await readFile(filePath, "utf-8");
 
-  if (filePath.includes(".contract.") || filePath.includes(".flow.")) {
+  if (
+    filePath.includes(".contract.") ||
+    filePath.includes(".flow.") ||
+    filePath.includes(".workflow.")
+  ) {
     // Runtime extraction via shared function (supports .with() syntax).
-    // Returns BOTH contracts and flows; v0.2+ flow files often export only
-    // flows, so we must emit one DiscoveredTest per flow in addition to
-    // per contract case.
+    // Returns BOTH contracts and workflows; `.workflow.ts` / `.flow.ts` files
+    // often export only workflows, so we must emit one DiscoveredTest per
+    // workflow in addition to per contract case.
     const result = await extractContractFromFile(filePath);
 
     const results: DiscoveredTest[] = [];

@@ -823,6 +823,7 @@ function findContractAndFlowFiles(dir: string): string[] {
         const base = basename(entry);
         if (
           base.includes(".contract.") ||
+          base.includes(".workflow.") ||
           base.includes(".flow.") ||
           base.includes(".bootstrap.")
         ) {

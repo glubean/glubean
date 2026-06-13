@@ -126,3 +126,21 @@ export const plain = workflow("wf-gate-plain")
   );
   expect(gated.map((wf) => wf.id)).toEqual(["wf-gate-poll"]); // plain workflow NOT gated
 });
+
+test("extractContractsFromProject finds workflows in a canonical .workflow.ts file", async () => {
+  // The project-level finder (glubean contracts / MCP / OpenAPI) must pick up
+  // `.workflow.ts` files, not just `.flow.ts` (codex 0.6 P2).
+  await writeFile(
+    join(dir, "checkout.workflow.ts"),
+    `
+import { workflow } from "@glubean/sdk";
+export const journey = workflow("checkout-journey")
+  .setup(async () => ({}))
+  .compute("derive", (s) => s)
+  .build();
+`,
+  );
+  const { extractContractsFromProject } = await import("@glubean/scanner");
+  const { workflows } = await extractContractsFromProject(dir);
+  expect(workflows.map((wf) => wf.id)).toContain("checkout-journey");
+});
