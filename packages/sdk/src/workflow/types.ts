@@ -4,7 +4,7 @@ import type {
   BranchPredicate,
   ExtractedPredicate,
   OpaquePredicate,
-} from "../contract-flow-condition.js";
+} from "../predicates.js";
 
 /**
  * Glubean vNext `workflow` — types for the shared runtime node graph + its

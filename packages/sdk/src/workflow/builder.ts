@@ -1,11 +1,11 @@
 import type { ContractCaseRef } from "../contract-types.js";
-import { predicateScope, assertL2Predicate, selectorPath } from "../contract-flow-condition.js";
+import { predicateScope, assertL2Predicate, selectorPath } from "../predicates.js";
 import type {
   BranchPredicate,
   OpaquePredicate,
   PredicateScope,
-} from "../contract-flow-condition.js";
-import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
+} from "../predicates.js";
+import { validatePollBounds, DEFAULT_EVERY_MS } from "../poll-primitives.js";
 import { registerTest } from "../internal.js";
 import { traceComputeFn } from "../contract-core.js";
 import { interpolateTemplate, normalizeEachTable } from "../test/utils.js";

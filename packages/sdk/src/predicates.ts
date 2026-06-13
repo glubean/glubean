@@ -1,8 +1,13 @@
 /**
- * Conditional branching — predicate foundation (Phase 1).
+ * Predicates — the shared declarative (L2) engine of the SDK.
  *
- * The declarative (L2) predicate layer for `flow().condition` / `switchOn` /
- * `switchCond` (design: internal/40-discovery/proposals/contract-flow-condition.md).
+ * Renamed from `contract-flow-condition.ts` (Nv1-D1, 2026-06-13): this was
+ * never flow-specific — it is the predicate foundation consumed by the vNext
+ * `workflow()` builder (branch/switch/route `when`, poll `until`, check
+ * `expect[]`, inbound correlate paths), by `test()` helpers, and (until D2
+ * deletes it) by the legacy `contract.flow()` lowering. The flow-only step
+ * shapes still living at the bottom of this file (RuntimeBranchStep /
+ * selectBranchSteps / extractBranchStep) are deleted with the legacy flow.
  *
  * A predicate is built ONLY through `predicateScope(...)` (`when` / `all` / `any`
  * / `not`) — never hand-authored — so every node is:

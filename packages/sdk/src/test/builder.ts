@@ -29,8 +29,8 @@ import type {
 import { isTestBranchStep } from "../types.js";
 import { registerTest } from "../internal.js";
 import { toArray } from "../data.js";
-import { assertSwitchCaseValues } from "../contract-flow-condition.js";
-import { validatePollBounds } from "../contract-flow-poll.js";
+import { assertSwitchCaseValues } from "../predicates.js";
+import { validatePollBounds } from "../poll-primitives.js";
 
 /**
  * Flatten steps for registry metadata: a branch contributes its first-class

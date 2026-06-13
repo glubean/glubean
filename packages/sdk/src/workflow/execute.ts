@@ -37,9 +37,9 @@ import type {
 import { GlubeanSkipError } from "../types.js";
 import { Expectation } from "../expect.js";
 import { getAdapter, validateNeedsOutput } from "../contract-core.js";
-import { evalPredicate, extractPredicate, resolvePath } from "../contract-flow-condition.js";
-import type { ExtractedPredicate } from "../contract-flow-condition.js";
-import type { BranchPredicate, OpaquePredicate } from "../contract-flow-condition.js";
+import { evalPredicate, extractPredicate, resolvePath } from "../predicates.js";
+import type { ExtractedPredicate } from "../predicates.js";
+import type { BranchPredicate, OpaquePredicate } from "../predicates.js";
 import {
   quarantinedCtx,
   raceBudget,
@@ -47,7 +47,7 @@ import {
   PollExhaustedError,
   BACKOFF_CAP_MS,
   DEFAULT_EVERY_MS,
-} from "../contract-flow-poll.js";
+} from "../poll-primitives.js";
 import { staticGradeOf } from "./project.js";
 import type {
   ActionNode,

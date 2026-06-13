@@ -9,7 +9,7 @@ import {
   type BranchPredicate,
   type OpaquePredicate,
   type RuntimeBranchStep,
-} from "./contract-flow-condition.js";
+} from "./predicates.js";
 import { LensPurityError, runFlow, normalizeFlow } from "./contract-core.js";
 import type {
   RuntimeFlowStep,

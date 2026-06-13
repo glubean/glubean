@@ -1,7 +1,12 @@
 /**
- * @module contract-flow-poll
+ * @module poll-primitives
  *
- * Bounded poll-until primitive for `contract.flow()` — runtime + projection.
+ * Bounded poll-until primitives — shared by the vNext `workflow().poll`
+ * executor, `test()` helpers, and (until D2 deletes it) the legacy
+ * `contract.flow()` loop. Renamed from `contract-flow-poll.ts` (Nv1-D1,
+ * 2026-06-13): the quarantine/budget/bounds machinery was never
+ * flow-specific. The flow-only pieces still living here (RuntimePollStep /
+ * evalPollExit / extractPollStep) are deleted with the legacy flow.
  *
  * A poll repeats ONE contract case until an exit predicate over the RESPONSE
  * holds, BOUNDED by a total wall-clock deadline and/or a finite per-attempt
@@ -29,7 +34,7 @@ import {
   type ExtractedPredicate,
   evalPredicate,
   extractPredicate,
-} from "./contract-flow-condition.js";
+} from "./predicates.js";
 
 // =============================================================================
 // Runtime poll step

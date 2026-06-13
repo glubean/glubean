@@ -1,4 +1,4 @@
-import { extractPredicate } from "../contract-flow-condition.js";
+import { extractPredicate } from "../predicates.js";
 import type {
   ActionNode,
   BranchNode,

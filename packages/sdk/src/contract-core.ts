@@ -50,7 +50,7 @@ import type {
   OpaquePredicate,
   PredicateScope,
   RuntimeBranchStep,
-} from "./contract-flow-condition.js";
+} from "./predicates.js";
 import { registerTest } from "./internal.js";
 import {
   selectBranchSteps,
@@ -59,7 +59,7 @@ import {
   assertSelectorSource,
   assertSwitchCaseValues,
   assertL2Predicate,
-} from "./contract-flow-condition.js";
+} from "./predicates.js";
 import {
   quarantinedCtx,
   raceBudget,
@@ -70,7 +70,7 @@ import {
   BACKOFF_CAP_MS,
   DEFAULT_EVERY_MS,
   type RuntimePollStep,
-} from "./contract-flow-poll.js";
+} from "./poll-primitives.js";
 import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
 import {
   getExplicitInput,

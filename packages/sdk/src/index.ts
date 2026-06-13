@@ -545,7 +545,7 @@ export type {
   RuntimeBranchStep,
   ExtractedBranchStep,
   ExtractedPredicate,
-} from "./contract-flow-condition.js";
+} from "./predicates.js";
 
 // HTTP adapter — built-in, registers itself at SDK load time
 import { contract as _contract } from "./contract-core.js";

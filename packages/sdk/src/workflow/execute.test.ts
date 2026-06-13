@@ -8,7 +8,7 @@ import { workflow } from "./builder.js";
 import type { WorkflowBuilder } from "./builder.js";
 import type { WorkflowContext } from "./types.js";
 import { projectWorkflow } from "./project.js";
-import { PollExhaustedError } from "../contract-flow-poll.js";
+import { PollExhaustedError } from "../poll-primitives.js";
 import {
   makeNodeScope,
   promoteGrade,
@@ -2131,7 +2131,7 @@ describe("runWorkflow — switch (addendum §9 #4)", () => {
   it("S2.18 R1: a thenable at the on-path FAILS the switch — never silent fall-through to default", async () => {
     const { ctx } = fakeBase();
     const wf = workflow("w")
-      .setup(async () => ({ k: Promise.resolve("a") as unknown }))
+      .setup(async () => ({ k: Promise.resolve("a") as unknown as string })) // typed string, ACTUALLY a thenable
       .switch("s", {
         on: (state) => state.k,
         cases: [{ value: "a", then: (b) => b.compute("c", (st) => st) }],

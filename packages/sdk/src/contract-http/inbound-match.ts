@@ -19,7 +19,7 @@ import type { SchemaLike, SecretsAccessor } from "../types.js";
 import type { InboundContractCase } from "./types.js";
 import { isInboundCase } from "./types.js";
 import { getSignatureVerifier } from "./inbound-verify.js";
-import { resolvePath } from "../contract-flow-condition.js";
+import { resolvePath } from "../predicates.js";
 
 export interface MatchInboundInput {
   caseSpec: unknown;

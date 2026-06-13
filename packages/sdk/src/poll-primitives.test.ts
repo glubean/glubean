@@ -7,14 +7,14 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { runFlow, normalizeFlow, contract } from "./index.js";
 import { __unregisterProtocolForTesting } from "./contract-core.js";
-import { predicateScope } from "./contract-flow-condition.js";
+import { predicateScope } from "./predicates.js";
 import {
   validatePollBounds,
   PollExhaustedError,
   evalPollExit,
   quarantinedCtx,
   type RuntimePollStep,
-} from "./contract-flow-poll.js";
+} from "./poll-primitives.js";
 import type { TestContext } from "./types.js";
 
 const ctx = { log: () => {} } as unknown as TestContext;

@@ -34,13 +34,13 @@ import type {
   JsonScalar,
   BranchPredicate,
   PredicateScope,
-} from "./contract-flow-condition.js";
+} from "./predicates.js";
 // Poll node shapes live with the bounded-retry machinery (contract-flow-poll.ts);
 // imported type-only here so the step unions stay the single source of truth.
 import type {
   RuntimePollStep,
   ExtractedPollStep,
-} from "./contract-flow-poll.js";
+} from "./poll-primitives.js";
 
 // =============================================================================
 // Protocol-agnostic enums
