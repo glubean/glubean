@@ -6,7 +6,7 @@
 
 import { test, expect, describe } from "vitest";
 import { RedactionEngine, genericPartialMask } from "./engine.js";
-import { compileScopes } from "./compiler.js";
+import { compileScopes, redactValue } from "./compiler.js";
 import { redactEvent } from "./adapter.js";
 import {
   jsonHandler,
@@ -986,5 +986,154 @@ describe("regressions", () => {
     expect(result.secret).toBe("[REDACTED]");
     expect(result.message).toBe("check passed");
     expect(result.expected).toBe("foo");
+  });
+});
+
+// =============================================================================
+// redactValue — deep redaction of non-event payloads (metadata projection)
+// =============================================================================
+
+describe("redactValue", () => {
+  test("redacts nested sensitive keys anywhere in the tree", () => {
+    const projection = {
+      id: "POST /login",
+      cases: {
+        success: {
+          schemas: {
+            request: { headers: { authorization: "Bearer super-secret-token" } },
+          },
+        },
+      },
+    };
+
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: ["authorization"], patterns: [], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as typeof projection;
+
+    expect(result.cases.success.schemas.request.headers.authorization).toBe("[REDACTED]");
+    // Structural / non-sensitive fields survive verbatim.
+    expect(result.id).toBe("POST /login");
+  });
+
+  test("preserves JSON-Schema structure under sensitive property names", () => {
+    // A request-body schema whose properties are named like secrets
+    // (`password`, `token`, `authorization`) must keep its shape — the
+    // property name is structural, not a secret value. Whereas a real scalar
+    // secret under a sensitive key (a default header) IS masked.
+    const projection = {
+      schemas: {
+        request: {
+          body: {
+            type: "object",
+            properties: {
+              password: { type: "string", minLength: 8 },
+              token: { type: "string" },
+            },
+            required: ["password"],
+          },
+          headers: { authorization: "Bearer real-default-token" },
+        },
+      },
+    };
+
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: [], patterns: ["bearer"], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as typeof projection;
+
+    // Schema nodes survive intact (not flattened to "[REDACTED]").
+    expect(result.schemas.request.body.properties.password).toEqual({
+      type: "string",
+      minLength: 8,
+    });
+    expect(result.schemas.request.body.properties.token).toEqual({ type: "string" });
+    expect(result.schemas.request.body.required).toEqual(["password"]);
+    // The real scalar default header secret IS masked.
+    expect(result.schemas.request.headers.authorization).toBe("[REDACTED]");
+  });
+
+  test("redacts pattern matches deep inside arrays (examples)", () => {
+    const projection = {
+      examples: [
+        { value: { email: "alice@example.com" }, summary: "happy path" },
+      ],
+    };
+
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: [], patterns: ["email"], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as { examples: Array<{ value: { email: string }; summary: string }> };
+
+    expect(result.examples[0].value.email).not.toContain("alice@example.com");
+    expect(result.examples[0].summary).toBe("happy path");
+  });
+
+  test("preserves array order (canonical-hash relies on example/tuple order)", () => {
+    const projection = { prefixItems: ["a", "b", "c"], required: ["x", "y"] };
+
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: [], patterns: ["email"], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as { prefixItems: string[]; required: string[] };
+
+    expect(result.prefixItems).toEqual(["a", "b", "c"]);
+    expect(result.required).toEqual(["x", "y"]);
+  });
+
+  test("applies the built-in sensitive-key baseline by default (no global keys needed)", () => {
+    // Default config: globalRules.sensitiveKeys is empty — built-in keys live
+    // in event scopes, which this non-event path can't see. redactValue opts
+    // into the built-in baseline so key-based secrets are still masked even
+    // when the value matches no value-pattern.
+    const projection = {
+      request: { headers: { authorization: "sk_live_no_pattern_match" } },
+      body: { password: "hunter2" },
+    };
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: [], patterns: [], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as { request: { headers: { authorization: string } }; body: { password: string } };
+    expect(result.request.headers.authorization).toBe("[REDACTED]");
+    expect(result.body.password).toBe("[REDACTED]");
+  });
+
+  test("useBuiltInSensitiveKeys:false with empty rules is a no-op", () => {
+    const projection = { token: "still-here", note: "alice@example.com" };
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: [], patterns: [], customPatterns: [] },
+      useBuiltInSensitiveKeys: false,
+    });
+    // No plugins → identical reference (cheap no-op).
+    expect(result).toBe(projection);
+  });
+
+  test("does not mutate the input", () => {
+    const projection = { auth: { token: "secret-value" } };
+    const snapshot = JSON.parse(JSON.stringify(projection));
+    redactValue(projection, {
+      globalRules: { sensitiveKeys: ["token"], patterns: [], customPatterns: [] },
+      replacementFormat: "simple",
+    });
+    expect(projection).toEqual(snapshot);
+  });
+
+  test("high maxDepth preserves deeply-nested structure (no too-deep sentinel)", () => {
+    // Build a 20-level-deep nested object — beyond the engine's default
+    // maxDepth of 10. Without a generous maxDepth the leaf would collapse to
+    // "[REDACTED: too deep]"; the metadata projection must survive intact.
+    let node: Record<string, unknown> = { leaf: "value" };
+    for (let i = 0; i < 20; i++) node = { nested: node };
+
+    const result = redactValue(node, {
+      globalRules: { sensitiveKeys: ["nonexistent"], patterns: [], customPatterns: [] },
+      replacementFormat: "simple",
+      maxDepth: 64,
+    });
+
+    // Walk back down — leaf must be intact.
+    let cursor: any = result;
+    for (let i = 0; i < 20; i++) cursor = cursor.nested;
+    expect(cursor.leaf).toBe("value");
   });
 });

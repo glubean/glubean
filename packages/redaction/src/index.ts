@@ -55,7 +55,7 @@ export {
 } from "./handlers.js";
 
 // Compiler
-export { compileScopes, createScopeEngine } from "./compiler.js";
+export { compileScopes, createScopeEngine, redactValue } from "./compiler.js";
 export type { CompilerOptions, ScopeOverride } from "./compiler.js";
 
 // Adapter

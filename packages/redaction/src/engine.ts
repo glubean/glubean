@@ -23,6 +23,19 @@ export interface RedactionEngineOptions {
   replacementFormat: "simple" | "labeled" | "partial";
   /** Max object nesting depth before truncation. Default: 10. */
   maxDepth?: number;
+  /**
+   * When true, a SENSITIVE KEY whose value is an object/array is RECURSED
+   * into (structure preserved, scalar leaves still redacted) rather than
+   * replaced wholesale with a redaction string. Default false (the event
+   * path nukes the whole subtree, which is correct for event payloads).
+   *
+   * Set for deep-redacting JSON-Schema-bearing payloads (the contract/flow
+   * projection): a schema node like `properties.password = { type: "string" }`
+   * must keep its shape — nuking it to "[REDACTED]" would corrupt the
+   * projection canonical-hash/OpenAPI consumers depend on. Scalar secrets
+   * under a sensitive key (e.g. `authorization: "Bearer …"`) are still masked.
+   */
+  sensitiveKeyRecurse?: boolean;
 }
 
 /**
@@ -46,11 +59,13 @@ export class RedactionEngine {
   private readonly plugins: RedactionPlugin[];
   private readonly replacementFormat: "simple" | "labeled" | "partial";
   private readonly maxDepth: number;
+  private readonly sensitiveKeyRecurse: boolean;
 
   constructor(options: RedactionEngineOptions) {
     this.plugins = options.plugins;
     this.replacementFormat = options.replacementFormat;
     this.maxDepth = options.maxDepth ?? 10;
+    this.sensitiveKeyRecurse = options.sensitiveKeyRecurse ?? false;
   }
 
   /**
@@ -150,6 +165,16 @@ export class RedactionEngine {
       }
 
       if (keySensitive) {
+        // Recurse-mode: a sensitive key over a container (object/array) keeps
+        // its structure — recurse so JSON-Schema nodes aren't flattened to a
+        // redaction string. Scalar leaves still fall through to masking.
+        const isContainer = value !== null && typeof value === "object";
+        if (this.sensitiveKeyRecurse && isContainer) {
+          const redacted = this.walkValue(value, scope, keyPath, details, depth + 1);
+          result[key] = redacted.value;
+          if (redacted.didRedact) didRedact = true;
+          continue;
+        }
         if (this.replacementFormat === "partial") {
           const str =
             value === null || value === undefined ? "" : String(value);

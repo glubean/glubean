@@ -110,6 +110,7 @@ function makeAccessors(target: string): {
 function buildScopePlugins(
   scopeRules: ScopeRules | undefined,
   globalRules: GlobalRules,
+  useBuiltInKeys = false,
 ): RedactionPlugin[] {
   const plugins: RedactionPlugin[] = [];
 
@@ -120,10 +121,13 @@ function buildScopePlugins(
   }
   for (const k of globalRules.sensitiveKeys) allKeys.add(k.toLowerCase());
 
-  if (allKeys.size > 0) {
+  // Per-event scopes carry their own key list (useBuiltInKeys=false), so the
+  // built-in baseline only applies when a caller opts in (e.g. redactValue
+  // over a non-event payload, where there is no scope to supply keys).
+  if (useBuiltInKeys || allKeys.size > 0) {
     plugins.push(
       sensitiveKeysPlugin({
-        useBuiltIn: false,
+        useBuiltIn: useBuiltInKeys,
         additional: [...allKeys],
         excluded: [],
       }),
@@ -237,4 +241,64 @@ export function createScopeEngine(
     replacementFormat,
     maxDepth,
   });
+}
+
+/**
+ * Deep-redact an arbitrary JSON value using GLOBAL rules only (no event scope).
+ *
+ * Unlike `redactEvent` — which targets specific payload fields of a *known*
+ * event type via compiled scopes — this walks the entire value tree applying
+ * the global sensitive-keys + pattern plugins. Use it for non-event payloads
+ * that may carry secrets at any path, e.g. the contract/flow metadata
+ * projection uploaded to Cloud (examples, default headers, gRPC metadata,
+ * `extensions`/`meta` blobs).
+ *
+ * The plugin pipeline is built by the same `buildScopePlugins` path the
+ * per-scope engines use, so global rules remain the single source of truth
+ * for what counts as sensitive.
+ *
+ * Because there is NO event scope to supply key-based rules, this path opts
+ * into the built-in sensitive-key baseline by default
+ * (`useBuiltInSensitiveKeys: true`) — without it, a payload like
+ * `{ authorization: "sk_live_…" }` whose value matches no value-pattern would
+ * pass through unredacted. Pass `sensitiveKeys` to add scope-level keys
+ * (e.g. the union of `BUILTIN_SCOPES` keys) so a non-event payload is redacted
+ * at least as strongly as events are.
+ *
+ * Returns a redacted deep clone; the input is never mutated. When the
+ * resolved rules contribute no plugins the input is returned unchanged.
+ *
+ * `maxDepth` bounds recursion (default mirrors the engine's own default of
+ * 10). Callers redacting deeply-nested structures — JSON Schemas, recursive
+ * flow branch trees — should pass a generous value so legitimate structure
+ * isn't truncated to a `[REDACTED: too deep]` sentinel.
+ */
+export function redactValue(
+  value: unknown,
+  options: {
+    globalRules: GlobalRules;
+    /** Extra sensitive keys (e.g. union of `BUILTIN_SCOPES` keys). */
+    sensitiveKeys?: string[];
+    /** Include the built-in sensitive-key baseline. Default: true. */
+    useBuiltInSensitiveKeys?: boolean;
+    replacementFormat?: "simple" | "labeled" | "partial";
+    maxDepth?: number;
+  },
+): unknown {
+  const plugins = buildScopePlugins(
+    { sensitiveKeys: options.sensitiveKeys ?? [], patterns: [] },
+    options.globalRules,
+    options.useBuiltInSensitiveKeys ?? true,
+  );
+  if (plugins.length === 0) return value;
+  const engine = new RedactionEngine({
+    plugins,
+    replacementFormat: options.replacementFormat ?? "partial",
+    maxDepth: options.maxDepth,
+    // Preserve JSON-Schema structure: a sensitive key over a schema node
+    // (e.g. `properties.password`) is recursed into, not flattened to a
+    // redaction string. Scalar secrets under sensitive keys are still masked.
+    sensitiveKeyRecurse: true,
+  });
+  return engine.redact(value).value;
 }
