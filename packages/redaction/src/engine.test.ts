@@ -1088,7 +1088,7 @@ describe("redactValue", () => {
     expect(result.required).toEqual(["password", "token"]);
   });
 
-  test("masks nested array-of-arrays under a multi-value header key (codex 0.6 P1)", () => {
+  test("masks nested array-of-arrays under a sensitive key (codex 0.6 P1)", () => {
     const projection = { authorization: [["a", "b"], ["c"]] };
     const result = redactValue(projection, {
       globalRules: { sensitiveKeys: ["authorization"], patterns: [], customPatterns: [] },
@@ -1097,11 +1097,29 @@ describe("redactValue", () => {
     expect(result.authorization).toEqual([["[REDACTED]", "[REDACTED]"], ["[REDACTED]"]]);
   });
 
+  test("masks array-valued secrets under ANY sensitive key, not just a header list (codex 0.6 P1)", () => {
+    // The allow-list approach leaked sensitive headers it didn't enumerate
+    // (e.g. `x-api-key`). Masking is now the secure default for any sensitive
+    // key's array — built-in header keys included — so nothing slips through.
+    const projection = {
+      headers: { "x-api-key": ["dev-key", "ci-key"] }, // built-in sensitive header
+      creds: { token: ["t1", "t2"] }, // non-header sensitive key, still masked
+    };
+    const result = redactValue(projection, {
+      // empty globalRules.sensitiveKeys → rely on the built-in baseline, which
+      // includes x-api-key + token.
+      globalRules: { sensitiveKeys: [], patterns: [], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as any;
+    expect(result.headers["x-api-key"]).toEqual(["[REDACTED]", "[REDACTED]"]);
+    expect(result.creds.token).toEqual(["[REDACTED]", "[REDACTED]"]);
+  });
+
   test("preserves schema keyword arrays under sensitive property names (codex 0.6 P2)", () => {
     // `dependentRequired: { password: ["mfaCode"] }` — `password` is a
     // sensitive NAME, but the array is a structural list of property names,
-    // NOT secret values. Only multi-value header/cookie arrays are masked by
-    // key; this structural array must survive intact.
+    // NOT secret values. Arrays under a sensitive key are masked by default;
+    // a `dependentRequired` parent exempts this structural array so it survives.
     const projection = {
       schemas: {
         request: {

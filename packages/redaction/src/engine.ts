@@ -37,17 +37,24 @@ export interface RedactionEngineOptions {
    */
   sensitiveKeyRecurse?: boolean;
   /**
-   * Lower-cased keys whose ARRAY value is a multi-value scalar secret (an HTTP
-   * multi-value header/cookie such as `authorization` / `set-cookie`) rather
-   * than structure. In `sensitiveKeyRecurse` mode, ONLY these keys have their
-   * array ELEMENTS masked (the array's scalars inherit the key's sensitivity);
-   * every other sensitive key's array is recursed/preserved, because a
-   * sensitive PROPERTY NAME in a JSON Schema can legitimately carry a
-   * structural array (e.g. `dependentRequired: { password: ["mfaCode"] }`)
-   * that must NOT be mangled. Ignored when `sensitiveKeyRecurse` is false.
-   * Default: empty (no array gets element-masked by key).
+   * Lower-cased PARENT keys under which a sensitive key's ARRAY value is
+   * STRUCTURE, not secret values, and must be preserved (recursed) rather than
+   * element-masked.
+   *
+   * In `sensitiveKeyRecurse` mode the secure default is to mask the scalar
+   * elements of ANY array directly under a sensitive key — a multi-value
+   * header/cookie/api-key (`authorization`/`set-cookie`/`x-api-key`: [...])
+   * carries secret values whose elements, visited under "0"/"1", no plugin
+   * sees as sensitive, so they would otherwise leak. The ONLY legitimate
+   * structural array directly under a sensitive PROPERTY NAME is a JSON-Schema
+   * property-dependency keyword (`dependentRequired` / `dependencies`, e.g.
+   * `dependentRequired: { password: ["mfaCode"] }` — a list of property names).
+   * Those parents are listed here so the schema isn't mangled; everything else
+   * errs toward masking (a leaked secret is worse than an over-masked display
+   * array). Ignored when `sensitiveKeyRecurse` is false. Default: empty (mask
+   * every sensitive-key array).
    */
-  multiValueSecretKeys?: Set<string>;
+  structuralArrayParentKeys?: Set<string>;
 }
 
 /**
@@ -72,14 +79,14 @@ export class RedactionEngine {
   private readonly replacementFormat: "simple" | "labeled" | "partial";
   private readonly maxDepth: number;
   private readonly sensitiveKeyRecurse: boolean;
-  private readonly multiValueSecretKeys: Set<string>;
+  private readonly structuralArrayParentKeys: Set<string>;
 
   constructor(options: RedactionEngineOptions) {
     this.plugins = options.plugins;
     this.replacementFormat = options.replacementFormat;
     this.maxDepth = options.maxDepth ?? 10;
     this.sensitiveKeyRecurse = options.sensitiveKeyRecurse ?? false;
-    this.multiValueSecretKeys = options.multiValueSecretKeys ?? new Set();
+    this.structuralArrayParentKeys = options.structuralArrayParentKeys ?? new Set();
   }
 
   /**
@@ -187,19 +194,21 @@ export class RedactionEngine {
         // inner scalars under NON-sensitive sub-keys are left alone.
         //
         // An ARRAY is ambiguous: it is values-OF-the-secret for a multi-value
-        // HTTP header/cookie (`authorization: ["dev-token"]`,
-        // `set-cookie: ["sid=abc"]`) — whose elements, visited under "0"/"1",
-        // no plugin sees as sensitive, so plain recursion would LEAK them
-        // (P1) — but it is STRUCTURE for a JSON-Schema keyword keyed by a
-        // sensitive property name (`dependentRequired: { password: ["mfaCode"]
-        // }`), where masking the elements would corrupt the schema (P2). We
-        // cannot tell these apart by shape, so element-masking is restricted to
-        // the known multi-value header/cookie keys (`multiValueSecretKeys`);
-        // every other sensitive key's array is recursed/preserved (its scalars
-        // still get value-pattern checks).
+        // HTTP header/cookie/api-key (`authorization: ["dev-token"]`,
+        // `set-cookie: ["sid=abc"]`, `x-api-key: ["dev-key"]`) — whose
+        // elements, visited under "0"/"1", no plugin sees as sensitive, so
+        // plain recursion would LEAK them (P1) — but it is STRUCTURE for a
+        // JSON-Schema property-dependency keyword keyed by a sensitive property
+        // name (`dependentRequired: { password: ["mfaCode"] }`), where masking
+        // the elements would corrupt the schema (P2). We cannot tell these
+        // apart by shape, so the secure default is to MASK the elements, and
+        // only PRESERVE when the parent key is a known structural keyword
+        // (`structuralArrayParentKeys`) — a leaked secret is worse than an
+        // over-masked display array.
         const isContainer = value !== null && typeof value === "object";
         if (this.sensitiveKeyRecurse && isContainer) {
-          if (Array.isArray(value) && this.multiValueSecretKeys.has(key.toLowerCase())) {
+          const parentKey = (path[path.length - 1] ?? "").toLowerCase();
+          if (Array.isArray(value) && !this.structuralArrayParentKeys.has(parentKey)) {
             const r = this.maskSensitiveArray(
               value,
               scope,
