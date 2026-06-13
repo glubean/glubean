@@ -95,7 +95,7 @@ export const wf = workflow("wf-pass")
 
   const ends = nodeEnds(r.events);
   expect(ends.map((e) => [e.nodeId, e.status, e.grade])).toEqual([
-    ["bump", "passed", "full"],
+    ["bump", "passed", "partial"],
     ["verify", "passed", "trace"], // opaque check promoted by its assertion (§17 #10)
   ]);
   // node_start brackets precede their node_end
@@ -109,7 +109,7 @@ export const wf = workflow("wf-pass")
     nodePassed: 2,
     nodeFailed: 0,
     nodeSkipped: 0,
-    nodeGrades: { full: 1, partial: 0, trace: 1, opaque: 0 },
+    nodeGrades: { full: 0, partial: 1, trace: 1, opaque: 0 },
     success: true,
   });
 });

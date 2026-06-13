@@ -111,8 +111,8 @@ test("buildMetadata carries workflow projections + workflows affect the rootHash
     {
       id: "signup-journey",
       exportName: "signup",
-      nodes: [{ kind: "compute", id: "derive", grade: "full" as const }],
-      gradeSummary: { full: 1, partial: 0, opaque: 0 },
+      nodes: [{ kind: "compute", id: "derive", grade: "partial" as const }], // S2.18
+      gradeSummary: { full: 0, partial: 1, opaque: 0 },
     },
   ];
   const base: ScanResult = {

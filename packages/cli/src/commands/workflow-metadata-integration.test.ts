@@ -60,7 +60,7 @@ export const probe = workflow("probe-journey")
   expect(signup).toMatchObject({ name: "Signup", tags: ["journey"] });
   // graded nodes survive verbatim (the SDK's pre-computed projection).
   expect(signup.nodes.map((n) => [n.id, n.kind, n.grade])).toEqual([
-    ["derive", "compute", "full"],
+    ["derive", "compute", "partial"], // S2.18: compute = traced dataflow, logic undeclarable
     ["seed", "action", "partial"],
     ["route", "branch", "full"],
   ]);
@@ -69,7 +69,7 @@ export const probe = workflow("probe-journey")
   expect(route.mode).toBe("predicate");
   expect(route.cases?.[0].when).toMatchObject({ kind: "compare", op: "eq", path: ["n"], value: 2 });
   expect(route.cases?.[0].nodes[0]).toMatchObject({ id: "verify", kind: "check", grade: "opaque" });
-  expect(signup.gradeSummary).toEqual({ full: 2, partial: 1, opaque: 1 });
+  expect(signup.gradeSummary).toEqual({ full: 1, partial: 2, opaque: 1 });
 
   // …and buildMetadata ships them on the bundle (the upload payload's
   // `metadata` bucket is this object verbatim).
