@@ -64,7 +64,9 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
       // inherently not declarable — "synchronous" never meant "projectable".
       // `full` is reserved for nodes whose behavioral surface is fully
       // declared (contract identity / predicate data / L2 decisions).
-      return "partial";
+      // Degraded trace (reads ABSENT — the dry run threw on proxy dummy
+      // values) → nothing is declared → opaque (codex S2.18 R1 P2).
+      return (node as ComputeNode).reads !== undefined ? "partial" : "opaque";
     case "action": {
       const p = (node as ActionNode).project;
       return p && (p.reads?.length || p.writes?.length || p.note) ? "partial" : "opaque";
@@ -147,7 +149,13 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
     case "compute": {
       const c = node as ComputeNode;
       // Build-time traced dataflow (S2.18) — the honest projectable surface.
-      return { ...base, kind: "compute", grade, reads: c.reads, writes: c.writes };
+      // Absent on a degraded trace (the node is opaque then).
+      return {
+        ...base,
+        kind: "compute",
+        grade,
+        ...(c.reads !== undefined ? { reads: c.reads, writes: c.writes } : {}),
+      };
     }
     case "action": {
       const a = node as ActionNode;

@@ -2128,6 +2128,21 @@ describe("runWorkflow — switch (addendum §9 #4)", () => {
     ).toThrow(/finite number/);
   });
 
+  it("S2.18 R1: a thenable at the on-path FAILS the switch — never silent fall-through to default", async () => {
+    const { ctx } = fakeBase();
+    const wf = workflow("w")
+      .setup(async () => ({ k: Promise.resolve("a") as unknown }))
+      .switch("s", {
+        on: (state) => state.k,
+        cases: [{ value: "a", then: (b) => b.compute("c", (st) => st) }],
+        default: (b) => b.action("fallback", async (_c, st) => st),
+      })
+      .build();
+    const res = await runWorkflow(wf, ctx);
+    expect(res.status).toBe("failed");
+    expect(String(res.error)).toMatch(/thenable/);
+  });
+
   it("build-time validation: duplicate value, non-scalar value, non-L2 predicate, empty cases", () => {
     expect(() =>
       workflow("w")

@@ -949,6 +949,17 @@ async function selectBranchCase(
     // the same no-match behavior rather than a crash.
     const discriminant =
       node.onPath !== undefined ? resolvePath(state, node.onPath) : undefined;
+    // A thenable at the path (an unawaited request stored into state by an
+    // earlier action) must FAIL, not silently fall through to default —
+    // taking the wrong branch on a pending value is misrouting, not a
+    // no-match (codex S2.18 R1 P2; preserves the pre-onPath guard).
+    if (isThenable(discriminant)) {
+      throw new Error(
+        `workflow ${node.meta.id}: the value at \`on\` path ` +
+          `"${(node.onPath ?? []).join(".")}" is a thenable — state must hold ` +
+          `settled values; await async work in .action() before switching on it`,
+      );
+    }
     const idx = node.cases.findIndex((c) => c.value === discriminant);
     return idx >= 0
       ? { takenIndex: idx, takenLabel: node.cases[idx].label }

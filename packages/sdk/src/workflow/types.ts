@@ -193,9 +193,15 @@ export interface ComputeNode<State = any> {
    * (`traceComputeFn` — the same tracer flow's normalizer uses). The body's
    * transform logic is inherently not declarable, which is why compute
    * grades `partial`, never `full` (S2.18 lens-purity).
+   *
+   * ABSENT (not empty) when tracing degraded: a value-sensitive helper
+   * (`new URL(state.url)`) may throw on the proxy's dummy values — that is
+   * not an authoring error, so the build proceeds and the node grades
+   * `opaque` instead (codex S2.18 R1 P2). Empty arrays mean "traced: no
+   * dataflow" (e.g. the identity transform) — still `partial`.
    */
-  reads: string[];
-  writes: string[];
+  reads?: string[];
+  writes?: string[];
 }
 
 // --- Forward-compat node kinds (in the IR from day one so the executor switch

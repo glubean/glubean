@@ -860,17 +860,24 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       const computeMeta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(computeMeta, "compute");
       // S2.18 lens-purity: trace the dataflow at BUILD time (proxy dry-run —
-      // the same tracer flow's normalizer runs). The fn executes once against
-      // a permissive proxy; an exception here is genuine and fails the build.
-      // Transform LOGIC stays undeclarable, which is why compute grades
-      // `partial` — reads/writes are the honest projectable surface.
-      const { reads, writes } = traceComputeFn(fn as (state: any) => any);
+      // the same tracer flow's normalizer runs). Transform LOGIC stays
+      // undeclarable, which is why compute grades `partial` at best.
+      // A throw during the dry run is NOT an authoring error: the proxy
+      // feeds dummy values ("", 0) and a value-sensitive helper
+      // (`new URL(state.url)`, schema validators) may legitimately reject
+      // them — degrade to untraced (grade `opaque`) instead of failing a
+      // build the runtime would have passed (codex S2.18 R1 P2).
+      let traced: { reads: string[]; writes: string[] } | undefined;
+      try {
+        traced = traceComputeFn(fn as (state: any) => any);
+      } catch {
+        traced = undefined;
+      }
       const node: ComputeNode<State> = {
         kind: "compute",
         meta: computeMeta,
         fn: fn as unknown as ComputeNode<State>["fn"],
-        reads,
-        writes,
+        ...(traced ? { reads: traced.reads, writes: traced.writes } : {}),
       };
       this._nodes.push(node as WorkflowNode);
       return this;

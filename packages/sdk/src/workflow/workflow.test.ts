@@ -173,6 +173,18 @@ describe("projectWorkflow() static grades", () => {
     expect(proj.nodes[0].writes).toEqual(["total"]);
   });
 
+  it("S2.18 R1: a value-sensitive compute body degrades to opaque — the BUILD never fails on proxy dummies", () => {
+    const wf = workflow("w")
+      .setup(async () => ({ url: "https://api.example.com/x" }))
+      // new URL("") throws on the tracing proxy's dummy string — that must
+      // degrade the trace, not reject a workflow the runtime would pass.
+      .compute("parse-host", (state) => ({ ...state, host: new URL(state.url).host }))
+      .build();
+    const node = projectWorkflow(wf).nodes[0];
+    expect(node.grade).toBe("opaque"); // nothing declared — honest
+    expect(node.reads).toBeUndefined(); // ABSENT, not [] (degraded ≠ "no dataflow")
+  });
+
   it("S2.18: switch/route `on` must be a PURE selector — expressions are rejected at build", () => {
     expect(() =>
       workflow("w")
