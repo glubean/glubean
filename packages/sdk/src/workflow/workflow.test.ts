@@ -144,13 +144,71 @@ describe("projectWorkflow() static grades", () => {
     const byName = Object.fromEntries(proj.nodes.map((n) => [n.name, n.grade]));
     expect(byName).toEqual({
       call: "full",
-      pure: "full",
+      pure: "partial", // S2.18: compute = traced dataflow, undeclarable logic
       "hinted action": "partial",
       "bare action": "opaque",
       "hinted check": "partial",
       "bare check": "opaque",
     });
-    expect(proj.gradeSummary).toEqual({ full: 2, partial: 2, opaque: 2 });
+    expect(proj.gradeSummary).toEqual({ full: 1, partial: 3, opaque: 2 });
+  });
+
+  it("S2.18: compute projects its traced dataflow (reads/writes), graded partial", () => {
+    const proj = projectWorkflow(
+      workflow("w")
+        .setup(async () => ({ amount: 2, fx: 3 }))
+        .compute("derive", (state) => ({
+          ...state,
+          total: state.amount * state.fx,
+        }))
+        .build(),
+    );
+    expect(proj.nodes[0]).toMatchObject({
+      kind: "compute",
+      grade: "partial",
+      reads: ["state.amount", "state.fx"],
+    });
+    // Spread on the trace proxy contributes no keys — `writes` is exactly the
+    // EXPLICITLY written keys, which is the honest declaration.
+    expect(proj.nodes[0].writes).toEqual(["total"]);
+  });
+
+  it("S2.18: switch/route `on` must be a PURE selector — expressions are rejected at build", () => {
+    expect(() =>
+      workflow("w")
+        .setup(async () => ({ paidAmount: 1 }))
+        .switch("s", {
+          on: (state) => (state.paidAmount > 0 ? "yes" : "no"),
+          cases: [{ value: "yes", then: (b) => b.compute("c", (st) => st) }],
+        }),
+    ).toThrow(/lens/i); // selector-source gate: ternary/comparison is classification logic
+    // A spoofed own `toString` cannot fool the gate (Function.prototype.toString.call).
+    const spoofed = Object.assign((state: { k: string }) => (state.k === "a" ? "x" : "y"), {
+      toString: () => "(state) => state.k",
+    });
+    expect(() =>
+      workflow("w2")
+        .setup(async () => ({ k: "a" }))
+        .switch("s", {
+          on: spoofed as never,
+          cases: [{ value: "x", then: (b) => b.compute("c", (st) => st) }],
+        }),
+    ).toThrow(/lens/i);
+  });
+
+  it("S2.18: value-mode dispatch runs over onPath (safe resolution); absent default projects identity EXPLICITLY", () => {
+    const wf = workflow("w")
+      .setup(async () => ({ k: "a" }))
+      .switch("s", {
+        on: (state) => state.k,
+        cases: [{ value: "a", then: (b) => b.compute("c", (st) => st) }],
+        // no default → identity pass-through
+      })
+      .build();
+    const node = projectWorkflow(wf).nodes[0];
+    expect(node.onPath).toEqual(["k"]);
+    expect(node.default).toBeUndefined();
+    expect(node.defaultBehavior).toBe("identity"); // absence ≠ unknown — declared pass-through
   });
 
   it("contract-call projection carries target + identity + protocol + accept", () => {
@@ -238,9 +296,9 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     expect(entries[0]).toMatchObject({ name: "Registered", type: "simple", tags: ["wf"] });
     expect(entries[0].workflow).toMatchObject({
       id: "registered",
-      gradeSummary: { full: 1, partial: 0, opaque: 0 },
+      gradeSummary: { full: 0, partial: 1, opaque: 0 }, // compute → partial (S2.18)
     });
-    expect(entries[0].workflow!.nodes[0]).toMatchObject({ id: "c", kind: "compute", grade: "full" });
+    expect(entries[0].workflow!.nodes[0]).toMatchObject({ id: "c", kind: "compute", grade: "partial" });
   });
 
   it("auto-builds on a microtask so an exported, never-built builder still registers", async () => {

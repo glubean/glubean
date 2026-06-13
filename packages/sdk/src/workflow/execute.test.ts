@@ -713,7 +713,7 @@ describe("runWorkflow — lifecycle + state threading", () => {
     expect(cause).toBeInstanceOf(WorkflowPhaseFailedError);
   });
 
-  it("node outcomes carry the runtime grade (compute=full, opaque+trace→trace, bare→opaque)", async () => {
+  it("node outcomes carry the runtime grade (compute=partial, opaque+trace→trace, bare→opaque)", async () => {
     const { ctx } = fakeBase();
     const wf = workflow("grades")
       .setup(async () => ({}))
@@ -726,7 +726,8 @@ describe("runWorkflow — lifecycle + state threading", () => {
       .build();
     const res = await runWorkflow(wf, ctx);
     const byId = Object.fromEntries(res.nodes.map((n) => [n.id, n.grade]));
-    expect(byId).toEqual({ pure: "full", "opaque-traced": "trace", bare: "opaque" });
+    // S2.18: compute grades partial — dataflow traced, transform logic undeclarable.
+    expect(byId).toEqual({ pure: "partial", "opaque-traced": "trace", bare: "opaque" });
   });
 });
 
@@ -1102,11 +1103,11 @@ describe("runWorkflow — branch (§17 #6)", () => {
       .setup(async () => ({ x: 1 }))
       .branch("b", {
         when: (w) => w.when((s: { x: number }) => s.x).eq(1), // L2 → full predicate
-        then: (b) => b.compute("c1", (s) => s).compute("c2", (s) => s), // 2 full children
+        then: (b) => b.compute("c1", (s) => s).compute("c2", (s) => s), // 2 partial children (S2.18)
       })
       .build();
-    // branch (full) + c1 (full) + c2 (full) = 3 full, none dropped.
-    expect(projectWorkflow(wf).gradeSummary).toEqual({ full: 3, partial: 0, opaque: 0 });
+    // branch (full) + c1 + c2 (compute → partial, S2.18) — none dropped.
+    expect(projectWorkflow(wf).gradeSummary).toEqual({ full: 1, partial: 2, opaque: 0 });
   });
 
   it("a branch predicate ctx.skip() skips the whole workflow, not fails it (codex S2.4a R5)", async () => {
@@ -1338,8 +1339,8 @@ describe("lifecycle hints + projection visibility (phase4 §6)", () => {
     expect(proj.teardown).toEqual({
       note: "deletes the Stripe endpoint and closes the tunnel",
     });
-    // lifecycle never joins the node grade rollup
-    expect(proj.gradeSummary).toEqual({ full: 1, partial: 0, opaque: 0 });
+    // lifecycle never joins the node grade rollup (the one node is a compute → partial, S2.18)
+    expect(proj.gradeSummary).toEqual({ full: 0, partial: 1, opaque: 0 });
   });
 
   it("presence without notes still projects; absence projects nothing", () => {
@@ -2176,7 +2177,9 @@ describe("runWorkflow — switch (addendum §9 #4)", () => {
       ["bee", "b"],
     ]);
     expect(n.default![0].id).toBe("cd");
-    expect(proj.gradeSummary).toEqual({ full: 4, partial: 0, opaque: 0 }); // dispatch + ca + cb + cd
+    // S2.18: the decision INPUT is declared too — onPath rides the projection.
+    expect(n.onPath).toEqual(["k"]);
+    expect(proj.gradeSummary).toEqual({ full: 1, partial: 3, opaque: 0 }); // dispatch full + 3 computes partial
   });
 });
 

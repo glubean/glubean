@@ -319,6 +319,11 @@ export interface NormalizedWorkflowNode {
   /** route: terminal — no trunk continues after the taken case. */
   terminal?: boolean;
   message?: string;
+  /** branch (value mode, S2.18): extracted selector path of `on`. */
+  onPath?: string[];
+  /** branch family (S2.18): present (always "identity") when no default
+   * subtree is declared — explicit pass-through, not "unknown". */
+  defaultBehavior?: "identity";
   /** poll: exit predicate + bounds. ABSENT on inbound polls (see `inbound`). */
   until?: NormalizedPredicate;
   /** poll (inbound, inbound-contract-design §9.3): the await declaration —

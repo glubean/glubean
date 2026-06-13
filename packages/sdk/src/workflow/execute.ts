@@ -941,13 +941,14 @@ async function selectBranchCase(
   ctx: WorkflowContext,
 ): Promise<BranchDecision> {
   if (node.mode === "value") {
-    const discriminant = node.on?.(state);
-    if (isThenable(discriminant)) {
-      throw new Error(
-        `workflow ${node.meta.id}: \`on\` returned a thenable — on must be a pure ` +
-          `synchronous lens (state) => scalar; do async work in .action()`,
-      );
-    }
+    // S2.18 lens-purity: the runtime dispatches via SAFE PATH RESOLUTION over
+    // the extracted onPath — the projection and the execution share one truth
+    // (the live lens is not kept on the node). A missing path yields
+    // `undefined`, which `===`-matches no JSON-scalar case → default/identity
+    // (the missing-operand rule). `as any`/JS callers without an onPath get
+    // the same no-match behavior rather than a crash.
+    const discriminant =
+      node.onPath !== undefined ? resolvePath(state, node.onPath) : undefined;
     const idx = node.cases.findIndex((c) => c.value === discriminant);
     return idx >= 0
       ? { takenIndex: idx, takenLabel: node.cases[idx].label }

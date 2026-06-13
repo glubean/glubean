@@ -122,7 +122,9 @@ export interface PredicateScope<S> {
  * a future P1 enrichment; this string check is the P0 gate.)
  */
 export function assertSelectorSource(fn: (...args: any[]) => unknown): void {
-  const src = fn.toString().trim();
+  // Function.prototype.toString.call — an own `toString` on the lens object
+  // must not be able to spoof the source the gate inspects (S2.18 consult).
+  const src = Function.prototype.toString.call(fn).trim();
   const arrowAt = src.indexOf("=>");
   if (arrowAt < 0) {
     throw new LensPurityError("lens", "predicate lens must be an arrow function");

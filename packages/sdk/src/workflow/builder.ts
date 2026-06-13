@@ -7,6 +7,7 @@ import type {
 } from "../contract-flow-condition.js";
 import { validatePollBounds, DEFAULT_EVERY_MS } from "../contract-flow-poll.js";
 import { registerTest } from "../internal.js";
+import { traceComputeFn } from "../contract-core.js";
 import { interpolateTemplate, normalizeEachTable } from "../test/utils.js";
 import type { Test, TestContext } from "../types.js";
 import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
@@ -858,10 +859,18 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       }
       const computeMeta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(computeMeta, "compute");
+      // S2.18 lens-purity: trace the dataflow at BUILD time (proxy dry-run —
+      // the same tracer flow's normalizer runs). The fn executes once against
+      // a permissive proxy; an exception here is genuine and fails the build.
+      // Transform LOGIC stays undeclarable, which is why compute grades
+      // `partial` — reads/writes are the honest projectable surface.
+      const { reads, writes } = traceComputeFn(fn as (state: any) => any);
       const node: ComputeNode<State> = {
         kind: "compute",
         meta: computeMeta,
         fn: fn as unknown as ComputeNode<State>["fn"],
+        reads,
+        writes,
       };
       this._nodes.push(node as WorkflowNode);
       return this;
@@ -1034,7 +1043,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     method: "switch" | "route",
     nodeId: string,
     opts: SwitchOpts<State> | RouteOpts<State>,
-  ): Pick<BranchNode<State>, "mode" | "on" | "cases"> {
+  ): Pick<BranchNode<State>, "mode" | "onPath" | "cases"> {
     if (!Array.isArray(opts.cases) || opts.cases.length === 0) {
       throw new Error(`workflow.${method}() "${nodeId}" requires at least one case`);
     }
@@ -1115,9 +1124,17 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       }
       seenLabels.add(c.label!);
     }
-    return valueMode
-      ? { mode: "value", on: (opts as { on: (s: State) => unknown }).on, cases }
-      : { mode: "predicate", cases };
+    if (valueMode) {
+      // S2.18 lens-purity: `on` passes the same P0 selector gate as every
+      // predicate lens, and only its EXTRACTED path is kept — the runtime
+      // dispatches via safe path resolution over onPath, so projection and
+      // execution share one truth. A classification expression (ternary,
+      // comparison, call) is rejected here: make it explicit — `.compute()`
+      // a discriminant field first, or use predicate mode.
+      const onPath = selectorPath((opts as { on: (s: State) => unknown }).on);
+      return { mode: "value", onPath, cases };
+    }
+    return { mode: "predicate", cases };
   }
 
   // Broad impl satisfies the interface's conditional-tuple signature; call sites

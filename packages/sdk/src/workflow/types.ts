@@ -188,6 +188,14 @@ export interface ComputeNode<State = any> {
   kind: "compute";
   meta: NodeMeta;
   fn: (state: State) => State;
+  /**
+   * Dataflow, auto-traced at BUILD time via the proxy dry-run
+   * (`traceComputeFn` — the same tracer flow's normalizer uses). The body's
+   * transform logic is inherently not declarable, which is why compute
+   * grades `partial`, never `full` (S2.18 lens-purity).
+   */
+  reads: string[];
+  writes: string[];
 }
 
 // --- Forward-compat node kinds (in the IR from day one so the executor switch
@@ -238,9 +246,14 @@ export interface BranchNode<State = any> {
   meta: NodeMeta;
   /** How the taken case is decided. */
   mode: "predicate" | "value";
-  /** value mode: pure lens state → discriminant (JSON scalar). Same trust level
-   * as a call's `in` lens (TODO lens-purity applies to both). */
-  on?: (state: State) => unknown;
+  /**
+   * value mode: the EXTRACTED selector path of the `on` lens (S2.18
+   * lens-purity — the lens passes the same P0 gate as every predicate lens;
+   * classification expressions are rejected at build). The RUNTIME also
+   * dispatches via safe path resolution over this path — projection and
+   * execution share one truth, the live function is not kept.
+   */
+  onPath?: readonly string[];
   /** Author label — required when a predicate is opaque (projection/diagnostics). */
   message?: string;
   /** Decision table — first-match (predicate) / ===-match (value). Order preserved. */
@@ -478,6 +491,16 @@ export interface ProjectedWorkflowNode {
   terminal?: boolean;
   /** branch/poll: author label (required for opaque predicates). */
   message?: string;
+  /** compute: build-time proxy-traced dataflow (S2.18). `reads` are
+   * `state.<path>` strings; `writes` are top-level result keys. */
+  // (reads/writes fields are shared with action above.)
+  /** branch (value mode): the extracted selector path of `on` (S2.18). */
+  onPath?: string[];
+  /** branch family: present (always `"identity"`) when NO default subtree is
+   * declared — absent-default means "pass through unchanged", and projecting
+   * that explicitly stops consumers reading absence as "unknown" (S2.18,
+   * codex consult). Route never carries it (default is required there). */
+  defaultBehavior?: "identity";
   /** poll: the extracted exit predicate — L2 declarative over the response, or
    * opaque. ABSENT on inbound polls (matched IS the exit — see `inbound`). */
   until?: ExtractedPredicate;

@@ -57,8 +57,14 @@ function worst(a: StaticGrade, b: StaticGrade): StaticGrade {
 export function staticGradeOf(node: WorkflowNode): StaticGrade {
   switch (node.kind) {
     case "contract-call":
-    case "compute":
       return "full";
+    case "compute":
+      // S2.18 lens-purity: dataflow (reads/writes) is auto-traced and
+      // projected, but the TRANSFORM LOGIC of an arbitrary sync body is
+      // inherently not declarable — "synchronous" never meant "projectable".
+      // `full` is reserved for nodes whose behavioral surface is fully
+      // declared (contract identity / predicate data / L2 decisions).
+      return "partial";
     case "action": {
       const p = (node as ActionNode).project;
       return p && (p.reads?.length || p.writes?.length || p.note) ? "partial" : "opaque";
@@ -138,8 +144,11 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         ...(n.meta.timeout !== undefined ? { nodeTimeoutMs: n.meta.timeout } : {}),
       };
     }
-    case "compute":
-      return { ...base, kind: "compute", grade };
+    case "compute": {
+      const c = node as ComputeNode;
+      // Build-time traced dataflow (S2.18) — the honest projectable surface.
+      return { ...base, kind: "compute", grade, reads: c.reads, writes: c.writes };
+    }
     case "action": {
       const a = node as ActionNode;
       const p = a.project;
@@ -185,6 +194,9 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         grade,
         mode: b.mode,
         message: b.message,
+        // S2.18: value mode projects the extracted selector path of `on` —
+        // the decision INPUT is declared, not just the literal table.
+        ...(b.onPath !== undefined ? { onPath: [...b.onPath] } : {}),
         cases: b.cases.map((c) => ({
           ...(c.label !== undefined ? { label: c.label } : {}),
           ...(c.value !== undefined ? { value: c.value } : {}),
@@ -193,7 +205,12 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
             : {}),
           nodes: c.nodes.map(projectNode),
         })),
-        default: b.default ? b.default.map(projectNode) : undefined,
+        // Absent default = identity pass-through; project that EXPLICITLY so
+        // consumers never read absence as "unknown" (S2.18 consult). Route
+        // never hits the else-branch (its default is required at build).
+        ...(b.default
+          ? { default: b.default.map(projectNode) }
+          : { defaultBehavior: "identity" as const }),
         ...(b.terminal ? { terminal: true } : {}),
       };
     }
