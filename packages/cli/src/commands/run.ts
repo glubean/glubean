@@ -304,6 +304,7 @@ function isGlob(target: string): boolean {
 const TEST_FILE_SUFFIXES = [
   ".test.ts",
   ".contract.ts",
+  ".workflow.ts",
   ".flow.ts",
   ".bootstrap.ts",
 ];
@@ -333,7 +334,9 @@ async function walkTestFiles(dir: string, result: string[]): Promise<void> {
  * Map a file path to its Glubean kind by extension.
  * - `.test.ts` → "test"
  * - `.contract.ts` → "contract"
- * - `.flow.ts` → "flow"
+ * - `.workflow.ts` / `.flow.ts` → "flow" (canonical vNext extension +
+ *   legacy alias; both ride the "flow" runnable kind during the migration
+ *   window — see discoverTests / the S2.6 R10/R11 notes)
  * - `.bootstrap.ts` → "bootstrap" (overlay registration only; not a runnable kind)
  *
  * Returns undefined for non-Glubean files. The suite.kinds filter in
@@ -344,7 +347,7 @@ export type GlubeanFileKind = "test" | "contract" | "flow" | "bootstrap";
 export function classifyGlubeanFile(filePath: string): GlubeanFileKind | undefined {
   if (filePath.endsWith(".test.ts")) return "test";
   if (filePath.endsWith(".contract.ts")) return "contract";
-  if (filePath.endsWith(".flow.ts")) return "flow";
+  if (filePath.endsWith(".workflow.ts") || filePath.endsWith(".flow.ts")) return "flow";
   if (filePath.endsWith(".bootstrap.ts")) return "bootstrap";
   return undefined;
 }
@@ -870,7 +873,7 @@ export async function runCommand(
       }${colors.reset}`,
     );
     console.error(
-      `${colors.dim}Glubean looks for files matching *.test.ts, *.contract.ts, or *.flow.ts in the target directory.${colors.reset}`,
+      `${colors.dim}Glubean looks for files matching *.test.ts, *.contract.ts, *.workflow.ts, or *.flow.ts in the target directory.${colors.reset}`,
     );
     console.error(
       `${colors.dim}Run "glubean run tests/" or "glubean run path/to/file.test.ts".${colors.reset}\n`,

@@ -48,7 +48,17 @@ const DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"];
 
 const TEST_FILE_SUFFIXES = [".test.ts", ".test.js", ".test.mjs"];
 const CONTRACT_FILE_SUFFIXES = [".contract.ts", ".contract.js", ".contract.mjs"];
-const FLOW_FILE_SUFFIXES = [".flow.ts", ".flow.js", ".flow.mjs"];
+// `.workflow.ts` is the canonical vNext extension for workflow files;
+// `.flow.ts` is the legacy alias and stays recognized (same treatment) during
+// the migration window. Both feed contract + workflow extraction identically.
+const FLOW_FILE_SUFFIXES = [
+  ".flow.ts",
+  ".flow.js",
+  ".flow.mjs",
+  ".workflow.ts",
+  ".workflow.js",
+  ".workflow.mjs",
+];
 
 function isTestFile(filePath: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
@@ -180,7 +190,7 @@ export class Scanner {
     if (!foundTestFile && !foundContractFile && !foundFlowFile) {
       errors.push(
         "No test, contract, or flow files found. " +
-          "Ensure your files are named *.test.ts, *.contract.ts, or *.flow.ts.",
+          "Ensure your files are named *.test.ts, *.contract.ts, *.workflow.ts, or *.flow.ts.",
       );
     }
 
@@ -403,7 +413,7 @@ export class Scanner {
     ) {
       warnings.push(
         "No Glubean test, contract, or flow files found. " +
-          "Ensure your files are named *.test.ts, *.contract.ts, or *.flow.ts.",
+          "Ensure your files are named *.test.ts, *.contract.ts, *.workflow.ts, or *.flow.ts.",
       );
     }
 

@@ -8,9 +8,20 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeEach, afterEach, expect, test } from "vitest";
-import { __testing } from "./run.js";
+import { __testing, classifyGlubeanFile } from "./run.js";
 
 const { flowStepsHaveBranchOrPoll, workflowNodesHaveBranchOrPoll } = __testing;
+
+test("classifyGlubeanFile maps .workflow.ts and legacy .flow.ts to the flow kind", () => {
+  // `.workflow.ts` is the canonical vNext extension; `.flow.ts` is the legacy
+  // alias. Both ride the "flow" runnable kind during the migration window.
+  expect(classifyGlubeanFile("checkout.workflow.ts")).toBe("flow");
+  expect(classifyGlubeanFile("checkout.flow.ts")).toBe("flow");
+  expect(classifyGlubeanFile("users.contract.ts")).toBe("contract");
+  expect(classifyGlubeanFile("smoke.test.ts")).toBe("test");
+  expect(classifyGlubeanFile("glubean.bootstrap.ts")).toBe("bootstrap");
+  expect(classifyGlubeanFile("README.md")).toBeUndefined();
+});
 
 // Fixtures must live inside the package so the scanner's dynamic import can
 // resolve `@glubean/sdk`.

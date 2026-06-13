@@ -141,6 +141,38 @@ test("Scanner.validate succeeds when .test.js exists", async () => {
   expect(result.errors.length).toBe(0);
 });
 
+test("Scanner.validate succeeds when .workflow.ts exists (canonical vNext extension)", async () => {
+  const mockFs = {
+    ...nodeFs,
+    exists: (path: string) => Promise.resolve(path.endsWith("package.json")),
+    readText: (path: string) => {
+      if (path.endsWith("package.json")) {
+        return Promise.resolve(JSON.stringify({ dependencies: {} }));
+      }
+      return Promise.resolve("// no SDK import here");
+    },
+    walk: async function* (
+      _dir: string,
+      _opts: { extensions: string[]; skipDirs: string[] },
+    ) {
+      // `.workflow.ts` must be recognized as a flow-layer file just like
+      // the legacy `.flow.ts` alias.
+      yield "/fake/dir/checkout.workflow.ts";
+    },
+  };
+
+  const mockScanner = new Scanner(
+    mockFs,
+    nodeHasher,
+    SPEC_VERSION,
+    emptyExtractor,
+  );
+  const result = await mockScanner.validate("/fake/dir");
+
+  expect(result.valid).toBe(true);
+  expect(result.errors.length).toBe(0);
+});
+
 test("Scanner.validate detects SDK dependency", async () => {
   const mockFs = {
     ...nodeFs,

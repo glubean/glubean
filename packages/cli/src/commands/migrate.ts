@@ -443,7 +443,7 @@ function isMigratableTsFile(path: string): boolean {
   const name = basename(path);
   // Migratable file conventions:
   //   - `glubean.setup.ts` — for installPlugin manifest rewrites
-  //   - `*.contract.ts` / `*.flow.ts` — contract-layer files
+  //   - `*.contract.ts` / `*.workflow.ts` / `*.flow.ts` — contract-layer files
   //   - `*.test.ts` / `*.spec.ts` — tests that may import contract surfaces
   //   - `*.plugin.ts` / `*.plugins.ts` — plugin authoring (legacy `definePlugin`).
   //     Pre-fix used `name.includes("plugin")` which over-matched any file
@@ -452,6 +452,7 @@ function isMigratableTsFile(path: string): boolean {
   //     suffix — the conventional Glubean plugin naming.
   return name === "glubean.setup.ts" ||
     name.endsWith(".contract.ts") ||
+    name.endsWith(".workflow.ts") ||
     name.endsWith(".flow.ts") ||
     name.endsWith(".test.ts") ||
     name.endsWith(".spec.ts") ||
@@ -596,6 +597,7 @@ function scopedInstanceLabel(file: string, rootDir: string): string {
   const rel = relative(rootDir, file);
   const base = basename(rel)
     .replace(/\.contract\.ts$/, "")
+    .replace(/\.workflow\.ts$/, "")
     .replace(/\.flow\.ts$/, "")
     .replace(/\.test\.ts$/, "")
     .replace(/\.spec\.ts$/, "")
