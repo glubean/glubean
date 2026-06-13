@@ -16,6 +16,7 @@ import { resolveEnvFileName } from "../lib/active_env.js";
 import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import { CLI_VERSION } from "../version.js";
 import type { UploadResultPayload } from "../lib/upload.js";
+import { redactMetadataForUpload } from "../lib/redact-metadata.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
 import {
   extractContractFromFile,
@@ -2579,6 +2580,12 @@ export async function runCommand(
         const built = await buildMetadata(scanResult, {
           generatedBy: `@glubean/cli@${CLI_VERSION}`,
           projectId,
+          // Upload path only: carry the lossless full CONTRACT projection for
+          // the Cloud c/f metadata snapshot. Deep-redacted below before upload;
+          // never written to the on-disk metadata.json (that path omits it).
+          // `workflows` is always present (Design Y) and redacted in the same
+          // pass below.
+          includeProjection: true,
         });
         metadata = built;
       } catch {
@@ -2605,6 +2612,21 @@ export async function runCommand(
           runPlan.suites = options.suites;
         }
         metadata = { ...metadata, runPlan };
+      }
+
+      // Deep-redact the FULL contract + workflow projection before upload. Test
+      // events are redacted below via scope-based `redactEvent`, but the
+      // projection is a free-form tree that can carry secrets anywhere
+      // (examples, default headers, gRPC metadata, `extensions`/`meta`, literal
+      // compare/switch values, assertion messages). `redactMetadataForUpload`
+      // redacts ONLY the projection buckets (contractsProjection + workflows) —
+      // never `files`/`rootHash` — so the server's test registry/dedup keeps
+      // its verbatim sha256 hashes. The projection is uploaded WHOLE (branch/
+      // poll included): it is the lossless source for the server snapshot, not
+      // a run view (see the buildMetadata R14 note); the branch/poll run-view
+      // gate is a separate layer, untouched here.
+      if (metadata) {
+        metadata = redactMetadataForUpload(metadata, effectiveRedaction);
       }
 
       const redactedPayload = {

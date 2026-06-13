@@ -83,6 +83,23 @@ export async function buildMetadata(
     generatedAt?: string;
     projectId?: string;
     version?: string;
+    /**
+     * Emit the LOSSLESS full CONTRACT projection (`contractsProjection`).
+     * Default false.
+     *
+     * Off by default because the rich projection can carry secrets (examples,
+     * default headers, `extensions`/`meta`) and `buildMetadata` also backs
+     * `glubean scan`, which writes metadata.json to disk (commonly kept in
+     * git). Only the Cloud upload path opts in — and it deep-redacts the
+     * projection before it leaves the machine (see commands/run.ts).
+     *
+     * NOTE (Design Y): `workflows` is emitted UNCONDITIONALLY (below) — it is
+     * the only representation of a workflow's shape and already drives
+     * `rootHash`, so `validate_metadata` recomputes it from the on-disk file.
+     * Gating it out would break that self-check. The upload path still redacts
+     * `workflows` before persisting the server snapshot — the actual P1 gate.
+     */
+    includeProjection?: boolean;
   },
 ): Promise<BundleMetadata> {
   const normalizedFiles = normalizeFileMap(scanResult.files);
@@ -90,6 +107,10 @@ export async function buildMetadata(
   const contracts = scanResult.contracts;
   const workflows = scanResult.workflows;
   const rootHash = await computeRootHash(normalizedFiles, contracts, workflows);
+
+  const contractsProjection = options.includeProjection
+    ? scanResult.contractsProjection
+    : undefined;
 
   return {
     schemaVersion: METADATA_SCHEMA_VERSION,
@@ -105,6 +126,14 @@ export async function buildMetadata(
     projectId: options.projectId,
     version: options.version,
     contracts: contracts && contracts.length > 0 ? contracts : undefined,
+    // Lossless full projection of contracts — the source of truth for the
+    // Cloud contract metadata snapshot. Upload-only (includeProjection) and
+    // MUST be redacted before upload (see commands/run.ts): the projection can
+    // carry secrets in examples / default headers / extensions.
+    contractsProjection:
+      contractsProjection && contractsProjection.length > 0
+        ? contractsProjection
+        : undefined,
     // DELIBERATELY UNFILTERED (codex S2.6 R14): metadata is the project's
     // authoritative DECLARATION inventory — like `files` and `contracts`, it
     // always reflects the whole scan, never the run's selection. The server's

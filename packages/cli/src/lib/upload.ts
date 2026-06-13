@@ -101,7 +101,7 @@ export interface UploadResultPayload {
         skip?: boolean;
       }>;
     }>;
-    /** Contract spec metadata (from .contract.ts files) */
+    /** Contract spec metadata (from .contract.ts files) — flat/legacy view. */
     contracts?: Array<{
       contractId: string;
       exportName: string;
@@ -113,6 +113,18 @@ export interface UploadResultPayload {
         deferred?: string;
       }>;
     }>;
+    /**
+     * Lossless FULL contract projection (schemas / needsSchema / runnability /
+     * verifyRules) and workflow projection — the source of truth for the Cloud
+     * contract/workflow metadata snapshot (c/f shape-identity, Phase 2). Kept
+     * as opaque arrays here: the server treats them structurally, and the CLI
+     * deep-redacts them before upload (see commands/run.ts) since they can
+     * carry secrets in examples / default headers / extensions / literals.
+     * Like `runPlan`, nested under `metadata` to clear the server DTO's
+     * `forbidNonWhitelisted` top-level whitelist.
+     */
+    contractsProjection?: unknown[];
+    workflows?: unknown[];
     /**
      * Phase 5 5a — run plan provenance. Cloud server projects this to
      * top-level RunEntity.{profile, suites} for index-backed queries.
