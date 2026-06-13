@@ -397,6 +397,21 @@ export interface ExtractedContractProjection<
 
   schemas?: SafeSchemas;
   meta?: SafeMeta;
+
+  /**
+   * Fully-qualified logical paths of schemas that were DECLARED but could not
+   * be projected to JSON Schema (the live `toJSONSchema()` threw, or the value
+   * was an unrecognized non-plain object). Distinct from "no schema declared":
+   * an absent schema does not appear here. Paths are dotted, e.g.
+   * `"request.body"`, `"cases.login.response.body"`, `"cases.login.needsSchema"`.
+   *
+   * The schema VALUE stays `undefined` in the projection (so OpenAPI / MCP /
+   * descriptors degrade exactly as before); this list is the explicit record
+   * a snapshot consumer uses to compute `projectionComplete` (false when
+   * non-empty) and warn about the specific holes. Undefined/omitted when every
+   * declared schema projected cleanly.
+   */
+  unprojectableSchemas?: string[];
 }
 
 // =============================================================================

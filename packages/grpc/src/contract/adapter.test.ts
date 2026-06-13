@@ -806,3 +806,30 @@ describe("schema validation failure path", () => {
 // + §5.3 load-time guard, not at flow-step registration. The describe
 // block that lived here is gone; flow-mode function-field behavior is
 // covered by the executeCaseInFlow tests above.
+
+test("normalizeGrpc records unprojectable schemas, omits clean/absent (sentinel)", () => {
+  const opaque = { safeParse: (d: unknown) => ({ success: true as const, data: d }) };
+  const projectable = { toJSONSchema: () => ({ type: "object" }) };
+  const ext = grpcAdapter.normalize!({
+    id: "c1",
+    protocol: "grpc",
+    target: "Svc/Op",
+    cases: [
+      {
+        key: "ok",
+        lifecycle: "active",
+        severity: "warning",
+        needsSchema: opaque,
+        schemas: { request: opaque, response: projectable },
+      },
+    ],
+  } as any);
+
+  // Opaque (safeParse-only) schemas can't project → recorded by path.
+  expect(ext.unprojectableSchemas).toEqual(
+    expect.arrayContaining(["cases.ok.needsSchema", "cases.ok.request"]),
+  );
+  // The projectable response schema is NOT flagged, and its value survives.
+  expect(ext.unprojectableSchemas).not.toContain("cases.ok.response");
+  expect((ext.cases[0].schemas as any)?.response).toEqual({ type: "object" });
+});

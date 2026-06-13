@@ -146,6 +146,15 @@ export interface NormalizedContractMeta {
   schemas?: unknown;
   meta?: unknown;
   cases: NormalizedCaseMeta[];
+  /**
+   * Fully-qualified logical paths of schemas DECLARED but not projectable
+   * (the adapter's `schemaToJsonSchema` couldn't convert them). Mirrors
+   * `ExtractedContractProjection.unprojectableSchemas`. The schema VALUE is
+   * `undefined` in the projection either way; this list lets a snapshot tell
+   * "couldn't project" apart from "no schema" and derive `projectionComplete`.
+   * Omitted when every declared schema projected cleanly.
+   */
+  unprojectableSchemas?: string[];
 }
 
 /**
@@ -517,6 +526,9 @@ export function protocolContractToNormalized(
     extensions: ex.extensions,
     schemas: ex.schemas,
     meta: ex.meta,
+    ...(Array.isArray(ex.unprojectableSchemas) && ex.unprojectableSchemas.length > 0
+      ? { unprojectableSchemas: ex.unprojectableSchemas }
+      : {}),
     cases: (ex.cases ?? []).map((c: any): NormalizedCaseMeta => ({
       key: c.key,
       description: c.description,

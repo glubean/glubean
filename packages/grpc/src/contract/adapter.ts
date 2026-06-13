@@ -345,18 +345,36 @@ function projectGrpc(
 function normalizeGrpc(
   projection: ContractProjection<GrpcPayloadSchemas, GrpcContractMeta> & { id: string },
 ): ExtractedContractProjection<GrpcSafeSchemas, GrpcContractSafeMeta> {
+  // Record schemas DECLARED but not projectable (toJSONSchema threw / opaque
+  // non-plain object). `schemaToJsonSchema` returns null for both "absent" and
+  // "failed"; a non-null input yielding null means a real failure. The value
+  // stays undefined (consumers unaffected); the path drives projectionComplete.
+  const failures: string[] = [];
+  const collect = (
+    input: unknown,
+    path: string,
+  ): Record<string, unknown> | undefined => {
+    if (input == null) return undefined;
+    const converted = schemaToJsonSchema(input);
+    if (converted == null) {
+      failures.push(path);
+      return undefined;
+    }
+    return converted;
+  };
+
   const safeCases: ExtractedCaseMeta<GrpcSafeSchemas, GrpcContractSafeMeta>[] =
     projection.cases.map((c) => {
       const s = c.schemas ?? {};
       const safe: GrpcSafeSchemas = {
-        request: schemaToJsonSchema(s.request) ?? undefined,
-        response: schemaToJsonSchema(s.response) ?? undefined,
-        metadata: schemaToJsonSchema(s.metadata) ?? undefined,
+        request: collect(s.request, `cases.${c.key}.request`),
+        response: collect(s.response, `cases.${c.key}.response`),
+        metadata: collect(s.metadata, `cases.${c.key}.metadata`),
       };
       // v10 — convert needsSchema to JSON-safe (may be null when the
       // SchemaLike is opaque safeParse-only; `hasNeeds` decoupled
       // remains true regardless).
-      const safeNeeds = schemaToJsonSchema(c.needsSchema) ?? undefined;
+      const safeNeeds = collect(c.needsSchema, `cases.${c.key}.needsSchema`);
       return {
         ...c,
         schemas: safe,
@@ -382,6 +400,7 @@ function normalizeGrpc(
     cases: safeCases,
     schemas: {},
     meta: projection.meta,
+    unprojectableSchemas: failures.length > 0 ? failures : undefined,
   };
 }
 

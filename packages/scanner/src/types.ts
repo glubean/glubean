@@ -3,7 +3,7 @@
  */
 
 import type { ContractStaticMeta } from "./extractor-static.js";
-import type { NormalizedWorkflowMeta } from "./contract-extraction.js";
+import type { NormalizedContractMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
 
 /** Export metadata for a single test export */
 export interface ExportMeta {
@@ -117,6 +117,17 @@ export interface BundleMetadata {
    */
   contracts?: ContractStaticMeta[];
   /**
+   * FULL normalized contract projection — lossless mirror of the SDK's
+   * `_extracted` form (schemas / needsSchema / runnability / given /
+   * verifyRules). This is the source of truth for the Cloud
+   * contract/workflow metadata snapshot. `contracts` (above) remains the
+   * down-converted flat view for existing consumers.
+   *
+   * MUST be redacted before upload — the projection can carry examples,
+   * default headers, and `extensions`/`meta` blobs that may contain secrets.
+   */
+  contractsProjection?: NormalizedContractMeta[];
+  /**
    * vNext workflow projections (S2.6) — the JSON-safe graded node view read
    * off `BuiltWorkflow._projection` for workflows exported from runtime-
    * extractable files (.flow.ts / .contract.ts). Consumed by Cloud/agents.
@@ -146,6 +157,17 @@ export interface ScanResult {
    * Independent from test exports — consumed by projection/coverage tools.
    */
   contracts: ContractStaticMeta[];
+  /**
+   * FULL normalized contract projection (schemas / needsSchema / runnability /
+   * given / verifyRules), mirroring the SDK's `_extracted` form. This is the
+   * lossless source `contracts` (above) is down-converted from. Consumed by
+   * the Cloud metadata-snapshot upload path; `contracts` is retained for
+   * existing flat/coverage consumers.
+   *
+   * Absent for contracts recovered via the static-regex fallback (runtime
+   * import failed) — that degraded path produces only `ContractStaticMeta`.
+   */
+  contractsProjection?: NormalizedContractMeta[];
   /**
    * vNext workflow projections (S2.6) — graded node views read off
    * `BuiltWorkflow._projection` during runtime extraction.

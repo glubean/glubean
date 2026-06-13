@@ -450,3 +450,54 @@ test("classifyFailure maps HTTP status to FailureKind", async () => {
   timeoutErr.name = "TimeoutError";
   expect(classify({ error: timeoutErr, events: [] })?.kind).toBe("timeout");
 });
+
+// ---------------------------------------------------------------------------
+// unprojectableSchemas — distinguish "schema failed to project" from "absent".
+// The schema VALUE stays undefined either way (consumers unaffected); the
+// failure is recorded as a fully-qualified path so a snapshot can derive
+// projectionComplete. See ExtractedContractProjection.unprojectableSchemas.
+// ---------------------------------------------------------------------------
+
+test("unprojectableSchemas records a response schema whose toJSONSchema throws", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  // A SchemaLike whose toJSONSchema() throws — conversion fails, distinct from
+  // an absent schema. (`expect.schema` maps to cases[].schemas.response.body.)
+  const failing = {
+    toJSONSchema: () => {
+      throw new Error("boom");
+    },
+  };
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: failing as any } },
+    },
+  });
+
+  expect(c._extracted.unprojectableSchemas).toEqual(["cases.ok.response.body"]);
+  // Value is undefined — OpenAPI / MCP / descriptors degrade exactly as before.
+  expect((c._extracted.cases[0].schemas as any)?.response?.body).toBeUndefined();
+});
+
+test("no unprojectableSchemas when schemas are absent or project cleanly", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+
+  // Absent response schema → no entry.
+  const c1 = api("a", {
+    endpoint: "GET /x",
+    cases: { ok: { description: "x", expect: { status: 200 } } },
+  });
+  expect(c1._extracted.unprojectableSchemas).toBeUndefined();
+
+  // Plain JSON Schema (has `type`) projects cleanly → no entry, value preserved.
+  const c2 = api("b", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: { type: "object" } as any } },
+    },
+  });
+  expect(c2._extracted.unprojectableSchemas).toBeUndefined();
+  expect((c2._extracted.cases[0].schemas as any)?.response?.body).toEqual({ type: "object" });
+});

@@ -414,3 +414,39 @@ test("isBuiltWorkflow: rejects non-arrays, missing markers, and missing projecti
     isBuiltWorkflow(Object.assign([], { __glubean_type: "workflow", _projection: { id: 42 } })),
   ).toBe(false); // projection without a string id
 });
+
+test("protocolContractToNormalized passes through unprojectableSchemas from _extracted", () => {
+  const carrier = {
+    _projection: { id: "c1", protocol: "http", target: "/x", cases: [] },
+    _extracted: {
+      id: "c1",
+      protocol: "http",
+      target: "/x",
+      cases: [{ key: "ok", lifecycle: "active", severity: "warning" }],
+      unprojectableSchemas: ["cases.ok.response.body", "request.headers"],
+    },
+  };
+
+  const normalized = protocolContractToNormalized(carrier, "exportName");
+  expect(normalized.unprojectableSchemas).toEqual([
+    "cases.ok.response.body",
+    "request.headers",
+  ]);
+});
+
+test("protocolContractToNormalized omits unprojectableSchemas when none/empty", () => {
+  const base = {
+    _projection: { id: "c1", protocol: "http", target: "/x", cases: [] },
+    _extracted: {
+      id: "c1",
+      protocol: "http",
+      target: "/x",
+      cases: [{ key: "ok", lifecycle: "active", severity: "warning" }],
+    },
+  };
+  // Absent
+  expect(protocolContractToNormalized(base, "e").unprojectableSchemas).toBeUndefined();
+  // Empty array → omitted (not an empty array)
+  const withEmpty = { ...base, _extracted: { ...base._extracted, unprojectableSchemas: [] } };
+  expect(protocolContractToNormalized(withEmpty, "e").unprojectableSchemas).toBeUndefined();
+});

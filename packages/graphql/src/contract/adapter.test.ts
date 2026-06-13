@@ -950,3 +950,28 @@ describe("schema validation failure path", () => {
     await expect(wf[0]!.fn!(makeCtx())).rejects.toThrow(/validate failed/);
   });
 });
+
+test("normalizeGraphql records unprojectable schemas, omits clean/absent (sentinel)", () => {
+  const opaque = { safeParse: (d: unknown) => ({ success: true as const, data: d }) };
+  const projectable = { toJSONSchema: () => ({ type: "object" }) };
+  const ext = graphqlAdapter.normalize!({
+    id: "c1",
+    protocol: "graphql",
+    target: "POST /graphql",
+    cases: [
+      {
+        key: "ok",
+        lifecycle: "active",
+        severity: "warning",
+        needsSchema: opaque,
+        schemas: { variables: opaque, response: projectable },
+      },
+    ],
+  } as any);
+
+  expect(ext.unprojectableSchemas).toEqual(
+    expect.arrayContaining(["cases.ok.needsSchema", "cases.ok.variables"]),
+  );
+  expect(ext.unprojectableSchemas).not.toContain("cases.ok.response");
+  expect((ext.cases[0].schemas as any)?.response).toEqual({ type: "object" });
+});

@@ -10,7 +10,7 @@ import { extractContractCases } from "./extractor-ast.js";
 import { extractAliasesFromSource } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
-import type { NormalizedWorkflowMeta } from "./contract-extraction.js";
+import type { NormalizedContractMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
 import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.js";
 
 /** File system interface for runtime abstraction */
@@ -277,12 +277,17 @@ export class Scanner {
     // Uses shared runtime extraction (supports both old and .with() syntax).
     // Falls back to static regex if runtime import fails.
     const contracts: ContractStaticMeta[] = [];
+    // Lossless full projection — retained alongside the down-converted
+    // `contracts` above. Source of truth for the Cloud metadata snapshot.
+    const contractsProjection: NormalizedContractMeta[] = [];
     for (const filePath of [...contractFiles, ...flowFiles]) {
       const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
       const result = await extractContractFromFile(absolutePath);
 
       if (result.contracts.length > 0) {
-        // Map NormalizedContractMeta → ContractStaticMeta for backward compatibility
+        // Keep the rich projection verbatim …
+        contractsProjection.push(...result.contracts);
+        // … and map NormalizedContractMeta → ContractStaticMeta for backward compatibility
         for (const ec of result.contracts) {
           contracts.push({
             contractId: ec.id,
@@ -410,6 +415,7 @@ export class Scanner {
       tags: Array.from(allTags),
       warnings,
       contracts,
+      ...(contractsProjection.length > 0 ? { contractsProjection } : {}),
       ...(workflows.length > 0 ? { workflows } : {}),
     };
   }

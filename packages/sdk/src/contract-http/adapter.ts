@@ -607,13 +607,31 @@ function projectHttp(
 function normalizeHttp(
   projection: ContractProjection<HttpPayloadSchemas, HttpContractMeta> & { id: string },
 ): ExtractedContractProjection<HttpSafeSchemas, HttpContractMeta> {
+  // Record schemas that were DECLARED but failed to project.
+  // `schemaToJsonSchema` returns null for BOTH "absent" and "failed", so we
+  // disambiguate via the input: a non-null input that yields null means a real
+  // conversion failure (toJSONSchema threw, or unrecognized non-plain object).
+  // The value stays `undefined` — consumers (OpenAPI / MCP / descriptors)
+  // degrade exactly as before — while the path is recorded so a snapshot can
+  // tell "couldn't project" apart from "no schema" (drives projectionComplete).
+  const failures: string[] = [];
+  const collect = (input: unknown, path: string): unknown | undefined => {
+    if (input == null) return undefined;
+    const converted = schemaToJsonSchema(input);
+    if (converted == null) {
+      failures.push(path);
+      return undefined;
+    }
+    return converted;
+  };
+
   const safeContractSchemas: HttpSafeSchemas | undefined = projection.schemas
     ? {
         request: projection.schemas.request
           ? {
-              body: schemaToJsonSchema(projection.schemas.request.body) ?? undefined,
+              body: collect(projection.schemas.request.body, "request.body"),
               contentType: projection.schemas.request.contentType,
-              headers: schemaToJsonSchema(projection.schemas.request.headers) ?? undefined,
+              headers: collect(projection.schemas.request.headers, "request.headers"),
               example: projection.schemas.request.example,
               examples: projection.schemas.request.examples,
             }
@@ -660,31 +678,29 @@ function normalizeHttp(
       hasNeeds: c.hasNeeds,
       direction: c.direction,
       runnable: c.runnable,
-      needsSchema: c.needsSchema
-        ? schemaToJsonSchema(c.needsSchema as Parameters<typeof schemaToJsonSchema>[0]) ?? undefined
-        : undefined,
+      needsSchema: collect(c.needsSchema, `cases.${c.key}.needsSchema`),
       schemas: c.schemas
         ? {
             response: c.schemas.response
               ? {
                   status: c.schemas.response.status,
-                  body: schemaToJsonSchema(c.schemas.response.body) ?? undefined,
+                  body: collect(c.schemas.response.body, `cases.${c.key}.response.body`),
                   contentType: c.schemas.response.contentType,
-                  headers: schemaToJsonSchema(c.schemas.response.headers) ?? undefined,
+                  headers: collect(c.schemas.response.headers, `cases.${c.key}.response.headers`),
                   example: c.schemas.response.example,
                   examples: c.schemas.response.examples,
                 }
               : undefined,
             params: c.schemas.params
-              ? normalizeParamMetaRecord(c.schemas.params)
+              ? normalizeParamMetaRecord(c.schemas.params, collect, `cases.${c.key}.params`)
               : undefined,
             query: c.schemas.query
-              ? normalizeParamMetaRecord(c.schemas.query)
+              ? normalizeParamMetaRecord(c.schemas.query, collect, `cases.${c.key}.query`)
               : undefined,
             security: c.schemas.security,
             inbound: c.schemas.inbound
               ? {
-                  body: schemaToJsonSchema(c.schemas.inbound.body) ?? undefined,
+                  body: collect(c.schemas.inbound.body, `cases.${c.key}.inbound.body`),
                   headers: c.schemas.inbound.headers,
                   // scheme/header/secretRef are NAMES (blind spot 9) —
                   // verbatim through normalize, nothing to redact.
@@ -695,6 +711,7 @@ function normalizeHttp(
           }
         : undefined,
     })),
+    unprojectableSchemas: failures.length > 0 ? failures : undefined,
   };
 }
 
@@ -703,11 +720,13 @@ function normalizeParamMetaRecord(
     string,
     { schema?: SchemaLike<unknown>; description?: string; required?: boolean; deprecated?: boolean }
   >,
+  collect: (input: unknown, path: string) => unknown | undefined,
+  pathPrefix: string,
 ): HttpSafeSchemas["params"] {
   const out: NonNullable<HttpSafeSchemas["params"]> = {};
   for (const [key, meta] of Object.entries(raw)) {
     out[key] = {
-      schema: schemaToJsonSchema(meta.schema) ?? undefined,
+      schema: collect(meta.schema, `${pathPrefix}.${key}.schema`),
       description: meta.description,
       required: meta.required,
       deprecated: meta.deprecated,

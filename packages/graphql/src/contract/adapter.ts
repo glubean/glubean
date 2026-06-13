@@ -423,6 +423,24 @@ function normalizeGraphql(
     id: string;
   },
 ): ExtractedContractProjection<GraphqlSafeSchemas, GraphqlContractSafeMeta> {
+  // Record schemas DECLARED but not projectable (toJSONSchema threw / opaque
+  // non-plain object). `schemaToJsonSchema` returns null for both "absent" and
+  // "failed"; a non-null input yielding null means a real failure. The value
+  // stays undefined (consumers unaffected); the path drives projectionComplete.
+  const failures: string[] = [];
+  const collect = (
+    input: unknown,
+    path: string,
+  ): Record<string, unknown> | undefined => {
+    if (input == null) return undefined;
+    const converted = schemaToJsonSchema(input);
+    if (converted == null) {
+      failures.push(path);
+      return undefined;
+    }
+    return converted;
+  };
+
   const safeCases: ExtractedCaseMeta<GraphqlSafeSchemas, GraphqlContractSafeMeta>[] =
     projection.cases.map((c) => {
       const s = c.schemas ?? {};
@@ -430,15 +448,15 @@ function normalizeGraphql(
         query: s.query,
         operation: s.operation,
         operationName: s.operationName,
-        variables: schemaToJsonSchema(s.variables) ?? undefined,
-        response: schemaToJsonSchema(s.response) ?? undefined,
-        headers: schemaToJsonSchema(s.headers) ?? undefined,
+        variables: collect(s.variables, `cases.${c.key}.variables`),
+        response: collect(s.response, `cases.${c.key}.response`),
+        headers: collect(s.headers, `cases.${c.key}.headers`),
         variablesExample: s.variablesExample,
         variablesExamples: s.variablesExamples,
       };
       // v10 — convert needsSchema to JSON-safe (may be undefined for
       // opaque safeParse-only validators); hasNeeds remains authoritative.
-      const safeNeeds = schemaToJsonSchema(c.needsSchema) ?? undefined;
+      const safeNeeds = collect(c.needsSchema, `cases.${c.key}.needsSchema`);
       return {
         ...c,
         schemas: safe,
@@ -464,6 +482,7 @@ function normalizeGraphql(
     cases: safeCases,
     schemas: {},
     meta: projection.meta,
+    unprojectableSchemas: failures.length > 0 ? failures : undefined,
   };
 }
 
