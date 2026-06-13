@@ -19,8 +19,8 @@ import * as protoLoader from "@grpc/proto-loader";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { contract, runFlow } from "@glubean/sdk";
-import type { FlowContract, TestContext } from "@glubean/sdk";
+import { contract, workflow } from "@glubean/sdk";
+import type { TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";
 
 import { createGrpcClient, type GrpcClient } from "../index.js";
@@ -255,19 +255,17 @@ describe("live gRPC smoke — execute + flow paths against real server", () => {
 
     let capturedMessage: string | undefined;
 
-    const flowObj = contract
-      .flow("live-greet-flow")
+    const wf = workflow("live-greet-flow")
       .setup(async () => ({ name: "bob" }))
-      .step(greeterContract.case("ok"), {
+      .call("greet", greeterContract.case("ok"), {
         in: (s: any) => ({ name: s.name }),
         out: (s: any, res: any) => {
           capturedMessage = res.message.message;
           return { ...s, greeting: res.message.message };
         },
       } as any)
-      .build() as FlowContract<unknown>;
-
-    await runFlow(flowObj, makeCtx());
+      .build();
+    await wf[0]!.fn!(makeCtx());
 
     expect(capturedMessage).toBe("Hello, bob!");
   });

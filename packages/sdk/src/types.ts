@@ -2628,18 +2628,6 @@ export interface RegisteredTestMeta {
   };
 
   /**
-   * Flow metadata (set by contract.flow()). Mutually exclusive with `contract`.
-   * Shape mirrors FlowRegistryMeta (contract-types.ts).
-   */
-  flow?: {
-    id: string;
-    description?: string;
-    tags?: string[];
-    steps: import("./contract-types.js").FlowRegistryStep[];
-    setupDynamic?: true;
-  };
-
-  /**
    * vNext workflow metadata (set by `workflow(...).build()`). Mutually
    * exclusive with `contract`/`flow`. The full JSON-safe graded projection
    * (proposal §7) — scanner/Cloud/agents read node grades, call identity,

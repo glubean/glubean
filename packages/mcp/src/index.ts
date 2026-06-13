@@ -385,7 +385,6 @@ async function computeRootHash(
   files: Record<string, FileMeta>,
   contracts?: unknown[],
   workflows?: unknown[],
-  flows?: unknown[],
 ): Promise<string> {
   // Keep ISOMORPHIC with cli/src/metadata.ts computeRootHash — the MCP
   // metadata path must report the same rootHash for the same scan inputs
@@ -401,10 +400,6 @@ async function computeRootHash(
     const workflowHash = createHash("sha256").update(JSON.stringify(workflows)).digest("hex");
     parts.push(`__workflows__:sha256-${workflowHash}`);
   }
-  if (flows && flows.length > 0) {
-    const flowHash = createHash("sha256").update(JSON.stringify(flows)).digest("hex");
-    parts.push(`__flows__:sha256-${flowHash}`);
-  }
   const hash = createHash("sha256").update(parts.join("\n")).digest("hex");
   return `sha256-${hash}`;
 }
@@ -417,8 +412,7 @@ async function buildMetadata(
   const stats = deriveMetadataStats(normalizedFiles);
   const contracts = scanResult.contracts;
   const workflows = scanResult.workflows;
-  const flows = scanResult.flows;
-  const rootHash = await computeRootHash(normalizedFiles, contracts, workflows, flows);
+  const rootHash = await computeRootHash(normalizedFiles, contracts, workflows);
 
   return {
     schemaVersion: METADATA_SCHEMA_VERSION,
@@ -433,7 +427,6 @@ async function buildMetadata(
     warnings: scanResult.warnings,
     contracts: contracts && contracts.length > 0 ? contracts : undefined,
     workflows: workflows && workflows.length > 0 ? workflows : undefined,
-    flows: flows && flows.length > 0 ? flows : undefined,
   };
 }
 
@@ -1939,67 +1932,6 @@ function securityToOpenApi(security: unknown, instanceName?: string): { name: st
 }
 
 /**
- * Walk an extracted flow projection and annotate matching OpenAPI operations
- * with `x-glubean-flow-sequence` extensions. Only flows where every step is
- * a `contract-call` with `protocol === "http"` are emitted — mixed-protocol
- * or compute-heavy flows are skipped (extension is path-keyed and only
- * makes sense for all-HTTP flows).
- *
- * Extension shape per operation:
- *   x-glubean-flow-sequence: [{ flowId, step, totalSteps, stepName? }, ...]
- * Operations referenced by multiple flows receive multiple entries.
- */
-export function injectFlowSequenceExtensions(
-  spec: Record<string, unknown>,
-  flows: Array<{
-    id: string;
-    steps: Array<{
-      // `branch` / `poll` steps are intentionally accepted but never match the
-      // all-HTTP gate below (neither is a `contract-call`), so any flow
-      // containing one is skipped — correct, since the path-keyed extension
-      // only makes sense for linear all-HTTP flows.
-      kind: "contract-call" | "compute" | "branch" | "poll";
-      name?: string;
-      protocol?: string;
-      target?: string;
-    }>;
-  }>,
-): void {
-  const paths = (spec.paths ?? {}) as Record<string, Record<string, any>>;
-  for (const flow of flows) {
-    const httpSteps = flow.steps.filter(
-      (s) => s.kind === "contract-call" && s.protocol === "http",
-    );
-    // Require ALL steps to be HTTP contract-calls (no compute, no other protocols)
-    if (httpSteps.length !== flow.steps.length || httpSteps.length === 0) continue;
-
-    const total = httpSteps.length;
-    httpSteps.forEach((step, idx) => {
-      if (!step.target) return;
-      const m = step.target.match(
-        /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+)$/i,
-      );
-      if (!m) return;
-      const method = m[1].toLowerCase();
-      const path = m[2];
-      const pathEntry = paths[path];
-      if (!pathEntry) return;
-      const operation = pathEntry[method];
-      if (!operation || typeof operation !== "object") return;
-
-      const existing = (operation["x-glubean-flow-sequence"] as unknown[]) ?? [];
-      existing.push({
-        flowId: flow.id,
-        step: idx + 1,
-        totalSteps: total,
-        ...(step.name ? { stepName: step.name } : {}),
-      });
-      operation["x-glubean-flow-sequence"] = existing;
-    });
-  }
-}
-
-/**
  * Back-compat shim — `contractsToOpenApi` is now a thin wrapper over
  * `renderArtifact(openapiArtifact, ...)` from `@glubean/sdk`. The
  * per-contract path/operation build logic and the merge logic both moved
@@ -2058,19 +1990,6 @@ server.registerTool(
     }
 
     const spec = contractsToOpenApi(result.contracts, input.title);
-
-    // Annotate operations referenced by all-HTTP flows with
-    // `x-glubean-flow-sequence` so agents / Cloud / viewers can see which
-    // endpoint plays which role in which flow. Skip flows that include
-    // non-HTTP steps (the extension is path-keyed and only meaningful when
-    // every step maps to an OpenAPI operation). Post-Phase 2f flows live
-    // as `kind: "flow"` entries inside `result.attachments`.
-    const flowsForOpenApi = result.attachments
-      .filter((a): a is Extract<typeof a, { kind: "flow" }> => a.kind === "flow")
-      .map((a) => a.flow);
-    if (flowsForOpenApi.length > 0) {
-      injectFlowSequenceExtensions(spec, flowsForOpenApi);
-    }
 
     return {
       content: [{

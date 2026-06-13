@@ -1,7 +1,8 @@
 /**
  * Tests for the protocol-agnostic contract core (`contract-core.ts`).
  *
- * Scope: register / dispatcher / flow / runFlow / normalizeFlow / tracer.
+ * Scope: register / dispatcher / bootstrap / tracer. (Legacy flow tests
+ * were deleted with contract.flow — Nv1-D2.)
  * All HTTP-specific behavior tests live in `./contract-http/*.test.ts` (P2).
  *
  * Uses a mock adapter to avoid any HTTP dependency.
@@ -10,8 +11,6 @@
 import { test, expect, beforeEach } from "vitest";
 import {
   contract,
-  runFlow,
-  normalizeFlow,
   extractMappings,
   extractMappingsOut,
   traceComputeFn,
@@ -22,7 +21,6 @@ import type {
   ContractProjection,
   ExtractedContractProjection,
   ProtocolContract,
-  FlowContract,
 } from "./contract-types.js";
 import type { TestContext } from "./types.js";
 import {
@@ -543,7 +541,7 @@ test("no-needs case with requireSession executes when session state exists", asy
     },
   }) as ProtocolContract<MockSpec>;
 
-  expect(c.case("ok").runnability).toEqual({ requireSession: true });
+  expect((c.case("ok") as { runnability?: unknown }).runnability).toEqual({ requireSession: true });
 
   await c[0]!.fn!(
     makeMockCtx({
@@ -1031,246 +1029,6 @@ test("_extracted equals adapter.normalize(_projection) exactly", () => {
 // contract.flow — generic builder
 // ---------------------------------------------------------------------------
 
-test("contract.flow builds a FlowContract with single Test", () => {
-  const flow = contract.flow("my-flow").build() as FlowContract<unknown>;
-  expect(Array.isArray(flow)).toBe(true);
-  expect(flow.length).toBe(1);
-  expect(flow[0].meta.id).toBe("my-flow");
-  expect(flow._flow.id).toBe("my-flow");
-  expect(flow._flow.protocol).toBe("flow");
-});
-
-test("flow meta.skip maps to Test.meta.deferred + skips at runtime", async () => {
-  const flowObj = contract
-    .flow("illustrative")
-    .meta({ skip: "docs example — no live server", tags: ["example"] })
-    .setup(async () => ({ x: 1 }))
-    .build();
-
-  // The inner orchestrator Test should carry `deferred` so the runner
-  // surfaces the reason to reporters (mirrors contract case convention).
-  expect(flowObj[0].meta.deferred).toBe("docs example — no live server");
-
-  // At runtime, the fn calls ctx.skip() before attempting runFlow so the
-  // flow body never hits any network stub.
-  const skipReasons: string[] = [];
-  const ctx = makeMockCtx({
-    skip: ((r?: string) => {
-      skipReasons.push(r ?? "");
-      throw new Error(`__skipped__:${r ?? ""}`);
-    }) as any,
-  });
-  await expect(flowObj[0].fn!(ctx)).rejects.toThrow(/__skipped__/);
-  expect(skipReasons).toContain("docs example — no live server");
-});
-
-test("contract.flow meta / setup / teardown are captured in runtime projection", () => {
-  const flow = contract
-    .flow("m")
-    .meta({ description: "d", tags: ["e2e"] })
-    .setup(async () => ({ foo: 1 }))
-    .teardown(async () => {})
-    .build() as FlowContract<unknown>;
-
-  expect(flow._flow.description).toBe("d");
-  expect(flow._flow.tags).toEqual(["e2e"]);
-  expect(typeof flow._flow.setup).toBe("function");
-  expect(typeof flow._flow.teardown).toBe("function");
-});
-
-test("flow.step rejects unknown protocol", () => {
-  const fakeRef = {
-    __glubean_type: "contract-case-ref",
-    contractId: "c",
-    caseKey: "ok",
-    protocol: "nonexistent_protocol_xyz",
-    target: "/x",
-    contract: [] as any,
-  } as any;
-  // Cast call to `any` so the conditional-tuple `step` signature doesn't
-  // force `bindings` based on an `any`-shaped CaseInputs (which distributes
-  // conditionals unexpectedly). The test is about runtime protocol rejection.
-  expect(() => (contract.flow("f").step as any)(fakeRef)).toThrow(/unknown protocol/);
-});
-
-test("flow.step rejects adapter without executeCaseInFlow", () => {
-  contract.register("no_flow", makeMockAdapter({ withFlow: false }));
-  const c = (contract as any).no_flow("c", {
-    target: "/x",
-    cases: { ok: {} },
-  }) as ProtocolContract<MockSpec>;
-
-  expect(() =>
-    contract.flow("f").step(c.case("ok")),
-  ).toThrow(/does not implement executeCaseInFlow/);
-});
-
-test("flow.step with compliant adapter accepts ContractCaseRef", async () => {
-  const log: string[] = [];
-  contract.register(
-    "yes_flow",
-    makeMockAdapter({ withFlow: true, executionLog: log }),
-  );
-  const c = (contract as any).yes_flow("c", {
-    target: "/x",
-    cases: { ok: {} },
-  }) as ProtocolContract<MockSpec>;
-
-  const flowObj = contract
-    .flow("f")
-    .setup(async () => ({ seed: 42 }))
-    .step(c.case("ok"), {
-      in: (s: any) => ({ body: { v: s.seed } }),
-    } as any)
-    .build() as FlowContract<unknown>;
-
-  await runFlow(flowObj, makeMockCtx());
-
-  expect(log.some((l) => l.startsWith("flow:ok"))).toBe(true);
-});
-
-// ---------------------------------------------------------------------------
-// runFlow — teardown Rule 1/2, compute async rejection
-// ---------------------------------------------------------------------------
-
-test("runFlow runs flow.teardown after successful steps", async () => {
-  contract.register(
-    "td1",
-    makeMockAdapter({ withFlow: true }),
-  );
-  const c = (contract as any).td1("c", { target: "/x", cases: { ok: {} } }) as ProtocolContract<MockSpec>;
-  const order: string[] = [];
-  const flowObj = contract
-    .flow("f")
-    .setup(async () => { order.push("setup"); return {}; })
-    .step(c.case("ok"))
-    .teardown(async () => { order.push("teardown"); })
-    .build() as FlowContract<unknown>;
-
-  await runFlow(flowObj, makeMockCtx());
-  expect(order).toEqual(["setup", "teardown"]);
-});
-
-test("runFlow runs flow.teardown in outer finally on step failure (Rule 2)", async () => {
-  const adapter: ContractProtocolAdapter<MockSpec> = {
-    async execute() {},
-    project(spec) {
-      return {
-        protocol: "td2",
-        target: spec.target,
-        cases: [{ key: "ok", lifecycle: "active", severity: "warning" }],
-      };
-    },
-    normalize: (p) => p as any,
-  };
-  (adapter as any).executeCaseInFlow = async () => {
-    throw new Error("step failed");
-  };
-  contract.register("td2", adapter);
-  const c = (contract as any).td2("c", { target: "/x", cases: { ok: {} } }) as ProtocolContract<MockSpec>;
-  const order: string[] = [];
-  const flowObj = contract
-    .flow("f")
-    .setup(async () => { order.push("setup"); return {}; })
-    .step(c.case("ok"))
-    .teardown(async () => { order.push("teardown"); })
-    .build() as FlowContract<unknown>;
-
-  await expect(runFlow(flowObj, makeMockCtx())).rejects.toThrow("step failed");
-  expect(order).toEqual(["setup", "teardown"]);
-});
-
-test("runFlow does NOT run teardown when flow.setup throws", async () => {
-  const order: string[] = [];
-  const flowObj = contract
-    .flow("f")
-    .setup(async (): Promise<{ x: number }> => {
-      order.push("setup");
-      throw new Error("setup fail");
-    })
-    .teardown(async () => { order.push("teardown"); })
-    .build() as FlowContract<unknown>;
-
-  await expect(runFlow(flowObj, makeMockCtx())).rejects.toThrow("setup fail");
-  expect(order).toEqual(["setup"]);
-});
-
-test("runFlow rejects async compute fn (syntactic)", async () => {
-  const flowObj = contract
-    .flow("f")
-    .setup(async () => ({}))
-    .compute((async (s: any) => s) as any)
-    .build() as FlowContract<unknown>;
-
-  await expect(runFlow(flowObj, makeMockCtx())).rejects.toThrow(/async functions are not allowed/);
-});
-
-test("runFlow rejects compute returning a thenable (value-level)", async () => {
-  const flowObj = contract
-    .flow("f")
-    .setup(async () => ({}))
-    .compute(((s: any) => Promise.resolve(s)) as any)
-    .build() as FlowContract<unknown>;
-
-  await expect(runFlow(flowObj, makeMockCtx())).rejects.toThrow(/thenable/);
-});
-
-test("runFlow threads state through compute + steps", async () => {
-  const log: string[] = [];
-  contract.register("thread", makeMockAdapter({ withFlow: true, executionLog: log }));
-  const c = (contract as any).thread("c", {
-    target: "/x",
-    cases: { ok: {} },
-  }) as ProtocolContract<MockSpec>;
-
-  const flowObj = contract
-    .flow("f")
-    .setup(async () => ({ a: 1 }))
-    .compute((s: any) => ({ ...s, b: `${s.a}-derived` }))
-    .step(c.case("ok") as any, {
-      in: (s: any) => ({ body: { v: s.b } }),
-    })
-    .build() as FlowContract<unknown>;
-
-  await runFlow(flowObj, makeMockCtx());
-  const lastLog = log[log.length - 1];
-  expect(lastLog).toContain("1-derived");
-});
-
-// ---------------------------------------------------------------------------
-// normalizeFlow — produces JSON-safe projection with FieldMappings
-// ---------------------------------------------------------------------------
-
-test("normalizeFlow emits ExtractedFlowProjection with kind discriminator", () => {
-  contract.register("nf", makeMockAdapter({ withFlow: true }));
-  const c = (contract as any).nf("c", {
-    target: "/x",
-    cases: { ok: {} },
-  }) as ProtocolContract<MockSpec>;
-  const flowObj = contract
-    .flow("f")
-    .setup(async () => ({ email: "a@b" }))
-    .compute((s: any) => ({ ...s, upper: s.email }))
-    .step(c.case("ok") as any, {
-      in: (s: any) => ({ body: { email: s.email } }),
-      out: (s: any, res: any) => ({ ...s, id: res.body }),
-    })
-    .build() as FlowContract<unknown>;
-
-  const extracted = normalizeFlow(flowObj._flow);
-
-  expect(extracted.id).toBe("f");
-  expect(extracted.protocol).toBe("flow");
-  expect(extracted.setupDynamic).toBe(true);
-  expect(extracted.steps.length).toBe(2);
-  expect(extracted.steps[0].kind).toBe("compute");
-  expect(extracted.steps[1].kind).toBe("contract-call");
-
-  // Projection is JSON-safe
-  const cloned = JSON.parse(JSON.stringify(extracted));
-  expect(cloned).toEqual(extracted);
-});
-
 test("extractMappings captures state field access", () => {
   const mappings = extractMappings((s: any) => ({
     body: { email: s.email, name: s.name },
@@ -1306,37 +1064,6 @@ test("lens purity: method call in lens fn throws LensPurityError", async () => {
 
   expect(() => extractMappings((s: any) => ({ body: { id: s.name.toUpperCase() } })))
     .toThrow(/must be a pure select\/repack function/);
-});
-
-test("lens purity: normalizeFlow wraps LensPurityError with step context", async () => {
-  contract.register("lens_bad", makeMockAdapter({ withFlow: true }));
-  const c = (contract as any).lens_bad("c", {
-    target: "/x",
-    cases: { ok: {} },
-  }) as ProtocolContract<MockSpec>;
-
-  // Build a flow with an impure `in` lens — should throw at build/normalize time
-  expect(() => {
-    contract
-      .flow("broken-flow")
-      .step(c.case("ok") as any, {
-        in: (s: any) => ({ body: { x: s.name.toUpperCase() } }),
-      })
-      .build();
-  }).toThrow(/broken-flow.*in lens.*pure select\/repack/s);
-});
-
-test("compute tracer errors wrap with step context (P2 regression)", () => {
-  // A compute fn that throws at call time should surface through `.build()`
-  // as a wrapped Error with the flow/step prefix, matching the lens error
-  // wrapping format — so authors can localize failures symmetrically.
-  expect(() => {
-    contract
-      .flow("broken-compute")
-      .setup(async () => ({}))
-      .compute(() => { throw new Error("compute blew up"); })
-      .build();
-  }).toThrow(/broken-compute.*step 1.*\(compute\).*compute blew up/s);
 });
 
 test("lens purity: pure lens with spread + nested access still works", () => {

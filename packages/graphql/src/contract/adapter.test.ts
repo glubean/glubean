@@ -11,8 +11,8 @@
  */
 
 import { test, expect, beforeAll, beforeEach, describe } from "vitest";
-import { contract, installPlugin, runFlow } from "@glubean/sdk";
-import type { FlowContract, TestContext } from "@glubean/sdk";
+import { contract, installPlugin, workflow } from "@glubean/sdk";
+import type { TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";
 import graphqlPlugin from "../index.js";
 
@@ -530,15 +530,13 @@ describe("executeCaseInFlow + flow integration", () => {
       },
     });
 
-    const flowObj = contract
-      .flow("user-flow")
+    const wf = workflow("user-flow")
       .setup(async () => ({ userId: "u-1" }))
-      .step(getUser.case("ok"), {
+      .call("get-user", getUser.case("ok"), {
         in: (s: any) => ({ id: s.userId }),
       } as any)
-      .build() as FlowContract<unknown>;
-
-    await runFlow(flowObj, makeCtx());
+      .build();
+    await wf[0]!.fn!(makeCtx());
 
     expect(client._calls).toHaveLength(1);
     expect(client._calls[0].op).toBe("query");
@@ -568,19 +566,16 @@ describe("executeCaseInFlow + flow integration", () => {
     });
 
     let captured: any;
-    const flowObj = contract
-      .flow("f")
+    const wf = workflow("f")
       .setup(async () => ({}))
-      .step(mutContract.case("ok"), {
+      .call("create-user", mutContract.case("ok"), {
         out: (_s: any, res: any) => {
           captured = res;
           return { id: res.data.createUser.id };
         },
-      } as any)  // Spike 4 — GraphQL factory returns `any` via (contract as any).graphql;
-                  // GraphQL flow migration deferred per Option X.
-      .build() as FlowContract<unknown>;
-
-    await runFlow(flowObj, makeCtx());
+      } as any)
+      .build();
+    await wf[0]!.fn!(makeCtx());
 
     expect(captured.data.createUser.id).toBe("u-9");
     expect(captured.httpStatus).toBe(200);
@@ -614,15 +609,13 @@ describe("executeCaseInFlow + flow integration", () => {
       },
     });
 
-    const flowObj = contract
-      .flow("f")
+    const wf = workflow("f")
       .setup(async () => ({ lensTag: "d" }))
-      .step(c.case("ok"), {
+      .call("hi", c.case("ok"), {
         in: (s: any) => ({ tag: s.lensTag }),
       } as any)
-      .build() as FlowContract<unknown>;
-
-    await runFlow(flowObj, makeCtx());
+      .build();
+    await wf[0]!.fn!(makeCtx());
 
     const headers = client._calls[0].headers!;
     expect(headers).toMatchObject({
@@ -950,12 +943,10 @@ describe("schema validation failure path", () => {
       },
     });
 
-    const flowObj = (contract
-      .flow("schema-fail-flow")
+    const wf = workflow("schema-fail-flow")
       .setup(async () => ({}))
-      .step as any)(c.case("ok"))
-      .build() as FlowContract<unknown>;
-
-    await expect(runFlow(flowObj, makeCtx())).rejects.toThrow(/validate failed/);
+      .call("hi", c.case("ok") as any, {} as any)
+      .build();
+    await expect(wf[0]!.fn!(makeCtx())).rejects.toThrow(/validate failed/);
   });
 });

@@ -8,7 +8,6 @@
  * Output:
  *   - NormalizedContractMeta — JSON-safe contract projection (mirrors
  *     ExtractedContractProjection from sdk, plus `exportName`)
- *   - NormalizedFlowMeta — JSON-safe flow projection (mirrors
  *     ExtractedFlowProjection, plus `exportName`)
  *
  * Schema conversion: anywhere scanner sees a value with `.toJSONSchema()`
@@ -160,9 +159,8 @@ export type ExtractedContract = NormalizedContractMeta;
  * Single step in a flow projection. Discriminated by `kind`.
  */
 /**
- * JSON-safe predicate descriptor for a predicate-mode branch case.
- * Mirrors the SDK's `ExtractedPredicate` (scanner is dep-free, so the shape is
- * duplicated structurally rather than imported).
+ * JSON-safe predicate descriptor (scanner-side mirror of the SDK's
+ * `ExtractedPredicate` — scanner is dep-free, shape duplicated structurally).
  */
 export type NormalizedPredicate =
   | {
@@ -180,108 +178,6 @@ export type NormalizedPredicate =
   | { kind: "and" | "or"; clauses: NormalizedPredicate[] }
   | { kind: "not"; clause: NormalizedPredicate }
   | { kind: "opaque"; strictness: "L1" | "L0"; mayDoAsyncIO: boolean };
-
-export type NormalizedFlowStep =
-  | {
-      kind: "contract-call";
-      name?: string;
-      contractId: string;
-      caseKey: string;
-      protocol: string;
-      target: string;
-      inputs?: NormalizedFieldMapping[];
-      outputs?: NormalizedFieldMapping[];
-      /** Accepted alternate outcome keys (HTTP: status numbers) when the step declared `accept`. */
-      accept?: ReadonlyArray<string | number>;
-    }
-  | {
-      kind: "compute";
-      name?: string;
-      reads: string[];
-      writes: string[];
-    }
-  | {
-      /**
-       * Branch (condition / switch). `mode` discriminates value-switch vs
-       * predicate-branch. Sub-steps (cases + default) nest recursively so
-       * downstream consumers can render/inspect the full tree.
-       */
-      kind: "branch";
-      mode: "value" | "predicate";
-      name?: string;
-      /** value-mode only: the traced subject lens path. */
-      subjectPath?: string[];
-      cases: Array<{
-        /** value-mode: scalar matched against the subject. */
-        value?: string | number | boolean | null;
-        /** predicate-mode: human-facing fallback message for the branch. */
-        message?: string;
-        /** predicate-mode: JSON-safe predicate (absent in the duck-typed fallback path). */
-        predicate?: NormalizedPredicate;
-        steps: NormalizedFlowStep[];
-      }>;
-      default: NormalizedFlowStep[];
-    }
-  | {
-      /**
-       * Poll (bounded poll-until). Repeats one case until `until` holds, bounded
-       * by `timeoutMs` / `maxAttempts` / `perAttemptTimeoutMs`. `until` is the
-       * exit predicate (L2 precise, or `{kind:"opaque",...}` when marked).
-       */
-      kind: "poll";
-      name?: string;
-      contractId: string;
-      caseKey: string;
-      protocol: string;
-      target: string;
-      inputs?: NormalizedFieldMapping[];
-      outputs?: NormalizedFieldMapping[];
-      accept?: ReadonlyArray<string | number>;
-      /** Exit predicate (absent only in the duck-typed fallback path). */
-      until?: NormalizedPredicate;
-      message?: string;
-      every: number;
-      backoff: number;
-      timeoutMs?: number;
-      perAttemptTimeoutMs?: number;
-      maxAttempts?: number;
-    };
-
-export interface NormalizedFieldMapping {
-  target: string;
-  source:
-    | { kind: "path"; path: string }
-    | { kind: "literal"; value: unknown }
-    | { kind: "pass-through" };
-}
-
-/**
- * Protocol-agnostic flow metadata. Mirrors `ExtractedFlowProjection`.
- */
-export interface NormalizedFlowMeta {
-  id: string;
-  exportName: string;
-  protocol: "flow";
-  description?: string;
-  tags?: string[];
-  extensions?: Record<string, unknown>;
-  /** Mirrors `FlowMeta.skip` — skip reason for discoverable flows. */
-  skip?: string;
-  /** Mirrors `FlowMeta.only` — focus filter. */
-  only?: boolean;
-  setupDynamic?: true;
-  steps: NormalizedFlowStep[];
-}
-
-// =============================================================================
-// vNext workflow projection (S2.6)
-//
-// Scanner-side mirror of the SDK's JSON-safe `WorkflowProjection` (the graded
-// node view, proposal §7) — re-declared here (like the Normalized* family)
-// so the scanner stays dep-free while consumers of metadata.json get precise
-// types. Read straight off `BuiltWorkflow._projection` (pre-computed by the
-// SDK's `build()`), never re-derived here.
-// =============================================================================
 
 /** One projected workflow node (scanner-side mirror of ProjectedWorkflowNode). */
 export interface NormalizedWorkflowNode {
@@ -438,31 +334,17 @@ export interface NormalizedBootstrapOverlayAttachment {
   };
 }
 
-/**
- * Flow attachment — orchestrates a sequence of contract calls under a
- * single test id. Distinct from raw / overlay (no underlying case).
- */
-export interface NormalizedFlowAttachment {
-  kind: "flow";
-  /** Flow test id (`flowId`). */
-  testId: string;
-  exportName: string;
-  flow: NormalizedFlowMeta;
-}
-
 /** Discriminated attachment entry. One per testId in the inventory. */
 export type NormalizedAttachmentMeta =
   | NormalizedRawAttachment
-  | NormalizedBootstrapOverlayAttachment
-  | NormalizedFlowAttachment;
+  | NormalizedBootstrapOverlayAttachment;
 
 /** Result of extracting contracts/attachments from one or more files. */
 export interface ExtractionResult {
   contracts: NormalizedContractMeta[];
   /**
    * Attachment inventory per attachment-model §7.3. Always present
-   * (may be empty). Replaces the previous `flows?: NormalizedFlowMeta[]`
-   * top-level field — flows now appear here as `kind: "flow"` entries.
+   * (may be empty).
    */
   attachments: NormalizedAttachmentMeta[];
   /**
@@ -554,282 +436,6 @@ export function isProtocolContract(val: unknown): val is {
 }
 
 /**
- * Check if a value looks like a FlowContract.
- * FlowContract extends Array<Test> and has `_flow.protocol === "flow"`.
- *
- * May also carry `_extracted` — a pre-computed ExtractedFlowProjection
- * populated by the SDK's flow builder via `normalizeFlow(_flow)`. When
- * present it is the source of truth for scanner output (full field
- * mappings, compute reads/writes). When absent we degrade to duck-typing
- * `_flow` directly (no lens proxy tracing in scanner since it is
- * dependency-free).
- */
-export function isFlowContract(val: unknown): val is {
-  _flow: {
-    id: string;
-    protocol: "flow";
-    description?: string;
-    tags?: string[];
-    extensions?: Record<string, unknown>;
-    skip?: string;
-    only?: boolean;
-    setup?: (...args: any[]) => unknown;
-    teardown?: (...args: any[]) => unknown;
-    steps: Array<any>;
-  };
-  _extracted?: {
-    id: string;
-    protocol: "flow";
-    description?: string;
-    tags?: string[];
-    extensions?: Record<string, unknown>;
-    skip?: string;
-    only?: boolean;
-    setupDynamic?: true;
-    steps: Array<any>;
-  };
-} {
-  return (
-    Array.isArray(val) &&
-    typeof (val as any)._flow === "object" &&
-    (val as any)._flow !== null &&
-    (val as any)._flow.protocol === "flow"
-  );
-}
-
-// =============================================================================
-// Mapping: projection → NormalizedContractMeta
-//
-// Reads the adapter-produced `_extracted` (JSON-safe form). The SDK's
-// `dispatchContract` populates this field unconditionally by calling
-// `adapter.normalize(_projection)` at construction time. Adapter is the
-// authoritative source of protocol-specific normalization (which fields
-// are schemas vs literal examples vs protocol metadata that must survive).
-// =============================================================================
-
-export function protocolContractToNormalized(
-  value: { _projection: any; _extracted: any },
-  exportName: string,
-): NormalizedContractMeta {
-  const ex = value._extracted;
-  return {
-    id: ex.id ?? exportName,
-    exportName,
-    protocol: ex.protocol,
-    target: ex.target,
-    description: ex.description,
-    feature: ex.feature,
-    instanceName: ex.instanceName,
-    tags: ex.tags,
-    deprecated: ex.deprecated,
-    extensions: ex.extensions,
-    schemas: ex.schemas,
-    meta: ex.meta,
-    cases: (ex.cases ?? []).map((c: any): NormalizedCaseMeta => ({
-      key: c.key,
-      description: c.description,
-      lifecycle: (c.lifecycle as CaseLifecycle) ?? "active",
-      severity: (c.severity as CaseSeverity) ?? "warning",
-      deferredReason: c.deferredReason,
-      deprecatedReason: c.deprecatedReason,
-      requires: c.requires as CaseRequires | undefined,
-      defaultRun: c.defaultRun as CaseDefaultRun | undefined,
-      tags: c.tags,
-      extensions: c.extensions,
-      schemas: c.schemas,
-      meta: c.meta,
-      given: c.given,
-      hasVerify: c.hasVerify,
-      verifyRules: c.verifyRules,
-      runnability: c.runnability,
-      hasNeeds: c.hasNeeds,
-      needsSchema: c.needsSchema,
-      direction: c.direction,
-      runnable: c.runnable,
-    })),
-  };
-}
-
-export function flowContractToNormalized(
-  value: { _flow: any; _extracted?: any },
-  exportName: string,
-): NormalizedFlowMeta {
-  // Prefer the pre-computed extracted projection. The SDK's flow builder
-  // populates `_extracted` via `normalizeFlow(_flow)` — this path carries
-  // full FieldMapping data for `.step()` lenses and reads/writes for
-  // `.compute()` nodes. Scanner just attaches `exportName`.
-  if (value._extracted) {
-    const ex = value._extracted;
-    return {
-      id: ex.id,
-      exportName,
-      protocol: "flow",
-      description: ex.description,
-      tags: ex.tags,
-      extensions: ex.extensions,
-      ...(ex.skip !== undefined ? { skip: ex.skip } : {}),
-      ...(ex.only !== undefined ? { only: ex.only } : {}),
-      setupDynamic: ex.setupDynamic,
-      steps: (ex.steps ?? []).map(mapExtractedStep),
-    };
-  }
-
-  // Fallback: duck-type `_flow` directly. Lens tracing is unavailable
-  // here (scanner is dep-free); callers downstream lose FieldMappings +
-  // compute reads/writes. In practice this only fires for flows
-  // constructed outside the canonical SDK path (e.g. test fixtures).
-  const f = value._flow;
-  return {
-    id: f.id,
-    exportName,
-    protocol: "flow",
-    description: f.description,
-    tags: f.tags,
-    extensions: f.extensions,
-    ...(f.skip !== undefined ? { skip: f.skip } : {}),
-    ...(f.only !== undefined ? { only: f.only } : {}),
-    setupDynamic: f.setup ? true : undefined,
-    steps: (f.steps ?? []).map(mapRuntimeFlowStep),
-  };
-}
-
-/**
- * Recursively normalize a step from the pre-computed `_extracted` projection
- * (JSON-safe). Branch cases + default nest through the same mapper so nested
- * branches and their leaf steps are preserved rather than collapsed into an
- * empty contract-call.
- */
-function mapExtractedStep(s: any): NormalizedFlowStep {
-  if (s.kind === "compute") {
-    return { kind: "compute", name: s.name, reads: s.reads ?? [], writes: s.writes ?? [] };
-  }
-  if (s.kind === "branch") {
-    return {
-      kind: "branch",
-      mode: s.mode,
-      ...(s.name !== undefined ? { name: s.name } : {}),
-      ...(s.subjectPath !== undefined ? { subjectPath: s.subjectPath } : {}),
-      cases: (s.cases ?? []).map((c: any) => ({
-        ...(c.value !== undefined ? { value: c.value } : {}),
-        ...(c.message !== undefined ? { message: c.message } : {}),
-        ...(c.predicate !== undefined ? { predicate: c.predicate as NormalizedPredicate } : {}),
-        steps: (c.steps ?? []).map(mapExtractedStep),
-      })),
-      default: (s.default ?? []).map(mapExtractedStep),
-    };
-  }
-  if (s.kind === "poll") {
-    return {
-      kind: "poll",
-      ...(s.name !== undefined ? { name: s.name } : {}),
-      contractId: s.contractId ?? "",
-      caseKey: s.caseKey ?? "",
-      protocol: s.protocol ?? "",
-      target: s.target ?? "",
-      inputs: s.inputs,
-      outputs: s.outputs,
-      ...(Array.isArray(s.accept) ? { accept: s.accept } : {}),
-      ...(s.until !== undefined ? { until: s.until as NormalizedPredicate } : {}),
-      ...(s.message !== undefined ? { message: s.message } : {}),
-      every: s.every ?? 0,
-      backoff: s.backoff ?? 1,
-      ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
-      ...(s.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: s.perAttemptTimeoutMs } : {}),
-      ...(s.maxAttempts !== undefined ? { maxAttempts: s.maxAttempts } : {}),
-    };
-  }
-  return {
-    kind: "contract-call",
-    name: s.name,
-    contractId: s.contractId ?? "",
-    caseKey: s.caseKey ?? "",
-    protocol: s.protocol ?? "",
-    target: s.target ?? "",
-    inputs: s.inputs,
-    outputs: s.outputs,
-    ...(Array.isArray(s.accept) ? { accept: s.accept } : {}),
-  };
-}
-
-/**
- * Recursively normalize a step from a duck-typed runtime `_flow`. The runtime
- * predicate is not JSON-safe (branded builder object), so the predicate is
- * omitted in this fallback path; sub-steps are still preserved.
- */
-function mapRuntimeFlowStep(s: any): NormalizedFlowStep {
-  if (s.kind === "compute") {
-    return { kind: "compute", name: s.name, reads: [], writes: [] };
-  }
-  if (s.kind === "branch") {
-    return {
-      kind: "branch",
-      mode: s.mode,
-      ...(s.name !== undefined ? { name: s.name } : {}),
-      ...(s.subject?.path !== undefined ? { subjectPath: [...s.subject.path] } : {}),
-      cases: (s.cases ?? []).map((c: any) => ({
-        ...(c.value !== undefined ? { value: c.value } : {}),
-        ...(c.message !== undefined ? { message: c.message } : {}),
-        steps: (c.steps ?? []).map(mapRuntimeFlowStep),
-      })),
-      default: (s.default ?? []).map(mapRuntimeFlowStep),
-    };
-  }
-  if (s.kind === "poll") {
-    // `until` omitted: the runtime exit predicate is a branded builder object
-    // (not JSON-safe), like a branch predicate in this fallback path.
-    return {
-      kind: "poll",
-      ...(s.name !== undefined ? { name: s.name } : {}),
-      contractId: s.contract?._projection?.id ?? s.ref?.contractId ?? "",
-      caseKey: s.caseKey ?? s.ref?.caseKey ?? "",
-      protocol: s.ref?.protocol ?? "",
-      target: s.ref?.target ?? "",
-      ...(Array.isArray(s.bindings?.accept) ? { accept: s.bindings.accept } : {}),
-      ...(s.message !== undefined ? { message: s.message } : {}),
-      every: s.every ?? 0,
-      backoff: s.backoff ?? 1,
-      ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
-      ...(s.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: s.perAttemptTimeoutMs } : {}),
-      ...(s.maxAttempts !== undefined ? { maxAttempts: s.maxAttempts } : {}),
-    };
-  }
-  return {
-    kind: "contract-call",
-    name: s.name,
-    contractId: s.contract?._projection?.id ?? s.ref?.contractId ?? "",
-    caseKey: s.caseKey ?? s.ref?.caseKey ?? "",
-    protocol: s.ref?.protocol ?? "",
-    target: s.ref?.target ?? "",
-    ...(Array.isArray(s.bindings?.accept) ? { accept: s.bindings.accept } : {}),
-  };
-}
-
-// =============================================================================
-// FlowBuilder auto-build
-// =============================================================================
-
-/**
- * If `val` is an unbuilt FlowBuilder (from `contract.flow(id).step(...)`
- * without a trailing `.build()`), call `.build()` to resolve it to a
- * FlowContract. Scanner is dep-free, so we duck-type the builder shape.
- */
-function autoBuildFlowBuilder(val: unknown): unknown {
-  if (
-    typeof val === "object" &&
-    val !== null &&
-    (val as any).__glubean_type === "flow-builder" &&
-    typeof (val as any).build === "function"
-  ) {
-    try {
-      return (val as { build(): unknown }).build();
-    } catch {
-      return val;
-    }
-  }
-  return val;
-}
-
-/**
  * If the export is an un-built vNext `WorkflowBuilder` (user omitted the
  * trailing `.build()`), call `.build()` to resolve it to a `BuiltWorkflow`.
  * Duck-typed like the flow builder; a build() that throws (poisoned builder)
@@ -885,6 +491,58 @@ export interface BootstrapOverlayMarker {
   caseKey: string;
 }
 
+//
+// Reads the adapter-produced `_extracted` (JSON-safe form). The SDK's
+// `dispatchContract` populates this field unconditionally by calling
+// `adapter.normalize(_projection)` at construction time. Adapter is the
+// authoritative source of protocol-specific normalization (which fields
+// are schemas vs literal examples vs protocol metadata that must survive).
+// =============================================================================
+
+export function protocolContractToNormalized(
+  value: { _projection: any; _extracted: any },
+  exportName: string,
+): NormalizedContractMeta {
+  const ex = value._extracted;
+  return {
+    id: ex.id ?? exportName,
+    exportName,
+    protocol: ex.protocol,
+    target: ex.target,
+    description: ex.description,
+    feature: ex.feature,
+    instanceName: ex.instanceName,
+    tags: ex.tags,
+    deprecated: ex.deprecated,
+    extensions: ex.extensions,
+    schemas: ex.schemas,
+    meta: ex.meta,
+    cases: (ex.cases ?? []).map((c: any): NormalizedCaseMeta => ({
+      key: c.key,
+      description: c.description,
+      lifecycle: (c.lifecycle as CaseLifecycle) ?? "active",
+      severity: (c.severity as CaseSeverity) ?? "warning",
+      deferredReason: c.deferredReason,
+      deprecatedReason: c.deprecatedReason,
+      requires: c.requires as CaseRequires | undefined,
+      defaultRun: c.defaultRun as CaseDefaultRun | undefined,
+      tags: c.tags,
+      extensions: c.extensions,
+      schemas: c.schemas,
+      meta: c.meta,
+      given: c.given,
+      hasVerify: c.hasVerify,
+      verifyRules: c.verifyRules,
+      runnability: c.runnability,
+      hasNeeds: c.hasNeeds,
+      needsSchema: c.needsSchema,
+      direction: c.direction,
+      runnable: c.runnable,
+    })),
+  };
+}
+
+
 /**
  * Convert a BootstrapAttachment runtime export to a marker. Splits
  * `testId` into contractId + caseKey at the LAST dot (contractId can have
@@ -934,7 +592,6 @@ function normalizeRunnability(
  *     available per §5.1).
  *  3. Duplicate detection: two markers with the same testId → push a
  *     load-time error. Keep the first; subsequent overlays ignored.
- *  4. Append flows as `kind: "flow"` entries.
  *
  * Overlays whose testId doesn't match any contract case stand alone —
  * we still emit them as `bootstrap-overlay` (no `rawBypass`, no targetRef
@@ -943,7 +600,6 @@ function normalizeRunnability(
  */
 export function synthesizeAttachments(
   contracts: NormalizedContractMeta[],
-  flows: NormalizedFlowMeta[],
   markers: BootstrapOverlayMarker[],
 ): { attachments: NormalizedAttachmentMeta[]; errors: ExtractionResult["errors"] } {
   const errors: ExtractionResult["errors"] = [];
@@ -1016,16 +672,7 @@ export function synthesizeAttachments(
     byTestId.set(marker.testId, overlay);
   }
 
-  // Step 4: append flows.
   const attachments = Array.from(byTestId.values());
-  for (const flow of flows) {
-    attachments.push({
-      kind: "flow",
-      testId: flow.id,
-      exportName: flow.exportName,
-      flow,
-    });
-  }
 
   return { attachments, errors };
 }
@@ -1037,7 +684,6 @@ const _importMtimeCache = new Map<string, number>();
 
 interface RawFileMaterials {
   contracts: NormalizedContractMeta[];
-  flows: NormalizedFlowMeta[];
   workflows: NormalizedWorkflowMeta[];
   markers: BootstrapOverlayMarker[];
   errors: ExtractionResult["errors"];
@@ -1052,7 +698,6 @@ interface RawFileMaterials {
  */
 async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> {
   const contracts: NormalizedContractMeta[] = [];
-  const flows: NormalizedFlowMeta[] = [];
   const workflows: NormalizedWorkflowMeta[] = [];
   const markers: BootstrapOverlayMarker[] = [];
   const errors: ExtractionResult["errors"] = [];
@@ -1095,10 +740,8 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
       // `export const signup = contract.flow(...).step(...)` returns a
       // FlowBuilder (not a FlowContract) because `.build()` is optional.
       // Scanner must build it to reach the `_flow` projection.
-      const value = autoBuildWorkflowBuilder(autoBuildFlowBuilder(rawValue));
-      if (isFlowContract(value)) {
-        flows.push(flowContractToNormalized(value, exportName));
-      } else if (isBuiltWorkflow(value)) {
+      const value = autoBuildWorkflowBuilder(rawValue);
+      if (isBuiltWorkflow(value)) {
         // The projection is pre-computed by the SDK's build() (S2.6) — carry
         // it verbatim, stamped with the export name like flows are.
         workflows.push({ ...value._projection, exportName });
@@ -1120,14 +763,14 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
     errors.push({ file: absolutePath, error: message });
   }
 
-  return { contracts, flows, workflows, markers, errors };
+  return { contracts, workflows, markers, errors };
 }
 
 /**
  * Extract contracts + attachments from a single file by dynamic import.
  * One file's import failure does not block others.
  *
- * Per-file synthesis: only this file's contracts/flows/markers are seen.
+ * Per-file synthesis: only this file's contracts/markers are seen.
  * Cross-file overlay replacement (overlay in fileA targets case in fileB)
  * only resolves at project level via `extractContractsFromProject`.
  */
@@ -1135,7 +778,7 @@ export async function extractContractFromFile(
   filePath: string,
 ): Promise<ExtractionResult> {
   const raw = await collectRawMaterials(filePath);
-  const synth = synthesizeAttachments(raw.contracts, raw.flows, raw.markers);
+  const synth = synthesizeAttachments(raw.contracts, raw.markers);
   return {
     contracts: raw.contracts,
     attachments: synth.attachments,
@@ -1199,7 +842,6 @@ export async function extractContractsFromProject(
   }
 
   const allContracts: NormalizedContractMeta[] = [];
-  const allFlows: NormalizedFlowMeta[] = [];
   const allWorkflows: NormalizedWorkflowMeta[] = [];
   const allMarkers: BootstrapOverlayMarker[] = [];
   const allErrors: ExtractionResult["errors"] = [];
@@ -1207,13 +849,12 @@ export async function extractContractsFromProject(
   for (const filePath of files) {
     const raw = await collectRawMaterials(filePath);
     allContracts.push(...raw.contracts);
-    allFlows.push(...raw.flows);
     allWorkflows.push(...raw.workflows);
     allMarkers.push(...raw.markers);
     allErrors.push(...raw.errors);
   }
 
-  const synth = synthesizeAttachments(allContracts, allFlows, allMarkers);
+  const synth = synthesizeAttachments(allContracts, allMarkers);
 
   return {
     contracts: allContracts,

@@ -49,7 +49,6 @@ export async function computeRootHash(
   files: Record<string, FileMeta>,
   contracts?: unknown[],
   workflows?: unknown[],
-  flows?: unknown[],
 ): Promise<string> {
   const entries = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
   const parts: string[] = entries.map(([path, meta]) => `${path}:${meta.hash}`);
@@ -72,15 +71,6 @@ export async function computeRootHash(
     parts.push(`__workflows__:sha256-${workflowHash}`);
   }
 
-  // Same for flow metadata (codex S2.6 R5: BundleMetadata.flows was declared
-  // since v0.2 but never populated — a flow-only project wrote an empty,
-  // misleading metadata.json once the presence gate accepted it).
-  if (flows && flows.length > 0) {
-    const flowHash = createHash("sha256")
-      .update(JSON.stringify(flows))
-      .digest("hex");
-    parts.push(`__flows__:sha256-${flowHash}`);
-  }
 
   const hash = createHash("sha256").update(parts.join("\n")).digest("hex");
   return `sha256-${hash}`;
@@ -99,8 +89,7 @@ export async function buildMetadata(
   const stats = deriveMetadataStats(normalizedFiles);
   const contracts = scanResult.contracts;
   const workflows = scanResult.workflows;
-  const flows = scanResult.flows;
-  const rootHash = await computeRootHash(normalizedFiles, contracts, workflows, flows);
+  const rootHash = await computeRootHash(normalizedFiles, contracts, workflows);
 
   return {
     schemaVersion: METADATA_SCHEMA_VERSION,
@@ -127,6 +116,5 @@ export async function buildMetadata(
     // these fields until the rendering line lands, and when it does it needs
     // the complete inventory, branch/poll included.
     workflows: workflows && workflows.length > 0 ? workflows : undefined,
-    flows: flows && flows.length > 0 ? flows : undefined,
   };
 }

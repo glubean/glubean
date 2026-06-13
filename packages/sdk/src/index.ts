@@ -373,8 +373,6 @@ export type { ExtendedTest } from "./test/extend.js";
 // Contract API
 // =============================================================================
 export {
-  runFlow,
-  normalizeFlow,
   extractMappings,
   extractMappingsOut,
   traceComputeFn,
@@ -517,33 +515,17 @@ export type {
   InferOutput,
   InferAcceptKey,
   InferRawOutcome,
-  FlowBuilder,
-  FlowFragmentBuilder,
   NoExtraKeys,
-  FlowContract,
-  FlowMeta,
-  FlowRegistryMeta,
-  RuntimeFlowProjection,
-  RuntimeFlowStep,
-  RuntimeContractCallStep,
-  RuntimeComputeStep,
-  ExtractedFlowProjection,
-  ExtractedFlowStep,
-  ExtractedContractCallStep,
-  ExtractedComputeStep,
   FieldMapping,
 } from "./contract-types.js";
 
-// Branch (condition / switch) helper types — exported so consumers can write
-// reusable branch-body helpers (`(b: FlowFragmentBuilder<S>) => ...`) and
-// predicate helpers (`(w: PredicateScope<S>) => ...`) against the public API.
+// Predicate helper types — exported so consumers can write reusable predicate
+// helpers (`(w: PredicateScope<S>) => ...`) against the public workflow API.
 export type {
   PredicateScope,
   BranchPredicate,
   WhenClause,
   JsonScalar,
-  RuntimeBranchStep,
-  ExtractedBranchStep,
   ExtractedPredicate,
 } from "./predicates.js";
 
@@ -553,7 +535,6 @@ import { httpAdapter } from "./contract-http/adapter.js";
 import { createHttpRoot } from "./contract-http/factory.js";
 import type { HttpContractRoot } from "./contract-http/types.js";
 import type { ContractProtocolAdapter } from "./contract-types.js";
-import type { FlowBuilder, FlowMeta } from "./contract-types.js";
 
 _contract.register("http", httpAdapter);
 {
@@ -565,7 +546,6 @@ _contract.register("http", httpAdapter);
  * The `contract` namespace — typed with built-in HTTP adapter.
  *
  *   - `contract.http.with("name", defaults)` — scoped HTTP factory (built-in)
- *   - `contract.flow(id)` — protocol-agnostic flow builder
  *   - `contract.register(protocol, adapter)` — plugin extension point
  *   - `contract[protocol](id, spec)` — attached by `register()`
  */
@@ -573,7 +553,6 @@ export interface ContractProtocolRoots {}
 
 export type ContractNamespace = ContractProtocolRoots & {
   http: HttpContractRoot;
-  flow: (idOrMeta: string | FlowMeta) => FlowBuilder<unknown>;
   register: <Spec, Rt = unknown, RtM = unknown, Sf = unknown, SfM = unknown>(
     protocol: string,
     adapter: ContractProtocolAdapter<Spec, Rt, RtM, Sf, SfM>,

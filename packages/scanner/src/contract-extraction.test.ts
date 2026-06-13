@@ -14,13 +14,11 @@
 import { test, expect } from "vitest";
 import {
   bootstrapAttachmentToNormalized,
-  flowContractToNormalized,
   isBootstrapAttachment,
   isBuiltWorkflow,
   protocolContractToNormalized,
   synthesizeAttachments,
   type NormalizedContractMeta,
-  type NormalizedFlowMeta,
 } from "./contract-extraction.js";
 
 // Helper: minimal contract carrier with one case.
@@ -71,9 +69,6 @@ function makeContract(
   };
 }
 
-function makeFlow(id: string, exportName: string): NormalizedFlowMeta {
-  return { id, exportName, protocol: "flow", steps: [] };
-}
 
 test("protocolContractToNormalized reads _extracted when available", () => {
   // Construct a fake carrier whose _extracted schemas differ from what
@@ -121,129 +116,7 @@ test("protocolContractToNormalized reads _extracted when available", () => {
 // collapsed into an empty contract-call; nested sub-steps must be preserved).
 // ---------------------------------------------------------------------------
 
-test("flowContractToNormalized preserves branch steps recursively (_extracted)", () => {
-  const carrier = {
-    _flow: { id: "f1" },
-    _extracted: {
-      id: "f1",
-      protocol: "flow",
-      steps: [
-        {
-          kind: "branch",
-          mode: "value",
-          name: "route-by-role",
-          subjectPath: ["role"],
-          cases: [
-            {
-              value: "admin",
-              steps: [
-                { kind: "compute", name: "mark", reads: ["role"], writes: ["panel"] },
-                // nested predicate branch inside the value-branch case
-                {
-                  kind: "branch",
-                  mode: "predicate",
-                  cases: [
-                    {
-                      message: "server error",
-                      predicate: { kind: "compare", op: "gte", path: ["status"], value: 500 },
-                      steps: [
-                        {
-                          kind: "contract-call",
-                          name: "alert",
-                          contractId: "ops.alert",
-                          caseKey: "fire",
-                          protocol: "http",
-                          target: "POST /alert",
-                        },
-                      ],
-                    },
-                  ],
-                  default: [],
-                },
-              ],
-            },
-          ],
-          default: [{ kind: "compute", name: "guest", reads: [], writes: [] }],
-        },
-      ],
-    },
-  };
 
-  const out = flowContractToNormalized(carrier, "f1");
-  expect(out.steps).toHaveLength(1);
-  const branch = out.steps[0];
-  expect(branch.kind).toBe("branch");
-  if (branch.kind !== "branch") throw new Error("expected branch");
-  expect(branch.mode).toBe("value");
-  expect(branch.subjectPath).toEqual(["role"]);
-  expect(branch.name).toBe("route-by-role");
-
-  // Case sub-steps preserved (NOT collapsed to an empty contract-call).
-  const adminSteps = branch.cases[0].steps;
-  expect(adminSteps[0]).toMatchObject({ kind: "compute", name: "mark" });
-  // Nested predicate branch preserved.
-  const nested = adminSteps[1];
-  expect(nested.kind).toBe("branch");
-  if (nested.kind !== "branch") throw new Error("expected nested branch");
-  expect(nested.mode).toBe("predicate");
-  expect(nested.cases[0].message).toBe("server error");
-  expect(nested.cases[0].predicate).toEqual({
-    kind: "compare",
-    op: "gte",
-    path: ["status"],
-    value: 500,
-  });
-  expect(nested.cases[0].steps[0]).toMatchObject({
-    kind: "contract-call",
-    contractId: "ops.alert",
-    caseKey: "fire",
-  });
-
-  // default preserved.
-  expect(branch.default[0]).toMatchObject({ kind: "compute", name: "guest" });
-});
-
-test("flowContractToNormalized preserves branch in duck-typed fallback (_flow only)", () => {
-  // No `_extracted` → fallback path. Predicate is omitted (runtime predicate is
-  // not JSON-safe), but sub-steps + structure must survive.
-  const carrier = {
-    _flow: {
-      id: "f2",
-      steps: [
-        {
-          kind: "branch",
-          mode: "value",
-          subject: { path: ["tier"] },
-          cases: [
-            {
-              value: "gold",
-              steps: [
-                {
-                  kind: "contract-call",
-                  ref: { contractId: "perks.grant", caseKey: "lounge", protocol: "http", target: "POST /perk" },
-                  caseKey: "lounge",
-                },
-              ],
-            },
-          ],
-          default: [],
-        },
-      ],
-    },
-  };
-
-  const out = flowContractToNormalized(carrier, "f2");
-  const branch = out.steps[0];
-  expect(branch.kind).toBe("branch");
-  if (branch.kind !== "branch") throw new Error("expected branch");
-  expect(branch.subjectPath).toEqual(["tier"]);
-  expect(branch.cases[0].value).toBe("gold");
-  expect(branch.cases[0].steps[0]).toMatchObject({
-    kind: "contract-call",
-    contractId: "perks.grant",
-    caseKey: "lounge",
-  });
-});
 
 // ---------------------------------------------------------------------------
 // v10 attachment model: bootstrap marker recognition (Phase 2e)
@@ -326,7 +199,7 @@ test("bootstrapAttachmentToNormalized rejects malformed testIds", () => {
 
 test("synthesize: each case seeds a kind:'raw' entry by default", () => {
   const c = makeContract("orders.create", "success", "ordersCreate");
-  const { attachments, errors } = synthesizeAttachments([c], [], []);
+  const { attachments, errors } = synthesizeAttachments([c], []);
   expect(errors).toEqual([]);
   expect(attachments).toEqual([
     {
@@ -348,7 +221,7 @@ test("synthesize: runnable:false cases (inbound, §9.5) seed NO raw entry", () =
     direction: "inbound",
     runnable: false,
   });
-  const { attachments, errors } = synthesizeAttachments([c], [], []);
+  const { attachments, errors } = synthesizeAttachments([c], []);
   expect(errors).toEqual([]);
   // Only the outbound case is advertised — the SDK registered no Test for
   // the inbound one (codex I2 R1 P1).
@@ -363,7 +236,7 @@ test("synthesize: bootstrap overlay REPLACES the raw entry for the same testId",
     contractId: "orders.create",
     caseKey: "success",
   };
-  const { attachments, errors } = synthesizeAttachments([c], [], [marker]);
+  const { attachments, errors } = synthesizeAttachments([c], [marker]);
   expect(errors).toEqual([]);
   expect(attachments).toHaveLength(1); // raw replaced, not appended
   expect(attachments[0]).toEqual({
@@ -396,7 +269,6 @@ test("synthesize: rawBypass present iff target case has `needs` (hasNeeds trigge
 
   const { attachments } = synthesizeAttachments(
     [cWithNeeds, cNoNeeds],
-    [],
     [overlayWithNeeds, overlayNoNeeds],
   );
 
@@ -432,7 +304,7 @@ test("synthesize: rawBypass surfaces even when needs schema is unprojectable (ha
     caseKey: "ok",
   };
 
-  const { attachments } = synthesizeAttachments([cOpaqueNeeds], [], [overlay]);
+  const { attachments } = synthesizeAttachments([cOpaqueNeeds], [overlay]);
   const a = attachments.find((x) => x.testId === "orders.create.ok");
   expect(a).toMatchObject({
     kind: "bootstrap-overlay",
@@ -454,7 +326,7 @@ test("synthesize: duplicate overlay surfaces a load-time error; first wins", () 
     contractId: "orders.create",
     caseKey: "ok",
   };
-  const { attachments, errors } = synthesizeAttachments([c], [], [m1, m2]);
+  const { attachments, errors } = synthesizeAttachments([c], [m1, m2]);
 
   expect(errors).toHaveLength(1);
   expect(errors[0]?.error).toMatch(/Duplicate bootstrap overlay/);
@@ -476,7 +348,7 @@ test("synthesize: orphan overlay (no matching case) still appears as bootstrap-o
     contractId: "absent.case",
     caseKey: "ok",
   };
-  const { attachments } = synthesizeAttachments([], [], [orphan]);
+  const { attachments } = synthesizeAttachments([], [orphan]);
   expect(attachments).toHaveLength(1);
   expect(attachments[0]).toEqual({
     kind: "bootstrap-overlay",
@@ -487,28 +359,12 @@ test("synthesize: orphan overlay (no matching case) still appears as bootstrap-o
   });
 });
 
-test("synthesize: flows appear as kind:'flow' alongside raw/overlay entries", () => {
-  const c = makeContract("orders.create", "ok", "createContract");
-  const flow = makeFlow("orders-onboarding", "onboardingFlow");
-  const { attachments } = synthesizeAttachments([c], [flow], []);
-  expect(attachments).toHaveLength(2);
-
-  expect(attachments.find((a) => a.kind === "raw")).toMatchObject({
-    testId: "orders.create.ok",
-  });
-  expect(attachments.find((a) => a.kind === "flow")).toEqual({
-    kind: "flow",
-    testId: "orders-onboarding",
-    exportName: "onboardingFlow",
-    flow,
-  });
-});
 
 test("synthesize: case extensions.runnability.requireAttachment surfaces on raw", () => {
   const c = makeContract("orders.create", "needs-overlay", "createContract", {
     requireAttachment: true,
   });
-  const { attachments } = synthesizeAttachments([c], [], []);
+  const { attachments } = synthesizeAttachments([c], []);
   expect(attachments[0]).toMatchObject({
     kind: "raw",
     runnability: { requireAttachment: true },
@@ -520,7 +376,7 @@ test("synthesize: multiple runnability gates surface on raw", () => {
     requireAttachment: true,
     requireSession: true,
   });
-  const { attachments } = synthesizeAttachments([c], [], []);
+  const { attachments } = synthesizeAttachments([c], []);
   expect(attachments[0]).toMatchObject({
     kind: "raw",
     runnability: {

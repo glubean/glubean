@@ -69,7 +69,6 @@ test("buildMetadata preserves contract given preconditions for upload payloads",
     fileCount: 0,
     tags: [],
     warnings: [],
-    flows: [],
     contracts: [
       {
         contractId: "invite-member",
@@ -136,24 +135,3 @@ test("buildMetadata carries workflow projections + workflows affect the rootHash
   expect(without.rootHash).toBe(await computeRootHash(files, []));
 });
 
-test("buildMetadata serializes flows + flows affect the rootHash (codex S2.6 R5)", async () => {
-  const base: ScanResult = {
-    specVersion: "1.0",
-    files: {},
-    testCount: 0,
-    fileCount: 0,
-    tags: [],
-    warnings: [],
-    contracts: [],
-  };
-  const flows = [
-    { id: "checkout", exportName: "checkout", protocol: "flow" as const, steps: [] },
-  ];
-
-  const without = await buildMetadata(base, { generatedBy: "test" });
-  expect(without.flows).toBeUndefined();
-
-  const withFlows = await buildMetadata({ ...base, flows }, { generatedBy: "test" });
-  expect(withFlows.flows).toEqual(flows); // the declared-but-never-populated field, now fed
-  expect(withFlows.rootHash).not.toBe(without.rootHash);
-});

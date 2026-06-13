@@ -9,8 +9,8 @@
  */
 
 import { test, expect, beforeAll, beforeEach, describe } from "vitest";
-import { contract, installPlugin, runFlow } from "@glubean/sdk";
-import type { FlowContract, TestContext } from "@glubean/sdk";
+import { contract, installPlugin, workflow } from "@glubean/sdk";
+import type { TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";
 import grpcPlugin from "../index.js";
 
@@ -412,15 +412,15 @@ describe("executeCaseInFlow + flow integration", () => {
       },
     });
 
-    const flowObj = contract
-      .flow("pay-flow")
+    // vNext workflow drives the same adapter.executeCaseInFlow hook the
+    // legacy flow used (flow deleted in Nv1-D2/D3).
+    const wf = workflow("pay-flow")
       .setup(async () => ({ orderId: "o-1", amount: 99.99 }))
-      .step(paymentContract.case("ok"), {
+      .call("pay", paymentContract.case("ok"), {
         in: (s: any) => ({ orderId: s.orderId, amount: s.amount }),
       } as any)
-      .build() as FlowContract<unknown>;
-
-    await runFlow(flowObj, makeCtx());
+      .build();
+    await wf[0]!.fn!(makeCtx());
 
     expect(client._calls).toHaveLength(1);
     expect(client._calls[0].method).toBe("Complete");
@@ -443,20 +443,16 @@ describe("executeCaseInFlow + flow integration", () => {
     });
 
     let capturedOut: any;
-    const flowObj = contract
-      .flow("f")
+    const wf = workflow("f")
       .setup(async () => ({}))
-      .step(svcContract.case("ok"), {
+      .call("do-thing", svcContract.case("ok"), {
         out: (_s: any, res: any) => {
           capturedOut = res;
           return { statusCode: res.status.code, serverId: res.message.serverId };
         },
-      } as any)  // Spike 4 — gRPC factory returns `any` via (contract as any).grpc,
-                  // so conditional tuple on step() matches typed-input branch. gRPC
-                  // flow migration is deferred per Option X.
-      .build() as FlowContract<unknown>;
-
-    await runFlow(flowObj, makeCtx());
+      } as any)
+      .build();
+    await wf[0]!.fn!(makeCtx());
 
     expect(capturedOut.status.code).toBe(0);
     expect(capturedOut.message.serverId).toBe("server-1");
@@ -490,15 +486,13 @@ describe("executeCaseInFlow + flow integration", () => {
       },
     });
 
-    const flowObj = contract
-      .flow("f")
+    const wf = workflow("f")
       .setup(async () => ({ lensTag: "d" }))
-      .step(svcContract.case("ok"), {
+      .call("do-thing", svcContract.case("ok"), {
         in: (s: any) => ({ tag: s.lensTag }),
       } as any)
-      .build() as FlowContract<unknown>;
-
-    await runFlow(flowObj, makeCtx());
+      .build();
+    await wf[0]!.fn!(makeCtx());
 
     const opts = client._calls[0].options as { metadata: Record<string, string> };
     expect(opts.metadata).toMatchObject({
@@ -790,13 +784,12 @@ describe("schema validation failure path", () => {
       },
     });
 
-    const flowObj = (contract
-      .flow("schema-fail-flow")
+    const wf = workflow("schema-fail-flow")
       .setup(async () => ({}))
-      .step as any)(svcContract.case("ok"))
-      .build() as FlowContract<unknown>;
-
-    await expect(runFlow(flowObj, makeCtx())).rejects.toThrow(/validate failed/);
+      .call("do-thing", svcContract.case("ok") as any, {} as any)
+      .build();
+    // The workflow Test fn rethrows the failing node's cause.
+    await expect(wf[0]!.fn!(makeCtx())).rejects.toThrow(/validate failed/);
   });
 });
 

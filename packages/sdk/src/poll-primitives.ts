@@ -5,8 +5,8 @@
  * executor, `test()` helpers, and (until D2 deletes it) the legacy
  * `contract.flow()` loop. Renamed from `contract-flow-poll.ts` (Nv1-D1,
  * 2026-06-13): the quarantine/budget/bounds machinery was never
- * flow-specific. The flow-only pieces still living here (RuntimePollStep /
- * evalPollExit / extractPollStep) are deleted with the legacy flow.
+ * flow-specific. The legacy flow's poll step shapes that used to live here
+ * were deleted with the flow itself (Nv1-D2).
  *
  * A poll repeats ONE contract case until an exit predicate over the RESPONSE
  * holds, BOUNDED by a total wall-clock deadline and/or a finite per-attempt
@@ -21,68 +21,8 @@
  * `contract-core.ts` (it needs the shared committed-state cell).
  */
 
-import type {
-  ContractCaseRef,
-  ProtocolContract,
-  FieldMapping,
-} from "./contract-types.js";
 import type { TestContext, SchemaLike } from "./types.js";
 import { Expectation } from "./expect.js";
-import {
-  type BranchPredicate,
-  type OpaquePredicate,
-  type ExtractedPredicate,
-  evalPredicate,
-  extractPredicate,
-} from "./predicates.js";
-
-// =============================================================================
-// Runtime poll step
-// =============================================================================
-
-/**
- * Runtime representation of a `flow().poll()` step. Carries live callbacks +
- * the live contract ref. Never serialized — `extractPollStep` produces the
- * JSON-safe form.
- *
- * The exit predicate (`until`) is over the RESPONSE (not state): L2 declarative
- * (`BranchPredicate`, projectable) or opaque (L1 sync / L0 async, marked). The
- * opaque form additionally receives `state` so a poll can wait for the response
- * to reflect something already in state (e.g. `res.version >= state.lastSeen`).
- */
-export interface RuntimePollStep {
-  kind: "poll";
-  name?: string;
-  ref: ContractCaseRef<any, any, any, any>;
-  caseKey: string;
-  /** Live contract instance (mirrors ref.contract). */
-  contract: ProtocolContract<any, any, any>;
-  bindings?: {
-    in?: (state: any) => any;
-    out?: (state: any, response: any) => any;
-    accept?: readonly unknown[];
-  };
-  /** Exit predicate — L2 declarative (over the response) or opaque (gets ctx, res, state). */
-  until:
-    | BranchPredicate<any>
-    | {
-        kind: "opaque";
-        sync: boolean;
-        fn: (ctx: TestContext, res: any, state: any) => boolean | Promise<boolean>;
-      };
-  /** Author-supplied label (opaque tiers require it; L2 can auto-generate). */
-  message?: string;
-  /** Interval between attempts (ms). */
-  every: number;
-  /** Multiplier applied to `every` after each retry (1 = fixed). Capped at BACKOFF_CAP_MS. */
-  backoff: number;
-  /** Total wall-clock bound (ms). */
-  timeoutMs?: number;
-  /** Per-attempt budget (ms) — required when `timeoutMs` is absent. */
-  perAttemptTimeoutMs?: number;
-  /** Max attempts (>= 1). */
-  maxAttempts?: number;
-}
 
 /** Backoff cap — mirrors the test() step retry-backoff ceiling. */
 export const BACKOFF_CAP_MS = 30_000;
@@ -264,50 +204,6 @@ export function raceBudget<T>(
 }
 
 // =============================================================================
-// Exit-predicate evaluation (three tiers)
-// =============================================================================
-
-function isOpaqueExit(
-  p: RuntimePollStep["until"],
-): p is { kind: "opaque"; sync: boolean; fn: (ctx: TestContext, res: any, state: any) => boolean | Promise<boolean> } {
-  return (p as { kind?: string }).kind === "opaque";
-}
-
-/**
- * Evaluate a poll exit predicate. L2 declarative reads the RESPONSE (`evalPredicate`
- * with subject = response). Opaque tiers get `(ctx, res, state)`. Non-boolean
- * results fail fast (mirrors condition Phase 6); a thrown error / `ctx.skip()`
- * propagates to the caller.
- */
-export async function evalPollExit(
-  until: RuntimePollStep["until"],
-  response: unknown,
-  ctx: TestContext,
-  state: unknown,
-): Promise<boolean> {
-  if (isOpaqueExit(until)) {
-    const out = until.fn(ctx, response, state);
-    if (until.sync && out && typeof (out as { then?: unknown }).then === "function") {
-      throw new Error(
-        "pollFn (L1) exit predicate must be synchronous — it returned a thenable. Use pollAsync for async/I-O exit predicates.",
-      );
-    }
-    const result = await out;
-    if (typeof result !== "boolean") {
-      throw new Error(
-        `${until.sync ? "pollFn (L1)" : "pollAsync (L0)"} exit predicate must return a boolean; ` +
-          `got ${result === null ? "null" : typeof result}`,
-      );
-    }
-    return result;
-  }
-  // L2 declarative — predicate subject is the response.
-  return evalPredicate(until as BranchPredicate<any>, response as any);
-}
-
-// =============================================================================
-// Build-time bound validation
-// =============================================================================
 
 /**
  * Validate poll bounds at construction. Two rules (both required), plus
@@ -357,58 +253,3 @@ export function validatePollBounds(
 
 // =============================================================================
 // Projection (JSON-safe)
-// =============================================================================
-
-export interface ExtractedPollStep {
-  kind: "poll";
-  name?: string;
-  contractId: string;
-  caseKey: string;
-  protocol: string;
-  target: string;
-  inputs?: FieldMapping[];
-  outputs?: FieldMapping[];
-  accept?: ReadonlyArray<string | number>;
-  /** Exit predicate — L2 precise (compare/in/...) or `{kind:"opaque",...}`. */
-  until: ExtractedPredicate;
-  message?: string;
-  every: number;
-  backoff: number;
-  timeoutMs?: number;
-  perAttemptTimeoutMs?: number;
-  maxAttempts?: number;
-}
-
-/**
- * Normalize a runtime poll step to JSON-safe form. `dryRun` produces the
- * input/output field mappings (the same Proxy dry-run normalizeFlow uses for a
- * contract-call step), so the poll node carries data-flow edges like a step.
- */
-export function extractPollStep(
-  step: RuntimePollStep,
-  dryRun: (step: RuntimePollStep) => { inputs?: FieldMapping[]; outputs?: FieldMapping[] },
-): ExtractedPollStep {
-  const projection = (step.contract as { _projection: { id: string; protocol: string; target?: string } })._projection;
-  const { inputs, outputs } = dryRun(step);
-  const untilExtracted: ExtractedPredicate = isOpaqueExit(step.until)
-    ? { kind: "opaque", strictness: step.until.sync ? "L1" : "L0", mayDoAsyncIO: !step.until.sync }
-    : extractPredicate(step.until as BranchPredicate<any>);
-  return {
-    kind: "poll",
-    ...(step.name ? { name: step.name } : {}),
-    contractId: projection.id,
-    caseKey: step.caseKey,
-    protocol: projection.protocol,
-    target: projection.target ?? "",
-    ...(inputs && inputs.length ? { inputs } : {}),
-    ...(outputs && outputs.length ? { outputs } : {}),
-    ...(step.bindings?.accept ? { accept: step.bindings.accept as ReadonlyArray<string | number> } : {}),
-    until: untilExtracted,
-    ...(step.message ? { message: step.message } : {}),
-    every: step.every ?? DEFAULT_EVERY_MS,
-    backoff: step.backoff ?? 1,
-    ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
-    ...(step.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: step.perAttemptTimeoutMs } : {}),
-    ...(step.maxAttempts !== undefined ? { maxAttempts: step.maxAttempts } : {}),
-  };
-}

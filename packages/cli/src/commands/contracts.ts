@@ -9,10 +9,6 @@ import { resolve } from "node:path";
 import { bootstrap } from "@glubean/runner";
 import { extractContractsFromProject } from "@glubean/scanner";
 import type {
-  NormalizedFlowMeta,
-  NormalizedFlowStep,
-  NormalizedPredicate,
-  NormalizedFieldMapping,
 } from "@glubean/scanner";
 import type { ContractStaticMeta, ContractCaseStaticMeta } from "@glubean/scanner/static";
 import {
@@ -210,10 +206,7 @@ export function formatMdOutline(contracts: ContractStaticMeta[]): string {
 
 // ── JSON formatter ──────────────────────────────────────────────────────────
 
-export function formatJson(
-  contracts: ContractStaticMeta[],
-  flows: NormalizedFlowMeta[] = [],
-): string {
+export function formatJson(contracts: ContractStaticMeta[]): string {
   const features = groupByFeature(contracts);
   const summary = computeSummary(contracts);
   const output: Record<string, unknown> = {
@@ -243,225 +236,7 @@ export function formatJson(
     })),
     summary,
   };
-  if (flows.length > 0) {
-    output.flows = flows.map(flowToJson);
-  }
   return JSON.stringify(output, null, 2) + "\n";
-}
-
-// ── Flow formatters ─────────────────────────────────────────────────────────
-
-function formatMappingArrow(m: NormalizedFieldMapping): string {
-  if (m.source.kind === "path") {
-    return `${m.target} ← ${m.source.path}`;
-  }
-  if (m.source.kind === "literal") {
-    return `${m.target} = ${JSON.stringify(m.source.value)}`;
-  }
-  return `${m.target} ← (pass-through)`;
-}
-
-/** Compact, human-readable rendering of a branch predicate for CLI output. */
-function formatPredicate(p: NormalizedPredicate): string {
-  switch (p.kind) {
-    case "compare":
-      // path-vs-path (phase4 §7) renders the rhs PATH, not "undefined"
-      return p.rhsPath !== undefined
-        ? `${p.path.join(".")} ${p.op} ${p.rhsPath.join(".")}`
-        : `${p.path.join(".")} ${p.op} ${JSON.stringify(p.value)}`;
-    case "in":
-      return `${p.path.join(".")} in [${p.values.map((v) => JSON.stringify(v)).join(", ")}]`;
-    case "presence":
-      return `${p.path.join(".")} ${p.op}`;
-    case "matches":
-      return `${p.path.join(".")} matches /${p.pattern}/${p.flags ?? ""}`;
-    case "and":
-      return p.clauses.map(formatPredicate).join(" AND ");
-    case "or":
-      return p.clauses.map(formatPredicate).join(" OR ");
-    case "not":
-      return `NOT (${formatPredicate(p.clause)})`;
-    case "opaque":
-      return `<opaque ${p.strictness}${p.mayDoAsyncIO ? " async/IO" : ""}>`;
-  }
-}
-
-function formatFlowStep(step: NormalizedFlowStep, index: number): string[] {
-  const lines: string[] = [];
-  if (step.kind === "compute") {
-    const name = step.name ? ` — ${step.name}` : "";
-    lines.push(`${index + 1}. **<compute>**${name}`);
-    const hasAny = (step.reads.length ?? 0) > 0 || (step.writes.length ?? 0) > 0;
-    if (hasAny) {
-      if (step.reads.length > 0) lines.push(`   - reads: ${step.reads.join(", ")}`);
-      if (step.writes.length > 0) lines.push(`   - writes: ${step.writes.join(", ")}`);
-    } else {
-      lines.push("   - *(mappings not available)*");
-    }
-    return lines;
-  }
-  if (step.kind === "branch") {
-    const name = step.name ? ` — ${step.name}` : "";
-    const subj =
-      step.mode === "value" && step.subjectPath ? ` (on: ${step.subjectPath.join(".")})` : "";
-    lines.push(`${index + 1}. **<branch:${step.mode}>**${name}${subj}`);
-    const emitSub = (sub: NormalizedFlowStep, i: number) => {
-      for (const l of formatFlowStep(sub, i)) lines.push(`     ${l}`);
-    };
-    for (const c of step.cases) {
-      const label =
-        step.mode === "value"
-          ? `case ${JSON.stringify(c.value)}`
-          : `case${c.message ? ` "${c.message}"` : ""}${
-              c.predicate ? ` [${formatPredicate(c.predicate)}]` : ""
-            }`;
-      lines.push(`   - ${label}:`);
-      c.steps.forEach(emitSub);
-    }
-    if (step.default.length > 0) {
-      lines.push("   - default:");
-      step.default.forEach(emitSub);
-    }
-    return lines;
-  }
-  if (step.kind === "poll") {
-    const name = step.name ? ` — ${step.name}` : "";
-    const target = step.target ? ` (${step.protocol} · ${step.target})` : "";
-    lines.push(`${index + 1}. **<poll> ${step.contractId}#${step.caseKey}**${name}${target}`);
-    const untilStr = step.until
-      ? formatPredicate(step.until)
-      : step.message
-        ? `"${step.message}"`
-        : "<exit predicate>";
-    lines.push(`   - until: ${untilStr}`);
-    const bound = [
-      step.timeoutMs !== undefined ? `≤${step.timeoutMs}ms` : null,
-      step.maxAttempts !== undefined ? `≤${step.maxAttempts}×` : null,
-      step.perAttemptTimeoutMs !== undefined ? `${step.perAttemptTimeoutMs}ms/try` : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    lines.push(
-      `   - every ${step.every}ms${step.backoff !== 1 ? ` ×${step.backoff}` : ""}${bound ? ` (${bound})` : ""}`,
-    );
-    if (step.accept && step.accept.length > 0) {
-      lines.push(`   - accepts: ${step.accept.join(", ")}`);
-    }
-    if (step.inputs && step.inputs.length > 0) {
-      lines.push("   - inputs:");
-      for (const m of step.inputs) lines.push(`     - ${formatMappingArrow(m)}`);
-    }
-    if (step.outputs && step.outputs.length > 0) {
-      lines.push("   - outputs:");
-      for (const m of step.outputs) lines.push(`     - ${formatMappingArrow(m)}`);
-    }
-    return lines;
-  }
-  // contract-call
-  const name = step.name ? ` — ${step.name}` : "";
-  const target = step.target ? ` (${step.protocol} · ${step.target})` : "";
-  lines.push(`${index + 1}. **${step.contractId}#${step.caseKey}**${name}${target}`);
-  if (step.accept && step.accept.length > 0) {
-    lines.push(`   - accepts: ${step.accept.join(", ")}`);
-  }
-  if (step.inputs && step.inputs.length > 0) {
-    lines.push("   - inputs:");
-    for (const m of step.inputs) lines.push(`     - ${formatMappingArrow(m)}`);
-  }
-  if (step.outputs && step.outputs.length > 0) {
-    lines.push("   - outputs:");
-    for (const m of step.outputs) lines.push(`     - ${formatMappingArrow(m)}`);
-  }
-  return lines;
-}
-
-export function formatFlowsMdSection(flows: NormalizedFlowMeta[]): string {
-  if (flows.length === 0) return "";
-  const lines: string[] = [];
-  lines.push("## Flows");
-  lines.push("");
-  for (const f of flows) {
-    const tagSuffix = f.tags && f.tags.length > 0 ? ` *(${f.tags.join(", ")})*` : "";
-    lines.push(`### ${f.id}${tagSuffix}`);
-    if (f.description) {
-      lines.push("");
-      lines.push(f.description);
-    }
-    lines.push("");
-    if (f.setupDynamic) {
-      lines.push("- setup: *<dynamic>*");
-    }
-    for (let i = 0; i < f.steps.length; i++) {
-      for (const line of formatFlowStep(f.steps[i], i)) {
-        lines.push(line);
-      }
-    }
-    lines.push("");
-  }
-  return lines.join("\n");
-}
-
-/** Recursively serialize a flow step to JSON (branch cases + default nest). */
-function flowStepToJson(s: NormalizedFlowStep): Record<string, unknown> {
-  if (s.kind === "compute") {
-    return { kind: "compute", name: s.name, reads: s.reads, writes: s.writes };
-  }
-  if (s.kind === "branch") {
-    return {
-      kind: "branch",
-      mode: s.mode,
-      name: s.name,
-      ...(s.subjectPath !== undefined ? { subjectPath: s.subjectPath } : {}),
-      cases: s.cases.map((c) => ({
-        ...(c.value !== undefined ? { value: c.value } : {}),
-        ...(c.message !== undefined ? { message: c.message } : {}),
-        ...(c.predicate !== undefined ? { predicate: c.predicate } : {}),
-        steps: c.steps.map(flowStepToJson),
-      })),
-      default: s.default.map(flowStepToJson),
-    };
-  }
-  if (s.kind === "poll") {
-    return {
-      kind: "poll",
-      name: s.name,
-      contractId: s.contractId,
-      caseKey: s.caseKey,
-      protocol: s.protocol,
-      target: s.target,
-      inputs: s.inputs,
-      outputs: s.outputs,
-      ...(s.accept ? { accept: s.accept } : {}),
-      ...(s.until !== undefined ? { until: s.until } : {}),
-      ...(s.message !== undefined ? { message: s.message } : {}),
-      every: s.every,
-      backoff: s.backoff,
-      ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
-      ...(s.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: s.perAttemptTimeoutMs } : {}),
-      ...(s.maxAttempts !== undefined ? { maxAttempts: s.maxAttempts } : {}),
-    };
-  }
-  return {
-    kind: "contract-call",
-    name: s.name,
-    contractId: s.contractId,
-    caseKey: s.caseKey,
-    protocol: s.protocol,
-    target: s.target,
-    inputs: s.inputs,
-    outputs: s.outputs,
-    ...(s.accept ? { accept: s.accept } : {}),
-  };
-}
-
-export function flowToJson(f: NormalizedFlowMeta): Record<string, unknown> {
-  return {
-    id: f.id,
-    description: f.description,
-    tags: f.tags,
-    setupDynamic: f.setupDynamic,
-    steps: f.steps.map(flowStepToJson),
-  };
 }
 
 // ── Command ─────────────────────────────────────────────────────────────────
@@ -524,12 +299,6 @@ export async function contractsCommand(
   }
 
   const result = await extractContractsFromProject(dir);
-  // Post-Phase 2f: flows live as `kind: "flow"` entries inside the
-  // attachment inventory (§7.3). Filter them back out for legacy
-  // `--format` consumers that still operate on a flat flow list.
-  const flows = result.attachments
-    .filter((a): a is Extract<typeof a, { kind: "flow" }> => a.kind === "flow")
-    .map((a) => a.flow);
 
   // Surface import errors
   if (result.errors.length > 0) {
@@ -539,10 +308,10 @@ export async function contractsCommand(
     }
   }
 
-  if (result.contracts.length === 0 && flows.length === 0) {
+  if (result.contracts.length === 0) {
     console.error(
-      `${colors.yellow}No contracts or flows found.${colors.reset} ` +
-      `Ensure .contract.ts / .flow.ts files exist and use contract.http.with() or contract.flow().`,
+      `${colors.yellow}No contracts found.${colors.reset} ` +
+      `Ensure .contract.ts files exist and use contract.http.with().`,
     );
     process.exit(1);
   }
@@ -595,7 +364,7 @@ export async function contractsCommand(
 
   // Output projection
   if (format === "json") {
-    process.stdout.write(formatJson(contracts, flows));
+    process.stdout.write(formatJson(contracts));
   } else if (format === "openapi") {
     // Dispatched through the artifact registry. Only HTTP contracts
     // contribute (openapi kind has no defaultRender). Non-HTTP protocols
@@ -611,33 +380,18 @@ export async function contractsCommand(
     );
     process.stdout.write(JSON.stringify(spec, null, 2) + "\n");
   } else if (format === "md-outline") {
-    // CAR-2: `md-outline` contracts section now flows through the artifact
-    // registry (`assembleMarkdownDocument` is a byte-for-byte port of the
-    // former CLI `formatMdOutline`). Flows section stays on the CLI side
-    // per D15 — flow artifact is a future ticket.
-    const contractsMd =
-      result.contracts.length > 0
-        ? renderArtifact(
-            markdownArtifact,
-            result.contracts as unknown as ExtractedContractProjection<
-              unknown,
-              unknown
-            >[],
-          )
-        : "";
-    const flowsMd = flows.length > 0 ? formatFlowsMdSection(flows) : "";
-    if (contractsMd && flowsMd) {
-      process.stdout.write(contractsMd.trimEnd() + "\n\n" + flowsMd);
-    } else {
-      // Even if contracts are empty, render a minimal header + flows block
-      if (!contractsMd) {
-        const date = new Date().toISOString().slice(0, 10);
-        process.stdout.write(
-          `# Contract Specification\n\nGenerated: ${date} | ${flows.length} flow(s)\n\n`,
-        );
-      }
-      process.stdout.write(contractsMd || flowsMd);
-    }
+    // CAR-2: `md-outline` renders through the artifact registry
+    // (`assembleMarkdownDocument`). The legacy flows section died with
+    // contract.flow (Nv1-D3); workflow markdown is the agreement-markdown
+    // proposal (G1).
+    const contractsMd = renderArtifact(
+      markdownArtifact,
+      result.contracts as unknown as ExtractedContractProjection<
+        unknown,
+        unknown
+      >[],
+    );
+    process.stdout.write(contractsMd);
   } else {
     // Dynamic dispatch via artifact registry for any other registered kind
     // name (future proto / sdl / asyncapi). Throws with a helpful error

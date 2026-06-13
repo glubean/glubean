@@ -560,26 +560,6 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
       }
     }
 
-    // Each flow has a single orchestrator Test (setup → steps → teardown).
-    // Discover it as one runnable entry with the flow id. Post-Phase 2f
-    // flows live as `kind: "flow"` entries inside `result.attachments`.
-    // SDK maps FlowMeta.skip → TestMeta.deferred (string reason); mirror
-    // that here so the runner's deferred-skip path applies uniformly.
-    for (const att of result.attachments) {
-      if (att.kind !== "flow") continue;
-      results.push({
-        exportName: att.exportName,
-        meta: {
-          id: att.flow.id,
-          description: att.flow.description,
-          tags: att.flow.tags,
-          only: att.flow.only,
-          deferred: att.flow.skip,
-          kind: "flow",
-        },
-      });
-    }
-
     // vNext workflows (S2.6): each BuiltWorkflow wraps the graph in ONE
     // simple test — discover it like a flow orchestrator, so a file whose
     // projection scan/upload advertises is also runnable (codex S2.6 R2 P2).
@@ -1247,9 +1227,6 @@ export async function runCommand(
         try {
           const extracted = await extractContractFromFile(filePath);
           const ids = new Set<string>();
-          for (const att of extracted.attachments ?? []) {
-            if (att.kind === "flow" && flowStepsHaveBranchOrPoll(att.flow.steps)) ids.add(att.flow.id);
-          }
           // vNext workflows ride the "flow" runnable kind, so they reach this
           // gate too — a branch/poll workflow gets the same refusal (codex
           // S2.6 R9 P2).

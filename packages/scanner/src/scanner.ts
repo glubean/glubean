@@ -10,7 +10,7 @@ import { extractContractCases } from "./extractor-ast.js";
 import { extractAliasesFromSource } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
-import type { NormalizedFlowMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
+import type { NormalizedWorkflowMeta } from "./contract-extraction.js";
 import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.js";
 
 /** File system interface for runtime abstraction */
@@ -358,11 +358,8 @@ export class Scanner {
       }
     }
 
-    // Phase 5: Extract flow + workflow metadata from flow files.
-    // Post-Phase 2f: extractContractFromFile returns flows as `kind: "flow"`
-    // entries inside `attachments[]`. We also call it on .flow.ts files so
-    // single-file flow modules are picked up. vNext workflows (S2.6) live on
-    // the result's first-class `workflows[]` — same files, same import.
+    // Phase 5: Extract workflow metadata from flow files. vNext workflows
+    // (S2.6) live on the result's first-class `workflows[]`.
     //
     // DELIBERATE: `.test.ts` files are NOT imported here — that is the
     // scanner's core safety invariant (the static path never executes user
@@ -374,20 +371,12 @@ export class Scanner {
     // already rely on. (A future run-time backfill — the runner imports test
     // files safely inside its sandbox — could lift this without breaking the
     // invariant; that is a runner-protocol slice, not a scan-time one.)
-    const flows: NormalizedFlowMeta[] = [];
     const workflows: NormalizedWorkflowMeta[] = [];
-    const allFlowSourceFiles = [...flowFiles, ...contractFiles]; // contract files can also export flows
-    const seenFlowIds = new Set<string>();
+    const allFlowSourceFiles = [...flowFiles, ...contractFiles]; // contract files can also export workflows
     const seenWorkflowIds = new Set<string>();
     for (const filePath of allFlowSourceFiles) {
       const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
       const result = await extractContractFromFile(absolutePath);
-      for (const att of result.attachments) {
-        if (att.kind !== "flow") continue;
-        if (seenFlowIds.has(att.flow.id)) continue;
-        flows.push(att.flow);
-        seenFlowIds.add(att.flow.id);
-      }
       for (const wf of result.workflows) {
         if (seenWorkflowIds.has(wf.id)) continue;
         workflows.push(wf);
@@ -405,7 +394,6 @@ export class Scanner {
     if (
       Object.keys(files).length === 0 &&
       contracts.length === 0 &&
-      flows.length === 0 &&
       workflows.length === 0
     ) {
       warnings.push(
@@ -422,7 +410,6 @@ export class Scanner {
       tags: Array.from(allTags),
       warnings,
       contracts,
-      ...(flows.length > 0 ? { flows } : {}),
       ...(workflows.length > 0 ? { workflows } : {}),
     };
   }

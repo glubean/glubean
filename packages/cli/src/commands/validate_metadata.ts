@@ -117,7 +117,6 @@ export async function validateMetadataCommand(
     normalizedFiles!,
     metadata.contracts,
     metadata.workflows,
-    metadata.flows,
   );
   if (computedRootHash !== metadata.rootHash) {
     console.error(`${colors.red}✗ Root hash mismatch${colors.reset}`);

@@ -3,7 +3,7 @@ import { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
 // P1/P2/P1-pick: extractFromSource + extractContractCases + extractPickExamples are
 // now AST-based (@babel/parser). The existing suites run unchanged against them as
 // the conformance contract.
-import { extractFromSource, extractContractCases, extractPickExamples, extractFlows } from "./extractor-ast.js";
+import { extractFromSource, extractContractCases, extractPickExamples } from "./extractor-ast.js";
 
 // =============================================================================
 // Empty / no-export cases
@@ -2292,50 +2292,7 @@ export const c = contract.http("create-project", {
 // extractFlows (structural, marker-free)
 // ---------------------------------------------------------------------------
 
-test("extractFlows detects a .flow() export with no marker", () => {
-  const source = `
-import { contract } from "@glubean/sdk";
-export const signupFlow = contract
-  .flow("signup-flow")
-  .meta({ description: "sign up" })
-  .step("register", async () => {});
-`;
-  const flows = extractFlows(source);
-  expect(flows).toHaveLength(1);
-  expect(flows[0].flowId).toBe("signup-flow");
-  expect(flows[0].exportName).toBe("signupFlow");
-  expect(flows[0].skip).toBeUndefined();
-});
 
-test("extractFlows supports the object overload flow({ id }) — id honored, object skip ignored", () => {
-  // Runtime reads id from the object overload but does NOT honor its skip (skip
-  // only applies from a chained .meta({ skip })), so we don't expose object skip.
-  const source = `
-export const f = contract.flow({ id: "obj-flow", skip: "wip" }).step("s", async () => {});
-`;
-  const flows = extractFlows(source);
-  expect(flows).toHaveLength(1);
-  expect(flows[0].flowId).toBe("obj-flow");
-  expect(flows[0].skip).toBeUndefined();
-});
 
-test("extractFlows ignores a non-contract .flow() (e.g. otherLib.flow)", () => {
-  const source = `export const p = otherLib.flow("daily").run();`;
-  expect(extractFlows(source)).toEqual([]);
-});
 
-test("extractFlows reads .meta({ skip }) and ignores non-flow exports", () => {
-  const source = `
-export const skipped = contract.flow("later").meta({ skip: "not ready" }).step("s", async () => {});
-export const notAFlow = test("plain", async () => {});
-const notExported = contract.flow("hidden");
-`;
-  const flows = extractFlows(source);
-  expect(flows).toHaveLength(1);
-  expect(flows[0].flowId).toBe("later");
-  expect(flows[0].skip).toBe("not ready");
-});
 
-test("extractFlows returns [] on unparseable source (never throws)", () => {
-  expect(extractFlows("export const x = (;")).toEqual([]);
-});

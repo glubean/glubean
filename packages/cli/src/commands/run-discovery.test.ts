@@ -346,13 +346,11 @@ export const getUser = api("users.get", {
 
   const flowPath = join(contractFixtureDir, "signup.flow.ts");
   await writeFile(flowPath, `
-import { contract } from "@glubean/sdk";
+import { workflow } from "@glubean/sdk";
 import { getUser } from "./users.contract.js";
 
-export const signup = contract
-  .flow("signup-flow")
-  .meta({ tags: ["smoke", "public-demo"] })
-  .step(getUser.case("ok"))
+export const signup = workflow({ id: "signup-flow", tags: ["smoke", "public-demo"] })
+  .call("get-user", getUser.case("ok"))
   .build();
 `);
 
@@ -369,7 +367,7 @@ export const signup = contract
   expect(notSmoke.map((t) => t.meta.id)).toEqual(["users.get.cold"]);
 });
 
-test("discoverTests propagates flow tags + only + skip (as deferred)", async () => {
+test("discoverTests propagates workflow tags + only + skip (as deferred)", async () => {
   // Need both a referenced contract (so flow.step() resolves) and the flow.
   const contractPath = join(contractFixtureDir, "users.contract.ts");
   await writeFile(contractPath, `
@@ -387,17 +385,16 @@ export const getUser = api("users.get", {
 
   const flowPath = join(contractFixtureDir, "signup.flow.ts");
   await writeFile(flowPath, `
-import { contract } from "@glubean/sdk";
+import { workflow } from "@glubean/sdk";
 import { getUser } from "./users.contract.js";
 
-export const signup = contract
-  .flow("signup-flow")
-  .meta({
-    tags: ["public-demo", "smoke"],
-    only: true,
-    skip: "manual review pending",
-  })
-  .step(getUser.case("ok"))
+export const signup = workflow({
+  id: "signup-flow",
+  tags: ["public-demo", "smoke"],
+  only: true,
+  skip: "manual review pending",
+})
+  .call("get-user", getUser.case("ok"))
   .build();
 `);
 
@@ -414,7 +411,7 @@ export const signup = contract
   });
 });
 
-test("discoverTests omits flow only/deferred when unset", async () => {
+test("discoverTests omits workflow only/deferred when unset", async () => {
   const contractPath = join(contractFixtureDir, "users.contract.ts");
   await writeFile(contractPath, `
 import { contract } from "@glubean/sdk";
@@ -431,12 +428,11 @@ export const getUser = api("users.get", {
 
   const flowPath = join(contractFixtureDir, "bare.flow.ts");
   await writeFile(flowPath, `
-import { contract } from "@glubean/sdk";
+import { workflow } from "@glubean/sdk";
 import { getUser } from "./users.contract.js";
 
-export const bare = contract
-  .flow("bare-flow")
-  .step(getUser.case("ok"))
+export const bare = workflow("bare-flow")
+  .call("get-user", getUser.case("ok"))
   .build();
 `);
 

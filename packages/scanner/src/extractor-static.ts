@@ -295,14 +295,3 @@ export interface ContractStaticMeta {
   cases: ContractCaseStaticMeta[];
 }
 
-/** Metadata for a discovered `<fn>.flow("id")` export (structural — no marker). */
-export interface FlowStaticMeta {
-  /** Export variable name (e.g. "signupFlow") */
-  exportName: string;
-  /** Source location (1-based line number) of the export */
-  line: number;
-  /** Flow ID — the literal string arg to `.flow(...)` */
-  flowId: string;
-  /** Skip-at-declaration reason from `.meta({ skip })`, if present */
-  skip?: string;
-}

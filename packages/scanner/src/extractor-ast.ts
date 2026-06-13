@@ -29,7 +29,7 @@ import {
   type SourceFile,
 } from "./ast.js";
 import type { ExportMeta } from "./types.js";
-import type { ContractCaseStaticMeta, ContractStaticMeta, FlowStaticMeta, PickMeta } from "./extractor-static.js";
+import type { ContractCaseStaticMeta, ContractStaticMeta, PickMeta } from "./extractor-static.js";
 import { resolveDataPath } from "./data-path.js";
 
 // `workflow` is the vNext graph authoring factory (@glubean/sdk workflow());
@@ -1171,83 +1171,6 @@ export function extractContractCases(
   return results;
 }
 
-/**
- * Structural (marker-free) flow extraction: every `export const X = <fn>.flow("id")…`
- * → `FlowStaticMeta`. Replaces vscode's `// @flow`-gated extractMarkedFlows — AST
- * recognizes the `.flow("id")` call shape directly, so no magic comment is needed
- * (aligns vscode discovery with the CLI, which never required markers). Returns []
- * on parse error.
- */
-export function extractFlows(content: string): FlowStaticMeta[] {
-  let source;
-  try {
-    source = parseSource(content);
-  } catch {
-    return [];
-  }
-  const results: FlowStaticMeta[] = [];
-  forEachExportedConst(source, (statement, declaration) => {
-    const exportName = (declaration.id as AnyNode | undefined)?.name as string | undefined;
-    const init = declaration.init as AnyNode | undefined;
-    if (!exportName || !init) return;
-
-    const flowCall = findFlowCall(init);
-    if (!flowCall) return;
-    // `flow(idOrMeta: string | FlowMeta)` — string id or `{ id, ... }`. Runtime
-    // honors the object's `id`; its `skip` is IGNORED at runtime (skip is only
-    // applied from a chained `.meta({ skip })`), so we read skip only from there.
-    const flowArg = (flowCall.arguments as AnyNode[] | undefined)?.[0];
-    const flowMetaObj = objectFromExpression(flowArg);
-    const flowId = stringFromExpression(flowArg) ?? (flowMetaObj && stringProperty(flowMetaObj, "id"));
-    if (!flowId) return;
-
-    const metaCall = findPropertyCall(init, "meta");
-    const metaObj = metaCall
-      ? objectFromExpression((metaCall.arguments as AnyNode[] | undefined)?.[0])
-      : undefined;
-    const skip = metaObj ? stringProperty(metaObj, "skip") : undefined;
-
-    const meta: FlowStaticMeta = { exportName, line: lineOf(statement), flowId };
-    if (skip !== undefined) meta.skip = skip;
-    results.push(meta);
-  });
-  return results;
-}
-
-/**
- * Find the Glubean flow call in a chain: `contract.flow(...)` — a `.flow` member
- * on the `contract` namespace. Does NOT match an arbitrary `.flow(...)` on some
- * other object (`otherLib.flow(...)`) nor a bare `flow(...)`, which the runtime
- * would not recognize as a flow.
- *
- * Like `findContractCall` / the former regex, this keys off the literal name
- * `contract` and does not resolve `import { contract as x }` aliases — a known,
- * consistent limitation across the contract + flow static extractors (real code
- * uses `contract.flow(...)`).
- */
-function findFlowCall(init: AnyNode): AnyNode | undefined {
-  let node: AnyNode | undefined = unwrapExpression(init);
-  while (node && node.type === "CallExpression") {
-    const callee = unwrapExpression(node.callee as AnyNode);
-    if (!callee) break;
-    if (callee.type === "MemberExpression" && callee.computed !== true) {
-      const object = callee.object as AnyNode;
-      const property = callee.property as AnyNode;
-      if (
-        property.type === "Identifier" && property.name === "flow" &&
-        object.type === "Identifier" && object.name === "contract"
-      ) {
-        return node; // contract.flow("id")
-      }
-      node = unwrapExpression(object);
-    } else if (callee.type === "CallExpression") {
-      node = callee;
-    } else {
-      break;
-    }
-  }
-  return undefined;
-}
 
 // --- test.pick() example extraction (CodeLens) ----------------------------
 

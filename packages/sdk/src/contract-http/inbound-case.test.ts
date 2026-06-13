@@ -220,9 +220,6 @@ test(".case() ref carries direction; call/poll/flow-step/bootstrap all reject it
     workflow("w").poll("wait", ref, { until: { ok: { eq: [(s: unknown) => s, true] } } } as never),
   ).toThrow(/`until` is not allowed on an inbound poll/);
   expect(() =>
-    contract.flow("f").step(ref),
-  ).toThrow(/is inbound/);
-  expect(() =>
     contract.bootstrap(ref, async () => undefined),
   ).toThrow(/a bootstrap[\s\S]*overlay has no meaning/);
 });

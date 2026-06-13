@@ -139,44 +139,5 @@ describe("glubean contracts --format md-outline (end-to-end)", () => {
     expect(md.endsWith("\n")).toBe(true);
   });
 
-  test("flows-only: contracts block is the minimal placeholder + flows section", async () => {
-    await writeFlow();
-    const md = await captureMd(fixtureDir);
 
-    // Placeholder doc header (CLI fallback path when contracts is empty)
-    expect(md).toContain("# Contract Specification");
-    expect(md).toMatch(/Generated: \d{4}-\d{2}-\d{2} \| 1 flow\(s\)/);
-    // Flows section — comes from CLI's formatFlowsMdSection (legacy path)
-    expect(md).toContain("## Flows");
-    expect(md).toContain("### signup-flow");
-    expect(md).toContain("User signup end-to-end");
-    // No Users-style feature heading (no contracts)
-    expect(md).not.toContain("## Users");
-  });
-
-  test("mixed: contracts section then flows section with blank-line separator", async () => {
-    await writeHttpContract();
-    await writeFlow();
-    const md = await captureMd(fixtureDir);
-
-    // Both sections present
-    expect(md).toContain("## users-api: Users");
-    expect(md).toContain("## Flows");
-    expect(md).toContain("### signup-flow");
-
-    // Order: contracts come before flows
-    const usersIdx = md.indexOf("## users-api: Users");
-    const flowsIdx = md.indexOf("## Flows");
-    expect(usersIdx).toBeGreaterThan(-1);
-    expect(flowsIdx).toBeGreaterThan(-1);
-    expect(usersIdx).toBeLessThan(flowsIdx);
-
-    // Separator invariant: contracts block trimEnd() + "\n\n" + flows
-    // (see contractsCommand implementation in contracts.ts). The slice
-    // between the two headings is the contracts section body + exactly
-    // one blank line separator (== ends with "\n\n", not "\n\n\n").
-    const joint = md.slice(usersIdx, flowsIdx);
-    expect(joint.endsWith("\n\n")).toBe(true);
-    expect(joint.endsWith("\n\n\n")).toBe(false);
-  });
 });

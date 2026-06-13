@@ -4,10 +4,9 @@
  * Renamed from `contract-flow-condition.ts` (Nv1-D1, 2026-06-13): this was
  * never flow-specific — it is the predicate foundation consumed by the vNext
  * `workflow()` builder (branch/switch/route `when`, poll `until`, check
- * `expect[]`, inbound correlate paths), by `test()` helpers, and (until D2
- * deletes it) by the legacy `contract.flow()` lowering. The flow-only step
- * shapes still living at the bottom of this file (RuntimeBranchStep /
- * selectBranchSteps / extractBranchStep) are deleted with the legacy flow.
+ * `expect[]`, inbound correlate paths) and by `test()` helpers. The legacy
+ * `contract.flow()` step shapes that used to live here were deleted with the
+ * flow itself (Nv1-D2).
  *
  * A predicate is built ONLY through `predicateScope(...)` (`when` / `all` / `any`
  * / `not`) — never hand-authored — so every node is:
@@ -25,7 +24,6 @@
 
 import { extractSelectorPath, LensPurityError } from "./contract-core.js";
 import type { TestContext } from "./types.js";
-import type { RuntimeFlowStep, ExtractedFlowStep } from "./contract-types.js";
 
 /** JSON-safe scalar — the only thing a predicate may compare against. */
 export type JsonScalar = string | number | boolean | null;
@@ -562,10 +560,7 @@ export function assertL2Predicate(node: unknown, op = "condition"): void {
 }
 
 // =============================================================================
-// Runtime branch node + execution + projection (Phase 2)
-//
-// condition / switchOn / switchCond all desugar to ONE runtime kind "branch"
-// (a discriminated union on `mode`). condition = single-case predicate branch.
+// Opaque predicate + JSON-safe predicate projection
 // =============================================================================
 
 /** Opaque (L1 sync / L0 async) predicate — built by the builder in Phase 3. */
@@ -575,92 +570,8 @@ export interface OpaquePredicate {
   fn: (ctx: TestContext, s: any) => boolean | Promise<boolean>;
 }
 
-/** Unified runtime branch node. mode discriminates value-switch vs predicate-branch. */
-export type RuntimeBranchStep = RuntimeValueSwitchStep | RuntimePredicateBranchStep;
-
-export interface RuntimeValueSwitchStep {
-  kind: "branch";
-  mode: "value";
-  name?: string;
-  /**
-   * subject lens, normalized to `(ctx, s)` (flow wraps its `(s)=>V` as `(_ctx,s)=>lens(s)`).
-   * Evaluated exactly once. `path` present for flow (L2, strict-Proxy traced → safe
-   * traversal at runtime + decision-table projection); absent for test (arbitrary lens).
-   */
-  subject: { lens: (ctx: TestContext, s: any) => any; path?: readonly string[] };
-  cases: ReadonlyArray<{ value: JsonScalar; steps: RuntimeFlowStep[] }>;
-  default: RuntimeFlowStep[];
-}
-
-export interface RuntimePredicateBranchStep {
-  kind: "branch";
-  mode: "predicate";
-  name?: string;
-  cases: ReadonlyArray<{
-    message?: string;
-    predicate: BranchPredicate<any> | OpaquePredicate;
-    steps: RuntimeFlowStep[];
-  }>;
-  default: RuntimeFlowStep[];
-}
-
 function isOpaque(p: BranchPredicate<any> | OpaquePredicate): p is OpaquePredicate {
   return (p as OpaquePredicate).kind === "opaque";
-}
-
-/** Evaluate one predicate-mode case predicate (L2 declarative sync / L1 sync / L0 async). */
-async function evalCasePredicate(
-  pred: BranchPredicate<any> | OpaquePredicate,
-  state: unknown,
-  ctx: TestContext,
-): Promise<boolean> {
-  if (isOpaque(pred)) {
-    const out = pred.fn(ctx, state);
-    if (pred.sync && out && typeof (out as any).then === "function") {
-      throw new Error(
-        "conditionFn (L1) predicate must be synchronous — it returned a thenable. Use conditionAsync for async/I-O predicates.",
-      );
-    }
-    const result = await out;
-    // The API types the predicate as `boolean`, but JS / `as any` callers can
-    // return a truthy non-boolean (e.g. the string "false", an object). Fail
-    // fast instead of letting `selectBranchSteps`' `if` silently take a branch
-    // on a coerced value.
-    if (typeof result !== "boolean") {
-      throw new Error(
-        `${pred.sync ? "conditionFn (L1)" : "conditionAsync (L0)"} predicate must return a boolean; ` +
-          `got ${result === null ? "null" : typeof result}`,
-      );
-    }
-    return result;
-  }
-  return evalPredicate(pred, state as any);
-}
-
-/**
- * Select the steps a branch takes against a concrete state (first-match → default).
- * Always async (L0 opaque predicates may be async). For value-mode the subject lens
- * is evaluated exactly once: flow uses the captured `path` (safe traversal, no throw
- * on missing intermediates), test calls the lens.
- */
-export async function selectBranchSteps(
-  step: RuntimeBranchStep,
-  state: unknown,
-  ctx: TestContext,
-): Promise<RuntimeFlowStep[]> {
-  if (step.mode === "value") {
-    const subject = step.subject.path
-      ? resolvePath(state, step.subject.path)
-      : step.subject.lens(ctx, state);
-    for (const c of step.cases) {
-      if (subject === c.value) return c.steps;
-    }
-    return step.default;
-  }
-  for (const c of step.cases) {
-    if (await evalCasePredicate(c.predicate, state, ctx)) return c.steps;
-  }
-  return step.default;
 }
 
 // --- projection (extraction) -------------------------------------------------
@@ -674,23 +585,6 @@ export type ExtractedPredicate =
   | { kind: "and" | "or"; clauses: ExtractedPredicate[] }
   | { kind: "not"; clause: ExtractedPredicate }
   | { kind: "opaque"; strictness: "L1" | "L0"; mayDoAsyncIO: boolean };
-
-export type ExtractedBranchStep =
-  | {
-      kind: "branch";
-      mode: "value";
-      name?: string;
-      subjectPath: string[]; // flow value-switch always has a traced subject path
-      cases: Array<{ value: JsonScalar; steps: ExtractedFlowStep[] }>;
-      default: ExtractedFlowStep[];
-    }
-  | {
-      kind: "branch";
-      mode: "predicate";
-      name?: string;
-      cases: Array<{ message?: string; predicate: ExtractedPredicate; steps: ExtractedFlowStep[] }>;
-      default: ExtractedFlowStep[];
-    };
 
 /** Map a runtime predicate (path already captured at construction) to JSON-safe form. */
 export function extractPredicate(
@@ -721,35 +615,4 @@ export function extractPredicate(
     case "not":
       return { kind: "not", clause: extractPredicate(pred.clause) };
   }
-}
-
-/**
- * Normalize a runtime branch step to JSON-safe form. `recurse` normalizes a
- * sub-step list (provided by normalizeFlow so nested branches recurse).
- */
-export function extractBranchStep(
-  step: RuntimeBranchStep,
-  recurse: (steps: RuntimeFlowStep[]) => ExtractedFlowStep[],
-): ExtractedBranchStep {
-  if (step.mode === "value") {
-    return {
-      kind: "branch",
-      mode: "value",
-      ...(step.name ? { name: step.name } : {}),
-      subjectPath: step.subject.path ? [...step.subject.path] : [],
-      cases: step.cases.map((c) => ({ value: c.value, steps: recurse(c.steps) })),
-      default: recurse(step.default),
-    };
-  }
-  return {
-    kind: "branch",
-    mode: "predicate",
-    ...(step.name ? { name: step.name } : {}),
-    cases: step.cases.map((c) => ({
-      ...(c.message ? { message: c.message } : {}),
-      predicate: extractPredicate(c.predicate),
-      steps: recurse(c.steps),
-    })),
-    default: recurse(step.default),
-  };
 }
