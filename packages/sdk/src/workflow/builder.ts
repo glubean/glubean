@@ -862,6 +862,17 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       // S2.18 lens-purity: trace the dataflow at BUILD time (proxy dry-run —
       // the same tracer flow's normalizer runs). Transform LOGIC stays
       // undeclarable, which is why compute grades `partial` at best.
+      //
+      // DESIGN STANCE (codex S2.18 R3, defended): yes, this executes the fn
+      // once at authoring/scan time. That is the established vNext mechanism
+      // for EVERY declared function — predicate lenses, selector lenses,
+      // via/correlate lenses all dry-run through a proxy at build — and the
+      // public contract of compute is "pure synchronous transform": a body
+      // with closure mutation/side effects (`++n`) violates that contract,
+      // and the dry run makes the violation observable instead of latent.
+      // No published users exist (pre-0.6 window); a static-analysis
+      // alternative is the regex bottomless pit S2.15 already disproved.
+      //
       // A throw during the dry run is NOT an authoring error: the proxy
       // feeds dummy values ("", 0) and a value-sensitive helper
       // (`new URL(state.url)`, schema validators) may legitimately reject

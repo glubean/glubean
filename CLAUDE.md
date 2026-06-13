@@ -75,3 +75,27 @@ on runtime predicates — in the same edit as the implementation, not as a
 separate pass. Hints are declarations the projection renders; an agent that
 just wrote the code can state what it does at zero cost. (Migrate into the
 skill repo at vNext release, together with the three conventions above.)
+
+### Lifecycle discipline (owner-accepted GPT-pro feedback, 2026-06-13)
+
+**`setup`/`teardown` do ENVIRONMENT PREPARATION only** (provision a receiver,
+mint a client, seed credentials, clean up the same). Any business interaction
+— creating an order, calling an API under test, flipping a feature flag that
+the scenario asserts on — MUST be a `call`/`action` node. Lifecycle phases
+have no grade and project only presence + note: business behavior hidden in
+setup is an agreement the projection cannot see. Same migration note as above.
+
+Two more authoring rules from the same review:
+
+- **`workflow.each` row data enters state via the setup closure ONLY** — never
+  into predicate operands (`predicate.x.eq(row.y)` makes rows project different
+  structures and is rejected at build time). Assert against state with
+  `eqPath`, or use row-invariant operands.
+- **`switch`/`route` `on` lenses must be pure selectors** (`(state) =>
+  state.field`). Classification logic (ternaries, comparisons) goes in an
+  explicit `compute` node first — an expression inside `on` is invisible to
+  the projection while the node still grades `full`.
+- **`compute` bodies must be PURE** — they are dry-run once at build/scan
+  time through a tracing proxy (the mechanism every declared lens shares),
+  so closure mutation or side effects execute at authoring time too. State
+  in, state out, nothing else; side effects belong in `.action()`.
