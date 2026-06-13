@@ -106,6 +106,21 @@ export async function buildMetadata(
   const stats = deriveMetadataStats(normalizedFiles);
   const contracts = scanResult.contracts;
   const workflows = scanResult.workflows;
+  // rootHash hashes the DOWN-CONVERTED `contracts` (not the rich
+  // `contractsProjection`). This is deliberate, NOT an oversight (codex 0.6
+  // P2): rootHash is the ON-DISK bundle-integrity hash — `validate_metadata`
+  // recomputes it from the metadata.json fields (files + contracts +
+  // workflows). The rich projection is UPLOAD-ONLY (off disk, includeProjection
+  // below), so hashing it here would make the upload's rootHash diverge from
+  // `glubean scan`'s and break that self-check. Consequence: a contract change
+  // that touches ONLY rich-projection fields (a response-body schema, a
+  // verifyRule) — which the flat `contracts` drops — does not move rootHash.
+  // That is fine: rootHash is bundle integrity, NOT the projection's version
+  // identity. The projection's identity is the server-side `canonicalHash`
+  // (shape-identity proposal §5.3), computed over the FULL projection in the
+  // derive job. Uploads are never deduped by rootHash (snapshots are stored
+  // per-runId), so a projection-only change still reaches the server and gets
+  // its own version there.
   const rootHash = await computeRootHash(normalizedFiles, contracts, workflows);
 
   const contractsProjection = options.includeProjection
