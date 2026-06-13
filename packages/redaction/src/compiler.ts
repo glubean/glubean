@@ -273,6 +273,20 @@ export function createScopeEngine(
  * flow branch trees — should pass a generous value so legitimate structure
  * isn't truncated to a `[REDACTED: too deep]` sentinel.
  */
+/**
+ * HTTP multi-value headers/cookies whose ARRAY value carries scalar secrets
+ * (not structure). In recurse-mode these are the only keys whose array
+ * ELEMENTS are masked by key — every other sensitive-named key (e.g. a
+ * JSON-Schema `dependentRequired: { password: [...] }`) keeps its array intact.
+ * Lower-cased for case-insensitive matching.
+ */
+const MULTI_VALUE_SECRET_HEADERS = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+]);
+
 export function redactValue(
   value: unknown,
   options: {
@@ -299,6 +313,11 @@ export function redactValue(
     // (e.g. `properties.password`) is recursed into, not flattened to a
     // redaction string. Scalar secrets under sensitive keys are still masked.
     sensitiveKeyRecurse: true,
+    // …but a multi-value HTTP header/cookie array (`authorization: [...]`,
+    // `set-cookie: [...]`) carries scalar secrets, not structure — mask its
+    // elements. Other sensitive-named arrays (JSON-Schema keyword lists) are
+    // left intact. See RedactionEngineOptions.multiValueSecretKeys.
+    multiValueSecretKeys: MULTI_VALUE_SECRET_HEADERS,
   });
   return engine.redact(value).value;
 }

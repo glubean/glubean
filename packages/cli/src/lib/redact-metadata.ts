@@ -1,5 +1,6 @@
 import { redactValue, BUILTIN_SCOPES } from "@glubean/redaction";
 import type { RedactionConfig } from "@glubean/redaction";
+import { computeRootHash } from "../metadata.js";
 import type { UploadResultPayload } from "./upload.js";
 
 type UploadMetadata = NonNullable<UploadResultPayload["metadata"]>;
@@ -32,6 +33,15 @@ const SCOPE_SENSITIVE_KEYS: string[] = [
  * A generous `maxDepth` keeps nested JSON Schemas / recursive workflow branch
  * trees from truncating to a `[REDACTED: too deep]` sentinel.
  *
+ * rootHash consistency (codex 0.6 P2): `workflows` participate in `rootHash`
+ * (see metadata.ts `computeRootHash`), but `buildMetadata` hashed the
+ * UNREDACTED workflows. Redacting them here would leave a payload whose
+ * rootHash no longer matches its own `workflows`, so when workflows are
+ * present we recompute rootHash over the redacted projection — the uploaded
+ * payload stays self-consistent for any receiver that verifies it.
+ * (`contractsProjection` is NOT part of rootHash, so its redaction is moot.)
+ * This makes the function async.
+ *
  * Redaction model (same engine as event redaction, config-driven):
  *  - Only SCALARS (string/number) are ever masked. A sensitive key over an
  *    object/array is RECURSED into, never replaced wholesale — so JSON-Schema
@@ -47,10 +57,10 @@ const SCOPE_SENSITIVE_KEYS: string[] = [
  *    usually sit under a sensitive inner key (`token`/`password`/`secret`)
  *    and ARE caught.
  */
-export function redactMetadataForUpload(
+export async function redactMetadataForUpload(
   metadata: UploadMetadata,
   redaction: Pick<RedactionConfig, "globalRules" | "replacementFormat">,
-): UploadMetadata {
+): Promise<UploadMetadata> {
   if (!metadata.contractsProjection && !metadata.workflows) return metadata;
 
   const redact = (v: unknown): unknown =>
@@ -65,11 +75,27 @@ export function redactMetadataForUpload(
       maxDepth: 64,
     });
 
-  return {
+  const redactedWorkflows = metadata.workflows
+    ? (redact(metadata.workflows) as unknown[])
+    : undefined;
+
+  const result: UploadMetadata = {
     ...metadata,
     ...(metadata.contractsProjection
       ? { contractsProjection: redact(metadata.contractsProjection) as unknown[] }
       : {}),
-    ...(metadata.workflows ? { workflows: redact(metadata.workflows) as unknown[] } : {}),
+    ...(redactedWorkflows ? { workflows: redactedWorkflows } : {}),
   };
+
+  // workflows are hashed into rootHash; recompute over the redacted projection
+  // so the uploaded payload is self-consistent (see the doc comment above).
+  if (redactedWorkflows && metadata.rootHash !== undefined) {
+    result.rootHash = await computeRootHash(
+      result.files as Parameters<typeof computeRootHash>[0],
+      result.contracts,
+      redactedWorkflows,
+    );
+  }
+
+  return result;
 }

@@ -2626,7 +2626,7 @@ export async function runCommand(
       // a run view (see the buildMetadata R14 note); the branch/poll run-view
       // gate is a separate layer, untouched here.
       if (metadata) {
-        metadata = redactMetadataForUpload(metadata, effectiveRedaction);
+        metadata = await redactMetadataForUpload(metadata, effectiveRedaction);
       }
 
       const redactedPayload = {

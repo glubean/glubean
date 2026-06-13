@@ -1,5 +1,6 @@
 import { test, expect, describe } from "vitest";
 import { DEFAULT_GLOBAL_RULES } from "@glubean/redaction";
+import { computeRootHash } from "../metadata.js";
 import { redactMetadataForUpload } from "./redact-metadata.js";
 
 type UploadMetadata = Parameters<typeof redactMetadataForUpload>[0];
@@ -29,7 +30,7 @@ function baseMetadata(): UploadMetadata {
 }
 
 describe("redactMetadataForUpload", () => {
-  test("redacts key-based secrets under the DEFAULT config (codex P1 regression)", () => {
+  test("redacts key-based secrets under the DEFAULT config (codex P1 regression)", async () => {
     // The default redaction config has empty globalRules.sensitiveKeys — the
     // built-in keys live in event scopes. A projection carrying
     // `{ authorization: "sk_live_…" }` whose value matches no value-pattern
@@ -57,7 +58,7 @@ describe("redactMetadataForUpload", () => {
       ] as unknown[],
     };
 
-    const result = redactMetadataForUpload(metadata, defaultRedaction);
+    const result = await redactMetadataForUpload(metadata, defaultRedaction);
     const headers = (result.contractsProjection as any[])[0].cases.ok.schemas.request.headers;
     const body = (result.contractsProjection as any[])[0].cases.ok.schemas.request.body;
     expect(headers.authorization).toBe("[REDACTED]");
@@ -65,7 +66,7 @@ describe("redactMetadataForUpload", () => {
     expect(body.apiKey).toBe("[REDACTED]");
   });
 
-  test("redacts secrets inside the contract projection (sensitive keys + patterns)", () => {
+  test("redacts secrets inside the contract projection (sensitive keys + patterns)", async () => {
     const metadata: UploadMetadata = {
       ...baseMetadata(),
       contractsProjection: [
@@ -85,7 +86,7 @@ describe("redactMetadataForUpload", () => {
       ] as unknown[],
     };
 
-    const result = redactMetadataForUpload(metadata, REDACTION);
+    const result = await redactMetadataForUpload(metadata, REDACTION);
     const proj = (result.contractsProjection as any[])[0];
 
     // Sensitive-key match (authorization) is masked.
@@ -98,7 +99,7 @@ describe("redactMetadataForUpload", () => {
     expect(proj.id).toBe("POST /login");
   });
 
-  test("preserves JSON-Schema shape while masking scalar secrets (codex P2)", () => {
+  test("preserves JSON-Schema shape while masking scalar secrets (codex P2)", async () => {
     // A login contract's request body schema declares `password`/`token`
     // properties — structural names, not secrets. The schema must survive
     // intact (canonical-hash/OpenAPI depend on it), while a real default
@@ -129,7 +130,7 @@ describe("redactMetadataForUpload", () => {
       ] as unknown[],
     };
 
-    const result = redactMetadataForUpload(metadata, REDACTION);
+    const result = await redactMetadataForUpload(metadata, REDACTION);
     const reqSchema = (result.contractsProjection as any[])[0].cases.ok.schemas.request;
 
     expect(reqSchema.body.properties.password).toEqual({ type: "string", minLength: 8 });
@@ -138,7 +139,7 @@ describe("redactMetadataForUpload", () => {
     expect(reqSchema.headers.authorization).toBe("[REDACTED]");
   });
 
-  test("nested secret under a non-sensitive inner key is caught via redaction config (by design)", () => {
+  test("nested secret under a non-sensitive inner key is caught via redaction config (by design)", async () => {
     // `authorization: { value: "sk_live…" }` — the inner key `value` is not a
     // built-in sensitive key, and `sk_live…` matches no value pattern, so the
     // base config does NOT mask it (only scalars under SENSITIVE keys / pattern
@@ -153,7 +154,7 @@ describe("redactMetadataForUpload", () => {
     };
 
     // Base config: NOT masked (recursed, inner key not sensitive).
-    const baseResult = redactMetadataForUpload(metadata, {
+    const baseResult = await redactMetadataForUpload(metadata, {
       globalRules: DEFAULT_GLOBAL_RULES,
       replacementFormat: "simple",
     });
@@ -162,7 +163,7 @@ describe("redactMetadataForUpload", () => {
     ).toBe("sk_live_SECRET");
 
     // Configured: add `value` to sensitiveKeys → now masked.
-    const configured = redactMetadataForUpload(metadata, {
+    const configured = await redactMetadataForUpload(metadata, {
       globalRules: { ...DEFAULT_GLOBAL_RULES, sensitiveKeys: ["value"] },
       replacementFormat: "simple",
     });
@@ -171,7 +172,7 @@ describe("redactMetadataForUpload", () => {
     ).toBe("[REDACTED]");
   });
 
-  test("redacts literal values inside the workflow projection", () => {
+  test("redacts literal values inside the workflow projection", async () => {
     // A workflow's branch/switch projection carries literal compare values and
     // assertion messages (NormalizedPredicate.value, node.message). A secret
     // smuggled into one of those literals must be masked just like a contract
@@ -205,7 +206,7 @@ describe("redactMetadataForUpload", () => {
       ] as unknown[],
     };
 
-    const result = redactMetadataForUpload(metadata, REDACTION);
+    const result = await redactMetadataForUpload(metadata, REDACTION);
     const when = (result.workflows as any[])[0].nodes[0].cases[0].when;
     // "Bearer ..." matches the bearer pattern (enabled in DEFAULT_GLOBAL_RULES).
     expect(when.value).not.toContain("leaked-token");
@@ -214,7 +215,7 @@ describe("redactMetadataForUpload", () => {
     expect(when.path).toEqual(["headers", "authorization"]);
   });
 
-  test("masks array-valued sensitive headers in the projection (codex 0.6 P1)", () => {
+  test("masks array-valued sensitive headers in the projection (codex 0.6 P1)", async () => {
     // A contract's default/request headers can be multi-value ARRAYS under a
     // sensitive key. The pattern-miss values must still be masked by key.
     const metadata: UploadMetadata = {
@@ -238,13 +239,67 @@ describe("redactMetadataForUpload", () => {
       ] as unknown[],
     };
 
-    const result = redactMetadataForUpload(metadata, REDACTION);
+    const result = await redactMetadataForUpload(metadata, REDACTION);
     const headers = (result.contractsProjection as any[])[0].cases.ok.schemas.request.headers;
     expect(headers.authorization).toEqual(["[REDACTED]", "[REDACTED]"]);
     expect(headers["set-cookie"]).toEqual(["[REDACTED]"]);
   });
 
-  test("NEVER touches files[].hash / rootHash (hexKeys must not mangle sha256)", () => {
+  test("recomputes rootHash after redacting workflows (codex 0.6 P2)", async () => {
+    // workflows participate in rootHash. buildMetadata hashed the UNREDACTED
+    // workflows; redacting a secret out of one (a branch compare value) must
+    // re-hash so the uploaded payload stays self-consistent.
+    const workflows: unknown[] = [
+      {
+        id: "wf",
+        exportName: "wf",
+        gradeSummary: { full: 1, partial: 0, opaque: 0 },
+        nodes: [
+          {
+            kind: "branch",
+            id: "b",
+            grade: "full",
+            cases: [
+              {
+                when: {
+                  kind: "compare",
+                  op: "eq",
+                  path: ["h", "authorization"],
+                  value: "Bearer leaked-token",
+                },
+                nodes: [],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const files = { "x.flow.ts": { hash: "sha256-" + "a".repeat(64), exports: [] } };
+    const staleRoot = await computeRootHash(files as any, undefined, workflows);
+    const metadata: UploadMetadata = {
+      ...baseMetadata(),
+      files,
+      rootHash: staleRoot,
+      workflows,
+    };
+
+    const result = await redactMetadataForUpload(metadata, REDACTION);
+
+    // The leaked token is gone from the redacted workflow.
+    const maskedValue = (result.workflows as any[])[0].nodes[0].cases[0].when.value;
+    expect(maskedValue).not.toContain("leaked-token");
+    // rootHash recomputed over the REDACTED workflows: no longer the stale hash,
+    // and exactly the hash of what we actually upload.
+    expect(result.rootHash).not.toBe(staleRoot);
+    expect(result.rootHash).toBe(
+      await computeRootHash(files as any, undefined, result.workflows as unknown[]),
+    );
+  });
+
+  test("NEVER touches files[].hash / rootHash when only contractsProjection is present", async () => {
+    // contractsProjection is NOT part of rootHash, so redacting it must leave
+    // rootHash and file hashes verbatim (the hexKeys pattern would otherwise
+    // mangle the sha256 and corrupt the server's registry/dedup).
     const metadata: UploadMetadata = {
       ...baseMetadata(),
       rootHash: "sha256-" + "f".repeat(64),
@@ -252,20 +307,20 @@ describe("redactMetadataForUpload", () => {
       contractsProjection: [{ id: "noop", cases: {} }] as unknown[],
     } as UploadMetadata;
 
-    const result = redactMetadataForUpload(metadata, REDACTION);
+    const result = await redactMetadataForUpload(metadata, REDACTION);
 
     expect(result.files["users.contract.ts"].hash).toBe("sha256-" + "a".repeat(64));
     expect((result as any).rootHash).toBe("sha256-" + "f".repeat(64));
   });
 
-  test("returns the input unchanged when no projection buckets are present", () => {
+  test("returns the input unchanged when no projection buckets are present", async () => {
     const metadata = baseMetadata();
-    const result = redactMetadataForUpload(metadata, REDACTION);
+    const result = await redactMetadataForUpload(metadata, REDACTION);
     // Same reference — cheap no-op for the common (no-projection) upload.
     expect(result).toBe(metadata);
   });
 
-  test("does not mutate the input projection", () => {
+  test("does not mutate the input projection", async () => {
     const metadata: UploadMetadata = {
       ...baseMetadata(),
       contractsProjection: [
@@ -274,7 +329,7 @@ describe("redactMetadataForUpload", () => {
     };
     const snapshot = JSON.parse(JSON.stringify(metadata.contractsProjection));
 
-    redactMetadataForUpload(metadata, REDACTION);
+    await redactMetadataForUpload(metadata, REDACTION);
 
     expect(metadata.contractsProjection).toEqual(snapshot);
   });

@@ -87,6 +87,13 @@ export interface UploadResultPayload {
     schemaVersion: string;
     generatedBy: string;
     generatedAt: string;
+    /**
+     * Bundle-integrity hash over files + flat contracts + workflows. Declared
+     * here because the upload path recomputes it after redacting `workflows`
+     * (which participate in the hash) so the uploaded payload stays
+     * self-consistent — see lib/redact-metadata.ts.
+     */
+    rootHash?: string;
     testCount: number;
     fileCount: number;
     tags: string[];

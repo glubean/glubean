@@ -1088,13 +1088,39 @@ describe("redactValue", () => {
     expect(result.required).toEqual(["password", "token"]);
   });
 
-  test("masks nested array-of-arrays under a sensitive key (codex 0.6 P1)", () => {
+  test("masks nested array-of-arrays under a multi-value header key (codex 0.6 P1)", () => {
     const projection = { authorization: [["a", "b"], ["c"]] };
     const result = redactValue(projection, {
       globalRules: { sensitiveKeys: ["authorization"], patterns: [], customPatterns: [] },
       replacementFormat: "simple",
     }) as any;
     expect(result.authorization).toEqual([["[REDACTED]", "[REDACTED]"], ["[REDACTED]"]]);
+  });
+
+  test("preserves schema keyword arrays under sensitive property names (codex 0.6 P2)", () => {
+    // `dependentRequired: { password: ["mfaCode"] }` — `password` is a
+    // sensitive NAME, but the array is a structural list of property names,
+    // NOT secret values. Only multi-value header/cookie arrays are masked by
+    // key; this structural array must survive intact.
+    const projection = {
+      schemas: {
+        request: {
+          body: {
+            type: "object",
+            properties: { password: { type: "string" }, mfaCode: { type: "string" } },
+            dependentRequired: { password: ["mfaCode"] },
+          },
+        },
+      },
+    };
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: ["password"], patterns: [], customPatterns: [] },
+      replacementFormat: "simple",
+    }) as any;
+    // The structural array under the sensitive-named `password` key is intact.
+    expect(result.schemas.request.body.dependentRequired.password).toEqual(["mfaCode"]);
+    // And the schema node under `properties.password` keeps its shape.
+    expect(result.schemas.request.body.properties.password).toEqual({ type: "string" });
   });
 
   test("redacts pattern matches deep inside arrays (examples)", () => {

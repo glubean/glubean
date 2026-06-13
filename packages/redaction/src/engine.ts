@@ -36,6 +36,18 @@ export interface RedactionEngineOptions {
    * under a sensitive key (e.g. `authorization: "Bearer …"`) are still masked.
    */
   sensitiveKeyRecurse?: boolean;
+  /**
+   * Lower-cased keys whose ARRAY value is a multi-value scalar secret (an HTTP
+   * multi-value header/cookie such as `authorization` / `set-cookie`) rather
+   * than structure. In `sensitiveKeyRecurse` mode, ONLY these keys have their
+   * array ELEMENTS masked (the array's scalars inherit the key's sensitivity);
+   * every other sensitive key's array is recursed/preserved, because a
+   * sensitive PROPERTY NAME in a JSON Schema can legitimately carry a
+   * structural array (e.g. `dependentRequired: { password: ["mfaCode"] }`)
+   * that must NOT be mangled. Ignored when `sensitiveKeyRecurse` is false.
+   * Default: empty (no array gets element-masked by key).
+   */
+  multiValueSecretKeys?: Set<string>;
 }
 
 /**
@@ -60,12 +72,14 @@ export class RedactionEngine {
   private readonly replacementFormat: "simple" | "labeled" | "partial";
   private readonly maxDepth: number;
   private readonly sensitiveKeyRecurse: boolean;
+  private readonly multiValueSecretKeys: Set<string>;
 
   constructor(options: RedactionEngineOptions) {
     this.plugins = options.plugins;
     this.replacementFormat = options.replacementFormat;
     this.maxDepth = options.maxDepth ?? 10;
     this.sensitiveKeyRecurse = options.sensitiveKeyRecurse ?? false;
+    this.multiValueSecretKeys = options.multiValueSecretKeys ?? new Set();
   }
 
   /**
@@ -168,20 +182,24 @@ export class RedactionEngine {
         // Recurse-mode: a sensitive key over a container keeps its structure
         // so JSON-Schema nodes aren't flattened to a redaction string.
         //
-        // OBJECT vs ARRAY split (codex 0.6 P1): an OBJECT under a sensitive key
-        // is treated as schema structure — recurse, and (by the documented
-        // boundary) inner scalars under NON-sensitive sub-keys are left alone.
-        // But an ARRAY directly under a sensitive key is values-OF-the-secret,
-        // not structure: a multi-value header/cookie like
-        // `authorization: ["dev-token"]` / `set-cookie: ["sid=abc"]`. Its
-        // elements are visited under "0"/"1", which no plugin sees as
-        // sensitive, so plain recursion would leak them unless they happened to
-        // match a value pattern. The array's scalar elements therefore INHERIT
-        // the parent key's sensitivity and must be masked (object elements stay
-        // recursed to preserve nested schema + catch nested sensitive keys).
+        // OBJECT vs ARRAY split (codex 0.6 P1/P2): an OBJECT under a sensitive
+        // key is schema structure — recurse, and (by the documented boundary)
+        // inner scalars under NON-sensitive sub-keys are left alone.
+        //
+        // An ARRAY is ambiguous: it is values-OF-the-secret for a multi-value
+        // HTTP header/cookie (`authorization: ["dev-token"]`,
+        // `set-cookie: ["sid=abc"]`) — whose elements, visited under "0"/"1",
+        // no plugin sees as sensitive, so plain recursion would LEAK them
+        // (P1) — but it is STRUCTURE for a JSON-Schema keyword keyed by a
+        // sensitive property name (`dependentRequired: { password: ["mfaCode"]
+        // }`), where masking the elements would corrupt the schema (P2). We
+        // cannot tell these apart by shape, so element-masking is restricted to
+        // the known multi-value header/cookie keys (`multiValueSecretKeys`);
+        // every other sensitive key's array is recursed/preserved (its scalars
+        // still get value-pattern checks).
         const isContainer = value !== null && typeof value === "object";
         if (this.sensitiveKeyRecurse && isContainer) {
-          if (Array.isArray(value)) {
+          if (Array.isArray(value) && this.multiValueSecretKeys.has(key.toLowerCase())) {
             const r = this.maskSensitiveArray(
               value,
               scope,
