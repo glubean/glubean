@@ -804,14 +804,26 @@ export async function extractContractFromFile(
 // =============================================================================
 
 /**
- * Find all .contract.{ts,js,mjs}, .flow.{ts,js,mjs}, and
- * .bootstrap.{ts,js,mjs} files in a directory tree.
+ * Find all .contract.{ts,js,mjs}, .workflow.{ts,js,mjs}, .flow.{ts,js,mjs},
+ * and .bootstrap.{ts,js,mjs} files in a directory tree.
  *
  * v10 attachment model §7.4 mandates eager loading of `.bootstrap.` files
  * so overlay registrations fire during module evaluation. Without this,
  * filtered runs (CLI / MCP) could miss overlay registrations and silently
  * fall through to the no-overlay path.
  */
+// Declaration files safe to runtime-import. Matched by SUFFIX, not substring:
+// a `.workflow.` substring would also import `checkout.workflow.test.ts` /
+// `foo.workflow.config.ts` — non-artifact files that can throw on import or
+// run top-level side effects, and (for test files) violate the scanner's
+// never-import-test-files invariant (codex 0.6 P2).
+const ARTIFACT_FILE_SUFFIXES = [
+  ".contract.ts", ".contract.js", ".contract.mjs",
+  ".workflow.ts", ".workflow.js", ".workflow.mjs",
+  ".flow.ts", ".flow.js", ".flow.mjs",
+  ".bootstrap.ts", ".bootstrap.js", ".bootstrap.mjs",
+];
+
 function findContractAndFlowFiles(dir: string): string[] {
   const files: string[] = [];
   const walk = (d: string) => {
@@ -821,12 +833,7 @@ function findContractAndFlowFiles(dir: string): string[] {
       if (statSync(full).isDirectory()) walk(full);
       else {
         const base = basename(entry);
-        if (
-          base.includes(".contract.") ||
-          base.includes(".workflow.") ||
-          base.includes(".flow.") ||
-          base.includes(".bootstrap.")
-        ) {
+        if (ARTIFACT_FILE_SUFFIXES.some((suffix) => base.endsWith(suffix))) {
           files.push(full);
         }
       }

@@ -127,9 +127,11 @@ export const plain = workflow("wf-gate-plain")
   expect(gated.map((wf) => wf.id)).toEqual(["wf-gate-poll"]); // plain workflow NOT gated
 });
 
-test("extractContractsFromProject finds workflows in a canonical .workflow.ts file", async () => {
+test("extractContractsFromProject finds .workflow.ts artifacts but never imports .workflow.test.ts", async () => {
   // The project-level finder (glubean contracts / MCP / OpenAPI) must pick up
-  // `.workflow.ts` files, not just `.flow.ts` (codex 0.6 P2).
+  // canonical `.workflow.ts` artifacts (codex 0.6 P2) — but match by SUFFIX,
+  // not the `.workflow.` substring, or it would import a normal test file like
+  // `decoy.workflow.test.ts` (violating the never-import-test-files invariant).
   await writeFile(
     join(dir, "checkout.workflow.ts"),
     `
@@ -140,7 +142,15 @@ export const journey = workflow("checkout-journey")
   .build();
 `,
   );
+  // A test file whose name contains ".workflow." — if the finder imported it
+  // (substring match) the top-level throw would surface as an extraction error.
+  await writeFile(
+    join(dir, "decoy.workflow.test.ts"),
+    `throw new Error("test files must never be runtime-imported by the finder");\n`,
+  );
   const { extractContractsFromProject } = await import("@glubean/scanner");
-  const { workflows } = await extractContractsFromProject(dir);
+  const { workflows, errors } = await extractContractsFromProject(dir);
   expect(workflows.map((wf) => wf.id)).toContain("checkout-journey");
+  // The decoy was NOT imported — no error from its top-level throw.
+  expect(errors).toEqual([]);
 });

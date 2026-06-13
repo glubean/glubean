@@ -313,6 +313,28 @@ function isGlubeanTestFile(name: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => name.endsWith(suffix));
 }
 
+// Files that carry contract/workflow DECLARATIONS and are safe to
+// runtime-import for extraction. Matched by SUFFIX, not substring: a normal
+// test like `checkout.workflow.test.ts` ends in `.test.ts` and must stay on
+// the static test path — a `.workflow.` substring would mis-route it into
+// contract extraction (which ignores `test()` exports), silently dropping its
+// tests (codex 0.6 P2).
+const RUNTIME_ARTIFACT_SUFFIXES = [
+  ".contract.ts",
+  ".contract.js",
+  ".contract.mjs",
+  ".workflow.ts",
+  ".workflow.js",
+  ".workflow.mjs",
+  ".flow.ts",
+  ".flow.js",
+  ".flow.mjs",
+];
+
+function isRuntimeExtractableArtifact(name: string): boolean {
+  return RUNTIME_ARTIFACT_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
+
 function isBootstrapOnlyFile(name: string): boolean {
   return name.endsWith(".bootstrap.ts");
 }
@@ -517,11 +539,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
 
   const content = await readFile(filePath, "utf-8");
 
-  if (
-    filePath.includes(".contract.") ||
-    filePath.includes(".flow.") ||
-    filePath.includes(".workflow.")
-  ) {
+  if (isRuntimeExtractableArtifact(filePath)) {
     // Runtime extraction via shared function (supports .with() syntax).
     // Returns BOTH contracts and workflows; `.workflow.ts` / `.flow.ts` files
     // often export only workflows, so we must emit one DiscoveredTest per
