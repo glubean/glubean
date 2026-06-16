@@ -90,6 +90,10 @@ export class RunnerCore {
     const instance = ky.create({
       fetch: hostFetch as typeof fetch,
       throwHttpErrors: false,
+      // Match the node harness default: no implicit retries (authors opt in
+      // per-request). ky 2 retries GET/HEAD by default, which would mask
+      // transient failures and emit extra requests/traces. (codex engine P2)
+      retry: 0,
       hooks: {
         beforeRequest: [
           ({ request }) => {
@@ -131,8 +135,13 @@ export class RunnerCore {
           if (def.setup) state = await def.setup(ctx);
           for (const step of def.steps ?? []) {
             scope.stepIndex += 1;
+            const failedBefore = scope.assertions.total - scope.assertions.passed;
             const next = await step.fn(ctx, state);
             if (next !== undefined) state = next;
+            // Stop after a soft assertion failure in this step — later steps are
+            // skipped so they can't run side effects (node harness parity). A
+            // thrown step already exits via the outer catch. (codex engine P2)
+            if (scope.assertions.total - scope.assertions.passed > failedBefore) break;
           }
         } finally {
           // teardown runs even when setup/a step throws (builder contract); its
@@ -214,7 +223,11 @@ function withPrefixUrlAlias(instance: KyInstance): GlubeanHttp {
       if (prop === "extend") {
         return (opts: unknown) =>
           withPrefixUrlAlias(
-            target.extend(typeof opts === "function" ? (opts as never) : (mapOpts(opts) as never)),
+            target.extend(
+              typeof opts === "function"
+                ? (((parent: unknown) => mapOpts((opts as (p: unknown) => unknown)(parent))) as never)
+                : (mapOpts(opts) as never),
+            ),
           );
       }
       const value = Reflect.get(target, prop, recv);

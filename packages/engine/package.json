@@ -1,6 +1,7 @@
 {
   "name": "@glubean/engine",
   "version": "0.6.0",
+  "private": true,
   "type": "module",
   "description": "Environment-agnostic run-loop core shared by the Node runner and the browser host.",
   "exports": {
