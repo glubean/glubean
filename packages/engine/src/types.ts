@@ -62,7 +62,7 @@ export type ExecutionEvent =
   | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown }
   | { type: "trace"; id: string; method: string; url: string; status: number; timeMs: number }
   | { type: "log"; id: string; message: string; data?: unknown }
-  | { type: "status"; id: string; status: "ok" | "error"; error?: string };
+  | { type: "status"; id: string; status: "ok" | "error" | "skipped"; error?: string };
 
 /** Host port: where execution events go. node = stdout stream / browser = collector. */
 export interface EventSink {
@@ -111,7 +111,7 @@ export interface ScopeInput {
 export interface TestResult {
   id: string;
   name: string;
-  status: "ok" | "error";
+  status: "ok" | "error" | "skipped";
   error?: string;
   assertions: { total: number; passed: number };
 }
@@ -122,7 +122,7 @@ export interface StepDef {
   fn: TestFn;
 }
 export interface TestDef {
-  meta: { id: string; name?: string; tags?: string[] };
+  meta: { id: string; name?: string; tags?: string[]; skip?: boolean; only?: boolean };
   type: "simple" | "steps";
   fn?: TestFn;
   setup?: TestFn;

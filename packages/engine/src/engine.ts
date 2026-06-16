@@ -44,6 +44,17 @@ export class RunnerCore {
    * continuation in user code — executes inside runWithRuntime(scope.runtime).
    */
   run(def: TestDef, input: ScopeInput = {}): Promise<TestResult> {
+    // Honor an explicitly skipped test: never execute it (no side effects) —
+    // node-harness parity (codex B4 P2).
+    if (def.meta.skip) {
+      this.services.events.emit({ type: "status", id: def.meta.id, status: "skipped" });
+      return Promise.resolve({
+        id: def.meta.id,
+        name: def.meta.name ?? def.meta.id,
+        status: "skipped",
+        assertions: { total: 0, passed: 0 },
+      });
+    }
     const scope = this.createScope(def, input);
     return runWithRuntime(scope.runtime, () => this.runLoop(def, scope));
   }
@@ -282,7 +293,7 @@ function withPrefixUrlAlias(instance: KyInstance): GlubeanHttp {
 // --- resolve helpers: map SDK module exports → engine TestDef -----------------
 // Structural shape of an SDK Test (we avoid importing the heavy generic type).
 interface SdkTestShape {
-  meta: { id: string; name?: string; tags?: string[] | string };
+  meta: { id: string; name?: string; tags?: string[] | string; skip?: boolean; only?: boolean };
   type: "simple" | "steps";
   fn?: unknown;
   setup?: unknown;
@@ -334,7 +345,7 @@ function toTestDef(t: SdkTestShape): TestDef {
   // SDK step fns take the SDK TestContext; the engine provides the narrow subset
   // at runtime, so the cast is sound for the Stage-1 surface.
   return {
-    meta: { id: t.meta.id, name: t.meta.name, tags },
+    meta: { id: t.meta.id, name: t.meta.name, tags, skip: t.meta.skip, only: t.meta.only },
     type: t.type,
     fn: t.fn as TestFn | undefined,
     setup: t.setup as TestFn | undefined,

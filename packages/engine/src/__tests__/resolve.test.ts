@@ -60,6 +60,21 @@ describe("engine.resolve — runtime expansion of SDK module exports", () => {
     ]);
   });
 
+  it("carries skip metadata and never executes a skipped test (codex B4 P2)", async () => {
+    let ran = false;
+    const ns = {
+      skipped: test.skip("skip-me", async () => {
+        ran = true;
+      }),
+    };
+    const engine = new RunnerCore(services());
+    const [def] = engine.resolve(ns);
+    expect(def!.meta.skip).toBe(true);
+    const res = await engine.run(def!);
+    expect(res.status).toBe("skipped");
+    expect(ran).toBe(false); // no execution, no side effects
+  });
+
   it("each rows run with their row data; a wrong row fails in isolation", async () => {
     const ns = {
       rows: test.each([
