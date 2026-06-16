@@ -125,17 +125,22 @@ export class RunnerCore {
         await def.fn(ctx);
       } else {
         let state: unknown;
-        if (def.setup) state = await def.setup(ctx);
-        for (const step of def.steps ?? []) {
-          scope.stepIndex += 1;
-          const next = await step.fn(ctx, state);
-          if (next !== undefined) state = next;
-        }
-        if (def.teardown) {
-          try {
-            await def.teardown(ctx, state);
-          } catch {
-            /* teardown errors don't fail the run (parity with node harness) */
+        try {
+          if (def.setup) state = await def.setup(ctx);
+          for (const step of def.steps ?? []) {
+            scope.stepIndex += 1;
+            const next = await step.fn(ctx, state);
+            if (next !== undefined) state = next;
+          }
+        } finally {
+          // teardown runs even when setup/a step throws (builder contract); its
+          // own errors never fail the run (parity with the node harness). (codex P2)
+          if (def.teardown) {
+            try {
+              await def.teardown(ctx, state);
+            } catch {
+              /* swallow */
+            }
           }
         }
       }
