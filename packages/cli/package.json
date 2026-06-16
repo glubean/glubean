@@ -1,6 +1,7 @@
 {
   "name": "@glubean/cli",
   "version": "0.6.0",
+  "engines": { "node": ">=22" },
   "type": "module",
   "bin": {
     "glubean": "./bin/gb.js"

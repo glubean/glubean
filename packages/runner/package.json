@@ -1,6 +1,7 @@
 {
   "name": "@glubean/runner",
   "version": "0.6.0",
+  "engines": { "node": ">=22" },
   "type": "module",
   "glubeanRunnerProtocol": "1",
   "glubeanRunnerProtocolMinimum": "1",

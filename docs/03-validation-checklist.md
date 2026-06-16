@@ -13,7 +13,7 @@
 | P0-1 | 干净安装验证 | 在全新空目录 `npm/pnpm add @glubean/sdk @glubean/cli`，不依赖 monorepo/workspace/本地源码，`import "@glubean/sdk"` 成功 | ✅ npm pack → clean install → `npx gb run .` 通过 (2026-03-12) |
 | P0-2 | npm pack 产物验证 | 每个包 `npm pack` 后 tarball 只含 dist/、package.json、README；无 src/*.ts、绝对路径、workspace 软链 | ✅ 6 包均 dist-only，无 .ts 源码泄漏 (2026-03-12) |
 | P0-3 | exports 可用性 | Node ESM 能 `import`；TypeScript 能拿到类型补全；CLI `gb` 命令可执行 | ✅ ESM import 成功，`gb --version` / `gb run .` 均可执行 (2026-03-12) |
-| P0-4 | Node 版本矩阵 | Node 20 (LTS) + Node 22 (LTS) 均通过。tsx 声称支持 18+，需实际验证 | ❌ |
+| P0-4 | Node 版本矩阵 | **Node ≥ 22 是地板**(ky 2.x 要求；所有包已声明 `engines.node >=22`)。在 Node 22 通过即可;Node 18/20 不再支持 | ❌ |
 | P0-5 | 无 Deno 残留 | 发布包内 grep 无 `Deno.`、`deno.json`、`--allow-*`、`@std/`、JSR import | ✅ scanner 保留 `jsr:` 检测模式(向后兼容)，无实际 Deno 依赖 (2026-03-12) |
 
 ### 端到端功能
@@ -74,7 +74,7 @@
 - 复杂测试形态 (multi-step, each, pick, extend, fixture)
 - HTTP client (ctx.http) 完整链路
 - 失败/超时/OOM 场景
-- Node 20/22 版本兼容性
+- Node ≥ 22 版本兼容性(ky 2.x 地板;18/20 不再支持)
 - 多包管理器兼容性
 - VSCode extension 集成 (冷启动时间、内存占用)
 
