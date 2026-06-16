@@ -1,0 +1,37 @@
+{
+  "name": "@glubean/engine",
+  "version": "0.6.0",
+  "type": "module",
+  "description": "Environment-agnostic run-loop core shared by the Node runner and the browser host.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
+    "pretest": "node -e \"const fs=require('fs'),p=require('path');const bad=fs.readdirSync('src',{recursive:true}).filter(f=>(/\\.(js|d\\.ts)$/.test(f)&&!f.endsWith('.mjs'))).map(f=>p.join('src',f));if(bad.length){console.error('ERROR: Stale build artifacts in src/ — delete them:',bad);process.exit(1)}\"",
+    "test": "vitest run"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@glubean/sdk": "workspace:*",
+    "ky": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glubean/glubean.git",
+    "directory": "packages/engine"
+  }
+}

@@ -9,27 +9,26 @@
  * the negative-control test installs the globalThis single-slot carrier and the
  * SAME interleaving test must then leak — proving the gate is sensitive.
  *
- * Narrow run-loop only: simple + linear steps. No branch / poll / retry / timeout
- * / workflow (Stage 2).
+ * HTTP (Decision B): each run gets a REAL ky instance built with the host-injected
+ * fetch + scope-bound trace hooks (keyed by Request, not ky NormalizedOptions —
+ * codex P1-2). ky owns the http facade; we only alias the SDK's public `prefixUrl`
+ * to ky 2's `prefix` at the boundary (codex P2-5). Narrow run-loop only: simple +
+ * linear steps. No branch / poll / retry / timeout / workflow (Stage 2).
  */
+import ky, { type KyInstance } from "ky";
 import { Expectation } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
   EngineContext,
   ExecutionScope,
-  ExtendOpts,
-  HttpCallOpts,
-  HttpClientLike,
-  HttpResponseData,
-  ResponseLike,
-  ResponsePromise,
   RunnerServices,
   ScopeInput,
   TestDef,
   TestResult,
-  Transport,
 } from "./types.js";
+
+const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head"]);
 
 export class RunnerCore {
   constructor(private readonly services: RunnerServices) {
@@ -48,16 +47,12 @@ export class RunnerCore {
   }
 
   private createScope(def: TestDef, input: ScopeInput): ExecutionScope {
-    const { env, transport, events, scheduler } = this.services;
+    const { env, events, scheduler } = this.services;
     const vars = { ...env.vars(), ...(input.vars ?? {}) };
     const secrets = { ...env.secrets(), ...(input.secrets ?? {}) };
     const session: Record<string, unknown> = { ...(input.session ?? {}) };
 
-    const http = createHttpFacade({
-      transport,
-      emit: (e) => events.emit(e),
-      now: () => scheduler.now(),
-    });
+    const http = this.createScopedKy();
 
     const scope: ExecutionScope = {
       runtime: undefined as unknown as InternalRuntime,
@@ -80,6 +75,41 @@ export class RunnerCore {
       log: (message: string, data?: unknown) => events.emit({ type: "log", message, data }),
     };
     return scope;
+  }
+
+  /**
+   * Build a per-run ky instance: host fetch + scope-bound trace hooks. Trace is
+   * keyed by the Request object (per-scope WeakMap), NOT ky NormalizedOptions
+   * (codex P1-2: ky 2 strips ky options from hook state). throwHttpErrors:false
+   * matches the node harness default so 4xx/5xx surface as responses, not throws.
+   */
+  private createScopedKy(): KyInstance {
+    const { fetch: hostFetch, events, scheduler } = this.services;
+    const startedAt = new WeakMap<Request, number>();
+    const instance = ky.create({
+      fetch: hostFetch as typeof fetch,
+      throwHttpErrors: false,
+      hooks: {
+        beforeRequest: [
+          ({ request }) => {
+            startedAt.set(request, scheduler.now());
+          },
+        ],
+        afterResponse: [
+          ({ request, response }) => {
+            const t0 = startedAt.get(request) ?? scheduler.now();
+            events.emit({
+              type: "trace",
+              method: request.method,
+              url: request.url,
+              status: response.status,
+              timeMs: scheduler.now() - t0,
+            });
+          },
+        ],
+      },
+    });
+    return withPrefixUrlAlias(instance);
   }
 
   private async runLoop(def: TestDef, scope: ExecutionScope): Promise<TestResult> {
@@ -156,78 +186,36 @@ export class RunnerCore {
   }
 }
 
-// --- minimal scope-bound HttpFacade over the injected Transport ---------------
-// ky-shaped enough for configure().http (extend + methods + ResponsePromise),
-// emitting a scope-attributed trace per request. NOT full HttpFacade parity
-// (Stage 2); just the surface the carrier proof needs (codex Track A P2-2).
-
-interface FacadeConfig {
-  transport: Transport;
-  emit: (e: { type: "trace"; method: string; url: string; status: number; timeMs: number }) => void;
-  now: () => number;
-  prefixUrl?: string;
-  headers?: Record<string, string>;
-}
-
-function createHttpFacade(cfg: FacadeConfig): HttpClientLike {
-  const call = (defaultMethod: string) => (url: string, opts: HttpCallOpts = {}): ResponsePromise => {
-    const method = (opts.method ?? defaultMethod).toUpperCase();
-    const finalUrl = cfg.prefixUrl ? joinUrl(cfg.prefixUrl, url) : url;
-    const headers: Record<string, string> = { ...(cfg.headers ?? {}), ...(opts.headers ?? {}) };
-    let body = opts.body;
-    if (opts.json !== undefined) {
-      body = JSON.stringify(opts.json);
-      if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
-        headers["content-type"] = "application/json";
-      }
+/**
+ * Preserve Glubean's public `prefixUrl` option over ky 2 (which renamed it to
+ * `prefix`). A Proxy over the real ky instance keeps the full KyInstance surface
+ * and only rewrites `prefixUrl` → `prefix` on calls and `.extend()` (codex P2-5).
+ * `prefix` (not `baseUrl`) preserves the ky-1 join semantics for "users" / "/users".
+ */
+function withPrefixUrlAlias(instance: KyInstance): KyInstance {
+  const mapOpts = (opts: unknown): unknown => {
+    if (opts && typeof opts === "object" && "prefixUrl" in opts) {
+      const { prefixUrl, ...rest } = opts as Record<string, unknown>;
+      return { ...rest, prefix: prefixUrl };
     }
-    const t0 = cfg.now();
-    const promise = cfg.transport.request({ method, url: finalUrl, headers, body }).then((res) => {
-      cfg.emit({ type: "trace", method, url: finalUrl, status: res.status, timeMs: res.timeMs ?? cfg.now() - t0 });
-      return toResponseLike(res);
-    });
-    return makeResponsePromise(promise);
+    return opts;
   };
-
-  const http = ((url: string, opts?: HttpCallOpts) => call((opts?.method ?? "GET"))(url, opts)) as HttpClientLike;
-  http.get = call("GET");
-  http.post = call("POST");
-  http.put = call("PUT");
-  http.patch = call("PATCH");
-  http.delete = call("DELETE");
-  http.head = call("HEAD");
-  http.extend = (ext: ExtendOpts) =>
-    createHttpFacade({
-      ...cfg,
-      prefixUrl: typeof ext.prefixUrl === "string" ? ext.prefixUrl : cfg.prefixUrl,
-      headers: { ...(cfg.headers ?? {}), ...(ext.headers ?? {}) },
-    });
-  return http;
-}
-
-function makeResponsePromise(p: Promise<ResponseLike>): ResponsePromise {
-  const rp = p as ResponsePromise;
-  rp.json = () => p.then((r) => r.json());
-  rp.text = () => p.then((r) => r.text());
-  return rp;
-}
-
-function toResponseLike(res: HttpResponseData): ResponseLike {
-  const hget = (k: string) => {
-    const hit = (res.headers ?? []).find(([hk]) => hk.toLowerCase() === String(k).toLowerCase());
-    return hit ? hit[1] : null;
-  };
-  return {
-    status: res.status,
-    statusText: res.statusText ?? "",
-    ok: res.status >= 200 && res.status < 300,
-    headers: { get: hget },
-    json: async () => JSON.parse(res.body || "null"),
-    text: async () => res.body || "",
-  };
-}
-
-function joinUrl(prefix: string, url: string): string {
-  if (/^https?:\/\//i.test(url)) return url; // absolute wins
-  return `${prefix.replace(/\/$/, "")}/${url.replace(/^\//, "")}`;
+  return new Proxy(instance, {
+    apply: (target, _thisArg, args: unknown[]) =>
+      (target as unknown as (...a: unknown[]) => unknown)(args[0], mapOpts(args[1])),
+    get: (target, prop, recv) => {
+      if (prop === "extend") {
+        return (opts: unknown) =>
+          withPrefixUrlAlias(
+            target.extend(typeof opts === "function" ? (opts as never) : (mapOpts(opts) as never)),
+          );
+      }
+      const value = Reflect.get(target, prop, recv);
+      if (typeof value === "function" && typeof prop === "string" && HTTP_METHODS.has(prop)) {
+        return (url: unknown, opts?: unknown) =>
+          (value as (...a: unknown[]) => unknown).call(target, url, mapOpts(opts));
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as KyInstance;
 }

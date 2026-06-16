@@ -4,7 +4,7 @@ import { configure, session } from "@glubean/sdk";
 import { createAlsCarrier, createGlobalThisCarrier, type RuntimeCarrier } from "@glubean/sdk/internal";
 
 import { RunnerCore } from "../engine.js";
-import type { ExecutionEvent, RunnerServices, TestDef, Transport } from "../types.js";
+import type { ExecutionEvent, FetchImpl, RunnerServices, TestDef } from "../types.js";
 
 // ============================================================================
 // Stage 1 HEADLINE go/no-go (SoT 0003 §5 Stage 1 / plan §B2,B5).
@@ -21,26 +21,27 @@ import type { ExecutionEvent, RunnerServices, TestDef, Transport } from "../type
 //                            test is sensitive to carrier leakage; not a tautology).
 // ============================================================================
 
-// Barrier transport: the first request from each party parks until all parties
-// have arrived, then all proceed — forcing two runs to interleave at their first
-// await. Later requests pass straight through. Echoes the request url in the body.
-function makeBarrierTransport(parties: number): Transport {
+// Barrier fetch: the first request from each party parks until all parties have
+// arrived, then all proceed — forcing two runs to interleave at their first await.
+// Later requests pass straight through. Echoes the final request url in the body
+// (so the configured-http prefix is observable). Returns a real Response (ky 2
+// consumes a standard fetch contract — codex P1-3).
+function makeBarrierFetch(parties: number): FetchImpl {
   let arrived = 0;
   let open = false;
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
-  return {
-    request: async (req) => {
-      if (!open) {
-        arrived += 1;
-        if (arrived >= parties) {
-          open = true;
-          release();
-        }
-        await gate;
+  return async (input) => {
+    const url = typeof input === "object" && "url" in input ? (input as Request).url : String(input);
+    if (!open) {
+      arrived += 1;
+      if (arrived >= parties) {
+        open = true;
+        release();
       }
-      return { status: 200, headers: [], body: JSON.stringify({ url: req.url }) };
-    },
+      await gate;
+    }
+    return new Response(JSON.stringify({ url }), { status: 200, headers: { "content-type": "application/json" } });
   };
 }
 
@@ -51,10 +52,10 @@ interface Obs {
   cfgHttpUrl?: string; // configure().http prefix — global getRuntime()
 }
 
-function makeServices(carrier: RuntimeCarrier, transport: Transport): RunnerServices {
+function makeServices(carrier: RuntimeCarrier, fetchImpl: FetchImpl): RunnerServices {
   const events: ExecutionEvent[] = [];
   return {
-    transport,
+    fetch: fetchImpl,
     env: { vars: () => ({}), secrets: () => ({}) },
     events: { emit: (e) => events.push(e) },
     scheduler: { now: () => 0 },
@@ -71,7 +72,8 @@ function observingDef(id: string, obs: Record<string, Obs>): TestDef {
       obs[own] = { ctxWho: own };
       await ctx.http("https://base.test/ping"); // <-- interleave barrier
       // Everything below reads through the GLOBAL carrier (getRuntime()):
-      const cfg = configure({ vars: { who: "{{WHO}}" }, http: { prefixUrl: "https://{{WHO}}.test" } });
+      // WHO in the PATH (not host) so URL normalization preserves its case.
+      const cfg = configure({ vars: { who: "{{WHO}}" }, http: { prefixUrl: "https://base.test/{{WHO}}" } });
       obs[own].cfgVarsWho = (cfg.vars as { who: string }).who;
       obs[own].sessWho = session.get("who");
       const r = (await cfg.http.get("x").json()) as { url: string };
@@ -82,7 +84,7 @@ function observingDef(id: string, obs: Record<string, Obs>): TestDef {
 
 async function runTwoInterleaved(carrier: RuntimeCarrier): Promise<Record<string, Obs>> {
   const obs: Record<string, Obs> = {};
-  const engine = new RunnerCore(makeServices(carrier, makeBarrierTransport(2)));
+  const engine = new RunnerCore(makeServices(carrier, makeBarrierFetch(2)));
   await Promise.all([
     engine.run(observingDef("A", obs), { vars: { WHO: "A" }, session: { who: "A" } }),
     engine.run(observingDef("B", obs), { vars: { WHO: "B" }, session: { who: "B" } }),
@@ -99,8 +101,8 @@ describe("engine isolation gate — two interleaved async runs", () => {
     expect(obs.B.cfgVarsWho).toBe("B");
     expect(obs.A.sessWho).toBe("A");
     expect(obs.B.sessWho).toBe("B");
-    expect(obs.A.cfgHttpUrl).toBe("https://A.test/x");
-    expect(obs.B.cfgHttpUrl).toBe("https://B.test/x");
+    expect(obs.A.cfgHttpUrl).toBe("https://base.test/A/x");
+    expect(obs.B.cfgHttpUrl).toBe("https://base.test/B/x");
   });
 
   it("NEGATIVE CONTROL — globalThis single-slot carrier LEAKS (test is sensitive)", async () => {
@@ -114,8 +116,8 @@ describe("engine isolation gate — two interleaved async runs", () => {
       obs.B.cfgVarsWho === "B" &&
       obs.A.sessWho === "A" &&
       obs.B.sessWho === "B" &&
-      obs.A.cfgHttpUrl === "https://A.test/x" &&
-      obs.B.cfgHttpUrl === "https://B.test/x";
+      obs.A.cfgHttpUrl === "https://base.test/A/x" &&
+      obs.B.cfgHttpUrl === "https://base.test/B/x";
     expect(allOwn).toBe(false);
   });
 });

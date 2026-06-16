@@ -1,37 +1,31 @@
 /**
  * @glubean/engine (Stage 1 spike) — environment-agnostic run-loop core.
  *
- * Lives in packages/runner/src/engine during the 1-week isolation gate; promotes
- * to packages/engine once the gate is green (see lite docs/tech-decisions/
- * 0003-step1-execution.md). NodeHost stays node orchestration, browser stays the
- * browser host.
+ * Lives in packages/engine during the isolation gate; both hosts reference it:
+ * @glubean/runner (NodeHost) and lite's BrowserHost. Hosts implement the ports
+ * and drive RunnerCore; the run-loop semantics live here, written once.
  *
- * Stage 1 goal (the headline go/no-go): prove the run-loop can be expressed using
- * ONLY injected services + an explicit per-run ExecutionScope, with NO module-
- * global coupling, so per-run isolation is delegated entirely to the injected
- * Carrier port. Narrow run-loop only (simple / linear steps); branch / poll /
+ * HTTP architecture (Decision B, codex-reviewed): run REAL ky in BOTH hosts. The
+ * host seam is the web-standard `fetch`; the engine builds a per-run ky instance
+ * with the injected fetch + scope-bound trace hooks and exposes it as
+ * `scope.runtime.http`. ky (extend/hooks/retry/timeout/configure().http) is then
+ * shared, written once — no hand-rolled HttpFacade.
+ *
+ * Stage 1 goal (headline go/no-go): prove per-run isolation is delegated entirely
+ * to the injected Carrier port via an explicit ExecutionScope, with NO module-
+ * global coupling. Narrow run-loop only (simple / linear steps); branch / poll /
  * retry / timeout / workflow are Stage 2.
  */
+import type { KyInstance } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
 
-export interface HttpRequestData {
-  method: string;
-  url: string;
-  headers?: Record<string, string>;
-  body?: string;
-}
-export interface HttpResponseData {
-  status: number;
-  statusText?: string;
-  headers?: [string, string][];
-  body?: string;
-  timeMs?: number;
-}
-
-/** Host port: the only HTTP egress. node = ky (internal) / browser = extension bridge RPC. */
-export interface Transport {
-  request(req: HttpRequestData): Promise<HttpResponseData>;
-}
+/**
+ * Host port: the only HTTP egress, as the web-standard `fetch`. node = node fetch
+ * (undici) / browser = a fetch wrapping the CORS-bypass extension or direct fetch.
+ * The browser wrapper MUST honor the real fetch contract (Request/URL + init,
+ * AbortSignal, clone-before-read) — see fetch-conformance tests. (codex P1-3)
+ */
+export type FetchImpl = (input: Request | string | URL, init?: RequestInit) => Promise<Response>;
 
 /** Host port: vars are available everywhere; secrets are node-only (never browser). */
 export interface EnvProvider {
@@ -64,7 +58,7 @@ export interface Scheduler {
  * AsyncContext-style propagation later — an open decision, not this gate).
  */
 export interface RunnerServices {
-  transport: Transport;
+  fetch: FetchImpl;
   env: EnvProvider;
   events: EventSink;
   scheduler: Scheduler;
@@ -114,46 +108,12 @@ export interface TestDef {
 
 /** The minimal ctx surface Stage 1 exercises — scope-bound, never module globals. */
 export interface EngineContext {
-  http: HttpClientLike;
+  /** ky instance for this run (the same shared ky both hosts use). */
+  http: KyInstance;
   expect(actual: unknown): unknown;
   vars: { get(k: string): string | undefined; require(k: string): string };
   session: { get(k: string): unknown; set(k: string, v: unknown): void };
   log(message: string, data?: unknown): void;
-}
-
-/** ky-shaped enough for configure().http (extend + methods + ResponsePromise). */
-export interface HttpCallOpts {
-  method?: string;
-  headers?: Record<string, string>;
-  json?: unknown;
-  body?: string;
-}
-export interface ExtendOpts {
-  prefixUrl?: string;
-  headers?: Record<string, string>;
-  [k: string]: unknown;
-}
-export interface ResponseLike {
-  status: number;
-  statusText: string;
-  ok: boolean;
-  headers: { get(k: string): string | null };
-  json(): Promise<unknown>;
-  text(): Promise<string>;
-}
-export interface ResponsePromise extends Promise<ResponseLike> {
-  json(): Promise<unknown>;
-  text(): Promise<string>;
-}
-export interface HttpClientLike {
-  (url: string, opts?: HttpCallOpts): ResponsePromise;
-  get(url: string, opts?: HttpCallOpts): ResponsePromise;
-  post(url: string, opts?: HttpCallOpts): ResponsePromise;
-  put(url: string, opts?: HttpCallOpts): ResponsePromise;
-  patch(url: string, opts?: HttpCallOpts): ResponsePromise;
-  delete(url: string, opts?: HttpCallOpts): ResponsePromise;
-  head(url: string, opts?: HttpCallOpts): ResponsePromise;
-  extend(opts: ExtendOpts): HttpClientLike;
 }
 
 /**
@@ -166,6 +126,6 @@ export interface ExecutionScope {
   testMeta: { id: string; tags: string[] };
   stepIndex: number;
   assertions: { total: number; passed: number };
-  http: HttpClientLike;
+  http: KyInstance;
   session: Record<string, unknown>;
 }
