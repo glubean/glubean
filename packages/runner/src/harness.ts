@@ -901,17 +901,17 @@ const ctx = {
 // ---------------------------------------------------------------------------
 // Auto-tracing HTTP client (ctx.http) — powered by ky
 // ---------------------------------------------------------------------------
-// Per-request state stored in a WeakMap keyed by the ky Request object (the same
-// reference flows through beforeRequest → afterResponse for a single attempt).
-// ky 2 strips ky-specific options from the hook state and gives no stable
-// NormalizedOptions identity, so we key by Request, not options (codex ky2 P1-2).
-// This avoids the read-await-write race that global variables had when multiple
-// requests were in flight (e.g. Promise.all).
+// Per-request state stored in a WeakMap keyed by ky 2's per-request
+// `options.context` object. ky 2 guarantees `context` is always the SAME object
+// across beforeRequest → afterResponse AND it survives a hook returning a
+// replacement Request (auth helpers do `rebuildRequest`), whereas the Request
+// object and the NormalizedOptions identity do not (codex ky2 P2). This also
+// avoids the read-await-write race global variables had with in-flight requests.
 interface RequestTraceState {
   startTime: number;
   body?: unknown;
 }
-const requestTraceMap = new WeakMap<Request, RequestTraceState>();
+const requestTraceMap = new WeakMap<object, RequestTraceState>();
 
 // Capture the outgoing request body for full-trace mode. ky 2 no longer exposes
 // `options.json`, so read it off a clone of the Request (parsed if JSON).
@@ -997,16 +997,18 @@ const kyInstance = ky.create({
   retry: 0,
   hooks: {
     beforeRequest: [
-      async ({ request }) => {
-        requestTraceMap.set(request, {
+      async ({ request, options }) => {
+        requestTraceMap.set(options.context, {
           startTime: performance.now(),
           body: emitFullTrace ? await captureRequestBody(request) : undefined,
         });
       },
     ],
     afterResponse: [
-      async ({ request, response }) => {
-        const trace = requestTraceMap.get(request);
+      async ({ request, options, response }) => {
+        // `request` here is the final (possibly hook-replaced) request — correct
+        // for the trace target; the trace state is keyed by the stable context.
+        const trace = requestTraceMap.get(options.context);
         const duration = Math.round(performance.now() - (trace?.startTime ?? performance.now()));
 
         // Increment HTTP counters for summary
