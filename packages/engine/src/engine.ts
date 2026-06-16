@@ -328,22 +328,49 @@ function isSdkTest(v: unknown): v is SdkTestShape {
   );
 }
 
-// TestBuilder → Test, EachBuilder/WorkflowBuilder → Test[]. Otherwise pass through.
+// TestBuilder → Test, EachBuilder → Test[]. Otherwise pass through (workflow
+// builders are NOT built — see isBuilder).
 function autoResolveDef(v: unknown): unknown {
   return isBuilder(v) ? v.build() : v;
 }
 
+// A built workflow handle is an array tagged __glubean_type "workflow" (builder.ts).
+// Workflows are Stage 2 (no workflow ctx here), so exclude them entirely. (codex B4 P2)
+function isWorkflowHandle(v: unknown): boolean {
+  return !!v && typeof v === "object" && (v as { __glubean_type?: unknown }).__glubean_type === "workflow";
+}
+
+// test.extend() tests carry a non-empty `fixtures` map. Fixtures are Stage 2;
+// excluding keeps us from running an extended test without its fixtures. (codex B4 P2)
+function hasFixtures(v: unknown): boolean {
+  const f = (v as { fixtures?: unknown })?.fixtures;
+  return !!f && typeof f === "object" && Object.keys(f as object).length > 0;
+}
+
+// A resolved value the narrow Stage-1 engine can actually run.
+function pushIfRunnable(v: unknown, out: TestDef[]): void {
+  if (isWorkflowHandle(v) || !isSdkTest(v) || hasFixtures(v)) return;
+  out.push(toTestDef(v));
+}
+
 function collectDefs(value: unknown, out: TestDef[]): void {
+  if (isWorkflowHandle(value)) return;
   const resolved = autoResolveDef(value);
+  if (isWorkflowHandle(resolved)) return;
   if (isSdkTest(resolved)) {
-    out.push(toTestDef(resolved));
+    pushIfRunnable(resolved, out);
     return;
   }
   if (Array.isArray(resolved)) {
     for (const item of resolved) {
+      if (isWorkflowHandle(item)) continue;
       const r = autoResolveDef(item);
-      if (isSdkTest(r)) out.push(toTestDef(r));
-      else if (Array.isArray(r)) for (const inner of r) if (isSdkTest(inner)) out.push(toTestDef(inner));
+      if (isWorkflowHandle(r)) continue;
+      if (Array.isArray(r)) {
+        for (const inner of r) pushIfRunnable(inner, out);
+      } else {
+        pushIfRunnable(r, out);
+      }
     }
   }
 }

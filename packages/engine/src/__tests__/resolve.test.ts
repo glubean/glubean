@@ -75,13 +75,28 @@ describe("engine.resolve — runtime expansion of SDK module exports", () => {
     expect(ran).toBe(false); // no execution, no side effects
   });
 
-  it("does NOT resolve workflow builders (unsupported until Stage 2) (codex B4 P2)", () => {
+  it("does NOT resolve workflow builders or built workflow handles (Stage 2) (codex B4 P2)", () => {
+    // A built workflow is an array tagged __glubean_type "workflow" holding a
+    // wrapper Test (SDK builder.ts dual shape). Neither the unbuilt builder nor
+    // the built handle should become a runnable def in the narrow engine.
+    const builtWorkflowHandle = Object.assign([{ meta: { id: "wf-built" }, type: "simple", fn: async () => {} }], {
+      __glubean_type: "workflow" as const,
+    });
     const ns = {
       ok: test("ok", async () => {}),
-      wf: workflow("wf-id"), // workflow-builder: __glubean_type + build(), but no engine ctx yet
+      wfBuilder: workflow("wf-builder"), // unbuilt workflow-builder
+      wfBuilt: builtWorkflowHandle, // already-built workflow handle
     };
     const defs = new RunnerCore(services()).resolve(ns);
-    expect(defs.map((d) => d.meta.id)).toEqual(["ok"]); // workflow left out, not a broken runnable
+    expect(defs.map((d) => d.meta.id)).toEqual(["ok"]);
+  });
+
+  it("does NOT resolve test.extend() tests with fixtures (Stage 2) (codex B4 P2)", () => {
+    // SDK extended tests carry a non-empty `fixtures` map; the narrow engine has
+    // no fixture resolution, so they must be excluded, not run without fixtures.
+    const extended = { meta: { id: "ext" }, type: "simple", fn: async () => {}, fixtures: { token: async () => {} } };
+    const defs = new RunnerCore(services()).resolve({ ok: test("ok", async () => {}), ext: extended });
+    expect(defs.map((d) => d.meta.id)).toEqual(["ok"]);
   });
 
   it("each rows run with their row data; a wrong row fails in isolation", async () => {
