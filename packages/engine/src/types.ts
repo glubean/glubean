@@ -130,13 +130,21 @@ export interface TestDef {
   teardown?: TestFn;
 }
 
-/** The minimal ctx surface Stage 1 exercises — scope-bound, never module globals. */
+/**
+ * The narrow ctx surface Stage 1 exercises — scope-bound, never module globals.
+ * Structurally a subset of the SDK TestContext (http/expect/assert/warn/vars/
+ * secrets/session/log), enough to run real simple / builder / each tests. The
+ * Stage-2 surface (validate/skip/fail/setTimeout/metric/attach) is not here yet.
+ */
 export interface EngineContext {
   /** ky instance for this run (the same shared ky both hosts use), accepting the
    *  public `prefixUrl` option. */
   http: GlubeanHttp;
   expect(actual: unknown): unknown;
+  assert(condition: unknown, message?: string, details?: unknown): void;
+  warn(condition: unknown, message?: string): void;
   vars: { get(k: string): string | undefined; require(k: string): string };
+  secrets: { get(k: string): string | undefined; require(k: string): string };
   session: { get(k: string): unknown; set(k: string, v: unknown): void };
   log(message: string, data?: unknown): void;
 }

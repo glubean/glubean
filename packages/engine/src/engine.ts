@@ -26,6 +26,7 @@ import type {
   RunnerServices,
   ScopeInput,
   TestDef,
+  TestFn,
   TestResult,
 } from "./types.js";
 
@@ -45,6 +46,18 @@ export class RunnerCore {
   run(def: TestDef, input: ScopeInput = {}): Promise<TestResult> {
     const scope = this.createScope(def, input);
     return runWithRuntime(scope.runtime, () => this.runLoop(def, scope));
+  }
+
+  /**
+   * Runtime-authoritative resolution of a module namespace into runnable TestDefs
+   * (SoT §3.2: the static scanner is UI-only; this is the权威 resolver). Handles
+   * plain Test, Test[], TestBuilder, and EachBuilder — each `test.each` row
+   * becomes its own def. Narrow Stage-1 surface (no workflow/contract expansion).
+   */
+  resolve(namespace: Record<string, unknown>): TestDef[] {
+    const defs: TestDef[] = [];
+    for (const value of Object.values(namespace ?? {})) collectDefs(value, defs);
+    return defs;
   }
 
   private createScope(def: TestDef, input: ScopeInput): ExecutionScope {
@@ -184,11 +197,37 @@ export class RunnerCore {
           if (r.passed) scope.assertions.passed += 1;
           emit({ type: "assertion", id: scope.testMeta.id, passed: r.passed, actual: r.actual, expected: r.expected, message: r.message });
         }),
+      assert: (condition: unknown, message?: string, details?: unknown) => {
+        const result =
+          condition && typeof condition === "object" && "passed" in condition
+            ? (condition as { passed: boolean; actual?: unknown; expected?: unknown })
+            : { passed: !!condition };
+        const d = (details ?? {}) as { actual?: unknown; expected?: unknown };
+        scope.assertions.total += 1;
+        if (result.passed) scope.assertions.passed += 1;
+        emit({
+          type: "assertion",
+          id: scope.testMeta.id,
+          passed: result.passed,
+          actual: result.actual ?? d.actual,
+          expected: result.expected ?? d.expected,
+          message: message ?? (result.passed ? "ok" : "failed"),
+        });
+      },
+      warn: (condition: unknown, message?: string) =>
+        emit({ type: "log", id: scope.testMeta.id, message: `[warn] ${message ?? ""}`, data: { passed: !!condition } }),
       vars: {
         get: (k) => scope.runtime.vars[k],
         require: (k) => {
           if (!(k in scope.runtime.vars)) throw new Error(`missing var "${k}"`);
           return scope.runtime.vars[k];
+        },
+      },
+      secrets: {
+        get: (k) => scope.runtime.secrets[k],
+        require: (k) => {
+          if (!(k in scope.runtime.secrets)) throw new Error(`missing secret "${k}"`);
+          return scope.runtime.secrets[k];
         },
       },
       session: {
@@ -238,4 +277,68 @@ function withPrefixUrlAlias(instance: KyInstance): GlubeanHttp {
       return typeof value === "function" ? value.bind(target) : value;
     },
   }) as unknown as GlubeanHttp;
+}
+
+// --- resolve helpers: map SDK module exports → engine TestDef -----------------
+// Structural shape of an SDK Test (we avoid importing the heavy generic type).
+interface SdkTestShape {
+  meta: { id: string; name?: string; tags?: string[] | string };
+  type: "simple" | "steps";
+  fn?: unknown;
+  setup?: unknown;
+  steps?: unknown;
+  teardown?: unknown;
+}
+
+function isBuilder(v: unknown): v is { __glubean_type: string; build(): unknown } {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as { build?: unknown }).build === "function" &&
+    typeof (v as { __glubean_type?: unknown }).__glubean_type === "string"
+  );
+}
+
+function isSdkTest(v: unknown): v is SdkTestShape {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    "meta" in v &&
+    "type" in v &&
+    ((v as SdkTestShape).type === "simple" || (v as SdkTestShape).type === "steps")
+  );
+}
+
+// TestBuilder → Test, EachBuilder/WorkflowBuilder → Test[]. Otherwise pass through.
+function autoResolveDef(v: unknown): unknown {
+  return isBuilder(v) ? v.build() : v;
+}
+
+function collectDefs(value: unknown, out: TestDef[]): void {
+  const resolved = autoResolveDef(value);
+  if (isSdkTest(resolved)) {
+    out.push(toTestDef(resolved));
+    return;
+  }
+  if (Array.isArray(resolved)) {
+    for (const item of resolved) {
+      const r = autoResolveDef(item);
+      if (isSdkTest(r)) out.push(toTestDef(r));
+      else if (Array.isArray(r)) for (const inner of r) if (isSdkTest(inner)) out.push(toTestDef(inner));
+    }
+  }
+}
+
+function toTestDef(t: SdkTestShape): TestDef {
+  const tags = Array.isArray(t.meta.tags) ? t.meta.tags : typeof t.meta.tags === "string" ? [t.meta.tags] : undefined;
+  // SDK step fns take the SDK TestContext; the engine provides the narrow subset
+  // at runtime, so the cast is sound for the Stage-1 surface.
+  return {
+    meta: { id: t.meta.id, name: t.meta.name, tags },
+    type: t.type,
+    fn: t.fn as TestFn | undefined,
+    setup: t.setup as TestFn | undefined,
+    steps: t.steps as { meta: { name: string }; fn: TestFn }[] | undefined,
+    teardown: t.teardown as TestFn | undefined,
+  };
 }
