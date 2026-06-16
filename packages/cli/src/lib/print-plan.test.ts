@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { DEFAULT_CONFIG } from "@glubean/redaction";
 import type { ResolvedRunPlan } from "./config.js";
 import { formatResolvedPlan } from "./print-plan.js";
 
@@ -34,7 +35,7 @@ function makePlan(over: Partial<ResolvedRunPlan> = {}): ResolvedRunPlan {
       truncateArrays: false,
     },
     envFile: ".env",
-    redaction: { replacementFormat: "simple" },
+    redaction: { ...structuredClone(DEFAULT_CONFIG), replacementFormat: "simple" },
     thresholds: {},
     ...over,
   };
