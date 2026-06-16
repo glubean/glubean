@@ -901,15 +901,33 @@ const ctx = {
 // ---------------------------------------------------------------------------
 // Auto-tracing HTTP client (ctx.http) — powered by ky
 // ---------------------------------------------------------------------------
-// Per-request state stored in a WeakMap keyed by the ky NormalizedOptions
-// object (which IS the same reference in beforeRequest and afterResponse).
-// This avoids the read-await-write race that global variables had when
-// multiple requests were in flight (e.g. Promise.all).
+// Per-request state stored in a WeakMap keyed by the ky Request object (the same
+// reference flows through beforeRequest → afterResponse for a single attempt).
+// ky 2 strips ky-specific options from the hook state and gives no stable
+// NormalizedOptions identity, so we key by Request, not options (codex ky2 P1-2).
+// This avoids the read-await-write race that global variables had when multiple
+// requests were in flight (e.g. Promise.all).
 interface RequestTraceState {
   startTime: number;
   body?: unknown;
 }
-const requestTraceMap = new WeakMap<NormalizedOptions, RequestTraceState>();
+const requestTraceMap = new WeakMap<Request, RequestTraceState>();
+
+// Capture the outgoing request body for full-trace mode. ky 2 no longer exposes
+// `options.json`, so read it off a clone of the Request (parsed if JSON).
+async function captureRequestBody(request: Request): Promise<unknown> {
+  try {
+    const text = await request.clone().text();
+    if (!text) return undefined;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  } catch {
+    return undefined;
+  }
+}
 
 /** Max serialized body size (chars) to include in trace events. */
 const TRACE_BODY_MAX_SIZE = 1_048_576; // 1MB
@@ -979,20 +997,16 @@ const kyInstance = ky.create({
   retry: 0,
   hooks: {
     beforeRequest: [
-      
-      (_request: Request, options: NormalizedOptions) => {
-        requestTraceMap.set(options, {
+      async ({ request }) => {
+        requestTraceMap.set(request, {
           startTime: performance.now(),
-          body: emitFullTrace
-            ? ((options as unknown as Record<string, unknown>).json ?? options.body ?? undefined)
-            : undefined,
+          body: emitFullTrace ? await captureRequestBody(request) : undefined,
         });
       },
     ],
     afterResponse: [
-      
-      async (request: Request, _options: NormalizedOptions, response: Response) => {
-        const trace = requestTraceMap.get(_options);
+      async ({ request, response }) => {
+        const trace = requestTraceMap.get(request);
         const duration = Math.round(performance.now() - (trace?.startTime ?? performance.now()));
 
         // Increment HTTP counters for summary
@@ -1112,14 +1126,22 @@ function normalizeUrl(input: string | URL | Request): string | URL | Request {
 
 /**
  * Normalize options to fix ky quirks:
+ * - Map glubean's public `prefixUrl` to ky 2's renamed `prefix` option
  * - Remove empty searchParams to prevent ky from appending bare '?'
  */
 
-type KyOptionsWithSchema = KyOptions & { schema?: HttpSchemaOptions };
+type KyOptionsWithSchema = KyOptions & { schema?: HttpSchemaOptions; prefixUrl?: string };
 
 function normalizeOptions(options?: KyOptionsWithSchema): KyOptionsWithSchema | undefined {
   if (!options) return options;
   const normalized = { ...options };
+  // ky 2 renamed `prefixUrl` → `prefix` (with the same join semantics we rely on
+  // for "users" / "/users"). Glubean keeps `prefixUrl` as its public option and
+  // translates here at the ky boundary (codex ky2 P2-5; not `baseUrl`).
+  if (normalized.prefixUrl !== undefined) {
+    (normalized as Record<string, unknown>).prefix = normalized.prefixUrl;
+    delete normalized.prefixUrl;
+  }
   // Remove empty searchParams so ky doesn't append a bare '?'
   if (normalized.searchParams != null) {
     if (normalized.searchParams instanceof URLSearchParams) {
@@ -1257,7 +1279,7 @@ function wrapKy(instance: KyInstance, label = "base"): Record<string, unknown> {
     if (responseHeadersSchema) {
       const { schema, severity } = resolveSchemaEntry(responseHeadersSchema);
       type AfterResponseHook = NonNullable<NonNullable<KyOptions["hooks"]>["afterResponse"]>[number];
-      const headersHook: AfterResponseHook = (_req, _opts, response) => {
+      const headersHook: AfterResponseHook = ({ response }) => {
         const headersObj = normalizeHeadersForValidation(response.headers);
         runSchemaValidation(headersObj, schema, "response headers", severity);
       };

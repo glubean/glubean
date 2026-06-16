@@ -38,7 +38,7 @@
     "access": "public"
   },
   "dependencies": {
-    "ky": "^1.14.0",
+    "ky": "^2.0.2",
     "yaml": "^2.7.0"
   },
   "devDependencies": {

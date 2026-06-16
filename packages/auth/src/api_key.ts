@@ -34,7 +34,7 @@ export function apiKey(opts: ApiKeyOptions): ConfigureHttpOptions {
       headers: { [MARKER]: value },
       hooks: {
         beforeRequest: [
-          async (request: Request): Promise<Request> => {
+          async ({ request }: { request: Request }): Promise<Request> => {
             const keyValue = request.headers.get(MARKER);
             if (!keyValue) return request;
 

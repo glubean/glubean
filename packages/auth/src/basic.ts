@@ -31,7 +31,7 @@ export function basicAuth(opts: BasicAuthOptions): ConfigureHttpOptions {
     },
     hooks: {
       beforeRequest: [
-        async (request: Request): Promise<Request> => {
+        async ({ request }: { request: Request }): Promise<Request> => {
           const credentials = request.headers.get(MARKER);
           if (!credentials) return request;
 

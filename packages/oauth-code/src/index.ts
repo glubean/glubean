@@ -471,7 +471,7 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
     headers,
     hooks: {
       beforeRequest: [
-        async (request: Request): Promise<Request> => {
+        async ({ request }: { request: Request }): Promise<Request> => {
           const token = await ensureToken(request);
           const h = cleanMarkers(request);
           h.set("Authorization", `Bearer ${token.accessToken}`);
@@ -479,11 +479,13 @@ export function oauthCode(opts: OAuthCodeOptions): ConfigureHttpOptions {
         },
       ],
       afterResponse: [
-        async (
-          request: Request,
-          _options: HttpRequestOptions,
-          response: Response,
-        ): Promise<Response | void> => {
+        async ({
+          request,
+          response,
+        }: {
+          request: Request;
+          response: Response;
+        }): Promise<Response | void> => {
           if (response.status !== 401 || !cached?.refreshToken) return;
 
           const m = readMarkers(request);

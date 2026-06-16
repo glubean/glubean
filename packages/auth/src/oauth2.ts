@@ -58,7 +58,7 @@ function clientCredentials(opts: OAuth2ClientCredentialsOptions): ConfigureHttpO
     },
     hooks: {
       beforeRequest: [
-        async (request: Request): Promise<Request> => {
+        async ({ request }: { request: Request }): Promise<Request> => {
           const markers = [TOKEN_URL_H, CLIENT_ID_H, CLIENT_SECRET_H] as const;
 
           if (cached && cached.expiresAt > Date.now() + 30_000) {
@@ -134,7 +134,7 @@ function refreshToken(opts: OAuth2RefreshTokenOptions): ConfigureHttpOptions {
     headers,
     hooks: {
       beforeRequest: [
-        async (request: Request): Promise<Request> => {
+        async ({ request }: { request: Request }): Promise<Request> => {
           if (!accessToken) accessToken = await fetchToken(request);
           const h = cleanMarkers(request, ...allMarkers);
           h.set("Authorization", `Bearer ${accessToken}`);
@@ -142,7 +142,7 @@ function refreshToken(opts: OAuth2RefreshTokenOptions): ConfigureHttpOptions {
         },
       ],
       afterResponse: [
-        async (request: Request, _options: HttpRequestOptions, response: Response): Promise<Response | void> => {
+        async ({ request, response }: { request: Request; response: Response }): Promise<Response | void> => {
           if (response.status !== 401) return;
           accessToken = await fetchToken(request);
           const h = cleanMarkers(request, ...allMarkers);

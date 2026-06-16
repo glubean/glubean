@@ -206,8 +206,8 @@ importers:
         specifier: ^16.4.0
         version: 16.6.1
       ky:
-        specifier: ^1.14.0
-        version: 1.14.3
+        specifier: ^2.0.2
+        version: 2.0.2
       p-queue:
         specifier: ^9.1.0
         version: 9.1.0
@@ -235,8 +235,8 @@ importers:
   packages/sdk:
     dependencies:
       ky:
-        specifier: ^1.14.0
-        version: 1.14.3
+        specifier: ^2.0.2
+        version: 2.0.2
       yaml:
         specifier: ^2.7.0
         version: 2.8.2
@@ -1383,10 +1383,6 @@ packages:
 
   json-schema-typed@8.0.2:
     resolution: {integrity: sha512-fQhoXdcvc3V28x7C7BMs4P5+kNlgUURe2jmUT1T//oBRMDrqy1QPelJimwZGo7Hg9VPV3EQV5Bnq4hbFy2vetA==}
-
-  ky@1.14.3:
-    resolution: {integrity: sha512-9zy9lkjac+TR1c2tG+mkNSVlyOpInnWdSMiue4F+kq8TwJSgv6o8jhLRg8Ho6SnZ9wOYUq/yozts9qQCfk7bIw==}
-    engines: {node: '>=18'}
 
   ky@2.0.2:
     resolution: {integrity: sha512-/GmXpo9F9W+f8n4Ivr2iH+7h7wL7jLbLKWkMlpflcCRb6kGjBfTlASEXaZ9qUgNTn4VgS0P2pwxxzQ4EM6Ulgg==}
@@ -3054,8 +3050,6 @@ snapshots:
   json-schema-traverse@1.0.0: {}
 
   json-schema-typed@8.0.2: {}
-
-  ky@1.14.3: {}
 
   ky@2.0.2: {}
 

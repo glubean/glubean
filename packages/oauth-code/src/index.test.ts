@@ -171,7 +171,10 @@ describe("beforeRequest hook", () => {
       openBrowser: stub.open,
       ...extra,
     });
-    const hook = opts.hooks!.beforeRequest![0] as (req: Request) => Promise<Request>;
+    // ky 2 hooks take a single `{ request }` state object; adapt to the positional
+    // Request the test call sites use so they stay unchanged.
+    const rawHook = opts.hooks!.beforeRequest![0] as (s: { request: Request }) => Promise<Request>;
+    const hook = (req: Request) => rawHook({ request: req });
     return { opts, hook, stub };
   }
 

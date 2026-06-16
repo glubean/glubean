@@ -1463,24 +1463,33 @@ export interface HttpRequestOptions {
  * ```
  */
 export interface HttpHooks {
-  /** Called before each request. Can modify or replace the request. */
+  /**
+   * Called before each request. Can modify or replace the request.
+   *
+   * ky 2 passes a single state object: `({ request, options }) => …`
+   * (was positional `(request, options)` in ky 1 / glubean ≤ 0.6).
+   */
   beforeRequest?: Array<
-    (
-      request: Request,
-      options: HttpRequestOptions,
-    ) => Request | Response | void | Promise<Request | Response | void>
+    (state: {
+      request: Request;
+      options: HttpRequestOptions;
+    }) => Request | Response | void | Promise<Request | Response | void>
   >;
-  /** Called after each response. Can modify or replace the response. */
+  /**
+   * Called after each response. Can modify or replace the response.
+   *
+   * ky 2 passes a single state object: `({ request, options, response }) => …`.
+   */
   afterResponse?: Array<
-    (
-      request: Request,
-      options: HttpRequestOptions,
-      response: Response,
-    ) => Response | void | Promise<Response | void>
+    (state: {
+      request: Request;
+      options: HttpRequestOptions;
+      response: Response;
+    }) => Response | void | Promise<Response | void>
   >;
   /** Called before each retry attempt. */
   beforeRetry?: Array<
-    (details: {
+    (state: {
       request: Request;
       options: HttpRequestOptions;
       error: Error;

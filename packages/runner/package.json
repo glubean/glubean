@@ -28,7 +28,7 @@
     "@glubean/sdk": "workspace:*",
     "@glubean/scanner": "workspace:*",
     "dotenv": "^16.4.0",
-    "ky": "^1.14.0",
+    "ky": "^2.0.2",
     "p-queue": "^9.1.0",
     "tsx": "^4.19.0"
   },

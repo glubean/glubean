@@ -29,7 +29,7 @@ describe("basicAuth", () => {
     const request = new Request("https://example.com", {
       headers: { "X-Glubean-Basic-Auth": "admin:secret123" },
     });
-    const result = await hook(request, {}) as Request;
+    const result = await hook({ request, options: {} } as never) as Request;
 
     expect(result.headers.get("Authorization")).toBe(
       `Basic ${Buffer.from("admin:secret123").toString("base64")}`
@@ -53,7 +53,7 @@ describe("apiKey", () => {
     const request = new Request("https://example.com/path", {
       headers: { "X-Glubean-ApiKey-Query": "my-secret-key" },
     });
-    const result = await hook(request, {}) as Request;
+    const result = await hook({ request, options: {} } as never) as Request;
 
     const url = new URL(result.url);
     expect(url.searchParams.get("api_key")).toBe("my-secret-key");
