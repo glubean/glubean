@@ -11,6 +11,7 @@
 import { test, expect, beforeEach } from "vitest";
 // Import from main index so the HTTP adapter side-effect registration fires.
 import { contract } from "../index.js";
+import { readJsonBody } from "./adapter.js";
 import type {
   ProtocolContract,
 } from "../contract-types.js";
@@ -500,4 +501,35 @@ test("no unprojectableSchemas when schemas are absent or project cleanly", () =>
   });
   expect(c2._extracted.unprojectableSchemas).toBeUndefined();
   expect((c2._extracted.cases[0].schemas as any)?.response?.body).toEqual({ type: "object" });
+});
+
+// --- readJsonBody: ky 2-safe body read (codex ky2 P2-6) ---------------------
+function fakeRes(status: number, opts: { contentLength?: string; body?: unknown } = {}) {
+  return {
+    status,
+    headers: { get: (k: string) => (k.toLowerCase() === "content-length" ? (opts.contentLength ?? null) : null) },
+    json: async () => {
+      if (opts.body === undefined) throw new SyntaxError("Unexpected end of JSON input"); // ky 2 on empty
+      return opts.body;
+    },
+  };
+}
+
+test("readJsonBody returns undefined for 204/205/304 (no throw)", async () => {
+  expect(await readJsonBody(fakeRes(204))).toBeUndefined();
+  expect(await readJsonBody(fakeRes(205))).toBeUndefined();
+  expect(await readJsonBody(fakeRes(304))).toBeUndefined();
+});
+
+test("readJsonBody returns undefined for content-length 0 (no throw)", async () => {
+  expect(await readJsonBody(fakeRes(200, { contentLength: "0" }))).toBeUndefined();
+});
+
+test("readJsonBody parses a normal JSON body", async () => {
+  expect(await readJsonBody(fakeRes(200, { body: { ok: true } }))).toEqual({ ok: true });
+});
+
+test("readJsonBody still surfaces a genuine parse error on a non-empty bad body", async () => {
+  // status 200, no content-length 0 → delegates to .json(), which throws here.
+  await expect(readJsonBody(fakeRes(200))).rejects.toBeInstanceOf(SyntaxError);
 });

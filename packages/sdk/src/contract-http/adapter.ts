@@ -198,6 +198,22 @@ function normalizeResponseHeaders(headers: unknown): NormalizedHeaders {
   return result;
 }
 
+/**
+ * Read a JSON response body, ky 2-safe. ky 2's `.json()` throws on 204/205/304
+ * and on an empty body (content-length 0); those are "no body" for a contract
+ * response, so return `undefined` instead of throwing. A genuinely malformed
+ * NON-empty body still surfaces its parse error. (codex ky2 P2-6)
+ */
+export async function readJsonBody(res: {
+  status: number;
+  headers: { get(name: string): string | null };
+  json(): Promise<unknown>;
+}): Promise<unknown> {
+  if (res.status === 204 || res.status === 205 || res.status === 304) return undefined;
+  if (res.headers.get("content-length") === "0") return undefined;
+  return res.json();
+}
+
 // =============================================================================
 // Schema → JSON Schema (normalize helper)
 // =============================================================================
@@ -377,7 +393,7 @@ async function executeStandaloneCase(
 
   let parsed: unknown;
   if (caseSpec.expect.schema) {
-    const jsonBody = await res.json();
+    const jsonBody = await readJsonBody(res);
     const validated = ctx.validate(
       jsonBody,
       caseSpec.expect.schema,
@@ -385,7 +401,7 @@ async function executeStandaloneCase(
     );
     parsed = validated !== undefined ? validated : jsonBody;
   } else if (caseSpec.verify) {
-    parsed = await res.json();
+    parsed = await readJsonBody(res);
   } else {
     parsed = undefined;
   }
@@ -866,7 +882,7 @@ async function executeCaseInFlowHttp(input: {
 
   let body2: unknown;
   if (caseSpec.expect.schema) {
-    const jsonBody = await res.json();
+    const jsonBody = await readJsonBody(res);
     const validated = ctx.validate(
       jsonBody,
       caseSpec.expect.schema,
@@ -874,7 +890,7 @@ async function executeCaseInFlowHttp(input: {
     );
     body2 = validated !== undefined ? validated : jsonBody;
   } else if (caseSpec.verify) {
-    body2 = await res.json();
+    body2 = await readJsonBody(res);
   } else {
     // Try to pull body anyway for downstream lens.
     try {

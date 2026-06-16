@@ -18,7 +18,7 @@ import {
   setForceStandalone,
   type InternalRuntime,
 } from "@glubean/sdk/internal";
-import ky, { type KyInstance, type Options as KyOptions, type NormalizedOptions } from "ky";
+import ky, { type KyInstance, type Options as KyOptions } from "ky";
 import type {
   Trace,
   AssertionDetails,
