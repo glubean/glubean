@@ -744,37 +744,6 @@ function scanCallbackForBranchFamily(fn: AnyNode | undefined): boolean | undefin
   return found;
 }
 
-/** Does the builder chain ITSELF (callee descent, never arguments) contain a
- * branch-family call? */
-function chainHasBranchFamilyCall(init: AnyNode): boolean {
-  let node: AnyNode | undefined = unwrapExpression(init);
-  while (node && isCallNode(node)) {
-    const callee = unwrapExpression(node.callee as AnyNode);
-    if (!callee) return false;
-    if (isMemberNode(callee)) {
-      const prop = unwrapExpression(callee.property as AnyNode);
-      let name: string | undefined;
-      if (callee.computed !== true && prop?.type === "Identifier") name = prop.name as string;
-      else if (callee.computed === true && prop?.type === "StringLiteral") name = prop.value as string;
-      else if (callee.computed === true) return true; // dynamic method on the chain — fail closed (R8)
-      if (name !== undefined) {
-        if (BRANCH_FAMILY_METHODS.has(name)) return true;
-        if (DELEGATING_CHAIN_METHODS.has(name)) {
-          // `.use(fragment)` / `.group(id, body)` on the chain: scan an inline
-          // callback; a reference fails closed (phase4 §1.4/§2.5/§4 — R18).
-          const cb = delegatedCallbackOf((node as AnyNode).arguments as AnyNode[] | undefined);
-          const verdict = scanCallbackForBranchFamily(cb);
-          if (verdict !== false) return true;
-        }
-      }
-      node = unwrapExpression(callee.object as AnyNode);
-    } else {
-      return false;
-    }
-  }
-  return false;
-}
-
 /**
  * Local names bound to the SDK's `workflow` factory via named-import aliases
  * (`import { workflow as journeyTest } ...`). The literal `workflow` is always
@@ -917,30 +886,6 @@ function parseTestDeclaration(
     // Only emitted for workflows: TestMeta.skip is boolean, so a string skip
     // never legitimately appears on a plain test.
     if (fields.deferred !== undefined) result.deferred = fields.deferred;
-    // Inspect ONLY the builder chain's own method names — descending callee
-    // objects like chainHead does, never the call ARGUMENTS — so a user
-    // callback body calling e.g. `client.poll()` cannot false-positive a
-    // linear workflow into the upload refusal (codex S2.6 R11 P2). A branch's
-    // then/else sub-chains live in arguments, but the outer `.branch(` on the
-    // chain has already flagged it by then.
-    let hasBranchOrPoll = chainHasBranchFamilyCall(init);
-    // workflow.each/pick: the graph lives in the FACTORY callback, not the
-    // outer chain — scan the factory body for branch-family calls ROOTED at
-    // its builder parameter (`wf.branch(...)`, incl. chained receivers), so a
-    // matrix of branch/poll graphs can't slip past the upload gate while an
-    // unrelated `client.poll()` still doesn't false-positive
-    // (codex S2.12 R1 P1).
-    if (!hasBranchOrPoll && (variant === "each" || variant === "pick")) {
-      const factoryArg = (head.arguments as AnyNode[] | undefined)?.[1];
-      // The graph lives in the factory callback. Inline bodies get the
-      // binding-aware scan; references fail CLOSED (codex S2.12 R9/R18 —
-      // test files are never runtime re-extracted).
-      const verdict = scanCallbackForBranchFamily(
-        factoryArg ? unwrapExpression(factoryArg) : undefined,
-      );
-      if (verdict !== false) hasBranchOrPoll = true;
-    }
-    if (hasBranchOrPoll) result.workflowHasBranchOrPoll = true;
   }
 
   return result;

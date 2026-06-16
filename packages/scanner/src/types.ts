@@ -56,12 +56,6 @@ export interface ExportMeta {
    * from the --upload branch/poll gate like deferred flows.
    */
   deferred?: string;
-  /**
-   * Set when a `workflow(...)` chain contains a `.branch(`/`.poll(` call
-   * (static AST detection) — drives the --upload fail-closed gate for
-   * workflows in files the runtime extractor never imports (.test.ts).
-   */
-  workflowHasBranchOrPoll?: true;
   /** JavaScript export name (e.g., "myTest" or "default") */
   exportName: string;
   /** Source location */

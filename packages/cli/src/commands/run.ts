@@ -218,58 +218,6 @@ async function findProjectConfig(
   return { rootDir: startDir };
 }
 
-/**
- * True if a flow's extracted step tree contains a branch (condition / switch) or
- * a poll (bounded poll-until). Recurses into branch cases/default so a poll
- * nested inside a branch body is caught too.
- *
- * Used to gate `--upload`: Glubean Cloud cannot render `kind:"branch"` or
- * `kind:"poll"` flows yet, and uploading would silently drop them (local run view
- * ≠ Cloud view), so we refuse rather than mislead. See contract-flow-condition.md
- * §12 / contract-flow-poll.md §8.
- */
-function flowStepsHaveBranchOrPoll(
-  steps: ReadonlyArray<{ kind?: string; cases?: ReadonlyArray<{ steps?: any[] }>; default?: any[] }> | undefined,
-): boolean {
-  if (!steps) return false;
-  for (const s of steps) {
-    if (s.kind === "branch" || s.kind === "poll") return true;
-    if (s.cases && s.cases.some((c) => flowStepsHaveBranchOrPoll(c.steps))) return true;
-    if (s.default && flowStepsHaveBranchOrPoll(s.default)) return true;
-  }
-  return false;
-}
-
-/**
- * Same gate for vNext workflows (codex S2.6 R9): a workflow with `.branch()`
- * or `.poll()` nodes is a graph orchestrator Cloud cannot render yet — it gets
- * the same --upload refusal as a branch/poll flow. Recurses branch sides and
- * group children.
- */
-function workflowNodesHaveBranchOrPoll(
-  nodes:
-    | ReadonlyArray<{
-        kind: string;
-        cases?: Array<{ nodes?: any[] }>;
-        default?: any[];
-        nodes?: any[];
-      }>
-    | undefined,
-): boolean {
-  if (!nodes) return false;
-  for (const n of nodes) {
-    // The whole branch FAMILY (branch/switch/route lower to kind "branch" —
-    // addendum §9) and poll are graph orchestrators Cloud cannot render yet.
-    if (n.kind === "branch" || n.kind === "poll") return true;
-    for (const c of n.cases ?? []) {
-      if (c.nodes && workflowNodesHaveBranchOrPoll(c.nodes)) return true;
-    }
-    if (n.default && workflowNodesHaveBranchOrPoll(n.default)) return true;
-    if (n.nodes && workflowNodesHaveBranchOrPoll(n.nodes)) return true;
-  }
-  return false;
-}
-
 // Config consolidation (docs/06): the package.json `glubean` field is no
 // longer a config source. Warn (don't error) when one lingers so users
 // migrate it into glubean.yaml instead of wondering why it stopped working.
@@ -513,13 +461,6 @@ interface DiscoveredTestMeta {
    * - "flow"     — `contract.flow(...).build()` orchestrator
    */
   kind?: "test" | "contract" | "flow";
-  /**
-   * Static AST flag: a vNext workflow chain in a .test.ts contains
-   * `.branch(`/`.poll(`. The --upload gate reads this DIRECTLY — test files
-   * are never runtime-imported, so the gate cannot re-extract them
-   * (codex S2.6 R10 P2).
-   */
-  workflowHasBranchOrPoll?: boolean;
 }
 
 interface DiscoveredTest {
@@ -718,9 +659,7 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         // LIMITATION) — a strict kinds:[flow] suite needs the workflow in a
         // .flow.ts, or kinds:[test, flow].
         kind: m.workflow ? "flow" : "test",
-        ...(m.workflowHasBranchOrPoll ? { workflowHasBranchOrPoll: true } : {}),
-        // WorkflowMeta.skip reason → deferred, so a skipped branch/poll
-        // workflow doesn't abort --upload (codex S2.6 R13 P2).
+        // WorkflowMeta.skip reason → deferred.
         ...(m.deferred !== undefined ? { deferred: m.deferred } : {}),
       },
     };
@@ -739,10 +678,6 @@ export const __testing = {
   matchesTags: (...args: Parameters<typeof matchesTags>) => matchesTags(...args),
   matchesExcludeTags: (...args: Parameters<typeof matchesExcludeTags>) =>
     matchesExcludeTags(...args),
-  flowStepsHaveBranchOrPoll: (...args: Parameters<typeof flowStepsHaveBranchOrPoll>) =>
-    flowStepsHaveBranchOrPoll(...args),
-  workflowNodesHaveBranchOrPoll: (...args: Parameters<typeof workflowNodesHaveBranchOrPoll>) =>
-    workflowNodesHaveBranchOrPoll(...args),
 };
 
 function matchesTags(
@@ -1213,81 +1148,13 @@ export async function runCommand(
     );
   }
 
-  // ── Gate: Cloud cannot yet render branch (condition/switch) flows ──────
-  // Operate on the POST-FILTER selected runnables (`testsToRun`) so a branch
-  // flow that was filtered out (--filter / tags / .only / suite kinds) does not
-  // block an otherwise-branchless upload. Uploading a branch flow would
-  // silently drop its branches server-side (Cloud run view ≠ local), so refuse
-  // before running and name the offending flows. Bootstrap already ran, so
-  // plugin-backed files re-extract from Node's cache cleanly.
-  // (contract-flow-condition.md §12 / Spike 6.)
-  if (options.upload) {
-    // Exclude deferred (FlowMeta.skip → meta.deferred) flows: they don't
-    // execute — only a skipped row is uploaded — so their branches never reach
-    // Cloud and they must not block the upload.
-    const selectedFlows = testsToRun.filter(
-      (ft) => ft.test.meta.kind === "flow" && !ft.test.meta.deferred,
-    );
-    if (selectedFlows.length > 0) {
-      // Map each selected flow's source file → the set of its branch/poll flow ids.
-      // Only runtime-extractable files are re-imported here; a .test.ts
-      // workflow carries a STATIC branch/poll flag on its discovered meta
-      // instead (test files are never runtime-imported — codex S2.6 R10 P2).
-      const branchIdsByFile = new Map<string, Set<string>>();
-      const extractableFiles = new Set(
-        selectedFlows
-          .map((ft) => ft.filePath)
-          // Exclude EVERY test-file suffix (.test.ts/.js/.mjs/…), not just the
-          // .ts one classifyGlubeanFile knows: re-extraction imports the file,
-          // and test files must never be runtime-imported (codex S2.6 R12 P2).
-          // Suffix-anchored so a runtime-extractable `checkout.test.flow.ts`
-          // is NOT excluded (codex R13: it classifies as flow and must be
-          // re-extracted for its branch/poll nodes).
-          .filter(
-            (p) =>
-              classifyGlubeanFile(p) !== "test" &&
-              !/\.test\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(basename(p)),
-          ),
-      );
-      for (const filePath of extractableFiles) {
-        try {
-          const extracted = await extractContractFromFile(filePath);
-          const ids = new Set<string>();
-          // vNext workflows ride the "flow" runnable kind, so they reach this
-          // gate too — a branch/poll workflow gets the same refusal (codex
-          // S2.6 R9 P2).
-          for (const wf of extracted.workflows ?? []) {
-            if (workflowNodesHaveBranchOrPoll(wf.nodes)) ids.add(wf.id);
-          }
-          branchIdsByFile.set(filePath, ids);
-        } catch {
-          // Real import/extraction errors are surfaced by discovery above.
-        }
-      }
-      const branchFlows = selectedFlows.filter(
-        (ft) =>
-          ft.test.meta.workflowHasBranchOrPoll === true ||
-          branchIdsByFile.get(ft.filePath)?.has(ft.test.meta.id),
-      );
-      if (branchFlows.length > 0) {
-        console.error(
-          `${colors.red}Error: --upload does not yet support branch (condition/switch) or poll flows.${colors.reset}`,
-        );
-        console.error(
-          `${colors.dim}Glubean Cloud can't render these flows yet, and uploading would silently drop their branches/polls:${colors.reset}`,
-        );
-        for (const ft of branchFlows) {
-          console.error(
-            `${colors.dim}  - ${ft.test.meta.id} (${ft.exportName}) [${relative(process.cwd(), ft.filePath)}]${colors.reset}`,
-          );
-        }
-        console.error(
-          `${colors.dim}Run without --upload, or remove condition/switchOn/switchCond/poll from these flows, until Cloud support lands.${colors.reset}`,
-        );
-        process.exit(1);
-      }
-    }
-  }
+  // NOTE (0.6, owner): the run-view upload is UNCONDITIONAL — branch/poll
+  // workflows upload like any other. The earlier OPTION D gate refused them
+  // because Cloud "couldn't render" branch/poll run views, but refusing the
+  // upload is the wrong trade: uploading is always correct, and Cloud degrades
+  // gracefully (render raw + the projected `note`/`message` on opaque nodes)
+  // until a richer run view lands. The projection already uploads whole
+  // (branch/poll included), so the run view simply joins it.
 
   console.log(
     `\n${colors.bold}Running ${testsToRun.length} test(s)...${colors.reset}\n`,

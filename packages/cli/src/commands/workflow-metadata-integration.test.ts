@@ -89,7 +89,7 @@ export const probe = workflow("probe-journey")
   expect(wfEntries[0].meta).toMatchObject({ name: "Signup", tags: ["journey"] });
 });
 
-test("a .test.ts workflow is discovered as a 'flow'-kind runnable with the static branch/poll flag", async () => {
+test("a .test.ts workflow is discovered as a 'flow'-kind runnable (skip reason → deferred)", async () => {
   const dir = join(FIXTURE_ROOT, "3");
   await mkdir(dir, { recursive: true });
   const file = join(dir, "journeys.test.ts");
@@ -121,20 +121,15 @@ export const parked = workflow({ id: "wf-parked", skip: "not ready" })
   );
   const discovered = await discoverTests(file);
   const byId = Object.fromEntries(
-    discovered.map((d) => [
-      d.meta.id,
-      [d.meta.kind, d.meta.workflowHasBranchOrPoll ?? false, d.meta.deferred],
-    ]),
+    discovered.map((d) => [d.meta.id, [d.meta.kind, d.meta.deferred]]),
   );
   // workflows ride the "flow" kind even in .test.ts (suite kinds:[flow] keeps
-  // them); the branch flag is STATIC — the upload gate reads it without ever
-  // importing the test file (codex S2.6 R10 P2). A skipped workflow carries
-  // its reason as `deferred` so the gate excludes it (codex R13).
+  // them). A skipped workflow carries its reason as `deferred`.
   expect(byId).toEqual({
-    "wf-branched": ["flow", true, undefined],
-    "wf-linear": ["flow", false, undefined],
-    "plain-test": ["test", false, undefined],
-    "wf-parked": ["flow", true, "not ready"],
+    "wf-branched": ["flow", undefined],
+    "wf-linear": ["flow", undefined],
+    "plain-test": ["test", undefined],
+    "wf-parked": ["flow", "not ready"],
   });
 });
 
