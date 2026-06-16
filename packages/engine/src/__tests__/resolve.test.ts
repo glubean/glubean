@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { test } from "@glubean/sdk";
+import { test, workflow } from "@glubean/sdk";
 import { createAlsCarrier } from "@glubean/sdk/internal";
 
 import { RunnerCore } from "../engine.js";
@@ -73,6 +73,15 @@ describe("engine.resolve — runtime expansion of SDK module exports", () => {
     const res = await engine.run(def!);
     expect(res.status).toBe("skipped");
     expect(ran).toBe(false); // no execution, no side effects
+  });
+
+  it("does NOT resolve workflow builders (unsupported until Stage 2) (codex B4 P2)", () => {
+    const ns = {
+      ok: test("ok", async () => {}),
+      wf: workflow("wf-id"), // workflow-builder: __glubean_type + build(), but no engine ctx yet
+    };
+    const defs = new RunnerCore(services()).resolve(ns);
+    expect(defs.map((d) => d.meta.id)).toEqual(["ok"]); // workflow left out, not a broken runnable
   });
 
   it("each rows run with their row data; a wrong row fails in isolation", async () => {

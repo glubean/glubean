@@ -214,14 +214,18 @@ export class RunnerCore {
             ? (condition as { passed: boolean; actual?: unknown; expected?: unknown })
             : { passed: !!condition };
         const d = (details ?? {}) as { actual?: unknown; expected?: unknown };
+        // `in` not `??` so an intentional null actual/expected keeps its
+        // diagnostic value (codex B4 P3).
+        const actual = "actual" in result ? result.actual : d.actual;
+        const expected = "expected" in result ? result.expected : d.expected;
         scope.assertions.total += 1;
         if (result.passed) scope.assertions.passed += 1;
         emit({
           type: "assertion",
           id: scope.testMeta.id,
           passed: result.passed,
-          actual: result.actual ?? d.actual,
-          expected: result.expected ?? d.expected,
+          actual,
+          expected,
           message: message ?? (result.passed ? "ok" : "failed"),
         });
       },
@@ -301,12 +305,16 @@ interface SdkTestShape {
   teardown?: unknown;
 }
 
+// Only the Stage-1 supported markers — a `workflow-builder` also has __glubean_type
+// + build(), but the narrow engine has no workflow ctx, so building it would yield
+// a def that fails at runtime. Leave workflows unresolved until Stage 2. (codex B4 P2)
 function isBuilder(v: unknown): v is { __glubean_type: string; build(): unknown } {
+  const marker = (v as { __glubean_type?: unknown })?.__glubean_type;
   return (
     !!v &&
     typeof v === "object" &&
     typeof (v as { build?: unknown }).build === "function" &&
-    typeof (v as { __glubean_type?: unknown }).__glubean_type === "string"
+    (marker === "builder" || marker === "each-builder")
   );
 }
 
