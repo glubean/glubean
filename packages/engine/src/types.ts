@@ -16,8 +16,30 @@
  * global coupling. Narrow run-loop only (simple / linear steps); branch / poll /
  * retry / timeout / workflow are Stage 2.
  */
-import type { KyInstance } from "ky";
+import type { KyInstance, Options } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
+
+/** ky request options plus Glubean's retained public `prefixUrl` (the engine maps
+ *  it to ky 2's `prefix` at the boundary). */
+export type GlubeanHttpOptions = Options & { prefixUrl?: string };
+
+/**
+ * The http client both hosts expose as `ctx.http` / `runtime.http`: a ky instance
+ * whose call / method / `.extend()` options also accept the public `prefixUrl`
+ * (codex P2-3 — typing it as raw KyInstance would reject `extend({ prefixUrl })`
+ * at compile time even though the runtime proxy maps it).
+ */
+type KyResponsePromise = ReturnType<KyInstance["get"]>;
+export interface GlubeanHttp {
+  (url: string | URL | Request, options?: GlubeanHttpOptions): KyResponsePromise;
+  get(url: string | URL | Request, options?: GlubeanHttpOptions): KyResponsePromise;
+  post(url: string | URL | Request, options?: GlubeanHttpOptions): KyResponsePromise;
+  put(url: string | URL | Request, options?: GlubeanHttpOptions): KyResponsePromise;
+  patch(url: string | URL | Request, options?: GlubeanHttpOptions): KyResponsePromise;
+  delete(url: string | URL | Request, options?: GlubeanHttpOptions): KyResponsePromise;
+  head(url: string | URL | Request, options?: GlubeanHttpOptions): KyResponsePromise;
+  extend(options: GlubeanHttpOptions | ((parentOptions: Options) => GlubeanHttpOptions)): GlubeanHttp;
+}
 
 /**
  * Host port: the only HTTP egress, as the web-standard `fetch`. node = node fetch
@@ -33,11 +55,13 @@ export interface EnvProvider {
   secrets(): Record<string, string>;
 }
 
+// Every event carries the owning test `id` so a host running runs concurrently
+// can attribute assertion/trace/log events to the right run (codex P2-2).
 export type ExecutionEvent =
   | { type: "start"; id: string; name: string; tags: string[] }
-  | { type: "assertion"; passed: boolean; message?: string; actual?: unknown; expected?: unknown }
-  | { type: "trace"; method: string; url: string; status: number; timeMs: number }
-  | { type: "log"; message: string; data?: unknown }
+  | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown }
+  | { type: "trace"; id: string; method: string; url: string; status: number; timeMs: number }
+  | { type: "log"; id: string; message: string; data?: unknown }
   | { type: "status"; id: string; status: "ok" | "error"; error?: string };
 
 /** Host port: where execution events go. node = stdout stream / browser = collector. */
@@ -108,8 +132,9 @@ export interface TestDef {
 
 /** The minimal ctx surface Stage 1 exercises — scope-bound, never module globals. */
 export interface EngineContext {
-  /** ky instance for this run (the same shared ky both hosts use). */
-  http: KyInstance;
+  /** ky instance for this run (the same shared ky both hosts use), accepting the
+   *  public `prefixUrl` option. */
+  http: GlubeanHttp;
   expect(actual: unknown): unknown;
   vars: { get(k: string): string | undefined; require(k: string): string };
   session: { get(k: string): unknown; set(k: string, v: unknown): void };
@@ -126,6 +151,6 @@ export interface ExecutionScope {
   testMeta: { id: string; tags: string[] };
   stepIndex: number;
   assertions: { total: number; passed: number };
-  http: KyInstance;
+  http: GlubeanHttp;
   session: Record<string, unknown>;
 }

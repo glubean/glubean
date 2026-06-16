@@ -22,6 +22,7 @@ import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
   EngineContext,
   ExecutionScope,
+  GlubeanHttp,
   RunnerServices,
   ScopeInput,
   TestDef,
@@ -52,7 +53,7 @@ export class RunnerCore {
     const secrets = { ...env.secrets(), ...(input.secrets ?? {}) };
     const session: Record<string, unknown> = { ...(input.session ?? {}) };
 
-    const http = this.createScopedKy();
+    const http = this.createScopedKy(def.meta.id);
 
     const scope: ExecutionScope = {
       runtime: undefined as unknown as InternalRuntime,
@@ -72,7 +73,7 @@ export class RunnerCore {
       get test() {
         return scope.testMeta as unknown as InternalRuntime["test"];
       },
-      log: (message: string, data?: unknown) => events.emit({ type: "log", message, data }),
+      log: (message: string, data?: unknown) => events.emit({ type: "log", id: def.meta.id, message, data }),
     };
     return scope;
   }
@@ -83,7 +84,7 @@ export class RunnerCore {
    * (codex P1-2: ky 2 strips ky options from hook state). throwHttpErrors:false
    * matches the node harness default so 4xx/5xx surface as responses, not throws.
    */
-  private createScopedKy(): KyInstance {
+  private createScopedKy(testId: string): GlubeanHttp {
     const { fetch: hostFetch, events, scheduler } = this.services;
     const startedAt = new WeakMap<Request, number>();
     const instance = ky.create({
@@ -100,6 +101,7 @@ export class RunnerCore {
             const t0 = startedAt.get(request) ?? scheduler.now();
             events.emit({
               type: "trace",
+              id: testId,
               method: request.method,
               url: request.url,
               status: response.status,
@@ -171,7 +173,7 @@ export class RunnerCore {
         new Expectation(actual, (r: { passed: boolean; actual?: unknown; expected?: unknown; message?: string }) => {
           scope.assertions.total += 1;
           if (r.passed) scope.assertions.passed += 1;
-          emit({ type: "assertion", passed: r.passed, actual: r.actual, expected: r.expected, message: r.message });
+          emit({ type: "assertion", id: scope.testMeta.id, passed: r.passed, actual: r.actual, expected: r.expected, message: r.message });
         }),
       vars: {
         get: (k) => scope.runtime.vars[k],
@@ -186,7 +188,7 @@ export class RunnerCore {
           scope.session[k] = v;
         },
       },
-      log: (message, data) => emit({ type: "log", message, data }),
+      log: (message, data) => emit({ type: "log", id: scope.testMeta.id, message, data }),
     };
   }
 }
@@ -197,7 +199,7 @@ export class RunnerCore {
  * and only rewrites `prefixUrl` → `prefix` on calls and `.extend()` (codex P2-5).
  * `prefix` (not `baseUrl`) preserves the ky-1 join semantics for "users" / "/users".
  */
-function withPrefixUrlAlias(instance: KyInstance): KyInstance {
+function withPrefixUrlAlias(instance: KyInstance): GlubeanHttp {
   const mapOpts = (opts: unknown): unknown => {
     if (opts && typeof opts === "object" && "prefixUrl" in opts) {
       const { prefixUrl, ...rest } = opts as Record<string, unknown>;
@@ -222,5 +224,5 @@ function withPrefixUrlAlias(instance: KyInstance): KyInstance {
       }
       return typeof value === "function" ? value.bind(target) : value;
     },
-  }) as KyInstance;
+  }) as unknown as GlubeanHttp;
 }
