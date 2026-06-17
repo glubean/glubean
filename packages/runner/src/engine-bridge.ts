@@ -24,27 +24,22 @@ import {
 import { createAlsCarrier } from "@glubean/sdk/internal";
 import type { Test } from "@glubean/sdk";
 
-/** Default OFF: production stays on the legacy run-loop until the cutover. */
-export const USE_ENGINE = process.env.GLUBEAN_USE_ENGINE === "1";
+// Phase 8 cutover: the engine is now the DEFAULT run-loop for common HTTP shapes.
+// Opt OUT with GLUBEAN_USE_ENGINE=0 (full-legacy escape hatch / one-flag revert).
+export const USE_ENGINE = process.env.GLUBEAN_USE_ENGINE !== "0";
 
-// Per-test allowlist (plan 0005): while the engine ctx is being brought to parity
-// incrementally, the flag alone must NOT route arbitrary tests through an incomplete
-// ctx (codex). GLUBEAN_ENGINE_TESTIDS is a comma list of EXACT test ids to route —
-// the parity instrument sets it for its own fixtures. There is deliberately no
-// "route all" wildcard yet: workflow/contract/etc. build plain simple-shaped Tests
-// that look routable but need unmigrated ctx APIs, so a blanket cutover waits until
-// those features land (Phase 8 wires route-all explicitly). Empty → route NOTHING.
+// GLUBEAN_ENGINE_TESTIDS scopes WHICH ids route to the engine. After the cutover the
+// default is route-all (empty list OR "*"); a non-empty explicit list restricts to
+// those ids (used by the parity instrument to route exactly one fixture per leg).
+// engineSupports() still gates the SHAPE and excludes node-legacy wrappers (workflow /
+// contract via __glubean_kind, fixtures), so route-all only ever sends common
+// simple/steps/branch/poll tests to the engine — workflow/contract stay legacy.
 const ENGINE_TESTIDS = new Set(
   (process.env.GLUBEAN_ENGINE_TESTIDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
 );
+const ROUTE_ALL = ENGINE_TESTIDS.size === 0 || ENGINE_TESTIDS.has("*");
 
-// Route-all wildcard (Phase 8 cutover): "*" routes EVERY engine-supported test id,
-// not just an explicit allowlist. engineSupports() gates the shape AND excludes the
-// node-legacy wrappers (workflow / contract via __glubean_kind, fixtures), so "*"
-// only ever sends common simple/steps/branch/poll tests to the engine.
-const ROUTE_ALL = ENGINE_TESTIDS.has("*");
-
-/** Whether the engine should run this specific test id (flag + allowlist or "*"). */
+/** Whether the engine should run this specific test id (flag + route-all or allowlist). */
 export function engineRoutesId(id: string): boolean {
   return USE_ENGINE && (ROUTE_ALL || ENGINE_TESTIDS.has(id));
 }

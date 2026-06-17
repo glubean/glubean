@@ -88,10 +88,15 @@ async function rawEvents(
   ctx: RunCtx = {},
   exec: ExecOpts = {},
 ): Promise<ExecutionEvent[]> {
-  // engine leg: flag on + allowlist this exact test id (plan 0005 per-test routing).
+  // engine leg: flag on + allowlist EXACTLY this test id (plan 0005 per-test routing).
+  // legacy leg: GLUBEAN_USE_ENGINE=0 forces legacy — REQUIRED post-cutover since the
+  // engine is now the default; without the pin both legs would run the engine and the
+  // diff would be vacuous.
   const executor = new TestExecutor({
     ...exec,
-    ...(useEngine ? { env: { GLUBEAN_USE_ENGINE: "1", GLUBEAN_ENGINE_TESTIDS: testId } } : {}),
+    env: useEngine
+      ? { GLUBEAN_USE_ENGINE: "1", GLUBEAN_ENGINE_TESTIDS: testId }
+      : { GLUBEAN_USE_ENGINE: "0" },
   });
   const events: ExecutionEvent[] = [];
   const runCtx = {
