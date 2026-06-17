@@ -1070,6 +1070,9 @@ export class RunnerCore {
           if (validate) runEngineValidator(validate(v), k, "var");
           return v;
         },
+        // A copy of all vars (node parity: harness ctx.vars.all → {...rawVars}). The
+        // NodeHost provider's keys spread to their resolved values (codex Phase-8 P1).
+        all: () => ({ ...scope.runtime.vars }),
       },
       secrets: {
         get: (k) => scope.runtime.secrets[k],
@@ -1167,6 +1170,13 @@ export class RunnerCore {
         throw new FailError(message);
       },
       retryCount: scope.retryCount,
+      // node parity: harness ctx.getMemoryUsage → process.memoryUsage(). Reached via
+      // globalThis (NOT a node:* import) so the engine stays browser-safe — null where
+      // process.memoryUsage is unavailable (browser).
+      getMemoryUsage: () => {
+        const proc = (globalThis as { process?: { memoryUsage?: () => { heapUsed: number; heapTotal: number; external: number; rss: number } } }).process;
+        return typeof proc?.memoryUsage === "function" ? proc.memoryUsage() : null;
+      },
     };
   }
 }

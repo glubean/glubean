@@ -207,6 +207,14 @@ export const emptyVarTest = test(
   { id: "emptyVarTest", name: "Empty Var Test" },
   async (ctx) => { ctx.vars.require("GLUBEAN_EMPTY"); ctx.assert(true, "unreached"); }
 );
+export const varsAllTest = test(
+  { id: "varsAllTest", name: "Vars All Test" },
+  async (ctx) => { const all = ctx.vars.all(); ctx.assert(all.A === "1" && all.B === "2", "vars.all() copy", { actual: all }); }
+);
+export const memUsageTest = test(
+  { id: "memUsageTest", name: "Memory Usage Test" },
+  async (ctx) => { const m = ctx.getMemoryUsage(); ctx.assert(m !== null && typeof m.heapUsed === "number", "memory shape"); }
+);
 export const namedErrorTest = test(
   { id: "namedErrorTest", name: "Named Error Test" },
   async () => { throw new TypeError("typed boom"); }
@@ -598,6 +606,14 @@ ptest("engine parity: vars.require throws for an EMPTY value (empty = unset)", a
   // The codex edge: an empty explicit value with no system fallback must throw on
   // require in BOTH paths (not return undefined on the engine path).
   await assertParity(MODULE, "emptyVarTest", { vars: { GLUBEAN_EMPTY: "" } });
+});
+
+ptest("engine parity: ctx.vars.all() returns a copy of all vars (codex Phase-8 P1)", async () => {
+  await assertParity(MODULE, "varsAllTest", { vars: { A: "1", B: "2" } });
+});
+
+ptest("engine parity: ctx.getMemoryUsage() returns a node memory snapshot (shape)", async () => {
+  await assertParity(MODULE, "memUsageTest");
 });
 
 ptest("engine parity: named error preserves failure classification (reason)", async () => {

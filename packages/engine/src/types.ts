@@ -231,6 +231,8 @@ export interface EngineContext {
   vars: {
     get(k: string): string | undefined;
     require(k: string, validate?: (value: string) => boolean | string | void | null): string;
+    /** A copy of all vars for diagnostics/logging (node parity: harness ctx.vars.all). */
+    all(): Record<string, string>;
   };
   secrets: {
     get(k: string): string | undefined;
@@ -274,6 +276,9 @@ export interface EngineContext {
   fail(message: string): never;
   /** Test-level retry attempt for this run (0 on the first run). */
   retryCount: number;
+  /** Process memory snapshot (node parity: harness ctx.getMemoryUsage → process
+   *  .memoryUsage()); null where unavailable (browser) — browser-safe via globalThis. */
+  getMemoryUsage(): { heapUsed: number; heapTotal: number; external: number; rss: number } | null;
 }
 
 /**
