@@ -206,7 +206,16 @@ export class RunnerCore {
         new Expectation(actual, (r: { passed: boolean; actual?: unknown; expected?: unknown; message?: string }) => {
           scope.assertions.total += 1;
           if (r.passed) scope.assertions.passed += 1;
-          emit({ type: "assertion", id: scope.testMeta.id, passed: r.passed, actual: r.actual, expected: r.expected, message: r.message });
+          emit({
+            type: "assertion",
+            id: scope.testMeta.id,
+            passed: r.passed,
+            actual: r.actual,
+            expected: r.expected,
+            // Default to the node harness's wording so both hosts + the runner
+            // golden agree on the message when the matcher gave none (parity gap C).
+            message: r.message ?? (r.passed ? "Assertion passed" : "Assertion failed"),
+          });
         }),
       assert: (condition: unknown, message?: string, details?: unknown) => {
         const result =
@@ -226,7 +235,8 @@ export class RunnerCore {
           passed: result.passed,
           actual,
           expected,
-          message: message ?? (result.passed ? "ok" : "failed"),
+          // Parity with the node harness default (gap C).
+          message: message ?? (result.passed ? "Assertion passed" : "Assertion failed"),
         });
       },
       warn: (condition: unknown, message?: string) =>
