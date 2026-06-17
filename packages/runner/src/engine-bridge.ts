@@ -38,7 +38,11 @@ const ENGINE_TESTIDS = new Set(
   (process.env.GLUBEAN_ENGINE_TESTIDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
 );
 
-/** Whether the engine should run this specific test id (flag + explicit allowlist). */
+/** Whether the engine should run this specific test id (flag + explicit allowlist).
+ *  The Phase 8 cutover wires a "*" route-all wildcard here, but ONLY once
+ *  engineSupports() excludes workflow wrapper tests (a built workflow is a simple-
+ *  shaped Test whose workflow:* events the LEGACY harness unwraps — routing it to the
+ *  engine would lose that evidence; codex P3 P2). Until then: explicit ids only. */
 export function engineRoutesId(id: string): boolean {
   return USE_ENGINE && ENGINE_TESTIDS.has(id);
 }
@@ -167,6 +171,9 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         ...(e.returnState !== undefined ? { returnState: e.returnState } : {}),
         testId: e.id,
       };
+    case "timeout_update":
+      // Control event (emitEngineWire bypasses buffering — CONTROL_EVENT_TYPES).
+      return { type: "timeout_update", timeout: e.timeout, testId: e.id };
     case "session_set":
       // Legacy shape: a control event (bypasses buffering) carrying ts. ts is
       // wall-clock here (node bridge) and normalized out of parity diffs.

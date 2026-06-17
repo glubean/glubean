@@ -18,7 +18,7 @@
 import ky, { type KyInstance } from "ky";
 import { captureRequestBody, inferJsonSchema, truncateBody, truncateDeep } from "./http-trace.js";
 import { Expectation } from "@glubean/sdk";
-import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, SchemaEntry, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaEntry, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
@@ -1118,6 +1118,32 @@ export class RunnerCore {
       // workflow-only → node-legacy (workflow is never engine-routed), so the engine
       // always emits the generic shape (node parity: harness.ts:804 fall-through).
       event: (ev: GlubeanEvent) => emitStep({ type: "event", id: scope.testMeta.id, data: ev }),
+      // ctx.setTimeout(ms) — a CONTROL event (not step-scoped): the parent re-arms its
+      // SIGTERM deadline (node parity: harness.ts:898). No stepIndex, like legacy.
+      setTimeout: (ms: number) => emit({ type: "timeout_update", id: scope.testMeta.id, timeout: ms }),
+      // ctx.pollUntil — poll fn until truthy or timeout; on timeout call onTimeout
+      // (silent) or throw (node parity: harness.ts:860). Emits no events itself (fn's
+      // assertions emit as usual). Uses the injected clock + setTimeout for the wait.
+      pollUntil: async (options: PollUntilOptions, fn: () => Promise<boolean | unknown>): Promise<void> => {
+        const { timeoutMs, intervalMs = 1000, onTimeout } = options;
+        const deadline = this.services.scheduler.now() + timeoutMs;
+        let lastError: Error | undefined;
+        while (this.services.scheduler.now() < deadline) {
+          try {
+            if (await fn()) return; // truthy → done
+          } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+          }
+          const remaining = deadline - this.services.scheduler.now();
+          if (remaining <= 0) break;
+          await new Promise<void>((r) => setTimeout(r, Math.min(intervalMs, remaining)));
+        }
+        if (onTimeout) {
+          onTimeout(lastError);
+          return;
+        }
+        throw new Error(`pollUntil timed out after ${timeoutMs}ms${lastError ? `: ${lastError.message}` : ""}`);
+      },
       // ctx.skip(reason?) — throws; the run-loop turns it into a `skipped` verdict.
       skip: (reason?: string): never => {
         throw new SkipError(reason);

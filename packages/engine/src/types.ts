@@ -18,7 +18,7 @@
  */
 import type { KyInstance, Options } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
-import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
 
 /** ky request options plus Glubean's retained public `prefixUrl` (the engine maps
  *  it to ky 2's `prefix` at the boundary) and the `schema` option for automatic
@@ -111,6 +111,10 @@ export type ExecutionEvent =
   // test().poll — a bounded retry leaf step (node parity: harness.ts:2490). Emitted
   // alongside the step's step_start/step_end. `index` is the leaf step index.
   | { type: "poll"; id: string; index: number; name: string; attempts: number; elapsedMs: number; satisfied: boolean; exhausted: boolean; error?: string }
+  // ctx.setTimeout — a CONTROL event (not a timeline event): the node parent re-arms
+  // its SIGTERM deadline (node parity: harness.ts:898 / executor.ts:1083). The host
+  // bypasses event buffering for it (CONTROL_EVENT_TYPES), like session_set.
+  | { type: "timeout_update"; id: string; timeout: number }
   // ctx.session.set — a host may surface this as a control signal (the node runner
   // forwards it to sibling tests; the browser updates its session store).
   | { type: "session_set"; id: string; key: string; value: unknown }
@@ -250,6 +254,12 @@ export interface EngineContext {
   /** Emit a generic structured event (node parity: harness ctx.event — the workflow
    *  first-class unwrap stays node-legacy; the engine always emits generic). */
   event(ev: GlubeanEvent): void;
+  /** Set a custom test timeout (ms) — emits a timeout_update control event the parent
+   *  uses to re-arm its deadline (node parity: harness ctx.setTimeout). */
+  setTimeout(ms: number): void;
+  /** Poll `fn` until it returns truthy or `timeoutMs` elapses; on timeout call
+   *  `onTimeout` (silent) or throw (node parity: harness ctx.pollUntil). */
+  pollUntil(options: PollUntilOptions, fn: () => Promise<boolean | unknown>): Promise<void>;
   /** Skip the current test with an optional reason (node parity: throws a SkipError
    *  the run-loop turns into a `skipped` verdict; a step/branch-predicate skip skips
    *  the whole test unless a failure was already recorded). */

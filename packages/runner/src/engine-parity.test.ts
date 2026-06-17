@@ -520,6 +520,26 @@ export const pollFnErrorTest = test("pollFnErrorTest")
     until: () => true,
     timeout: 5000,
   });
+export const setTimeoutTest = test(
+  { id: "setTimeoutTest", name: "Set Timeout" },
+  async (ctx) => { ctx.setTimeout(5000); ctx.assert(true, "set timeout"); }
+);
+export const pollUntilSuccessTest = test(
+  { id: "pollUntilSuccessTest", name: "pollUntil success" },
+  async (ctx) => { let n = 0; await ctx.pollUntil({ timeoutMs: 5000, intervalMs: 1 }, async () => { n += 1; return n >= 3; }); ctx.assert(n === 3, "polled to 3"); }
+);
+export const pollUntilRetryErrorsTest = test(
+  { id: "pollUntilRetryErrorsTest", name: "pollUntil retries through errors" },
+  async (ctx) => { let n = 0; await ctx.pollUntil({ timeoutMs: 5000, intervalMs: 1 }, async () => { n += 1; if (n < 3) throw new Error("not yet"); return true; }); ctx.assert(n === 3, "retried to 3"); }
+);
+export const pollUntilSilentTimeoutTest = test(
+  { id: "pollUntilSilentTimeoutTest", name: "pollUntil silent timeout" },
+  async (ctx) => { let fired = false; await ctx.pollUntil({ timeoutMs: 20, intervalMs: 5, onTimeout: () => { fired = true; } }, async () => false); ctx.assert(fired === true, "onTimeout fired"); }
+);
+export const pollUntilThrowTimeoutTest = test(
+  { id: "pollUntilThrowTimeoutTest", name: "pollUntil throw timeout" },
+  async (ctx) => { await ctx.pollUntil({ timeoutMs: 20, intervalMs: 5 }, async () => false); ctx.assert(true, "unreached"); }
+);
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -775,4 +795,24 @@ ptest("engine parity: poll until returns non-boolean → poll error", async () =
 
 ptest("engine parity: poll fn throws → poll error", async () => {
   await assertParity(MODULE, "pollFnErrorTest");
+});
+
+ptest("engine parity: ctx.setTimeout → timeout_update control event", async () => {
+  await assertParity(MODULE, "setTimeoutTest");
+});
+
+ptest("engine parity: ctx.pollUntil succeeds after multiple polls", async () => {
+  await assertParity(MODULE, "pollUntilSuccessTest");
+});
+
+ptest("engine parity: ctx.pollUntil retries through errors", async () => {
+  await assertParity(MODULE, "pollUntilRetryErrorsTest");
+});
+
+ptest("engine parity: ctx.pollUntil silent timeout (onTimeout, no throw)", async () => {
+  await assertParity(MODULE, "pollUntilSilentTimeoutTest");
+});
+
+ptest("engine parity: ctx.pollUntil timeout throws (test fails)", async () => {
+  await assertParity(MODULE, "pollUntilThrowTimeoutTest");
 });
