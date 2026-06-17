@@ -1957,12 +1957,10 @@ function engineSupports(test: Test<unknown>): boolean {
   if (test.fixtures && Object.keys(test.fixtures).length > 0) return false;
   if (test.type === "simple") return true;
   if (test.type === "steps") {
-    // Phase 1a: linear steps only. branch/poll steps (Phase 2/3) and per-step
-    // retry/timeout (Phase 1b) stay on legacy until the engine emits their events.
+    // Linear steps incl. per-step retry/timeout (Phase 1a/1b). branch/poll steps
+    // (Phase 2/3) still route to legacy.
     for (const step of test.steps ?? []) {
       if (isTestBranchStep(step) || isTestPollStep(step)) return false;
-      const m = (step as { meta?: { retries?: unknown; timeout?: unknown } }).meta;
-      if (m && (m.retries !== undefined || m.timeout !== undefined)) return false;
     }
     return true;
   }

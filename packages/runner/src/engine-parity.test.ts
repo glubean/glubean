@@ -140,6 +140,11 @@ export const multiStepFailTest = test("multiStepFailTest")
   .step("first", async (ctx) => { ctx.assert(false, "first fails"); })
   .step("second", async (ctx) => { ctx.assert(true, "skipped — never runs"); })
   .step("third", async (ctx) => { ctx.assert(true, "skipped too"); });
+let _retryN = 0;
+export const stepRetryTest = test("stepRetryTest")
+  .step("flaky", { retries: 2, retryDelay: 0 }, async (ctx) => { _retryN++; ctx.assert(_retryN >= 2, "ok on attempt 2"); });
+export const stepTimeoutTest = test("stepTimeoutTest")
+  .step("slow", { timeout: 10 }, async () => { await new Promise((r) => setTimeout(r, 100)); });
 export const retryTest = test(
   { id: "retryTest", name: "Retry Test" },
   async (ctx) => { ctx.assert(ctx.retryCount === 2, "retry count", { actual: ctx.retryCount, expected: 2 }); }
@@ -215,4 +220,12 @@ ptest("engine parity: failing step → 'One or more steps failed' (failed + exit
 
 ptest("engine parity: failed step skips remaining steps (skipped step_end tree)", async () => {
   await assertParity(MODULE, "multiStepFailTest");
+});
+
+ptest("engine parity: step retry (fail→pass; attempts/retriesUsed + Retrying log)", async () => {
+  await assertParity(MODULE, "stepRetryTest");
+});
+
+ptest("engine parity: step timeout (StepTimeoutError, terminal — no retry)", async () => {
+  await assertParity(MODULE, "stepTimeoutTest");
 });

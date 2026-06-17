@@ -49,6 +49,15 @@ function runEngineValidator(result: boolean | string | void | null, key: string,
   throw new Error(`Invalid ${kind} "${key}": validation failed`);
 }
 
+/** Per-step timeout error — same message/name as the node harness (harness.ts:446)
+ *  so step_end.error + classifyErrorReason match. */
+class StepTimeoutError extends Error {
+  constructor(stepName: string, timeoutMs: number) {
+    super(`Step "${stepName}" timed out after ${timeoutMs}ms`);
+    this.name = "StepTimeoutError";
+  }
+}
+
 /**
  * Serialize a step's return state for the step_end event with the node harness's
  * 4 KB guard: keep the value if it serializes ≤ 4096 bytes, else a truncated marker;
@@ -254,28 +263,74 @@ export class RunnerCore {
               continue;
             }
             scope.currentStepIndex = idx;
-            const totalBefore = scope.assertions.total;
-            const failedBefore = scope.assertions.total - scope.assertions.passed;
             const startedAt = scheduler.now();
             events.emit({ type: "step_start", id: scope.testMeta.id, index: idx, name: step.meta.name, total: stepTotal });
 
+            // Per-step retry / timeout (node parity, harness runStepList). retries
+            // re-run the fn on failure — NOT on a timeout (terminal). backoff delay =
+            // retryDelay * backoff^(attempt-1), capped at 30s.
+            const sm = (step as { meta?: { retries?: number; retryDelay?: number; backoff?: number; timeout?: number } }).meta ?? {};
+            const configuredRetries = Number.isFinite(sm.retries) ? Math.max(0, Math.floor(sm.retries as number)) : 0;
+            const retryDelayMs = Number.isFinite(sm.retryDelay) ? Math.max(0, sm.retryDelay as number) : configuredRetries > 0 ? 1000 : 0;
+            const backoff = Number.isFinite(sm.backoff) ? Math.max(1, sm.backoff as number) : 1;
+            const stepTimeoutMs = Number.isFinite(sm.timeout) && (sm.timeout as number) > 0 ? Math.floor(sm.timeout as number) : undefined;
+            const maxAttempts = configuredRetries + 1;
+
             let stepError: string | undefined;
             let stepReturnState: unknown;
-            try {
-              const next = await step.fn(ctx, state);
-              if (next !== undefined) {
-                state = next;
-                stepReturnState = next;
+            let attemptsUsed = 0;
+            let lastAssertions = 0;
+            let lastFailedAssertions = 0;
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              attemptsUsed = attempt;
+              stepError = undefined;
+              stepReturnState = undefined;
+              const aBefore = scope.assertions.total;
+              const fBefore = scope.assertions.total - scope.assertions.passed;
+              let timedOut = false;
+              try {
+                const call = step.fn(ctx, state);
+                if (stepTimeoutMs === undefined) {
+                  const next = await call;
+                  if (next !== undefined) { state = next; stepReturnState = next; }
+                } else {
+                  let timer: ReturnType<typeof setTimeout> | undefined;
+                  try {
+                    const next = await Promise.race([
+                      call,
+                      new Promise<never>((_, reject) => {
+                        timer = setTimeout(() => reject(new StepTimeoutError(step.meta.name, stepTimeoutMs)), stepTimeoutMs);
+                      }),
+                    ]);
+                    if (next !== undefined) { state = next; stepReturnState = next; }
+                  } finally {
+                    if (timer !== undefined) clearTimeout(timer);
+                  }
+                }
+              } catch (e) {
+                // A thrown step is caught + recorded as a failed step (node parity:
+                // the run still "completes"; the test fails via stepsFailed).
+                stepError = e instanceof Error ? e.message : String(e);
+                timedOut = e instanceof StepTimeoutError;
               }
-            } catch (e) {
-              // A thrown step is recorded as a failed step (node parity: the step
-              // loop catches it; the test still "completes" and fails via summary).
-              stepError = e instanceof Error ? e.message : String(e);
+              lastAssertions = scope.assertions.total - aBefore;
+              lastFailedAssertions = scope.assertions.total - scope.assertions.passed - fBefore;
+              const attemptFailed = !!stepError || lastFailedAssertions > 0;
+              if (!attemptFailed || timedOut) break; // success, or a timeout (terminal — no retry)
+              if (attempt < maxAttempts) {
+                const delay = Math.min(retryDelayMs * backoff ** (attempt - 1), 30_000);
+                const reason = stepError ? stepError : `${lastFailedAssertions} failed assertion(s)`;
+                events.emit({
+                  type: "log",
+                  id: scope.testMeta.id,
+                  stepIndex: idx,
+                  message: `Retrying step "${step.meta.name}" (${attempt + 1}/${maxAttempts}) after failure: ${reason}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`,
+                });
+                if (delay > 0) await new Promise<void>((r) => setTimeout(r, delay));
+              }
             }
 
-            const assertions = scope.assertions.total - totalBefore;
-            const failedAssertions = scope.assertions.total - scope.assertions.passed - failedBefore;
-            const failed = !!stepError || failedAssertions > 0;
+            const failed = !!stepError || lastFailedAssertions > 0;
             events.emit({
               type: "step_end",
               id: scope.testMeta.id,
@@ -283,18 +338,17 @@ export class RunnerCore {
               name: step.meta.name,
               status: failed ? "failed" : "passed",
               durationMs: scheduler.now() - startedAt,
-              assertions,
-              failedAssertions,
-              attempts: 1,
-              retriesUsed: 0,
+              assertions: lastAssertions,
+              failedAssertions: lastFailedAssertions,
+              attempts: attemptsUsed,
+              retriesUsed: Math.max(0, attemptsUsed - 1),
               ...(stepError ? { error: stepError } : {}),
               ...(stepReturnState !== undefined ? { returnState: serializeReturnState(stepReturnState) } : {}),
             });
             scope.currentStepIndex = null;
 
             // On failure: mark stepFailed but DON'T break — the loop continues so the
-            // remaining steps emit skipped step_end (node parity, via the skip-check
-            // at the loop top). (Per-step retry/timeout is still Phase 1b.)
+            // remaining steps emit skipped step_end (node parity, skip-check at top).
             if (failed) {
               stepFailed = true;
               if (stepError && stepFailMsg === undefined) stepFailMsg = stepError;
@@ -330,14 +384,18 @@ export class RunnerCore {
     // RESULT. Emitting here would force one shape on both hosts and double the
     // runner's status event (plan 0005 / codex P2).
     const assertionsFailed = scope.assertions.total > scope.assertions.passed;
-    const verdict: "ok" | "error" = threw || stepFailed || assertionsFailed ? "error" : "ok";
+    // Steps tests fail via stepFailed (the LAST attempt of each step) — NOT the
+    // cumulative assertion count, so a step that fails then RETRIES to success does
+    // not fail the run. Simple tests use the cumulative count (soft-fail).
+    const verdict: "ok" | "error" =
+      threw || (def.type === "steps" ? stepFailed : assertionsFailed) ? "error" : "ok";
     return {
       id: scope.testMeta.id,
       name: def.meta.name ?? def.meta.id,
       status: verdict,
       threw,
       ...(stepFailed ? { stepsFailed: true } : {}),
-      error: threw ? thrownError : (stepFailMsg ?? (assertionsFailed ? "assertion failed" : undefined)),
+      error: verdict === "ok" ? undefined : threw ? thrownError : (stepFailMsg ?? "assertion failed"),
       // Preserve the user's original throw stack + name so a host can re-raise with
       // them (stack diagnostics + failure classification parity — codex P2).
       ...(threw && thrownStack ? { errorStack: thrownStack } : {}),
