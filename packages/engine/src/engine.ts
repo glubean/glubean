@@ -90,6 +90,31 @@ class StepTimeoutError extends Error {
 }
 
 /**
+ * ctx.skip() sentinel (node parity: harness.ts SkipError). Caught in the run-loop
+ * and turned into a `skipped` verdict — never leaves the engine (the host re-raises
+ * its OWN SkipError from the result so the dispatcher's skip status matches). The
+ * name matches the node harness so any classifier agrees.
+ */
+class SkipError extends Error {
+  constructor(public readonly reason?: string) {
+    super(reason ? `Test skipped: ${reason}` : "Test skipped");
+    this.name = "SkipError";
+  }
+}
+
+/**
+ * ctx.fail() sentinel (node parity: harness.ts FailError). ctx.fail emits a failed
+ * assertion THEN throws this; in a simple test it propagates as a throw (→ host
+ * re-raises → failed), in a step/branch leg it is caught as the step error message.
+ */
+class FailError extends Error {
+  constructor(public readonly reason: string) {
+    super(reason);
+    this.name = "FailError";
+  }
+}
+
+/**
  * Serialize a step's return state for the step_end event with the node harness's
  * 4 KB guard: keep the value if it serializes ≤ 4096 bytes, else a truncated marker;
  * a non-serializable value becomes a marker (codex parity).
@@ -266,6 +291,12 @@ export class RunnerCore {
     // First branch-decision failure → the test-level failure message (node parity:
     // the post-loop throw prefers it over "One or more steps failed").
     let branchDecisionError: string | undefined;
+    // ctx.skip() reached us: in a steps run a step/branch-predicate skip sets this
+    // (no throw — skips remaining steps + skips the whole test after teardown, node
+    // parity). A simple-test / setup skip propagates as a throw to the catch below.
+    let skipRequest: SkipError | undefined;
+    let skipped = false;
+    let skipReason: string | undefined;
     try {
       if (def.type === "simple") {
         if (!def.fn) throw new Error(`test "${def.meta.id}": missing fn`);
@@ -345,13 +376,20 @@ export class RunnerCore {
                 }
               }
             } catch (e) {
-              // A thrown step is caught + recorded as a failed step (node parity:
-              // the run still "completes"; the test fails via stepsFailed).
-              stepError = e instanceof Error ? e.message : String(e);
-              timedOut = e instanceof StepTimeoutError;
+              if (e instanceof SkipError) {
+                // ctx.skip() inside a step skips the WHOLE test — not a step failure,
+                // and never retried (node parity: harness.ts:2219).
+                skipRequest = e;
+              } else {
+                // A thrown step is caught + recorded as a failed step (node parity:
+                // the run still "completes"; the test fails via stepsFailed).
+                stepError = e instanceof Error ? e.message : String(e);
+                timedOut = e instanceof StepTimeoutError;
+              }
             }
             lastAssertions = scope.assertions.total - aBefore;
             lastFailedAssertions = scope.assertions.total - scope.assertions.passed - fBefore;
+            if (skipRequest) break; // skip is terminal — never retry a skip
             const attemptFailed = !!stepError || lastFailedAssertions > 0;
             if (!attemptFailed || timedOut) break; // success, or a timeout (terminal — no retry)
             if (attempt < maxAttempts) {
@@ -366,6 +404,30 @@ export class RunnerCore {
               if (delay > 0) await new Promise<void>((r) => setTimeout(r, delay));
             }
           }
+
+          // ctx.skip() in this step skips the whole test — UNLESS a failed assertion
+          // was already recorded before the skip, in which case the failure wins (a
+          // skip must not mask a real failure; node parity: harness.ts:2275). On a
+          // clean skip: emit a skipped step_end (with attempts/retriesUsed) and return;
+          // runStepList sees skipRequest set and skips the remaining steps.
+          if (skipRequest && lastFailedAssertions === 0) {
+            events.emit({
+              type: "step_end",
+              id: scope.testMeta.id,
+              index: idx,
+              name: step.meta.name,
+              status: "skipped",
+              durationMs: scheduler.now() - startedAt,
+              assertions: lastAssertions,
+              failedAssertions: 0,
+              attempts: attemptsUsed,
+              retriesUsed: Math.max(0, attemptsUsed - 1),
+            });
+            scope.currentStepIndex = null;
+            return;
+          }
+          // A prior failure overrides the skip — report this step (+ the test) failed.
+          skipRequest = undefined;
 
           const failed = !!stepError || lastFailedAssertions > 0;
           events.emit({
@@ -439,9 +501,26 @@ export class RunnerCore {
               }
             }
           } catch (e) {
-            // Decision failure (§7.4): the test fails; never silently take a branch.
-            // (ctx.skip() inside a predicate is Phase 4 — no ctx.skip yet.)
-            failDecision(e instanceof Error ? e.message : String(e));
+            const decisionFailed = scope.assertions.total - scope.assertions.passed - failedBefore;
+            if (e instanceof SkipError && decisionFailed === 0) {
+              // ctx.skip() in a predicate/lens skips the WHOLE test (node parity:
+              // harness.ts:2573) — emit a default-taken branch with NO error + skip
+              // every sub-step; runStepList then skips the remaining steps.
+              skipRequest = e;
+              events.emit({ type: "branch", ...baseEvent, index: branchSeq++, takenIndex: "default", total });
+              for (const c of branch.cases) emitSkippedTree(c.steps);
+              emitSkippedTree(branch.default ?? []);
+              return;
+            }
+            // Decision failure (§7.4): the test fails; never silently take a branch. A
+            // skip preceded by a failed assertion reports that failure (failure wins).
+            failDecision(
+              e instanceof SkipError
+                ? `${decisionFailed} failed assertion(s) before ctx.skip() in branch decision`
+                : e instanceof Error
+                  ? e.message
+                  : String(e),
+            );
             return;
           }
 
@@ -475,7 +554,7 @@ export class RunnerCore {
         // skips the rest (skipped step_end tree); branch steps make a decision + recurse.
         const runStepList = async (steps: StepDef[]): Promise<void> => {
           for (const step of steps) {
-            if (stepFailed) {
+            if (stepFailed || skipRequest) {
               emitSkippedTree([step]);
               continue;
             }
@@ -510,12 +589,37 @@ export class RunnerCore {
             }
           }
         }
+        // A step / branch-predicate called ctx.skip() (recorded without a throw):
+        // after teardown the whole test is skipped (node parity: harness.ts:2692).
+        if (skipRequest) {
+          skipped = true;
+          skipReason = skipRequest.reason;
+        }
       }
     } catch (e) {
-      threw = true;
-      thrownError = e instanceof Error ? e.message : String(e);
-      thrownStack = e instanceof Error ? e.stack : undefined;
-      thrownName = e instanceof Error ? e.name : undefined;
+      if (e instanceof SkipError) {
+        // ctx.skip() from a simple test (or setup) propagates as a throw → skipped.
+        skipped = true;
+        skipReason = e.reason;
+      } else {
+        threw = true;
+        thrownError = e instanceof Error ? e.message : String(e);
+        thrownStack = e instanceof Error ? e.stack : undefined;
+        thrownName = e instanceof Error ? e.name : undefined;
+      }
+    }
+
+    // ctx.skip() wins over any partial assertion bookkeeping: a skipped test has no
+    // verdict (the host re-raises its own SkipError(reason) so the dispatcher emits
+    // the same skipped status as legacy). assertions are carried for completeness.
+    if (skipped) {
+      return {
+        id: scope.testMeta.id,
+        name: def.meta.name ?? def.meta.id,
+        status: "skipped",
+        ...(skipReason !== undefined ? { skipReason } : {}),
+        assertions: { ...scope.assertions },
+      };
     }
 
     // The engine does NOT emit a status EVENT — status emission is host policy:
@@ -625,6 +729,19 @@ export class RunnerCore {
         },
       },
       log: (message, data) => emitStep({ type: "log", id: scope.testMeta.id, message, data }),
+      // ctx.skip(reason?) — throws; the run-loop turns it into a `skipped` verdict.
+      skip: (reason?: string): never => {
+        throw new SkipError(reason);
+      },
+      // ctx.fail(message) — emit a failed assertion THEN throw. The assertion is
+      // emitted WITHOUT a stepIndex even inside a step (node parity: harness ctx.fail
+      // uses the bare emit, not the step-scoped one), but it still bumps the assertion
+      // counter so a step/branch leg records the failure even if the throw is caught.
+      fail: (message: string): never => {
+        scope.assertions.total += 1;
+        emit({ type: "assertion", id: scope.testMeta.id, passed: false, message });
+        throw new FailError(message);
+      },
       retryCount: scope.retryCount,
     };
   }

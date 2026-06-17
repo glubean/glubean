@@ -191,6 +191,36 @@ export const validatorTest = test(
   { id: "validatorTest", name: "Validator Test" },
   async (ctx) => { ctx.vars.require("V", (v) => v === "good" || "must be good"); ctx.assert(true, "unreached"); }
 );
+export const skipReasonTest = test(
+  { id: "skipReasonTest", name: "Skip Reason Test" },
+  async (ctx) => { ctx.log("before skip"); ctx.skip("not ready"); ctx.assert(true, "unreached"); }
+);
+export const skipNoReasonTest = test(
+  { id: "skipNoReasonTest", name: "Skip No Reason Test" },
+  async (ctx) => { ctx.skip(); }
+);
+export const failTest = test(
+  { id: "failTest", name: "Fail Test" },
+  async (ctx) => { ctx.assert(true, "before fail"); ctx.fail("boom failure"); ctx.assert(true, "unreached"); }
+);
+export const stepSkipTest = test("stepSkipTest")
+  .step("one", async (ctx) => { ctx.assert(true, "first ok"); })
+  .step("skip-here", async (ctx) => { ctx.skip("skip from step"); })
+  .step("never", async (ctx) => { ctx.assert(true, "unreached"); });
+export const stepFailTest = test("stepFailTest")
+  .step("boom", async (ctx) => { ctx.fail("fail in step"); })
+  .step("never", async (ctx) => { ctx.assert(true, "unreached"); });
+export const branchSkipTest = test("branchSkipTest")
+  .setup(async () => ({}))
+  .condition(
+    { predicate: (ctx) => { ctx.skip("skip in predicate"); return true; }, message: "decide" },
+    (b) => b.step("yes", async (ctx, s) => s),
+    (b) => b.step("no", async (ctx, s) => s),
+  )
+  .step("after", async (ctx, s) => { ctx.assert(true, "unreached"); return s; });
+export const stepSkipAfterFailTest = test("stepSkipAfterFailTest")
+  .step("fail-then-skip", async (ctx) => { ctx.assert(false, "real failure", { actual: 1, expected: 2 }); ctx.skip("masked"); })
+  .step("never", async (ctx) => { ctx.assert(true, "unreached"); });
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -282,4 +312,32 @@ ptest("engine parity: branch switchOn — value case matched (others + default s
 
 ptest("engine parity: branch decision failure (predicate throws → branch error)", async () => {
   await assertParity(MODULE, "branchFailTest");
+});
+
+ptest("engine parity: ctx.skip(reason) in simple test → skipped status carries reason", async () => {
+  await assertParity(MODULE, "skipReasonTest");
+});
+
+ptest("engine parity: ctx.skip() with no reason → skipped status (no reason field)", async () => {
+  await assertParity(MODULE, "skipNoReasonTest");
+});
+
+ptest("engine parity: ctx.fail(msg) → failed assertion + re-raised (failed + exit 1)", async () => {
+  await assertParity(MODULE, "failTest");
+});
+
+ptest("engine parity: ctx.skip() in a step → skipped step_end + remaining skipped + skipped", async () => {
+  await assertParity(MODULE, "stepSkipTest");
+});
+
+ptest("engine parity: ctx.fail() in a step → step fails ('One or more steps failed')", async () => {
+  await assertParity(MODULE, "stepFailTest");
+});
+
+ptest("engine parity: ctx.skip() in a branch predicate → whole test skipped", async () => {
+  await assertParity(MODULE, "branchSkipTest");
+});
+
+ptest("engine parity: failed assertion before ctx.skip() in a step → failure wins", async () => {
+  await assertParity(MODULE, "stepSkipAfterFailTest");
 });

@@ -159,6 +159,10 @@ export interface TestResult {
   /** The message a host should throw for `stepsFailed` — usually "One or more steps
    *  failed", or a branch-decision-specific message when a branch decision failed. */
   stepsFailMessage?: string;
+  /** When `status === "skipped"` because user code called ctx.skip(reason?): the
+   *  reason. A host re-raises its own SkipError(reason) so the dispatcher emits the
+   *  same skipped status (with `reason`) as the legacy path (plan 0005 / codex). */
+  skipReason?: string;
   error?: string;
   /** The original throw's stack (only when `threw`), so a host can re-raise with
    *  the user's stack instead of a host-rooted one (diagnostics parity). */
@@ -206,6 +210,13 @@ export interface EngineContext {
   };
   session: { get(k: string): unknown; set(k: string, v: unknown): void };
   log(message: string, data?: unknown): void;
+  /** Skip the current test with an optional reason (node parity: throws a SkipError
+   *  the run-loop turns into a `skipped` verdict; a step/branch-predicate skip skips
+   *  the whole test unless a failure was already recorded). */
+  skip(reason?: string): never;
+  /** Immediately fail + abort: emit a failed assertion (counted even if caught) then
+   *  throw, so a steps/branch leg records the failure (node parity: harness ctx.fail). */
+  fail(message: string): never;
   /** Test-level retry attempt for this run (0 on the first run). */
   retryCount: number;
 }

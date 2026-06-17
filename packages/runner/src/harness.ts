@@ -2008,18 +2008,19 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
       throw new Error(result.stepsFailMessage ?? "One or more steps failed");
     }
     if (result.status === "skipped") {
-      // Legacy skip status (dispatcher) carries no peak memory.
-      emitEngineWire({ type: "status", status: "skipped", id: test.meta.id, testId: test.meta.id });
-    } else {
-      emitEngineWire({
-        type: "status",
-        status: "completed",
-        id: test.meta.id,
-        testId: test.meta.id,
-        peakMemoryBytes: peakBytes,
-        peakMemoryMB: (peakBytes / 1024 / 1024).toFixed(2),
-      });
+      // Re-raise a harness SkipError(reason) so the SAME dispatcher catch that
+      // handles a legacy ctx.skip() emits the skipped status (with `reason`) — byte
+      // parity with legacy, which throws skipRequest out to the dispatcher (plan 0005).
+      throw new SkipError(result.skipReason);
     }
+    emitEngineWire({
+      type: "status",
+      status: "completed",
+      id: test.meta.id,
+      testId: test.meta.id,
+      peakMemoryBytes: peakBytes,
+      peakMemoryMB: (peakBytes / 1024 / 1024).toFixed(2),
+    });
     return;
   }
 
