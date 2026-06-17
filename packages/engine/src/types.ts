@@ -136,6 +136,10 @@ export interface RunnerServices {
   events: EventSink;
   scheduler: Scheduler;
   carrier: RuntimeCarrier;
+  /** HTTP trace policy (host-injected from ExecutorOptions, all default OFF): full
+   *  request/response capture, response-body schema inference, and aggressive array
+   *  truncation. Node parity: harness emitFullTrace / inferSchema / truncateArrays. */
+  http?: { emitFullTrace?: boolean; inferSchema?: boolean; truncateArrays?: boolean };
 }
 
 // --- type sketches only (Stage 1 P3-1: NOT implemented/wired; here to fix the

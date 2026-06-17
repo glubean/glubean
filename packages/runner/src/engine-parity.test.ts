@@ -50,6 +50,11 @@ beforeAll(async () => {
       res.end(JSON.stringify({ error: "teapot" }));
       return;
     }
+    if (url.pathname === "/big") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ items: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], note: "x".repeat(100) }));
+      return;
+    }
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
   });
@@ -71,6 +76,9 @@ async function makeTempFile(content: string, name = "test.ts"): Promise<string> 
 }
 
 type RunCtx = { vars?: Record<string, string>; secrets?: Record<string, string>; retryCount?: number };
+/** ExecutorOptions exercised by the ky full-trace parity cases — passed to BOTH legs
+ *  so the only difference is legacy vs engine, never the trace policy. */
+type ExecOpts = { emitFullTrace?: boolean; inferSchema?: boolean; truncateArrays?: boolean };
 
 /** Collect the raw ExecutionEvent stream from one harness subprocess run. */
 async function rawEvents(
@@ -78,11 +86,13 @@ async function rawEvents(
   testId: string,
   useEngine: boolean,
   ctx: RunCtx = {},
+  exec: ExecOpts = {},
 ): Promise<ExecutionEvent[]> {
   // engine leg: flag on + allowlist this exact test id (plan 0005 per-test routing).
-  const executor = new TestExecutor(
-    useEngine ? { env: { GLUBEAN_USE_ENGINE: "1", GLUBEAN_ENGINE_TESTIDS: testId } } : {},
-  );
+  const executor = new TestExecutor({
+    ...exec,
+    ...(useEngine ? { env: { GLUBEAN_USE_ENGINE: "1", GLUBEAN_ENGINE_TESTIDS: testId } } : {}),
+  });
   const events: ExecutionEvent[] = [];
   const runCtx = {
     vars: ctx.vars ?? {},
@@ -128,14 +138,20 @@ function normalize(events: ExecutionEvent[]): unknown[] {
     if (c.type === "metric" && c.name === "http_duration_ms" && typeof c.value === "number") {
       c.value = 0;
     }
+    // Full-trace headers carry a wall-clock `date` (the two legs run sequentially).
+    if (c.type === "trace") {
+      const data = c.data as { requestHeaders?: Record<string, unknown>; responseHeaders?: Record<string, unknown> } | undefined;
+      delete data?.requestHeaders?.date;
+      delete data?.responseHeaders?.date;
+    }
     return c;
   });
 }
 
-async function assertParity(content: string, testId: string, ctx: RunCtx = {}): Promise<void> {
+async function assertParity(content: string, testId: string, ctx: RunCtx = {}, exec: ExecOpts = {}): Promise<void> {
   const file = await makeTempFile(content);
-  const legacy = normalize(await rawEvents(file, testId, false, ctx));
-  const engine = normalize(await rawEvents(file, testId, true, ctx));
+  const legacy = normalize(await rawEvents(file, testId, false, ctx, exec));
+  const engine = normalize(await rawEvents(file, testId, true, ctx, exec));
   // Guard against a VACUOUS green: if the module failed to import (e.g. a malformed
   // fixture), both legs error identically before any test runs and toEqual passes
   // without comparing real output. A real run always emits a "start" event.
@@ -442,6 +458,36 @@ export const httpResponseHeaderSchemaFailTest = test(
     ctx.assert(true, "after response header schema");
   }
 );
+export const httpFullTraceGetTest = test(
+  { id: "httpFullTraceGetTest", name: "full-trace GET" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/json");
+    ctx.assert(res.status === 200, "200");
+  }
+);
+export const httpFullTracePostTest = test(
+  { id: "httpFullTracePostTest", name: "full-trace POST captures request body" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.post(base + "/json", { json: { name: "bob", tags: ["a", "b"] } });
+    ctx.assert(res.status === 200, "200");
+  }
+);
+export const httpTruncateBodyTest = test(
+  { id: "httpTruncateBodyTest", name: "full-trace + truncateArrays truncates response body" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/big");
+    ctx.assert(res.status === 200, "200");
+  }
+);
+export const assertTruncateTest = test(
+  { id: "assertTruncateTest", name: "assertion actual/expected truncated on pass" },
+  async (ctx) => {
+    ctx.assert(true, "big arrays", { actual: [0, 1, 2, 3, 4, 5, 6], expected: [0, 1, 2, 3, 4, 5, 6] });
+  }
+);
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -657,4 +703,24 @@ ptest("engine parity: ky schema.response fail via .json() monkey-patch", async (
 
 ptest("engine parity: ky schema.responseHeaders fail → schema_validation (afterResponse hook)", async () => {
   await assertParity(MODULE, "httpResponseHeaderSchemaFailTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: emitFullTrace GET (request/response headers + response body)", async () => {
+  await assertParity(MODULE, "httpFullTraceGetTest", { vars: { BASE_URL: baseUrl } }, { emitFullTrace: true });
+});
+
+ptest("engine parity: emitFullTrace POST captures request body", async () => {
+  await assertParity(MODULE, "httpFullTracePostTest", { vars: { BASE_URL: baseUrl } }, { emitFullTrace: true });
+});
+
+ptest("engine parity: emitFullTrace + inferSchema → responseSchema on trace", async () => {
+  await assertParity(MODULE, "httpFullTraceGetTest", { vars: { BASE_URL: baseUrl } }, { emitFullTrace: true, inferSchema: true });
+});
+
+ptest("engine parity: emitFullTrace + truncateArrays truncates the response body", async () => {
+  await assertParity(MODULE, "httpTruncateBodyTest", { vars: { BASE_URL: baseUrl } }, { emitFullTrace: true, truncateArrays: true });
+});
+
+ptest("engine parity: truncateArrays truncates a passing assertion's actual/expected", async () => {
+  await assertParity(MODULE, "assertTruncateTest", {}, { truncateArrays: true });
 });

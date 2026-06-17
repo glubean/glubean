@@ -1387,6 +1387,10 @@ const engineCore = USE_ENGINE
       // without destroying the Proxy.
       vars: withEnvFallback(rawVars),
       secrets: withEnvFallback(rawSecrets),
+      // Forward the trace policy so the engine's ky auto-trace capture matches legacy.
+      emitFullTrace: !!emitFullTrace,
+      inferSchema: !!inferSchema,
+      truncateArrays: !!truncateArrays,
     })
   : undefined;
 

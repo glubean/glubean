@@ -178,6 +178,11 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
 export interface EngineCoreOptions {
   vars: Record<string, string>;
   secrets: Record<string, string>;
+  /** HTTP trace policy (ExecutorOptions), forwarded to the engine's ky hooks so the
+   *  auto-trace capture matches the legacy harness (plan 0005 §D / Phase 4f-3). */
+  emitFullTrace?: boolean;
+  inferSchema?: boolean;
+  truncateArrays?: boolean;
 }
 
 /**
@@ -195,6 +200,11 @@ export function createEngineCore(
     events: { emit: (e) => sink(engineEventToWire(e)) },
     scheduler: { now: () => performance.now() },
     carrier: createAlsCarrier(),
+    http: {
+      emitFullTrace: opts.emitFullTrace,
+      inferSchema: opts.inferSchema,
+      truncateArrays: opts.truncateArrays,
+    },
   };
   return new RunnerCore(services);
 }

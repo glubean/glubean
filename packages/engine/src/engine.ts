@@ -16,6 +16,7 @@
  * linear steps. No branch / poll / retry / timeout / workflow (Stage 2).
  */
 import ky, { type KyInstance } from "ky";
+import { captureRequestBody, inferJsonSchema, truncateBody, truncateDeep } from "./http-trace.js";
 import { Expectation } from "@glubean/sdk";
 import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, SchemaEntry, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
@@ -344,7 +345,11 @@ export class RunnerCore {
    */
   private createScopedKy(scope: ExecutionScope): GlubeanHttp {
     const { fetch: hostFetch, scheduler } = this.services;
-    const startedAt = new WeakMap<object, number>();
+    const emitFullTrace = this.services.http?.emitFullTrace ?? false;
+    const inferSchema = this.services.http?.inferSchema ?? false;
+    const truncateArrays = this.services.http?.truncateArrays ?? false;
+    // Per-request state keyed by ky 2's stable options.context (not the Request).
+    const reqState = new WeakMap<object, { startTime: number; body?: unknown }>();
     const instance = ky.create({
       fetch: hostFetch as typeof fetch,
       throwHttpErrors: false,
@@ -354,18 +359,22 @@ export class RunnerCore {
       retry: 0,
       hooks: {
         beforeRequest: [
-          ({ options }) => {
-            startedAt.set(options.context, scheduler.now());
+          async ({ request, options }) => {
+            reqState.set(options.context, {
+              startTime: scheduler.now(),
+              // Capture the request body (ky 2 hides options.json) for full-trace.
+              body: emitFullTrace ? await captureRequestBody(request) : undefined,
+            });
           },
         ],
         afterResponse: [
-          ({ request, options, response }) => {
+          async ({ request, options, response }) => {
             const ctx = scope.ctxRef;
             // No ctx yet (a request before makeCtx) should never happen during a run;
             // bail rather than emit an un-attributed trace.
             if (!ctx) return response;
-            const t0 = startedAt.get(options.context) ?? scheduler.now();
-            const durationMs = Math.round(scheduler.now() - t0);
+            const state = reqState.get(options.context);
+            const durationMs = Math.round(scheduler.now() - (state?.startTime ?? scheduler.now()));
             // `request` is the final (possibly hook-replaced) request — correct target.
             const pathname = pathnameOf(request.url);
             const trace: Trace = {
@@ -382,6 +391,32 @@ export class RunnerCore {
             // Operation name from the GraphQL client (X-Glubean-Op header).
             const glubeanOp = request.headers.get("x-glubean-op");
             if (glubeanOp) trace.name = glubeanOp;
+
+            // Full-trace capture (node parity: harness.ts:1062-1106), gated by
+            // emitFullTrace. Reads a CLONE so the user's res.json()/text() still works.
+            if (emitFullTrace) {
+              trace.requestHeaders = Object.fromEntries(request.headers.entries());
+              if (state?.body !== undefined) trace.requestBody = truncateBody(state.body);
+              trace.responseHeaders = Object.fromEntries(response.headers.entries());
+              try {
+                const cloned = response.clone();
+                const contentType = response.headers.get("content-type") || "";
+                let parsedBody: unknown;
+                if (contentType.includes("json")) parsedBody = await cloned.json();
+                else if (contentType.includes("text") || contentType.includes("xml")) parsedBody = await cloned.text();
+                if (parsedBody !== undefined) {
+                  // Schema inference runs on the FULL body before any truncation.
+                  if (inferSchema && typeof parsedBody === "object" && parsedBody !== null) {
+                    trace.responseSchema = inferJsonSchema(parsedBody);
+                  }
+                  trace.responseBody = truncateArrays ? truncateDeep(parsedBody) : truncateBody(parsedBody);
+                }
+                // Binary content types are intentionally skipped.
+              } catch {
+                // Ignore clone/parse errors — trace still emits without the body.
+              }
+            }
+
             // ctx.trace emits the trace event + the derived `http:request` action.
             ctx.trace(trace);
             // Auto-metric for response time (node parity: harness.ts:1116).
@@ -784,6 +819,9 @@ export class RunnerCore {
 
   private makeCtx(scope: ExecutionScope): EngineContext {
     const emit = (e: Parameters<RunnerServices["events"]["emit"]>[0]) => this.services.events.emit(e);
+    // Aggressive array/string truncation of a PASSING assertion's actual/expected,
+    // to save tokens (node parity: harness.ts:718 — only on pass, full kept on fail).
+    const truncateArrays = this.services.http?.truncateArrays ?? false;
     // Events emitted DURING a step carry its 0-based index (node parity); outside a
     // step (simple tests / setup / teardown) they carry none.
     const emitStep = (e: { stepIndex?: number } & Record<string, unknown>) =>
@@ -807,8 +845,9 @@ export class RunnerCore {
         type: "assertion",
         id: scope.testMeta.id,
         passed: result.passed,
-        actual,
-        expected,
+        // Truncate on PASS to save tokens; keep full on FAIL for debugging (node parity).
+        actual: result.passed && truncateArrays ? truncateDeep(actual) : actual,
+        expected: result.passed && truncateArrays ? truncateDeep(expected) : expected,
         // Parity with the node harness default (gap C).
         message: message ?? (result.passed ? "Assertion passed" : "Assertion failed"),
       });
@@ -820,21 +859,13 @@ export class RunnerCore {
     const actionFn = (a: GlubeanAction): void => emitStep({ type: "action", id: scope.testMeta.id, data: a });
     return {
       http: scope.http,
+      // Route through assertFn (like the node harness routes expect → ctx.assert,
+      // harness.ts:725-737) so the counters, default message, and truncate-on-pass
+      // behave identically — one assertion implementation.
       expect: (actual: unknown) =>
-        new Expectation(actual, (r: { passed: boolean; actual?: unknown; expected?: unknown; message?: string }) => {
-          scope.assertions.total += 1;
-          if (r.passed) scope.assertions.passed += 1;
-          emitStep({
-            type: "assertion",
-            id: scope.testMeta.id,
-            passed: r.passed,
-            actual: r.actual,
-            expected: r.expected,
-            // Default to the node harness's wording so both hosts + the runner
-            // golden agree on the message when the matcher gave none (parity gap C).
-            message: r.message ?? (r.passed ? "Assertion passed" : "Assertion failed"),
-          });
-        }),
+        new Expectation(actual, (r: { passed: boolean; actual?: unknown; expected?: unknown; message?: string }) =>
+          assertFn({ passed: r.passed, actual: r.actual, expected: r.expected }, r.message),
+        ),
       assert: assertFn,
       warn: warnFn,
       validate: <T>(data: unknown, schema: SchemaLike<T>, label?: string, options?: ValidateOptions): T | undefined => {
