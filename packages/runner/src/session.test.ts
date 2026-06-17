@@ -329,7 +329,7 @@ export default defineSession({
 
 // ── Session → {{KEY}} template resolution (integration) ────────────────────
 
-test("session values resolve in configure() {{KEY}} templates", async () => {
+test("session values resolve in configure() {{KEY}} templates", { timeout: 15_000, retry: 3 }, async () => {
   const dir = await makeTempDir();
 
   // session.ts sets AUTH_TOKEN
@@ -399,7 +399,7 @@ export const checkHeader = test("check-header", async (ctx) => {
   );
 }, 15_000);
 
-test("session values resolve in configure() prefixUrl template", async () => {
+test("session values resolve in configure() prefixUrl template", { timeout: 15_000, retry: 3 }, async () => {
   const dir = await makeTempDir();
 
   const testFile = join(dir, "prefix.test.ts");

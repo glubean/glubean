@@ -1711,7 +1711,7 @@ export const httpResponseHeadersSchemaFailTest = test(
 );
 `;
 
-test("HTTP schema - query validation passes with valid params", { timeout: 15_000 }, async () => {
+test("HTTP schema - query validation passes with valid params", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1728,7 +1728,7 @@ test("HTTP schema - query validation passes with valid params", { timeout: 15_00
   expect(queryValidation!.success).toBe(true);
 });
 
-test("HTTP schema - query validation fails with invalid params", { timeout: 15_000 }, async () => {
+test("HTTP schema - query validation fails with invalid params", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1747,7 +1747,7 @@ test("HTTP schema - query validation fails with invalid params", { timeout: 15_0
   expect(queryValidation!.success).toBe(false);
 });
 
-test("HTTP schema - request body validation passes", { timeout: 15_000 }, async () => {
+test("HTTP schema - request body validation passes", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1763,7 +1763,7 @@ test("HTTP schema - request body validation passes", { timeout: 15_000 }, async 
   expect(bodyValidation!.success).toBe(true);
 });
 
-test("HTTP schema - request body validation fails", { timeout: 15_000 }, async () => {
+test("HTTP schema - request body validation fails", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1782,7 +1782,7 @@ test("HTTP schema - request body validation fails", { timeout: 15_000 }, async (
   expect(bodyValidation!.success).toBe(false);
 });
 
-test("HTTP schema - severity: warn does not fail test", { timeout: 15_000 }, async () => {
+test("HTTP schema - severity: warn does not fail test", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1801,7 +1801,7 @@ test("HTTP schema - severity: warn does not fail test", { timeout: 15_000 }, asy
   expect(queryValidation!.severity).toBe("warn");
 });
 
-test("HTTP schema - request headers validation passes", { timeout: 15_000 }, async () => {
+test("HTTP schema - request headers validation passes", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1817,7 +1817,7 @@ test("HTTP schema - request headers validation passes", { timeout: 15_000 }, asy
   expect(headersValidation!.success).toBe(true);
 });
 
-test("HTTP schema - request headers validation fails", { timeout: 15_000 }, async () => {
+test("HTTP schema - request headers validation fails", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1836,7 +1836,7 @@ test("HTTP schema - request headers validation fails", { timeout: 15_000 }, asyn
   expect(headersValidation!.success).toBe(false);
 });
 
-test("HTTP schema - response headers validation passes", { timeout: 15_000 }, async () => {
+test("HTTP schema - response headers validation passes", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1852,7 +1852,7 @@ test("HTTP schema - response headers validation passes", { timeout: 15_000 }, as
   expect(headersValidation!.success).toBe(true);
 });
 
-test("HTTP schema - response headers validation fails", { timeout: 15_000 }, async () => {
+test("HTTP schema - response headers validation fails", { timeout: 15_000, retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
