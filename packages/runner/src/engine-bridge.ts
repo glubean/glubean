@@ -38,13 +38,15 @@ const ENGINE_TESTIDS = new Set(
   (process.env.GLUBEAN_ENGINE_TESTIDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
 );
 
-/** Whether the engine should run this specific test id (flag + explicit allowlist).
- *  The Phase 8 cutover wires a "*" route-all wildcard here, but ONLY once
- *  engineSupports() excludes workflow wrapper tests (a built workflow is a simple-
- *  shaped Test whose workflow:* events the LEGACY harness unwraps — routing it to the
- *  engine would lose that evidence; codex P3 P2). Until then: explicit ids only. */
+// Route-all wildcard (Phase 8 cutover): "*" routes EVERY engine-supported test id,
+// not just an explicit allowlist. engineSupports() gates the shape AND excludes the
+// node-legacy wrappers (workflow / contract via __glubean_kind, fixtures), so "*"
+// only ever sends common simple/steps/branch/poll tests to the engine.
+const ROUTE_ALL = ENGINE_TESTIDS.has("*");
+
+/** Whether the engine should run this specific test id (flag + allowlist or "*"). */
 export function engineRoutesId(id: string): boolean {
-  return USE_ENGINE && ENGINE_TESTIDS.has(id);
+  return USE_ENGINE && (ROUTE_ALL || ENGINE_TESTIDS.has(id));
 }
 
 /**

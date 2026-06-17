@@ -186,6 +186,14 @@ export const sessionTest = test(
   { id: "sessionTest", name: "Session Test" },
   async (ctx) => { ctx.session.set("sk", "sv"); ctx.assert(ctx.session.get("sk") === "sv", "session roundtrip"); }
 );
+export const sessionRequireTest = test(
+  { id: "sessionRequireTest", name: "Session Require/Entries" },
+  async (ctx) => { ctx.session.set("k", "v"); const all = ctx.session.entries(); ctx.assert(ctx.session.require("k") === "v" && all.k === "v", "require+entries"); }
+);
+export const sessionRequireMissingTest = test(
+  { id: "sessionRequireMissingTest", name: "Session Require Missing" },
+  async (ctx) => { ctx.session.require("nope"); ctx.assert(true, "unreached"); }
+);
 export const warnTest = test(
   { id: "warnTest", name: "Warn Test" },
   async (ctx) => { ctx.warn(false, "slow"); ctx.warn(true, "fine"); ctx.assert(true, "warned"); }
@@ -567,6 +575,14 @@ ptest("engine parity: system env fallback (ctx.vars.require → process.env)", a
 
 ptest("engine parity: session.set (first-class session:set control event)", async () => {
   await assertParity(MODULE, "sessionTest");
+});
+
+ptest("engine parity: session.require + session.entries", async () => {
+  await assertParity(MODULE, "sessionRequireTest");
+});
+
+ptest("engine parity: session.require throws on a missing key (test fails)", async () => {
+  await assertParity(MODULE, "sessionRequireMissingTest");
 });
 
 ptest("engine parity: warn (first-class warning events)", async () => {

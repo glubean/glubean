@@ -625,6 +625,13 @@ function dispatchContract<
       contract: registryMeta,
     });
 
+    // Keep contract cases on the LEGACY harness under the runner-on-engine cutover
+    // (engineSupports excludes marked tests). Outbound cases are common HTTP the
+    // engine could drive, but inbound (node:http webhook + node:crypto signing) is
+    // node-only, and the runner golden suite can't validate the engine path for
+    // contracts — so conservatively all contract cases stay legacy (plan 0005 §scope).
+    (testDef as { __glubean_kind?: string }).__glubean_kind = "contract";
+
     return [testDef];
   });
 

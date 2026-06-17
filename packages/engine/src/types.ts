@@ -236,7 +236,12 @@ export interface EngineContext {
     get(k: string): string | undefined;
     require(k: string, validate?: (value: string) => boolean | string | void | null): string;
   };
-  session: { get(k: string): unknown; set(k: string, v: unknown): void };
+  session: {
+    get(k: string): unknown;
+    require(k: string): unknown;
+    set(k: string, v: unknown): void;
+    entries(): Record<string, unknown>;
+  };
   log(message: string, data?: unknown): void;
   /** Validate `data` against a SchemaLike (zod or any safeParse/parse object); emits
    *  a schema_validation event and routes a failure by severity (error→failed

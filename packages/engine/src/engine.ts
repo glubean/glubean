@@ -1082,12 +1082,21 @@ export class RunnerCore {
       },
       session: {
         get: (k) => scope.session[k],
+        // node parity: harness.ts:652 — throws with the exact same message.
+        require: (k) => {
+          const v = scope.session[k];
+          if (v === undefined) {
+            throw new Error(`Session key '${k}' is required but not set. Check your session.ts setup.`);
+          }
+          return v;
+        },
         set: (k, v) => {
           scope.session[k] = v;
           // Surface the update so a host can propagate it (node: forward to sibling
           // tests; browser: update its store). Without this it'd be lost (codex P2).
           emit({ type: "session_set", id: scope.testMeta.id, key: k, value: v });
         },
+        entries: () => ({ ...scope.session }),
       },
       log: (message, data) => emitStep({ type: "log", id: scope.testMeta.id, message, data }),
       // ctx.metric — numeric perf metric. unit/tags are emitted as-is (undefined keys

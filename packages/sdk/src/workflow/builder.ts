@@ -1637,6 +1637,11 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         }
       },
     };
+    // Mark the simple wrapper so the runner-on-engine gate (engineSupports) keeps it
+    // on the LEGACY harness: its fn emits workflow:* events the harness unwraps into
+    // node/poll timeline events, which the browser-safe engine does not (plan 0005
+    // §scope: workflow stays node-only / cloud; codex Phase-3 P2).
+    (wfTest as { __glubean_kind?: string }).__glubean_kind = "workflow";
 
     // The handle IS both the Workflow IR (runWorkflow/projectWorkflow consume it
     // directly) and a one-element Test[] (the runner's array resolution discovers

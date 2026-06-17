@@ -1959,6 +1959,12 @@ async function withFixtures(
  */
 function engineSupports(test: Test<unknown>): boolean {
   if (test.fixtures && Object.keys(test.fixtures).length > 0) return false;
+  // Built workflow / contract wrappers are simple-shaped Tests, but their fn emits
+  // workflow:* events the LEGACY harness unwraps into node/poll timeline events (and
+  // inbound contract is node-only) — the browser-safe engine doesn't, so keep them on
+  // legacy even under route-all (codex Phase-3 P2; plan 0005 §scope). The SDK marks
+  // these wrappers with __glubean_kind.
+  if ((test as { __glubean_kind?: string }).__glubean_kind) return false;
   if (test.type === "simple") return true;
   if (test.type === "steps") {
     // Linear steps + retry/timeout (Phase 1) + branch (Phase 2) + poll (Phase 3).
