@@ -59,10 +59,27 @@ export interface EnvProvider {
 // can attribute assertion/trace/log events to the right run (codex P2-2).
 export type ExecutionEvent =
   | { type: "start"; id: string; name: string; tags: string[]; retryCount?: number }
-  | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown }
-  | { type: "trace"; id: string; method: string; url: string; status: number; timeMs: number }
-  | { type: "log"; id: string; message: string; data?: unknown }
-  | { type: "warning"; id: string; condition: boolean; message: string }
+  | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown; stepIndex?: number }
+  | { type: "trace"; id: string; method: string; url: string; status: number; timeMs: number; stepIndex?: number }
+  | { type: "log"; id: string; message: string; data?: unknown; stepIndex?: number }
+  | { type: "warning"; id: string; condition: boolean; message: string; stepIndex?: number }
+  | { type: "step_start"; id: string; index: number; name: string; total: number }
+  | {
+      type: "step_end";
+      id: string;
+      index: number;
+      name: string;
+      status: "passed" | "failed" | "skipped";
+      durationMs: number;
+      assertions: number;
+      failedAssertions: number;
+      // present for run steps; omitted for steps skipped after an earlier failure
+      // (node parity: emitSkippedTree emits no attempts/retriesUsed)
+      attempts?: number;
+      retriesUsed?: number;
+      error?: string;
+      returnState?: unknown;
+    }
   // ctx.session.set — a host may surface this as a control signal (the node runner
   // forwards it to sibling tests; the browser updates its session store).
   | { type: "session_set"; id: string; key: string; value: unknown }
@@ -124,6 +141,10 @@ export interface TestResult {
    *  distinguish "completed but failed an assertion" from "threw" when deciding
    *  status/exit semantics (the runner re-raises a throw; a soft fail completed). */
   threw?: boolean;
+  /** True if a STEP failed (assertion or throw) in a steps run. Node parity: a
+   *  steps test with any failed step is reported as a failure ("One or more steps
+   *  failed"), unlike a simple test's soft assertion failure which "completes". */
+  stepsFailed?: boolean;
   error?: string;
   /** The original throw's stack (only when `threw`), so a host can re-raise with
    *  the user's stack instead of a host-rooted one (diagnostics parity). */
@@ -184,6 +205,9 @@ export interface ExecutionScope {
   runtime: InternalRuntime; // own object identity (configure().http WeakMap-caches per runtime)
   testMeta: { id: string; tags: string[] };
   stepIndex: number;
+  /** 0-based index of the step currently running (null outside a step) — events
+   *  emitted during a step carry it as `stepIndex`, like the node harness. */
+  currentStepIndex: number | null;
   retryCount: number;
   assertions: { total: number; passed: number };
   http: GlubeanHttp;

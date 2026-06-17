@@ -130,6 +130,16 @@ export const namedErrorTest = test(
   { id: "namedErrorTest", name: "Named Error Test" },
   async () => { throw new TypeError("typed boom"); }
 );
+export const stepsTest = test("stepsTest")
+  .setup(async () => ({ n: 0 }))
+  .step("inc", async (ctx, s) => { ctx.log("incrementing"); return { ...s, n: s.n + 1 }; })
+  .step("check", async (ctx, s) => { ctx.assert(s.n === 1, "n is 1"); return s; });
+export const failingStepTest = test("failingStepTest")
+  .step("bad", async (ctx) => { ctx.assert(false, "step fails", { actual: 1, expected: 2 }); });
+export const multiStepFailTest = test("multiStepFailTest")
+  .step("first", async (ctx) => { ctx.assert(false, "first fails"); })
+  .step("second", async (ctx) => { ctx.assert(true, "skipped — never runs"); })
+  .step("third", async (ctx) => { ctx.assert(true, "skipped too"); });
 export const retryTest = test(
   { id: "retryTest", name: "Retry Test" },
   async (ctx) => { ctx.assert(ctx.retryCount === 2, "retry count", { actual: ctx.retryCount, expected: 2 }); }
@@ -193,4 +203,16 @@ ptest("engine parity: require() validator callback runs (codex P2)", async () =>
   // A failing validator must throw on BOTH paths (engine ignoring it would let an
   // invalid value pass).
   await assertParity(MODULE, "validatorTest", { vars: { V: "bad" } });
+});
+
+ptest("engine parity: linear steps (step_start/step_end + per-step stepIndex)", async () => {
+  await assertParity(MODULE, "stepsTest");
+});
+
+ptest("engine parity: failing step → 'One or more steps failed' (failed + exit 1)", async () => {
+  await assertParity(MODULE, "failingStepTest");
+});
+
+ptest("engine parity: failed step skips remaining steps (skipped step_end tree)", async () => {
+  await assertParity(MODULE, "multiStepFailTest");
 });

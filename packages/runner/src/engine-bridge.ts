@@ -64,7 +64,13 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         ...(e.retryCount !== undefined ? { retryCount: e.retryCount } : {}),
       };
     case "log":
-      return { type: "log", message: e.message, ...(e.data !== undefined ? { data: e.data } : {}), testId: e.id };
+      return {
+        type: "log",
+        message: e.message,
+        ...(e.data !== undefined ? { data: e.data } : {}),
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
+        testId: e.id,
+      };
     case "assertion":
       return {
         type: "assertion",
@@ -72,10 +78,34 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         message: e.message,
         actual: e.actual,
         expected: e.expected,
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
         testId: e.id,
       };
     case "warning":
-      return { type: "warning", condition: e.condition, message: e.message, testId: e.id };
+      return {
+        type: "warning",
+        condition: e.condition,
+        message: e.message,
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
+        testId: e.id,
+      };
+    case "step_start":
+      return { type: "step_start", index: e.index, name: e.name, total: e.total, testId: e.id };
+    case "step_end":
+      return {
+        type: "step_end",
+        index: e.index,
+        name: e.name,
+        status: e.status,
+        durationMs: e.durationMs,
+        assertions: e.assertions,
+        failedAssertions: e.failedAssertions,
+        ...(e.attempts !== undefined ? { attempts: e.attempts } : {}),
+        ...(e.retriesUsed !== undefined ? { retriesUsed: e.retriesUsed } : {}),
+        ...(e.error !== undefined ? { error: e.error } : {}),
+        ...(e.returnState !== undefined ? { returnState: e.returnState } : {}),
+        testId: e.id,
+      };
     case "session_set":
       // Legacy shape: a control event (bypasses buffering) carrying ts. ts is
       // wall-clock here (node bridge) and normalized out of parity diffs.
@@ -104,6 +134,7 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
           target: `${e.method} ${path}`,
           ok: e.status < 400,
         },
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
         testId: e.id,
       };
     }

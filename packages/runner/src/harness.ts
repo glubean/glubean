@@ -1955,7 +1955,18 @@ async function withFixtures(
  */
 function engineSupports(test: Test<unknown>): boolean {
   if (test.fixtures && Object.keys(test.fixtures).length > 0) return false;
-  return test.type === "simple";
+  if (test.type === "simple") return true;
+  if (test.type === "steps") {
+    // Phase 1a: linear steps only. branch/poll steps (Phase 2/3) and per-step
+    // retry/timeout (Phase 1b) stay on legacy until the engine emits their events.
+    for (const step of test.steps ?? []) {
+      if (isTestBranchStep(step) || isTestPollStep(step)) return false;
+      const m = (step as { meta?: { retries?: unknown; timeout?: unknown } }).meta;
+      if (m && (m.retries !== undefined || m.timeout !== undefined)) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 async function executeNewTest(test: Test<unknown>): Promise<void> {
@@ -1983,6 +1994,12 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
       if (result.errorName) err.name = result.errorName;
       if (result.errorStack) err.stack = result.errorStack;
       throw err;
+    }
+    if (result.stepsFailed) {
+      // Node parity (harness.ts "One or more steps failed"): a steps test with any
+      // failed step throws after teardown so the dispatcher reports failed + exit 1
+      // — unlike a simple test's soft assertion failure, which "completes" (codex P2).
+      throw new Error("One or more steps failed");
     }
     if (result.status === "skipped") {
       // Legacy skip status (dispatcher) carries no peak memory.

@@ -49,6 +49,21 @@ function runEngineValidator(result: boolean | string | void | null, key: string,
   throw new Error(`Invalid ${kind} "${key}": validation failed`);
 }
 
+/**
+ * Serialize a step's return state for the step_end event with the node harness's
+ * 4 KB guard: keep the value if it serializes ≤ 4096 bytes, else a truncated marker;
+ * a non-serializable value becomes a marker (codex parity).
+ */
+function serializeReturnState(value: unknown): unknown {
+  try {
+    const s = JSON.stringify(value);
+    if (typeof s !== "string") return "[non-serializable]";
+    return s.length <= 4096 ? value : `[truncated: ${s.length} bytes]`;
+  } catch {
+    return "[non-serializable]";
+  }
+}
+
 function layerEnv(
   provider: Record<string, string>,
   overlay?: Record<string, string>,
@@ -118,17 +133,20 @@ export class RunnerCore {
     const secrets = layerEnv(env.secrets(), input.secrets);
     const session: Record<string, unknown> = { ...(input.session ?? {}) };
 
-    const http = this.createScopedKy(def.meta.id);
-
     const scope: ExecutionScope = {
       runtime: undefined as unknown as InternalRuntime,
       testMeta: { id: def.meta.id, tags: def.meta.tags ?? [] },
       stepIndex: 0,
+      currentStepIndex: null,
       retryCount: input.retryCount ?? 0,
       assertions: { total: 0, passed: 0 },
-      http,
+      // assigned just below once the scope exists (the ky trace hook reads the live
+      // scope.currentStepIndex so HTTP traces inside a step carry stepIndex).
+      http: undefined as unknown as GlubeanHttp,
       session,
     };
+    const http = this.createScopedKy(def.meta.id, () => scope.currentStepIndex);
+    scope.http = http;
 
     // Fresh runtime object per run (configure().http WeakMap-caches per identity).
     scope.runtime = {
@@ -150,7 +168,7 @@ export class RunnerCore {
    * (codex P1-2: ky 2 strips ky options from hook state). throwHttpErrors:false
    * matches the node harness default so 4xx/5xx surface as responses, not throws.
    */
-  private createScopedKy(testId: string): GlubeanHttp {
+  private createScopedKy(testId: string, getStepIndex: () => number | null): GlubeanHttp {
     const { fetch: hostFetch, events, scheduler } = this.services;
     const startedAt = new WeakMap<Request, number>();
     const instance = ky.create({
@@ -169,6 +187,7 @@ export class RunnerCore {
         afterResponse: [
           ({ request, response }) => {
             const t0 = startedAt.get(request) ?? scheduler.now();
+            const stepIndex = getStepIndex();
             events.emit({
               type: "trace",
               id: testId,
@@ -176,6 +195,7 @@ export class RunnerCore {
               url: request.url,
               status: response.status,
               timeMs: scheduler.now() - t0,
+              ...(stepIndex !== null ? { stepIndex } : {}),
             });
           },
         ],
@@ -185,7 +205,7 @@ export class RunnerCore {
   }
 
   private async runLoop(def: TestDef, scope: ExecutionScope): Promise<TestResult> {
-    const { events } = this.services;
+    const { events, scheduler } = this.services;
     events.emit({
       type: "start",
       id: scope.testMeta.id,
@@ -199,32 +219,100 @@ export class RunnerCore {
     let thrownError: string | undefined;
     let thrownStack: string | undefined;
     let thrownName: string | undefined;
+    // A step that throws is CAUGHT + recorded as a failed step (node parity: the
+    // run still "completes"); it must still make the test's verdict error.
+    let stepFailed = false;
+    let stepFailMsg: string | undefined;
     try {
       if (def.type === "simple") {
         if (!def.fn) throw new Error(`test "${def.meta.id}": missing fn`);
         await def.fn(ctx);
       } else {
         let state: unknown;
+        const stepTotal = def.steps?.length ?? 0;
         try {
-          if (def.setup) state = await def.setup(ctx);
+          if (def.setup) {
+            events.emit({ type: "log", id: scope.testMeta.id, message: "Running setup..." });
+            state = await def.setup(ctx);
+          }
+          let i = 0;
           for (const step of def.steps ?? []) {
-            scope.stepIndex += 1;
+            const idx = i++;
+            // A prior step failed → skip the rest, emitting a skipped step_end for
+            // each (node parity: emitSkippedTree — no attempts/retriesUsed).
+            if (stepFailed) {
+              events.emit({
+                type: "step_end",
+                id: scope.testMeta.id,
+                index: idx,
+                name: step.meta.name,
+                status: "skipped",
+                durationMs: 0,
+                assertions: 0,
+                failedAssertions: 0,
+              });
+              continue;
+            }
+            scope.currentStepIndex = idx;
+            const totalBefore = scope.assertions.total;
             const failedBefore = scope.assertions.total - scope.assertions.passed;
-            const next = await step.fn(ctx, state);
-            if (next !== undefined) state = next;
-            // Stop after a soft assertion failure in this step — later steps are
-            // skipped so they can't run side effects (node harness parity). A
-            // thrown step already exits via the outer catch. (codex engine P2)
-            if (scope.assertions.total - scope.assertions.passed > failedBefore) break;
+            const startedAt = scheduler.now();
+            events.emit({ type: "step_start", id: scope.testMeta.id, index: idx, name: step.meta.name, total: stepTotal });
+
+            let stepError: string | undefined;
+            let stepReturnState: unknown;
+            try {
+              const next = await step.fn(ctx, state);
+              if (next !== undefined) {
+                state = next;
+                stepReturnState = next;
+              }
+            } catch (e) {
+              // A thrown step is recorded as a failed step (node parity: the step
+              // loop catches it; the test still "completes" and fails via summary).
+              stepError = e instanceof Error ? e.message : String(e);
+            }
+
+            const assertions = scope.assertions.total - totalBefore;
+            const failedAssertions = scope.assertions.total - scope.assertions.passed - failedBefore;
+            const failed = !!stepError || failedAssertions > 0;
+            events.emit({
+              type: "step_end",
+              id: scope.testMeta.id,
+              index: idx,
+              name: step.meta.name,
+              status: failed ? "failed" : "passed",
+              durationMs: scheduler.now() - startedAt,
+              assertions,
+              failedAssertions,
+              attempts: 1,
+              retriesUsed: 0,
+              ...(stepError ? { error: stepError } : {}),
+              ...(stepReturnState !== undefined ? { returnState: serializeReturnState(stepReturnState) } : {}),
+            });
+            scope.currentStepIndex = null;
+
+            // On failure: mark stepFailed but DON'T break — the loop continues so the
+            // remaining steps emit skipped step_end (node parity, via the skip-check
+            // at the loop top). (Per-step retry/timeout is still Phase 1b.)
+            if (failed) {
+              stepFailed = true;
+              if (stepError && stepFailMsg === undefined) stepFailMsg = stepError;
+            }
           }
         } finally {
           // teardown runs even when setup/a step throws (builder contract); its
           // own errors never fail the run (parity with the node harness). (codex P2)
           if (def.teardown) {
+            events.emit({ type: "log", id: scope.testMeta.id, message: "Running teardown..." });
             try {
               await def.teardown(ctx, state);
-            } catch {
-              /* swallow */
+            } catch (e) {
+              events.emit({
+                type: "log",
+                id: scope.testMeta.id,
+                message: `Teardown error: ${e instanceof Error ? e.message : String(e)}`,
+              });
             }
           }
         }
@@ -242,13 +330,14 @@ export class RunnerCore {
     // RESULT. Emitting here would force one shape on both hosts and double the
     // runner's status event (plan 0005 / codex P2).
     const assertionsFailed = scope.assertions.total > scope.assertions.passed;
-    const verdict: "ok" | "error" = threw || assertionsFailed ? "error" : "ok";
+    const verdict: "ok" | "error" = threw || stepFailed || assertionsFailed ? "error" : "ok";
     return {
       id: scope.testMeta.id,
       name: def.meta.name ?? def.meta.id,
       status: verdict,
       threw,
-      error: threw ? thrownError : assertionsFailed ? "assertion failed" : undefined,
+      ...(stepFailed ? { stepsFailed: true } : {}),
+      error: threw ? thrownError : (stepFailMsg ?? (assertionsFailed ? "assertion failed" : undefined)),
       // Preserve the user's original throw stack + name so a host can re-raise with
       // them (stack diagnostics + failure classification parity — codex P2).
       ...(threw && thrownStack ? { errorStack: thrownStack } : {}),
@@ -259,13 +348,17 @@ export class RunnerCore {
 
   private makeCtx(scope: ExecutionScope): EngineContext {
     const emit = (e: Parameters<RunnerServices["events"]["emit"]>[0]) => this.services.events.emit(e);
+    // Events emitted DURING a step carry its 0-based index (node parity); outside a
+    // step (simple tests / setup / teardown) they carry none.
+    const emitStep = (e: { stepIndex?: number } & Record<string, unknown>) =>
+      emit((scope.currentStepIndex !== null ? { ...e, stepIndex: scope.currentStepIndex } : e) as Parameters<typeof emit>[0]);
     return {
       http: scope.http,
       expect: (actual: unknown) =>
         new Expectation(actual, (r: { passed: boolean; actual?: unknown; expected?: unknown; message?: string }) => {
           scope.assertions.total += 1;
           if (r.passed) scope.assertions.passed += 1;
-          emit({
+          emitStep({
             type: "assertion",
             id: scope.testMeta.id,
             passed: r.passed,
@@ -288,7 +381,7 @@ export class RunnerCore {
         const expected = "expected" in result ? result.expected : d.expected;
         scope.assertions.total += 1;
         if (result.passed) scope.assertions.passed += 1;
-        emit({
+        emitStep({
           type: "assertion",
           id: scope.testMeta.id,
           passed: result.passed,
@@ -300,7 +393,7 @@ export class RunnerCore {
       },
       warn: (condition: unknown, message?: string) =>
         // First-class warning event (node parity) — NOT a log. condition=true means OK.
-        emit({ type: "warning", id: scope.testMeta.id, condition: !!condition, message: message ?? "" }),
+        emitStep({ type: "warning", id: scope.testMeta.id, condition: !!condition, message: message ?? "" }),
       vars: {
         get: (k) => scope.runtime.vars[k],
         require: (k, validate) => {
@@ -331,7 +424,7 @@ export class RunnerCore {
           emit({ type: "session_set", id: scope.testMeta.id, key: k, value: v });
         },
       },
-      log: (message, data) => emit({ type: "log", id: scope.testMeta.id, message, data }),
+      log: (message, data) => emitStep({ type: "log", id: scope.testMeta.id, message, data }),
       retryCount: scope.retryCount,
     };
   }
