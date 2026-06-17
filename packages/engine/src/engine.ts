@@ -32,6 +32,43 @@ import type {
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head"]);
 
+/**
+ * Layer per-run overrides over a host env object WITHOUT a destructive spread, so
+ * a fallback-Proxy provider (node: .env → process.env) keeps its fallback for keys
+ * the run never overrides. An empty-string override is treated as "unset" (node
+ * parity: empty = missing → defer to the provider). (codex P2 / plan 0005 §E)
+ */
+/**
+ * Mirror the node harness's validator semantics for ctx.vars/secrets.require's
+ * optional validator callback (codex P2): true / undefined / null = valid; a string
+ * = custom error message; anything else (false) = generic validation failure.
+ */
+function runEngineValidator(result: boolean | string | void | null, key: string, kind: "var" | "secret"): void {
+  if (result === true || result === undefined || result === null) return;
+  if (typeof result === "string") throw new Error(`Invalid ${kind} "${key}": ${result}`);
+  throw new Error(`Invalid ${kind} "${key}": validation failed`);
+}
+
+function layerEnv(
+  provider: Record<string, string>,
+  overlay?: Record<string, string>,
+): Record<string, string> {
+  if (!overlay || Object.keys(overlay).length === 0) return provider;
+  return new Proxy(provider, {
+    get(target, prop: string) {
+      const o = overlay[prop];
+      return o !== undefined && o !== "" ? o : target[prop];
+    },
+    has(target, prop: string) {
+      // Empty overlay value = unset → defer to the provider (so ctx.vars.require,
+      // which checks `k in vars`, still throws for a genuinely-missing key). (codex P2)
+      const o = overlay[prop];
+      if (o !== undefined && o !== "") return true;
+      return prop in target;
+    },
+  });
+}
+
 export class RunnerCore {
   constructor(private readonly services: RunnerServices) {
     // Install the host carrier as the SDK's global carrier so getRuntime()
@@ -47,7 +84,8 @@ export class RunnerCore {
     // Honor an explicitly skipped test: never execute it (no side effects) —
     // node-harness parity (codex B4 P2).
     if (def.meta.skip) {
-      this.services.events.emit({ type: "status", id: def.meta.id, status: "skipped" });
+      // No status EVENT — status emission is host policy (the runner emits the
+      // skipped status at dispatch; the browser derives it from this result).
       return Promise.resolve({
         id: def.meta.id,
         name: def.meta.name ?? def.meta.id,
@@ -72,9 +110,12 @@ export class RunnerCore {
   }
 
   private createScope(def: TestDef, input: ScopeInput): ExecutionScope {
-    const { env, events, scheduler } = this.services;
-    const vars = { ...env.vars(), ...(input.vars ?? {}) };
-    const secrets = { ...env.secrets(), ...(input.secrets ?? {}) };
+    const { env, events } = this.services;
+    // Layer per-run input OVER the host EnvProvider WITHOUT a destructive spread,
+    // so a host whose vars()/secrets() is a fallback Proxy (node: .env → process.env)
+    // keeps that fallback for keys the run never overrides (codex P2 / plan 0005 §E).
+    const vars = layerEnv(env.vars(), input.vars);
+    const secrets = layerEnv(env.secrets(), input.secrets);
     const session: Record<string, unknown> = { ...(input.session ?? {}) };
 
     const http = this.createScopedKy(def.meta.id);
@@ -83,6 +124,7 @@ export class RunnerCore {
       runtime: undefined as unknown as InternalRuntime,
       testMeta: { id: def.meta.id, tags: def.meta.tags ?? [] },
       stepIndex: 0,
+      retryCount: input.retryCount ?? 0,
       assertions: { total: 0, passed: 0 },
       http,
       session,
@@ -144,11 +186,19 @@ export class RunnerCore {
 
   private async runLoop(def: TestDef, scope: ExecutionScope): Promise<TestResult> {
     const { events } = this.services;
-    events.emit({ type: "start", id: scope.testMeta.id, name: def.meta.name ?? def.meta.id, tags: scope.testMeta.tags });
+    events.emit({
+      type: "start",
+      id: scope.testMeta.id,
+      name: def.meta.name ?? def.meta.id,
+      tags: scope.testMeta.tags,
+      ...(scope.retryCount > 0 ? { retryCount: scope.retryCount } : {}),
+    });
     const ctx = this.makeCtx(scope);
 
-    let status: "ok" | "error" = "ok";
-    let error: string | undefined;
+    let threw = false;
+    let thrownError: string | undefined;
+    let thrownStack: string | undefined;
+    let thrownName: string | undefined;
     try {
       if (def.type === "simple") {
         if (!def.fn) throw new Error(`test "${def.meta.id}": missing fn`);
@@ -179,21 +229,30 @@ export class RunnerCore {
           }
         }
       }
-      if (scope.assertions.total > scope.assertions.passed) {
-        status = "error";
-        error = "assertion failed";
-      }
     } catch (e) {
-      status = "error";
-      error = e instanceof Error ? e.message : String(e);
+      threw = true;
+      thrownError = e instanceof Error ? e.message : String(e);
+      thrownStack = e instanceof Error ? e.stack : undefined;
+      thrownName = e instanceof Error ? e.name : undefined;
     }
 
-    events.emit({ type: "status", id: scope.testMeta.id, status, error });
+    // The engine does NOT emit a status EVENT — status emission is host policy:
+    // the runner emits "completed" at dispatch (and re-raises a throw so its own
+    // dispatcher reports "failed" + exit 1), the browser derives status from the
+    // RESULT. Emitting here would force one shape on both hosts and double the
+    // runner's status event (plan 0005 / codex P2).
+    const assertionsFailed = scope.assertions.total > scope.assertions.passed;
+    const verdict: "ok" | "error" = threw || assertionsFailed ? "error" : "ok";
     return {
       id: scope.testMeta.id,
       name: def.meta.name ?? def.meta.id,
-      status,
-      error,
+      status: verdict,
+      threw,
+      error: threw ? thrownError : assertionsFailed ? "assertion failed" : undefined,
+      // Preserve the user's original throw stack + name so a host can re-raise with
+      // them (stack diagnostics + failure classification parity — codex P2).
+      ...(threw && thrownStack ? { errorStack: thrownStack } : {}),
+      ...(threw && thrownName ? { errorName: thrownName } : {}),
       assertions: { ...scope.assertions },
     };
   }
@@ -240,28 +299,40 @@ export class RunnerCore {
         });
       },
       warn: (condition: unknown, message?: string) =>
-        emit({ type: "log", id: scope.testMeta.id, message: `[warn] ${message ?? ""}`, data: { passed: !!condition } }),
+        // First-class warning event (node parity) — NOT a log. condition=true means OK.
+        emit({ type: "warning", id: scope.testMeta.id, condition: !!condition, message: message ?? "" }),
       vars: {
         get: (k) => scope.runtime.vars[k],
-        require: (k) => {
-          if (!(k in scope.runtime.vars)) throw new Error(`missing var "${k}"`);
-          return scope.runtime.vars[k];
+        require: (k, validate) => {
+          // Empty = missing (node parity: a "" .env value with no fallback is unset).
+          // Check the VALUE, not `k in vars`, since a fallback Proxy may report an
+          // empty key as present (codex). Message matches the node harness.
+          const v = scope.runtime.vars[k];
+          if (v === undefined || v === "") throw new Error(`Missing required var: ${k}`);
+          if (validate) runEngineValidator(validate(v), k, "var");
+          return v;
         },
       },
       secrets: {
         get: (k) => scope.runtime.secrets[k],
-        require: (k) => {
-          if (!(k in scope.runtime.secrets)) throw new Error(`missing secret "${k}"`);
-          return scope.runtime.secrets[k];
+        require: (k, validate) => {
+          const v = scope.runtime.secrets[k];
+          if (v === undefined || v === "") throw new Error(`Missing required secret: ${k}`);
+          if (validate) runEngineValidator(validate(v), k, "secret");
+          return v;
         },
       },
       session: {
         get: (k) => scope.session[k],
         set: (k, v) => {
           scope.session[k] = v;
+          // Surface the update so a host can propagate it (node: forward to sibling
+          // tests; browser: update its store). Without this it'd be lost (codex P2).
+          emit({ type: "session_set", id: scope.testMeta.id, key: k, value: v });
         },
       },
       log: (message, data) => emit({ type: "log", id: scope.testMeta.id, message, data }),
+      retryCount: scope.retryCount,
     };
   }
 }
@@ -306,7 +377,7 @@ function withPrefixUrlAlias(instance: KyInstance): GlubeanHttp {
 
 // --- resolve helpers: map SDK module exports → engine TestDef -----------------
 // Structural shape of an SDK Test (we avoid importing the heavy generic type).
-interface SdkTestShape {
+export interface SdkTestShape {
   meta: { id: string; name?: string; tags?: string[] | string; skip?: boolean; only?: boolean };
   type: "simple" | "steps";
   fn?: unknown;
@@ -385,7 +456,7 @@ function collectDefs(value: unknown, out: TestDef[]): void {
   }
 }
 
-function toTestDef(t: SdkTestShape): TestDef {
+export function toTestDef(t: SdkTestShape): TestDef {
   const tags = Array.isArray(t.meta.tags) ? t.meta.tags : typeof t.meta.tags === "string" ? [t.meta.tags] : undefined;
   // SDK step fns take the SDK TestContext; the engine provides the narrow subset
   // at runtime, so the cast is sound for the Stage-1 surface.

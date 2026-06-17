@@ -58,10 +58,14 @@ export interface EnvProvider {
 // Every event carries the owning test `id` so a host running runs concurrently
 // can attribute assertion/trace/log events to the right run (codex P2-2).
 export type ExecutionEvent =
-  | { type: "start"; id: string; name: string; tags: string[] }
+  | { type: "start"; id: string; name: string; tags: string[]; retryCount?: number }
   | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown }
   | { type: "trace"; id: string; method: string; url: string; status: number; timeMs: number }
   | { type: "log"; id: string; message: string; data?: unknown }
+  | { type: "warning"; id: string; condition: boolean; message: string }
+  // ctx.session.set — a host may surface this as a control signal (the node runner
+  // forwards it to sibling tests; the browser updates its session store).
+  | { type: "session_set"; id: string; key: string; value: unknown }
   | { type: "status"; id: string; status: "ok" | "error" | "skipped"; error?: string };
 
 /** Host port: where execution events go. node = stdout stream / browser = collector. */
@@ -106,13 +110,27 @@ export interface ScopeInput {
   vars?: Record<string, string>;
   secrets?: Record<string, string>;
   session?: Record<string, unknown>;
+  /** Test-level retry attempt (the host re-runs a failed test); surfaced on
+   *  ctx.retryCount + the start event, like the node harness. 0/undefined = first run. */
+  retryCount?: number;
 }
 
 export interface TestResult {
   id: string;
   name: string;
+  /** The engine's verdict: "error" if it threw OR a soft assertion failed. */
   status: "ok" | "error" | "skipped";
+  /** True only if user code threw (vs a soft assertion failure). Lets a host
+   *  distinguish "completed but failed an assertion" from "threw" when deciding
+   *  status/exit semantics (the runner re-raises a throw; a soft fail completed). */
+  threw?: boolean;
   error?: string;
+  /** The original throw's stack (only when `threw`), so a host can re-raise with
+   *  the user's stack instead of a host-rooted one (diagnostics parity). */
+  errorStack?: string;
+  /** The original throw's error name (e.g. "TypeError", ky's "TimeoutError"), so a
+   *  host can re-raise with it and keep failure classification (diagnostics parity). */
+  errorName?: string;
   assertions: { total: number; passed: number };
 }
 
@@ -143,10 +161,18 @@ export interface EngineContext {
   expect(actual: unknown): unknown;
   assert(condition: unknown, message?: string, details?: unknown): void;
   warn(condition: unknown, message?: string): void;
-  vars: { get(k: string): string | undefined; require(k: string): string };
-  secrets: { get(k: string): string | undefined; require(k: string): string };
+  vars: {
+    get(k: string): string | undefined;
+    require(k: string, validate?: (value: string) => boolean | string | void | null): string;
+  };
+  secrets: {
+    get(k: string): string | undefined;
+    require(k: string, validate?: (value: string) => boolean | string | void | null): string;
+  };
   session: { get(k: string): unknown; set(k: string, v: unknown): void };
   log(message: string, data?: unknown): void;
+  /** Test-level retry attempt for this run (0 on the first run). */
+  retryCount: number;
 }
 
 /**
@@ -158,6 +184,7 @@ export interface ExecutionScope {
   runtime: InternalRuntime; // own object identity (configure().http WeakMap-caches per runtime)
   testMeta: { id: string; tags: string[] };
   stepIndex: number;
+  retryCount: number;
   assertions: { total: number; passed: number };
   http: GlubeanHttp;
   session: Record<string, unknown>;

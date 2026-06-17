@@ -9,6 +9,7 @@
 import { parseArgs } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
+import { USE_ENGINE, createEngineCore, runViaEngine, engineRoutesId } from "./engine-bridge.js";
 import { bootstrap } from "./bootstrap.js";
 import { loadProjectOverlays } from "@glubean/scanner";
 import {
@@ -278,6 +279,27 @@ function writeEventLine(json: string): void {
   const buf = parallelEventBuffer.getStore();
   if (buf) buf.push(json);
   else console.log(json);
+}
+
+/**
+ * Write a wire event produced by the engine path (runner-on-engine, plan 0005).
+ * Mirrors emitEvent's control-event bypass, but the event already carries its
+ * testId (the engine path runs outside the testContext ALS, so testId is sourced
+ * from the engine event's own id, not currentTestCtx()).
+ */
+function emitEngineWire(ev: Record<string, unknown>): void {
+  // Mirror the legacy ctx.session.set: update the subprocess-local sessionData so
+  // sibling tests in this process see it (batch mode), in addition to forwarding
+  // the control event to the parent (codex P2).
+  if (ev.type === "session:set") {
+    sessionData[ev.key as string] = ev.value;
+  }
+  const json = JSON.stringify(ev);
+  if (CONTROL_EVENT_TYPES.has(ev.type as string)) {
+    console.log(json);
+    return;
+  }
+  writeEventLine(json);
 }
 
 // ── vNext workflow per-node evidence → first-class timeline events ──────────
@@ -1352,6 +1374,22 @@ function withEnvFallback(
 }
 
 
+// runner-on-engine (plan 0005): when GLUBEAN_USE_ENGINE=1 the engine drives the
+// run-loop (executeNewTest delegates to RunnerCore). Construct it BEFORE
+// setRuntime so RunnerCore's ALS carrier is the one the SDK runtime fallback gets
+// set on — module-load configure() and the engine's runWithRuntime() then share a
+// single carrier (plan 0005 §接缝设计 / codex P1-5). Default OFF → no behavior change.
+const engineCore = USE_ENGINE
+  ? createEngineCore(emitEngineWire, {
+      // Pass the SAME fallback Proxies the legacy ctx/runtime use (.env →
+      // process.env), so engine-mode ctx.vars/secrets keep the system-env fallback
+      // (codex P2 / plan 0005 §E). The engine layers per-run input over these
+      // without destroying the Proxy.
+      vars: withEnvFallback(rawVars),
+      secrets: withEnvFallback(rawSecrets),
+    })
+  : undefined;
+
 setRuntime({
   vars: withEnvFallback(rawVars),
   secrets: withEnvFallback(rawSecrets),
@@ -1907,7 +1945,61 @@ async function withFixtures(
  *
  * @param test The Test object to execute
  */
+/**
+ * Structural gate for the engine path (plan 0005): Phase 0 routes ONLY simple
+ * tests. Steps stay on legacy until the engine emits step_start/step_end + per-step
+ * index/retry/timeout (Phase 1); branch/poll (Phase 2/3); test.extend() fixtures
+ * and workflow later. Routing a steps test now would lose its step timeline and
+ * skew summaries (codex P2). ctx-surface gaps (validate/metric/…) are managed by
+ * only exercising migrated features under the flag.
+ */
+function engineSupports(test: Test<unknown>): boolean {
+  if (test.fixtures && Object.keys(test.fixtures).length > 0) return false;
+  return test.type === "simple";
+}
+
 async function executeNewTest(test: Test<unknown>): Promise<void> {
+  // runner-on-engine (plan 0005): route to the engine only when (a) the engine is
+  // active, (b) this test id is on the per-test allowlist (GLUBEAN_ENGINE_TESTIDS;
+  // "*" = all at cutover) — so the flag never sends arbitrary production tests
+  // through an incomplete ctx (codex), and (c) the test's shape is supported. The
+  // engine owns its scope/carrier/per-event-id and runs OUTSIDE the legacy
+  // testContext ALS (testId comes from each event's own id). Anything else → legacy.
+  if (engineCore && engineRoutesId(test.meta.id) && engineSupports(test)) {
+    // Wrap with the same memory monitoring as the legacy path so the final status
+    // carries peakMemoryBytes/peakMemoryMB (codex P2).
+    startMemoryMonitoring();
+    const result = await runViaEngine(engineCore, test, { session: sessionData, retryCount });
+    const peakBytes = stopMemoryMonitoring();
+    // Status emission mirrors the legacy split: a throw re-raises so the dispatcher
+    // reports "failed" + exit 1 (the engine swallows throws into a result); success
+    // and skip emit their status here (plan 0005 / codex P2). A soft assertion
+    // failure is NOT a throw → it "completed" (pass/fail is derived from the
+    // assertion events downstream, as in the legacy path).
+    if (result.threw) {
+      const err = new Error(result.error ?? "test threw");
+      // Re-raise with the user's original name + stack so classifyErrorReason() and
+      // diagnostics match the legacy path (codex P2).
+      if (result.errorName) err.name = result.errorName;
+      if (result.errorStack) err.stack = result.errorStack;
+      throw err;
+    }
+    if (result.status === "skipped") {
+      // Legacy skip status (dispatcher) carries no peak memory.
+      emitEngineWire({ type: "status", status: "skipped", id: test.meta.id, testId: test.meta.id });
+    } else {
+      emitEngineWire({
+        type: "status",
+        status: "completed",
+        id: test.meta.id,
+        testId: test.meta.id,
+        peakMemoryBytes: peakBytes,
+        peakMemoryMB: (peakBytes / 1024 / 1024).toFixed(2),
+      });
+    }
+    return;
+  }
+
   const testTags = normalizeTestTags(test.meta.tags);
   const testMeta = { id: test.meta.id, tags: testTags };
   const trc = new TestRunContext(test.meta.id, testMeta);

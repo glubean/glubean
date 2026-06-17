@@ -7,7 +7,8 @@
  * live here, written once. HTTP is real ky in both hosts (Decision B) — the host
  * seam is the web-standard `fetch`.
  */
-export { RunnerCore } from "./engine.js";
+export { RunnerCore, toTestDef } from "./engine.js";
+export type { SdkTestShape } from "./engine.js";
 export type {
   DataProvider,
   EngineContext,

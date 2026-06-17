@@ -1,0 +1,143 @@
+/**
+ * engine-bridge — drive @glubean/engine's RunnerCore from inside the harness
+ * subprocess (runner-on-engine migration, plan 0005).
+ *
+ * Phase 0: behind the GLUBEAN_USE_ENGINE flag (default OFF → 100% legacy). When
+ * ON, harness.ts:executeNewTest delegates the run-loop to RunnerCore; this module
+ * maps the engine's canonical events back to the runner's NDJSON wire shape so the
+ * parent (executor) sees a byte-identical event stream. Parity is proven by
+ * running the SAME module through the harness subprocess twice (flag off/on) and
+ * diffing the raw ExecutionEvent stream — see engine-parity.test.ts.
+ *
+ * The carrier MUST be installed (RunnerCore constructor) BEFORE harness.ts calls
+ * setRuntime(), so the SDK process-global runtime fallback and the engine's
+ * runWithRuntime() share one carrier (plan 0005 §接缝设计 / codex P1-5).
+ */
+import {
+  RunnerCore,
+  toTestDef,
+  type ExecutionEvent,
+  type RunnerServices,
+  type TestResult,
+  type ScopeInput,
+} from "@glubean/engine";
+import { createAlsCarrier } from "@glubean/sdk/internal";
+import type { Test } from "@glubean/sdk";
+
+/** Default OFF: production stays on the legacy run-loop until the cutover. */
+export const USE_ENGINE = process.env.GLUBEAN_USE_ENGINE === "1";
+
+// Per-test allowlist (plan 0005): while the engine ctx is being brought to parity
+// incrementally, the flag alone must NOT route arbitrary tests through an incomplete
+// ctx (codex). GLUBEAN_ENGINE_TESTIDS is a comma list of EXACT test ids to route —
+// the parity instrument sets it for its own fixtures. There is deliberately no
+// "route all" wildcard yet: workflow/contract/etc. build plain simple-shaped Tests
+// that look routable but need unmigrated ctx APIs, so a blanket cutover waits until
+// those features land (Phase 8 wires route-all explicitly). Empty → route NOTHING.
+const ENGINE_TESTIDS = new Set(
+  (process.env.GLUBEAN_ENGINE_TESTIDS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+);
+
+/** Whether the engine should run this specific test id (flag + explicit allowlist). */
+export function engineRoutesId(id: string): boolean {
+  return USE_ENGINE && ENGINE_TESTIDS.has(id);
+}
+
+/**
+ * Map one engine canonical event to the runner's NDJSON wire event. testId comes
+ * from the event's own `id` (not ALS — the engine path runs outside testContext).
+ * Status is NOT mapped here: the engine emits no status event; harness.ts
+ * synthesizes it from the run RESULT (plan 0005). Phase 0 base set:
+ * start / log / assertion / trace. Richer variants (warning / action / metric /
+ * step_*) and the full Trace shape (+ derived action + http_duration_ms) land in
+ * later sub-slices (Phase 3/4).
+ */
+export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
+  switch (e.type) {
+    case "start":
+      return {
+        type: "start",
+        id: e.id,
+        name: e.name,
+        tags: e.tags,
+        testId: e.id,
+        ...(e.retryCount !== undefined ? { retryCount: e.retryCount } : {}),
+      };
+    case "log":
+      return { type: "log", message: e.message, ...(e.data !== undefined ? { data: e.data } : {}), testId: e.id };
+    case "assertion":
+      return {
+        type: "assertion",
+        passed: e.passed,
+        message: e.message,
+        actual: e.actual,
+        expected: e.expected,
+        testId: e.id,
+      };
+    case "warning":
+      return { type: "warning", condition: e.condition, message: e.message, testId: e.id };
+    case "session_set":
+      // Legacy shape: a control event (bypasses buffering) carrying ts. ts is
+      // wall-clock here (node bridge) and normalized out of parity diffs.
+      return { type: "session:set", key: e.key, value: e.value, ts: Date.now(), testId: e.id };
+    case "trace": {
+      // The runner wire wants { type:"trace", data: Trace }. The engine emits a flat
+      // trace today; build a well-shaped Trace with the required SDK fields (target /
+      // ok / duration alias). Header capture + the derived action + http_duration_ms
+      // metric are Phase 4 — until then HTTP tests aren't byte-parity, but the event
+      // carries the documented Trace fields and is never malformed.
+      let path = e.url;
+      try {
+        path = new URL(e.url).pathname;
+      } catch {
+        /* keep raw url */
+      }
+      return {
+        type: "trace",
+        data: {
+          protocol: "http",
+          method: e.method,
+          url: e.url,
+          status: e.status,
+          durationMs: e.timeMs,
+          duration: e.timeMs,
+          target: `${e.method} ${path}`,
+          ok: e.status < 400,
+        },
+        testId: e.id,
+      };
+    }
+    default:
+      // pass-through with testId; richer mappings added per sub-slice
+      return { ...(e as Record<string, unknown>), testId: (e as { id: string }).id };
+  }
+}
+
+export interface EngineCoreOptions {
+  vars: Record<string, string>;
+  secrets: Record<string, string>;
+}
+
+/**
+ * Build the RunnerCore for the harness subprocess. `sink` writes a wire event to
+ * stdout (harness owns the NDJSON write + control-event bypass). Constructing
+ * RunnerCore installs the ALS carrier — call this BEFORE setRuntime().
+ */
+export function createEngineCore(
+  sink: (wire: Record<string, unknown>) => void,
+  opts: EngineCoreOptions,
+): RunnerCore {
+  const services: RunnerServices = {
+    fetch: (input, init) => globalThis.fetch(input as RequestInfo, init),
+    env: { vars: () => opts.vars, secrets: () => opts.secrets },
+    events: { emit: (e) => sink(engineEventToWire(e)) },
+    scheduler: { now: () => performance.now() },
+    carrier: createAlsCarrier(),
+  };
+  return new RunnerCore(services);
+}
+
+/** Run one already-resolved SDK Test through the engine (converts to engine TestDef). */
+export function runViaEngine(core: RunnerCore, test: Test<unknown>, input: ScopeInput): Promise<TestResult> {
+  return core.run(toTestDef(test), input);
+}
