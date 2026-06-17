@@ -1961,8 +1961,7 @@ function engineSupports(test: Test<unknown>): boolean {
   if (test.fixtures && Object.keys(test.fixtures).length > 0) return false;
   if (test.type === "simple") return true;
   if (test.type === "steps") {
-    // Linear steps + retry/timeout (Phase 1) + branch (Phase 2). poll steps (Phase 3)
-    // — anywhere in the tree, incl. nested in a branch case — still route to legacy.
+    // Linear steps + retry/timeout (Phase 1) + branch (Phase 2) + poll (Phase 3).
     return stepsEngineSupported(test.steps ?? []);
   }
   return false;
@@ -1970,7 +1969,8 @@ function engineSupports(test: Test<unknown>): boolean {
 
 function stepsEngineSupported(steps: StepDefinition<unknown>[]): boolean {
   for (const step of steps) {
-    if (isTestPollStep(step)) return false; // Phase 3
+    // poll steps (Phase 3) are now engine-supported; recurse into branch cases for
+    // any still-unsupported shape (none today — kept as a structural guard).
     if (isTestBranchStep(step)) {
       for (const c of step.branch.cases) if (!stepsEngineSupported(c.steps)) return false;
       if (!stepsEngineSupported(step.branch.default ?? [])) return false;

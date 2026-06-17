@@ -138,6 +138,18 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         ...(e.error !== undefined ? { error: e.error } : {}),
         testId: e.id,
       };
+    case "poll":
+      return {
+        type: "poll",
+        index: e.index,
+        name: e.name,
+        attempts: e.attempts,
+        elapsedMs: e.elapsedMs,
+        satisfied: e.satisfied,
+        exhausted: e.exhausted,
+        ...(e.error !== undefined ? { error: e.error } : {}),
+        testId: e.id,
+      };
     case "step_start":
       return { type: "step_start", index: e.index, name: e.name, total: e.total, testId: e.id };
     case "step_end":

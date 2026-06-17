@@ -114,7 +114,7 @@ function zeroDurationsDeep(v: unknown): void {
   }
   if (v && typeof v === "object") {
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      if ((k === "duration" || k === "durationMs") && typeof val === "number") {
+      if ((k === "duration" || k === "durationMs" || k === "elapsedMs") && typeof val === "number") {
         (v as Record<string, unknown>)[k] = 0;
       } else {
         zeroDurationsDeep(val);
@@ -488,6 +488,38 @@ export const assertTruncateTest = test(
     ctx.assert(true, "big arrays", { actual: [0, 1, 2, 3, 4, 5, 6], expected: [0, 1, 2, 3, 4, 5, 6] });
   }
 );
+let _pollN = 0;
+export const pollSatisfiedTest = test("pollSatisfiedTest")
+  .poll("await-job", async () => { _pollN += 1; return { status: _pollN >= 3 ? "done" : "pending", n: _pollN }; }, {
+    until: (ctx, res) => res.status === "done",
+    every: 1,
+    timeout: 5000,
+    out: (s, res) => ({ ...s, done: true, n: res.n }),
+  })
+  .step("assert", async (ctx, s) => { ctx.assert(s.done === true && s.n === 3, "polled to done at n=3"); });
+export const pollExhaustedTest = test("pollExhaustedTest")
+  .poll("never", async () => ({ status: "pending" }), {
+    until: (ctx, res) => res.status === "done",
+    every: 1,
+    maxAttempts: 3,
+    perAttemptTimeout: 1000,
+  });
+export const pollSkipTest = test("pollSkipTest")
+  .poll("maybe", async (ctx) => { ctx.skip("not applicable"); return {}; }, {
+    until: () => true,
+    timeout: 5000,
+  })
+  .step("after", async (ctx) => { ctx.assert(true, "unreached"); });
+export const pollBadUntilTest = test("pollBadUntilTest")
+  .poll("bad", async () => ({}), {
+    until: () => "done",
+    timeout: 5000,
+  });
+export const pollFnErrorTest = test("pollFnErrorTest")
+  .poll("boom", async () => { throw new Error("fn boom"); }, {
+    until: () => true,
+    timeout: 5000,
+  });
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -723,4 +755,24 @@ ptest("engine parity: emitFullTrace + truncateArrays truncates the response body
 
 ptest("engine parity: truncateArrays truncates a passing assertion's actual/expected", async () => {
   await assertParity(MODULE, "assertTruncateTest", {}, { truncateArrays: true });
+});
+
+ptest("engine parity: poll satisfied after N attempts (poll event + out threads state)", async () => {
+  await assertParity(MODULE, "pollSatisfiedTest");
+});
+
+ptest("engine parity: poll exhausted (maxAttempts → failed + exhausted)", async () => {
+  await assertParity(MODULE, "pollExhaustedTest");
+});
+
+ptest("engine parity: poll ctx.skip() in fn → skipped step + whole test skipped", async () => {
+  await assertParity(MODULE, "pollSkipTest");
+});
+
+ptest("engine parity: poll until returns non-boolean → poll error", async () => {
+  await assertParity(MODULE, "pollBadUntilTest");
+});
+
+ptest("engine parity: poll fn throws → poll error", async () => {
+  await assertParity(MODULE, "pollFnErrorTest");
 });

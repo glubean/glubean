@@ -108,6 +108,9 @@ export type ExecutionEvent =
       total: number;
       error?: string;
     }
+  // test().poll — a bounded retry leaf step (node parity: harness.ts:2490). Emitted
+  // alongside the step's step_start/step_end. `index` is the leaf step index.
+  | { type: "poll"; id: string; index: number; name: string; attempts: number; elapsedMs: number; satisfied: boolean; exhausted: boolean; error?: string }
   // ctx.session.set — a host may surface this as a control signal (the node runner
   // forwards it to sibling tests; the browser updates its session store).
   | { type: "session_set"; id: string; key: string; value: unknown }

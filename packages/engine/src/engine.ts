@@ -85,6 +85,23 @@ function branchOf(step: StepDef): BranchData | null {
   return b && typeof b === "object" && Array.isArray(b.cases) ? b : null;
 }
 
+/** A poll step's data (test().poll), detected structurally — same shape as the SDK's
+ *  TestPollData. A poll step is a leaf (counts as 1 in countLeafSteps). */
+interface PollData {
+  fn: TestFn;
+  until: (ctx: unknown, res: unknown, state: unknown) => boolean | Promise<boolean>;
+  out?: (state: unknown, res: unknown) => unknown;
+  every?: number;
+  backoff?: number;
+  timeout?: number;
+  perAttemptTimeout?: number;
+  maxAttempts?: number;
+}
+function pollOf(step: StepDef): PollData | null {
+  const p = (step as { poll?: PollData }).poll;
+  return p && typeof p === "object" && typeof p.fn === "function" && typeof p.until === "function" ? p : null;
+}
+
 /** Count LEAF steps (node parity: leafTotal) — branch cases + default recurse;
  *  used for the `total` on step_start. A linear list counts as its length. */
 function countLeafSteps(steps: StepDef[]): number {
@@ -717,6 +734,167 @@ export class RunnerCore {
           else emitSkippedTree(branch.default ?? []);
         };
 
+        // Execute a poll step (test().poll): a first-class leaf step whose body is a
+        // bounded retry of `fn` until `until` holds (or a bound exhausts → it fails).
+        // Each attempt is RACED against its budget (best-effort: arbitrary user fn/until
+        // can't be force-cancelled, but the step never waits past the budget). Emits a
+        // `poll` event (attempts/elapsed/satisfied/exhausted) + the normal step_start/
+        // step_end. Assertions accumulate across attempts (node parity: harness.ts:2345).
+        const runPollStep = async (step: StepDef, poll: PollData): Promise<void> => {
+          const idx = stepSeq++;
+          scope.currentStepIndex = idx;
+          const aBefore = scope.assertions.total;
+          const fBefore = scope.assertions.total - scope.assertions.passed;
+          const stepStart = scheduler.now();
+          events.emit({ type: "step_start", id: scope.testMeta.id, index: idx, name: step.meta.name, total: stepTotal });
+
+          // Local budget sentinel so a budget timeout is distinguishable from a genuine
+          // fn/until error or a SkipError.
+          class PollBudgetTimeout extends Error {}
+          const raceBudget = <T>(p: Promise<T>, budgetMs: number): Promise<T> => {
+            if (!Number.isFinite(budgetMs)) return p;
+            return new Promise<T>((resolve, reject) => {
+              const t = setTimeout(() => reject(new PollBudgetTimeout()), Math.max(0, budgetMs));
+              p.then(
+                (v) => { clearTimeout(t); resolve(v); },
+                (e) => { clearTimeout(t); reject(e); },
+              );
+            });
+          };
+
+          const everyMs = poll.every ?? 1000;
+          const backoff = poll.backoff ?? 1;
+          const perAttempt = poll.perAttemptTimeout ?? Infinity;
+          const start = scheduler.now();
+          const deadline = poll.timeout !== undefined ? start + poll.timeout : Infinity;
+          let attempt = 0;
+          let delay = everyMs;
+          let satisfied = false;
+          let exhausted = false;
+          let pollError: string | undefined;
+          let lastRes: unknown;
+          // A poll-phase throw must surface a non-empty message: pollError is tested for
+          // truthiness below to decide failure, so an empty message would be a silent pass.
+          const pollErrMsg = (e: unknown): string => {
+            const m = e instanceof Error ? e.message : String(e);
+            return m || `poll "${step.meta.name}" threw an empty error`;
+          };
+
+          for (;;) {
+            attempt += 1;
+            const remainingTotal = deadline - scheduler.now();
+            if (remainingTotal <= 0) { exhausted = true; break; }
+            const attemptBudget = Math.min(perAttempt, remainingTotal);
+            const attemptStart = scheduler.now();
+
+            // Attempt fn (best-effort raced).
+            try {
+              lastRes = await raceBudget(Promise.resolve(poll.fn(ctx, state)), attemptBudget);
+            } catch (err) {
+              if (err instanceof SkipError) { skipRequest = err; break; }
+              if (err instanceof PollBudgetTimeout) { exhausted = true; break; }
+              pollError = pollErrMsg(err);
+              break;
+            }
+            if (scheduler.now() > deadline || scheduler.now() - attemptStart > perAttempt) { exhausted = true; break; }
+
+            // Exit predicate (raced to the remaining attempt budget).
+            let done: boolean;
+            try {
+              const predBudget = Math.min(deadline - scheduler.now(), perAttempt - (scheduler.now() - attemptStart));
+              const out = await raceBudget(Promise.resolve(poll.until(ctx, lastRes, state)), Math.max(0, predBudget));
+              if (typeof out !== "boolean") {
+                pollError = `poll "${step.meta.name}": until must return a boolean; got ${out === null ? "null" : typeof out}`;
+                break;
+              }
+              done = out;
+            } catch (err) {
+              if (err instanceof SkipError) { skipRequest = err; break; }
+              if (err instanceof PollBudgetTimeout) { exhausted = true; break; }
+              pollError = pollErrMsg(err);
+              break;
+            }
+
+            if (done) {
+              satisfied = true;
+              if (poll.out) {
+                // A throwing out-mapper fails the poll through the normal path (poll
+                // event + step_end below), not by escaping.
+                try {
+                  const next = poll.out(state, lastRes);
+                  if (next !== undefined) state = next;
+                } catch (err) {
+                  pollError = pollErrMsg(err);
+                }
+              }
+              break;
+            }
+
+            // Not satisfied → check bounds, then wait.
+            if (poll.maxAttempts && attempt >= poll.maxAttempts) { exhausted = true; break; }
+            if (Number.isFinite(deadline) && scheduler.now() + delay >= deadline) { exhausted = true; break; }
+            await new Promise<void>((r) => setTimeout(r, delay));
+            delay = Math.min(delay * backoff, 30_000);
+          }
+
+          const durationMs = scheduler.now() - stepStart;
+          const failedAssertions = scope.assertions.total - scope.assertions.passed - fBefore;
+          const assertions = scope.assertions.total - aBefore;
+
+          // ctx.skip() in fn/until skips the whole test (unless a failure/exhaustion was
+          // already recorded — failure wins, node parity: harness.ts:2464).
+          if (skipRequest && failedAssertions === 0 && !pollError && !exhausted) {
+            events.emit({
+              type: "step_end",
+              id: scope.testMeta.id,
+              index: idx,
+              name: step.meta.name,
+              status: "skipped",
+              durationMs,
+              assertions,
+              failedAssertions: 0,
+              attempts: attempt,
+            });
+            scope.currentStepIndex = null;
+            return;
+          }
+          skipRequest = undefined;
+
+          if (exhausted && !pollError) {
+            pollError = `poll "${step.meta.name}" exhausted: condition not met after ${attempt} attempt(s)`;
+          }
+          const failed = !!pollError || failedAssertions > 0 || !satisfied;
+
+          events.emit({
+            type: "poll",
+            id: scope.testMeta.id,
+            index: idx,
+            name: step.meta.name,
+            attempts: attempt,
+            elapsedMs: Math.round(scheduler.now() - start),
+            satisfied,
+            exhausted,
+            ...(pollError ? { error: pollError } : {}),
+          });
+          events.emit({
+            type: "step_end",
+            id: scope.testMeta.id,
+            index: idx,
+            name: step.meta.name,
+            status: failed ? "failed" : "passed",
+            durationMs,
+            assertions,
+            failedAssertions,
+            attempts: attempt,
+            ...(pollError ? { error: pollError } : {}),
+          });
+          scope.currentStepIndex = null;
+          if (failed) {
+            stepFailed = true;
+            if (pollError && stepFailMsg === undefined) stepFailMsg = pollError;
+          }
+        };
+
         // Recursive step-list runner (node parity: runStepList). A prior failure
         // skips the rest (skipped step_end tree); branch steps make a decision + recurse.
         const runStepList = async (steps: StepDef[]): Promise<void> => {
@@ -728,6 +906,11 @@ export class RunnerCore {
             const branch = branchOf(step);
             if (branch) {
               await runBranchStep(step, branch);
+              continue;
+            }
+            const poll = pollOf(step);
+            if (poll) {
+              await runPollStep(step, poll);
               continue;
             }
             await runNormalStep(step);
