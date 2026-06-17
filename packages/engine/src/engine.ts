@@ -319,6 +319,16 @@ export class RunnerCore {
         return scope.testMeta as unknown as InternalRuntime["test"];
       },
       log: (message: string, data?: unknown) => events.emit({ type: "log", id: def.meta.id, message, data }),
+      // configure() plugins resolve trace/action/event from the CARRIER runtime, not
+      // the ctx object (configure/plugin.ts: `runtime.trace ?? noop`). The legacy
+      // harness wires these via setRuntime (`trace: ctx.trace`, …); forward them here
+      // too so an engine-routed plugin test keeps its trace/action/event evidence —
+      // else plugins (e.g. @glubean/grpc) silently no-op (codex 4c-e P2). Delegated to
+      // scope.ctxRef (back-filled before any user code resolves a plugin) so they
+      // carry the run's stepIndex, exactly like ctx.trace/action/event.
+      trace: (t) => scope.ctxRef?.trace(t),
+      action: (a) => scope.ctxRef?.action(a),
+      event: (ev) => scope.ctxRef?.event(ev),
     };
     return scope;
   }

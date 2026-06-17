@@ -149,7 +149,7 @@ async function assertParity(content: string, testId: string, ctx: RunCtx = {}): 
 const ptest = (name: string, fn: () => Promise<void>) => test(name, fn, 20_000);
 
 const MODULE = `
-import { test } from "@glubean/sdk";
+import { test, configure, defineClientFactory } from "@glubean/sdk";
 export const passingTest = test(
   { id: "passingTest", name: "Passing Test", tags: ["unit"] },
   async (ctx) => { ctx.log("Hello from test"); ctx.assert(true, "Should pass"); }
@@ -352,6 +352,21 @@ export const httpTraceInStepTest = test("httpTraceInStepTest")
     const res = await ctx.http.get(base + "/json");
     ctx.assert(res.status === 200, "200 in step");
   });
+// codex 4c-e P2: a configure() plugin resolves trace/action/event from the CARRIER
+// runtime (configure/plugin.ts), not ctx. The engine must forward them through
+// scope.runtime or plugin evidence silently no-ops on the engine leg.
+const evidencePlugin = defineClientFactory((rt) => ({
+  fire: () => {
+    rt.trace({ protocol: "grpc", target: "Svc/Method", status: 0, durationMs: 1, ok: true, name: "Method" });
+    rt.action({ category: "mcp:call", target: "tool", duration: 2, status: "ok", detail: { tool: "x" } });
+    rt.event({ type: "plugin:fired", data: { n: 1 } });
+  },
+}));
+const evidenceCfg = configure({ plugins: { evidence: evidencePlugin } });
+export const pluginRuntimeTest = test(
+  { id: "pluginRuntimeTest", name: "Plugin runtime evidence" },
+  async (ctx) => { evidenceCfg.evidence.fire(); ctx.assert(true, "plugin fired evidence"); }
+);
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -527,4 +542,8 @@ ptest("engine parity: explicit ctx.trace (non-http protocol) → trace + derived
 
 ptest("engine parity: HTTP auto-trace inside a step carries stepIndex", async () => {
   await assertParity(MODULE, "httpTraceInStepTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: configure() plugin trace/action/event via runtime carrier (codex 4c-e P2)", async () => {
+  await assertParity(MODULE, "pluginRuntimeTest");
 });
