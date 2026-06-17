@@ -17,6 +17,7 @@
  */
 import ky, { type KyInstance } from "ky";
 import { Expectation } from "@glubean/sdk";
+import type { SchemaIssue, SchemaLike, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
@@ -112,6 +113,82 @@ class FailError extends Error {
     super(reason);
     this.name = "FailError";
   }
+}
+
+/**
+ * Core schema validation (node parity: harness.ts:runSchemaValidation). Duck-types
+ * `safeParse` (preferred) / `parse` so it stays browser-safe — no zod import. Always
+ * emits a schema_validation event (via the injected emitter), then routes a FAILURE
+ * by severity through the injected assert/warn (so it shares the run-loop's assertion
+ * counters + stepIndex). `fatal` emits a failed assertion then throws to abort. Shared
+ * by ctx.validate and (Phase 4f) the HTTP schema hooks.
+ */
+function runSchemaValidation<T>(
+  data: unknown,
+  schema: SchemaLike<T>,
+  label: string,
+  severity: "error" | "warn" | "fatal",
+  deps: {
+    emitSchemaValidation: (p: {
+      label: string;
+      success: boolean;
+      severity: "error" | "warn" | "fatal";
+      issues?: SchemaIssue[];
+    }) => void;
+    assert: (passed: boolean, message: string) => void;
+    warn: (condition: boolean, message: string) => void;
+  },
+): { success: true; data: T } | { success: false; issues: SchemaIssue[] } {
+  let success = false;
+  let parsed: T | undefined;
+  let issues: SchemaIssue[] = [];
+
+  if (typeof schema.safeParse === "function") {
+    const result = schema.safeParse(data);
+    if (result.success) {
+      success = true;
+      parsed = result.data;
+    } else {
+      issues = (result.error?.issues ?? []).map((i) => ({ message: i.message, ...(i.path ? { path: i.path } : {}) }));
+    }
+  } else if (typeof schema.parse === "function") {
+    try {
+      parsed = schema.parse(data);
+      success = true;
+    } catch (err: unknown) {
+      const errObj = err as { issues?: ReadonlyArray<{ message?: string; path?: ReadonlyArray<PropertyKey> }> };
+      if (errObj?.issues && Array.isArray(errObj.issues)) {
+        issues = errObj.issues.map((i) => ({ message: i.message ?? String(i), ...(i.path ? { path: i.path } : {}) }));
+      } else {
+        issues = [{ message: err instanceof Error ? err.message : String(err) }];
+      }
+    }
+  } else {
+    issues = [{ message: "Schema has neither safeParse nor parse method" }];
+  }
+
+  deps.emitSchemaValidation({ label, success, severity, ...(issues.length > 0 ? { issues } : {}) });
+
+  if (!success) {
+    const issuesSummary = issues
+      .map((i) => (i.path ? i.path.join(".") + ": " : "") + i.message)
+      .join("; ");
+    const msg = `Schema validation failed: ${label} — ${issuesSummary}`;
+    switch (severity) {
+      case "error":
+        deps.assert(false, msg);
+        break;
+      case "warn":
+        deps.warn(false, msg);
+        break;
+      case "fatal":
+        deps.assert(false, msg);
+        throw new FailError(msg);
+    }
+    return { success: false, issues };
+  }
+
+  return { success: true, data: parsed as T };
 }
 
 /**
@@ -656,6 +733,34 @@ export class RunnerCore {
     // step (simple tests / setup / teardown) they carry none.
     const emitStep = (e: { stepIndex?: number } & Record<string, unknown>) =>
       emit((scope.currentStepIndex !== null ? { ...e, stepIndex: scope.currentStepIndex } : e) as Parameters<typeof emit>[0]);
+    // Extracted so ctx.validate's failure routing reuses the SAME assert/warn paths
+    // as ctx.assert / ctx.warn (node parity: harness's runSchemaValidation calls
+    // ctx.assert / ctx.warn) — same counters, same stepIndex attribution.
+    const assertFn = (condition: unknown, message?: string, details?: unknown): void => {
+      const result =
+        condition && typeof condition === "object" && "passed" in condition
+          ? (condition as { passed: boolean; actual?: unknown; expected?: unknown })
+          : { passed: !!condition };
+      const d = (details ?? {}) as { actual?: unknown; expected?: unknown };
+      // `in` not `??` so an intentional null actual/expected keeps its
+      // diagnostic value (codex B4 P3).
+      const actual = "actual" in result ? result.actual : d.actual;
+      const expected = "expected" in result ? result.expected : d.expected;
+      scope.assertions.total += 1;
+      if (result.passed) scope.assertions.passed += 1;
+      emitStep({
+        type: "assertion",
+        id: scope.testMeta.id,
+        passed: result.passed,
+        actual,
+        expected,
+        // Parity with the node harness default (gap C).
+        message: message ?? (result.passed ? "Assertion passed" : "Assertion failed"),
+      });
+    };
+    const warnFn = (condition: unknown, message?: string): void =>
+      // First-class warning event (node parity) — NOT a log. condition=true means OK.
+      emitStep({ type: "warning", id: scope.testMeta.id, condition: !!condition, message: message ?? "" });
     return {
       http: scope.http,
       expect: (actual: unknown) =>
@@ -673,31 +778,16 @@ export class RunnerCore {
             message: r.message ?? (r.passed ? "Assertion passed" : "Assertion failed"),
           });
         }),
-      assert: (condition: unknown, message?: string, details?: unknown) => {
-        const result =
-          condition && typeof condition === "object" && "passed" in condition
-            ? (condition as { passed: boolean; actual?: unknown; expected?: unknown })
-            : { passed: !!condition };
-        const d = (details ?? {}) as { actual?: unknown; expected?: unknown };
-        // `in` not `??` so an intentional null actual/expected keeps its
-        // diagnostic value (codex B4 P3).
-        const actual = "actual" in result ? result.actual : d.actual;
-        const expected = "expected" in result ? result.expected : d.expected;
-        scope.assertions.total += 1;
-        if (result.passed) scope.assertions.passed += 1;
-        emitStep({
-          type: "assertion",
-          id: scope.testMeta.id,
-          passed: result.passed,
-          actual,
-          expected,
-          // Parity with the node harness default (gap C).
-          message: message ?? (result.passed ? "Assertion passed" : "Assertion failed"),
+      assert: assertFn,
+      warn: warnFn,
+      validate: <T>(data: unknown, schema: SchemaLike<T>, label?: string, options?: ValidateOptions): T | undefined => {
+        const r = runSchemaValidation(data, schema, label ?? "data", options?.severity ?? "error", {
+          emitSchemaValidation: (p) => emitStep({ type: "schema_validation", id: scope.testMeta.id, ...p }),
+          assert: (passed, msg) => assertFn(passed, msg),
+          warn: (cond, msg) => warnFn(cond, msg),
         });
+        return r.success ? r.data : undefined;
       },
-      warn: (condition: unknown, message?: string) =>
-        // First-class warning event (node parity) — NOT a log. condition=true means OK.
-        emitStep({ type: "warning", id: scope.testMeta.id, condition: !!condition, message: message ?? "" }),
       vars: {
         get: (k) => scope.runtime.vars[k],
         require: (k, validate) => {

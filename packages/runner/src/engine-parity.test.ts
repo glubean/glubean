@@ -221,6 +221,31 @@ export const branchSkipTest = test("branchSkipTest")
 export const stepSkipAfterFailTest = test("stepSkipAfterFailTest")
   .step("fail-then-skip", async (ctx) => { ctx.assert(false, "real failure", { actual: 1, expected: 2 }); ctx.skip("masked"); })
   .step("never", async (ctx) => { ctx.assert(true, "unreached"); });
+const okSchema = { safeParse: (d) => ({ success: true, data: d }) };
+const failSchema = { safeParse: () => ({ success: false, error: { issues: [{ message: "bad value", path: ["field"] }] } }) };
+export const validatePassTest = test(
+  { id: "validatePassTest", name: "Validate Pass" },
+  async (ctx) => { const out = ctx.validate({ a: 1 }, okSchema, "payload"); ctx.assert(out && out.a === 1, "returns parsed data"); }
+);
+export const validateErrorTest = test(
+  { id: "validateErrorTest", name: "Validate Error" },
+  async (ctx) => { ctx.validate({ a: 1 }, failSchema, "payload"); }
+);
+export const validateWarnTest = test(
+  { id: "validateWarnTest", name: "Validate Warn" },
+  async (ctx) => { ctx.validate({}, failSchema, "soft", { severity: "warn" }); ctx.assert(true, "still passes"); }
+);
+export const validateFatalTest = test(
+  { id: "validateFatalTest", name: "Validate Fatal" },
+  async (ctx) => { ctx.validate({}, failSchema, "hard", { severity: "fatal" }); ctx.assert(true, "unreached"); }
+);
+const throwSchema = { parse: () => { const e = new Error("nope"); e.issues = [{ message: "p issue", path: ["x"] }]; throw e; } };
+export const validateParseFallbackTest = test(
+  { id: "validateParseFallbackTest", name: "Validate parse fallback" },
+  async (ctx) => { ctx.validate({}, throwSchema, "parsed"); }
+);
+export const validateInStepTest = test("validateInStepTest")
+  .step("vstep", async (ctx) => { ctx.validate({}, failSchema, "in-step"); });
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -340,4 +365,28 @@ ptest("engine parity: ctx.skip() in a branch predicate → whole test skipped", 
 
 ptest("engine parity: failed assertion before ctx.skip() in a step → failure wins", async () => {
   await assertParity(MODULE, "stepSkipAfterFailTest");
+});
+
+ptest("engine parity: ctx.validate success → schema_validation(ok) + returns data", async () => {
+  await assertParity(MODULE, "validatePassTest");
+});
+
+ptest("engine parity: ctx.validate error → schema_validation + failed assertion (soft)", async () => {
+  await assertParity(MODULE, "validateErrorTest");
+});
+
+ptest("engine parity: ctx.validate warn → schema_validation + warning (test passes)", async () => {
+  await assertParity(MODULE, "validateWarnTest");
+});
+
+ptest("engine parity: ctx.validate fatal → failed assertion + abort (failed + exit 1)", async () => {
+  await assertParity(MODULE, "validateFatalTest");
+});
+
+ptest("engine parity: ctx.validate parse() fallback path (throws → issues extracted)", async () => {
+  await assertParity(MODULE, "validateParseFallbackTest");
+});
+
+ptest("engine parity: ctx.validate in a step → schema_validation carries stepIndex; step fails", async () => {
+  await assertParity(MODULE, "validateInStepTest");
 });

@@ -89,6 +89,16 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
         testId: e.id,
       };
+    case "schema_validation":
+      return {
+        type: "schema_validation",
+        label: e.label,
+        success: e.success,
+        severity: e.severity,
+        ...(e.issues !== undefined ? { issues: e.issues } : {}),
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
+        testId: e.id,
+      };
     case "branch":
       return {
         type: "branch",
