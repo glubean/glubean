@@ -19,7 +19,9 @@
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
     "pretest": "node -e \"const fs=require('fs'),p=require('path');const bad=fs.readdirSync('src',{recursive:true}).filter(f=>(/\\.(js|d\\.ts)$/.test(f)&&!f.endsWith('.mjs'))).map(f=>p.join('src',f));if(bad.length){console.error('ERROR: Stale build artifacts in src/ — delete them:',bad);process.exit(1)}\"",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke": "pnpm --filter @glubean/sdk --filter @glubean/engine build && node browser-smoke/build-smoke.mjs",
+    "smoke:serve": "pnpm --filter @glubean/sdk --filter @glubean/engine build && node browser-smoke/serve-smoke.mjs"
   },
   "publishConfig": {
     "access": "public"
@@ -29,7 +31,8 @@
     "ky": "^2.0.2"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0"
   },
   "repository": {
     "type": "git",
