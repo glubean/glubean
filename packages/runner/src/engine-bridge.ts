@@ -89,6 +89,18 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
         testId: e.id,
       };
+    case "branch":
+      return {
+        type: "branch",
+        index: e.index,
+        name: e.name,
+        takenIndex: e.takenIndex,
+        ...(e.takenValue !== undefined ? { takenValue: e.takenValue } : {}),
+        ...(e.message !== undefined ? { message: e.message } : {}),
+        total: e.total,
+        ...(e.error !== undefined ? { error: e.error } : {}),
+        testId: e.id,
+      };
     case "step_start":
       return { type: "step_start", index: e.index, name: e.name, total: e.total, testId: e.id };
     case "step_end":

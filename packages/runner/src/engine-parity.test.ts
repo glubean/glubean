@@ -88,6 +88,10 @@ async function assertParity(content: string, testId: string, ctx: RunCtx = {}): 
   const file = await makeTempFile(content);
   const legacy = normalize(await rawEvents(file, testId, false, ctx));
   const engine = normalize(await rawEvents(file, testId, true, ctx));
+  // Guard against a VACUOUS green: if the module failed to import (e.g. a malformed
+  // fixture), both legs error identically before any test runs and toEqual passes
+  // without comparing real output. A real run always emits a "start" event.
+  expect(legacy.some((e) => (e as { type?: string }).type === "start")).toBe(true);
   expect(engine).toEqual(legacy);
 }
 
@@ -145,6 +149,40 @@ export const stepRetryTest = test("stepRetryTest")
   .step("flaky", { retries: 2, retryDelay: 0 }, async (ctx) => { _retryN++; ctx.assert(_retryN >= 2, "ok on attempt 2"); });
 export const stepTimeoutTest = test("stepTimeoutTest")
   .step("slow", { timeout: 10 }, async () => { await new Promise((r) => setTimeout(r, 100)); });
+export const condThenTest = test("condThenTest")
+  .setup(async () => ({ role: "admin", route: "" }))
+  .condition(
+    { predicate: (ctx, s) => s.role === "admin", message: "is admin" },
+    (b) => b.step("go-admin", async (ctx, s) => ({ ...s, route: "admin" })),
+    (b) => b.step("go-home", async (ctx, s) => ({ ...s, route: "home" })),
+  )
+  .step("assert-route", async (ctx, s) => { ctx.assert(s.route === "admin", "route is admin"); return s; });
+export const condElseTest = test("condElseTest")
+  .setup(async () => ({ role: "guest", route: "" }))
+  .condition(
+    { predicate: (ctx, s) => s.role === "admin", message: "is admin" },
+    (b) => b.step("go-admin", async (ctx, s) => ({ ...s, route: "admin" })),
+    (b) => b.step("go-home", async (ctx, s) => ({ ...s, route: "home" })),
+  )
+  .step("assert-route", async (ctx, s) => { ctx.assert(s.route === "home", "route is home"); return s; });
+export const switchOnTest = test("switchOnTest")
+  .setup(async () => ({ status: 404, handled: "" }))
+  .switchOn((ctx, s) => s.status)(
+    [
+      { value: 200, then: (b) => b.step("use", async (ctx, s) => ({ ...s, handled: "use" })) },
+      { value: 404, then: (b) => b.step("create", async (ctx, s) => ({ ...s, handled: "create" })) },
+    ],
+    (b) => b.step("fallback", async (ctx, s) => ({ ...s, handled: "fallback" })),
+  )
+  .step("assert", async (ctx, s) => { ctx.assert(s.handled === "create", "handled=create"); return s; });
+export const branchFailTest = test("branchFailTest")
+  .setup(async () => ({}))
+  .condition(
+    { predicate: () => { throw new Error("predicate boom"); }, message: "decide" },
+    (b) => b.step("yes", async (ctx, s) => s),
+    (b) => b.step("no", async (ctx, s) => s),
+  )
+  .step("after", async (ctx, s) => { ctx.assert(true, "unreached"); return s; });
 export const retryTest = test(
   { id: "retryTest", name: "Retry Test" },
   async (ctx) => { ctx.assert(ctx.retryCount === 2, "retry count", { actual: ctx.retryCount, expected: 2 }); }
@@ -228,4 +266,20 @@ ptest("engine parity: step retry (fail→pass; attempts/retriesUsed + Retrying l
 
 ptest("engine parity: step timeout (StepTimeoutError, terminal — no retry)", async () => {
   await assertParity(MODULE, "stepTimeoutTest");
+});
+
+ptest("engine parity: branch condition — then-case taken (else skipped)", async () => {
+  await assertParity(MODULE, "condThenTest");
+});
+
+ptest("engine parity: branch condition — else/default taken (then skipped)", async () => {
+  await assertParity(MODULE, "condElseTest");
+});
+
+ptest("engine parity: branch switchOn — value case matched (others + default skipped)", async () => {
+  await assertParity(MODULE, "switchOnTest");
+});
+
+ptest("engine parity: branch decision failure (predicate throws → branch error)", async () => {
+  await assertParity(MODULE, "branchFailTest");
 });

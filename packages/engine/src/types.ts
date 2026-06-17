@@ -80,6 +80,17 @@ export type ExecutionEvent =
       error?: string;
       returnState?: unknown;
     }
+  | {
+      type: "branch";
+      id: string;
+      index: number;
+      name: string;
+      takenIndex: number | "default";
+      takenValue?: string | number | boolean | null;
+      message?: string;
+      total: number;
+      error?: string;
+    }
   // ctx.session.set — a host may surface this as a control signal (the node runner
   // forwards it to sibling tests; the browser updates its session store).
   | { type: "session_set"; id: string; key: string; value: unknown }
@@ -145,6 +156,9 @@ export interface TestResult {
    *  steps test with any failed step is reported as a failure ("One or more steps
    *  failed"), unlike a simple test's soft assertion failure which "completes". */
   stepsFailed?: boolean;
+  /** The message a host should throw for `stepsFailed` — usually "One or more steps
+   *  failed", or a branch-decision-specific message when a branch decision failed. */
+  stepsFailMessage?: string;
   error?: string;
   /** The original throw's stack (only when `threw`), so a host can re-raise with
    *  the user's stack instead of a host-rooted one (diagnostics parity). */

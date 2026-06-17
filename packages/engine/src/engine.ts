@@ -25,6 +25,7 @@ import type {
   GlubeanHttp,
   RunnerServices,
   ScopeInput,
+  StepDef,
   TestDef,
   TestFn,
   TestResult,
@@ -47,6 +48,36 @@ function runEngineValidator(result: boolean | string | void | null, key: string,
   if (result === true || result === undefined || result === null) return;
   if (typeof result === "string") throw new Error(`Invalid ${kind} "${key}": ${result}`);
   throw new Error(`Invalid ${kind} "${key}": validation failed`);
+}
+
+/** A branch step's decision data (test().condition/.switchOn/.switchCond), detected
+ *  structurally so the engine needn't import the SDK type-guard. */
+interface BranchData {
+  mode: "predicate" | "value";
+  subject?: (ctx: unknown, state: unknown) => unknown;
+  cases: Array<{ value?: unknown; predicate?: (ctx: unknown, state: unknown) => unknown; steps: StepDef[] }>;
+  default?: StepDef[];
+  message?: string;
+}
+function branchOf(step: StepDef): BranchData | null {
+  const b = (step as { branch?: BranchData }).branch;
+  return b && typeof b === "object" && Array.isArray(b.cases) ? b : null;
+}
+
+/** Count LEAF steps (node parity: leafTotal) — branch cases + default recurse;
+ *  used for the `total` on step_start. A linear list counts as its length. */
+function countLeafSteps(steps: StepDef[]): number {
+  let n = 0;
+  for (const s of steps) {
+    const br = branchOf(s);
+    if (br) {
+      for (const c of br.cases) n += countLeafSteps(c.steps);
+      n += countLeafSteps(br.default ?? []);
+    } else {
+      n += 1;
+    }
+  }
+  return n;
 }
 
 /** Per-step timeout error — same message/name as the node harness (harness.ts:446)
@@ -232,128 +263,237 @@ export class RunnerCore {
     // run still "completes"); it must still make the test's verdict error.
     let stepFailed = false;
     let stepFailMsg: string | undefined;
+    // First branch-decision failure → the test-level failure message (node parity:
+    // the post-loop throw prefers it over "One or more steps failed").
+    let branchDecisionError: string | undefined;
     try {
       if (def.type === "simple") {
         if (!def.fn) throw new Error(`test "${def.meta.id}": missing fn`);
         await def.fn(ctx);
       } else {
         let state: unknown;
-        const stepTotal = def.steps?.length ?? 0;
-        try {
-          if (def.setup) {
-            events.emit({ type: "log", id: scope.testMeta.id, message: "Running setup..." });
-            state = await def.setup(ctx);
-          }
-          let i = 0;
-          for (const step of def.steps ?? []) {
-            const idx = i++;
-            // A prior step failed → skip the rest, emitting a skipped step_end for
-            // each (node parity: emitSkippedTree — no attempts/retriesUsed).
-            if (stepFailed) {
+        const stepTotal = countLeafSteps(def.steps ?? []);
+        let stepSeq = 0; // monotonic LEAF step index (continues across branches)
+        let branchSeq = 0; // separate index for branch decision events
+
+        // Recursive skipped-step emission (node parity: emitSkippedTree) — a skipped
+        // step_end per leaf (no attempts/retriesUsed); branch cases recurse.
+        const emitSkippedTree = (steps: StepDef[]): void => {
+          for (const s of steps) {
+            const br = branchOf(s);
+            if (br) {
+              for (const c of br.cases) emitSkippedTree(c.steps as StepDef[]);
+              emitSkippedTree((br.default ?? []) as StepDef[]);
+            } else {
               events.emit({
                 type: "step_end",
                 id: scope.testMeta.id,
-                index: idx,
-                name: step.meta.name,
+                index: stepSeq++,
+                name: s.meta.name,
                 status: "skipped",
                 durationMs: 0,
                 assertions: 0,
                 failedAssertions: 0,
               });
-              continue;
-            }
-            scope.currentStepIndex = idx;
-            const startedAt = scheduler.now();
-            events.emit({ type: "step_start", id: scope.testMeta.id, index: idx, name: step.meta.name, total: stepTotal });
-
-            // Per-step retry / timeout (node parity, harness runStepList). retries
-            // re-run the fn on failure — NOT on a timeout (terminal). backoff delay =
-            // retryDelay * backoff^(attempt-1), capped at 30s.
-            const sm = (step as { meta?: { retries?: number; retryDelay?: number; backoff?: number; timeout?: number } }).meta ?? {};
-            const configuredRetries = Number.isFinite(sm.retries) ? Math.max(0, Math.floor(sm.retries as number)) : 0;
-            const retryDelayMs = Number.isFinite(sm.retryDelay) ? Math.max(0, sm.retryDelay as number) : configuredRetries > 0 ? 1000 : 0;
-            const backoff = Number.isFinite(sm.backoff) ? Math.max(1, sm.backoff as number) : 1;
-            const stepTimeoutMs = Number.isFinite(sm.timeout) && (sm.timeout as number) > 0 ? Math.floor(sm.timeout as number) : undefined;
-            const maxAttempts = configuredRetries + 1;
-
-            let stepError: string | undefined;
-            let stepReturnState: unknown;
-            let attemptsUsed = 0;
-            let lastAssertions = 0;
-            let lastFailedAssertions = 0;
-            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-              attemptsUsed = attempt;
-              stepError = undefined;
-              stepReturnState = undefined;
-              const aBefore = scope.assertions.total;
-              const fBefore = scope.assertions.total - scope.assertions.passed;
-              let timedOut = false;
-              try {
-                const call = step.fn(ctx, state);
-                if (stepTimeoutMs === undefined) {
-                  const next = await call;
-                  if (next !== undefined) { state = next; stepReturnState = next; }
-                } else {
-                  let timer: ReturnType<typeof setTimeout> | undefined;
-                  try {
-                    const next = await Promise.race([
-                      call,
-                      new Promise<never>((_, reject) => {
-                        timer = setTimeout(() => reject(new StepTimeoutError(step.meta.name, stepTimeoutMs)), stepTimeoutMs);
-                      }),
-                    ]);
-                    if (next !== undefined) { state = next; stepReturnState = next; }
-                  } finally {
-                    if (timer !== undefined) clearTimeout(timer);
-                  }
-                }
-              } catch (e) {
-                // A thrown step is caught + recorded as a failed step (node parity:
-                // the run still "completes"; the test fails via stepsFailed).
-                stepError = e instanceof Error ? e.message : String(e);
-                timedOut = e instanceof StepTimeoutError;
-              }
-              lastAssertions = scope.assertions.total - aBefore;
-              lastFailedAssertions = scope.assertions.total - scope.assertions.passed - fBefore;
-              const attemptFailed = !!stepError || lastFailedAssertions > 0;
-              if (!attemptFailed || timedOut) break; // success, or a timeout (terminal — no retry)
-              if (attempt < maxAttempts) {
-                const delay = Math.min(retryDelayMs * backoff ** (attempt - 1), 30_000);
-                const reason = stepError ? stepError : `${lastFailedAssertions} failed assertion(s)`;
-                events.emit({
-                  type: "log",
-                  id: scope.testMeta.id,
-                  stepIndex: idx,
-                  message: `Retrying step "${step.meta.name}" (${attempt + 1}/${maxAttempts}) after failure: ${reason}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`,
-                });
-                if (delay > 0) await new Promise<void>((r) => setTimeout(r, delay));
-              }
-            }
-
-            const failed = !!stepError || lastFailedAssertions > 0;
-            events.emit({
-              type: "step_end",
-              id: scope.testMeta.id,
-              index: idx,
-              name: step.meta.name,
-              status: failed ? "failed" : "passed",
-              durationMs: scheduler.now() - startedAt,
-              assertions: lastAssertions,
-              failedAssertions: lastFailedAssertions,
-              attempts: attemptsUsed,
-              retriesUsed: Math.max(0, attemptsUsed - 1),
-              ...(stepError ? { error: stepError } : {}),
-              ...(stepReturnState !== undefined ? { returnState: serializeReturnState(stepReturnState) } : {}),
-            });
-            scope.currentStepIndex = null;
-
-            // On failure: mark stepFailed but DON'T break — the loop continues so the
-            // remaining steps emit skipped step_end (node parity, skip-check at top).
-            if (failed) {
-              stepFailed = true;
-              if (stepError && stepFailMsg === undefined) stepFailMsg = stepError;
             }
           }
+        };
+
+        // Run one normal (non-branch) step with retry/timeout (node parity).
+        const runNormalStep = async (step: StepDef): Promise<void> => {
+          const idx = stepSeq++;
+          scope.currentStepIndex = idx;
+          const startedAt = scheduler.now();
+          events.emit({ type: "step_start", id: scope.testMeta.id, index: idx, name: step.meta.name, total: stepTotal });
+
+          const sm = (step as { meta?: { retries?: number; retryDelay?: number; backoff?: number; timeout?: number } }).meta ?? {};
+          const configuredRetries = Number.isFinite(sm.retries) ? Math.max(0, Math.floor(sm.retries as number)) : 0;
+          const retryDelayMs = Number.isFinite(sm.retryDelay) ? Math.max(0, sm.retryDelay as number) : configuredRetries > 0 ? 1000 : 0;
+          const backoff = Number.isFinite(sm.backoff) ? Math.max(1, sm.backoff as number) : 1;
+          const stepTimeoutMs = Number.isFinite(sm.timeout) && (sm.timeout as number) > 0 ? Math.floor(sm.timeout as number) : undefined;
+          const maxAttempts = configuredRetries + 1;
+
+          let stepError: string | undefined;
+          let stepReturnState: unknown;
+          let attemptsUsed = 0;
+          let lastAssertions = 0;
+          let lastFailedAssertions = 0;
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            attemptsUsed = attempt;
+            stepError = undefined;
+            stepReturnState = undefined;
+            const aBefore = scope.assertions.total;
+            const fBefore = scope.assertions.total - scope.assertions.passed;
+            let timedOut = false;
+            try {
+              const call = step.fn!(ctx, state);
+              if (stepTimeoutMs === undefined) {
+                const next = await call;
+                if (next !== undefined) { state = next; stepReturnState = next; }
+              } else {
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                try {
+                  const next = await Promise.race([
+                    call,
+                    new Promise<never>((_, reject) => {
+                      timer = setTimeout(() => reject(new StepTimeoutError(step.meta.name, stepTimeoutMs)), stepTimeoutMs);
+                    }),
+                  ]);
+                  if (next !== undefined) { state = next; stepReturnState = next; }
+                } finally {
+                  if (timer !== undefined) clearTimeout(timer);
+                }
+              }
+            } catch (e) {
+              // A thrown step is caught + recorded as a failed step (node parity:
+              // the run still "completes"; the test fails via stepsFailed).
+              stepError = e instanceof Error ? e.message : String(e);
+              timedOut = e instanceof StepTimeoutError;
+            }
+            lastAssertions = scope.assertions.total - aBefore;
+            lastFailedAssertions = scope.assertions.total - scope.assertions.passed - fBefore;
+            const attemptFailed = !!stepError || lastFailedAssertions > 0;
+            if (!attemptFailed || timedOut) break; // success, or a timeout (terminal — no retry)
+            if (attempt < maxAttempts) {
+              const delay = Math.min(retryDelayMs * backoff ** (attempt - 1), 30_000);
+              const reason = stepError ? stepError : `${lastFailedAssertions} failed assertion(s)`;
+              events.emit({
+                type: "log",
+                id: scope.testMeta.id,
+                stepIndex: idx,
+                message: `Retrying step "${step.meta.name}" (${attempt + 1}/${maxAttempts}) after failure: ${reason}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`,
+              });
+              if (delay > 0) await new Promise<void>((r) => setTimeout(r, delay));
+            }
+          }
+
+          const failed = !!stepError || lastFailedAssertions > 0;
+          events.emit({
+            type: "step_end",
+            id: scope.testMeta.id,
+            index: idx,
+            name: step.meta.name,
+            status: failed ? "failed" : "passed",
+            durationMs: scheduler.now() - startedAt,
+            assertions: lastAssertions,
+            failedAssertions: lastFailedAssertions,
+            attempts: attemptsUsed,
+            retriesUsed: Math.max(0, attemptsUsed - 1),
+            ...(stepError ? { error: stepError } : {}),
+            ...(stepReturnState !== undefined ? { returnState: serializeReturnState(stepReturnState) } : {}),
+          });
+          scope.currentStepIndex = null;
+          if (failed) {
+            stepFailed = true;
+            if (stepError && stepFailMsg === undefined) stepFailMsg = stepError;
+          }
+        };
+
+        // Recursive step-list runner (node parity: runStepList). A prior failure
+        // skips the rest (skipped step_end tree). branch handling lands in Phase 2.
+        // Branch step (test().condition / .switchOn / .switchCond): make the decision
+        // ONCE, emit a `branch` event, run the taken case's sub-steps as first-class
+        // steps, and skip every non-taken case + (if a case matched) the default —
+        // in registry order so stepSeq stays aligned (node parity: runBranchStep).
+        const runBranchStep = async (step: StepDef, branch: BranchData): Promise<void> => {
+          scope.currentStepIndex = null;
+          const failedBefore = scope.assertions.total - scope.assertions.passed;
+          let takenIndex: number | "default" = "default";
+          let takenValue: string | number | boolean | null | undefined;
+          const total = branch.cases.length;
+          const baseEvent = { id: scope.testMeta.id, name: step.meta.name, ...(branch.message ? { message: branch.message } : {}) };
+          const failDecision = (errMessage: string): void => {
+            events.emit({ type: "branch", ...baseEvent, index: branchSeq++, takenIndex: "default", total, error: errMessage });
+            stepFailed = true;
+            if (branchDecisionError === undefined) branchDecisionError = `branch "${step.meta.name}": ${errMessage}`;
+            for (const c of branch.cases) emitSkippedTree(c.steps);
+            emitSkippedTree(branch.default ?? []);
+          };
+
+          try {
+            if (branch.mode === "value") {
+              // Subject lens evaluated EXACTLY ONCE (lenses may be impure); await so
+              // an async lens resolves to its scalar before matching.
+              const subject = branch.subject ? await branch.subject(ctx, state) : undefined;
+              for (let ci = 0; ci < branch.cases.length; ci++) {
+                if (subject === branch.cases[ci].value) {
+                  takenIndex = ci;
+                  takenValue = branch.cases[ci].value as typeof takenValue;
+                  break;
+                }
+              }
+            } else {
+              for (let ci = 0; ci < branch.cases.length; ci++) {
+                const pred = branch.cases[ci].predicate;
+                if (!pred) continue;
+                const result = await pred(ctx, state);
+                if (typeof result !== "boolean") {
+                  throw new Error(
+                    `condition / switchCond predicate must return a boolean; got ${result === null ? "null" : typeof result}`,
+                  );
+                }
+                if (result) {
+                  takenIndex = ci;
+                  break;
+                }
+              }
+            }
+          } catch (e) {
+            // Decision failure (§7.4): the test fails; never silently take a branch.
+            // (ctx.skip() inside a predicate is Phase 4 — no ctx.skip yet.)
+            failDecision(e instanceof Error ? e.message : String(e));
+            return;
+          }
+
+          // A ctx.assert(false) failure recorded WHILE deciding fails the branch (the
+          // assertion event is outside any step, so step-authority would miss it).
+          const decisionFailed = scope.assertions.total - scope.assertions.passed - failedBefore;
+          if (decisionFailed > 0) {
+            failDecision(`${decisionFailed} failed assertion(s) during branch decision`);
+            return;
+          }
+
+          events.emit({
+            type: "branch",
+            ...baseEvent,
+            index: branchSeq++,
+            takenIndex,
+            ...(takenValue !== undefined ? { takenValue } : {}),
+            total,
+          });
+          // Leaves in registry order: cases 0..N then default — run the taken one,
+          // skip the rest IN PLACE (keeps stepSeq aligned with discovery order).
+          for (let ci = 0; ci < branch.cases.length; ci++) {
+            if (ci === takenIndex) await runStepList(branch.cases[ci].steps);
+            else emitSkippedTree(branch.cases[ci].steps);
+          }
+          if (takenIndex === "default") await runStepList(branch.default ?? []);
+          else emitSkippedTree(branch.default ?? []);
+        };
+
+        // Recursive step-list runner (node parity: runStepList). A prior failure
+        // skips the rest (skipped step_end tree); branch steps make a decision + recurse.
+        const runStepList = async (steps: StepDef[]): Promise<void> => {
+          for (const step of steps) {
+            if (stepFailed) {
+              emitSkippedTree([step]);
+              continue;
+            }
+            const branch = branchOf(step);
+            if (branch) {
+              await runBranchStep(step, branch);
+              continue;
+            }
+            await runNormalStep(step);
+          }
+        };
+
+        try {
+          if (def.setup) {
+            events.emit({ type: "log", id: scope.testMeta.id, message: "Running setup..." });
+            state = await def.setup(ctx);
+          }
+          await runStepList((def.steps ?? []) as StepDef[]);
         } finally {
           // teardown runs even when setup/a step throws (builder contract); its
           // own errors never fail the run (parity with the node harness). (codex P2)
@@ -394,7 +534,9 @@ export class RunnerCore {
       name: def.meta.name ?? def.meta.id,
       status: verdict,
       threw,
-      ...(stepFailed ? { stepsFailed: true } : {}),
+      // A branch decision failure promotes its message over "One or more steps failed"
+      // (node parity: harness throws `branchDecisionError ?? "One or more steps failed"`).
+      ...(stepFailed ? { stepsFailed: true, stepsFailMessage: branchDecisionError ?? "One or more steps failed" } : {}),
       error: verdict === "ok" ? undefined : threw ? thrownError : (stepFailMsg ?? "assertion failed"),
       // Preserve the user's original throw stack + name so a host can re-raise with
       // them (stack diagnostics + failure classification parity — codex P2).

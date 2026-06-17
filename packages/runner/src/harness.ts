@@ -1957,14 +1957,22 @@ function engineSupports(test: Test<unknown>): boolean {
   if (test.fixtures && Object.keys(test.fixtures).length > 0) return false;
   if (test.type === "simple") return true;
   if (test.type === "steps") {
-    // Linear steps incl. per-step retry/timeout (Phase 1a/1b). branch/poll steps
-    // (Phase 2/3) still route to legacy.
-    for (const step of test.steps ?? []) {
-      if (isTestBranchStep(step) || isTestPollStep(step)) return false;
-    }
-    return true;
+    // Linear steps + retry/timeout (Phase 1) + branch (Phase 2). poll steps (Phase 3)
+    // — anywhere in the tree, incl. nested in a branch case — still route to legacy.
+    return stepsEngineSupported(test.steps ?? []);
   }
   return false;
+}
+
+function stepsEngineSupported(steps: StepDefinition<unknown>[]): boolean {
+  for (const step of steps) {
+    if (isTestPollStep(step)) return false; // Phase 3
+    if (isTestBranchStep(step)) {
+      for (const c of step.branch.cases) if (!stepsEngineSupported(c.steps)) return false;
+      if (!stepsEngineSupported(step.branch.default ?? [])) return false;
+    }
+  }
+  return true;
 }
 
 async function executeNewTest(test: Test<unknown>): Promise<void> {
@@ -1994,10 +2002,10 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
       throw err;
     }
     if (result.stepsFailed) {
-      // Node parity (harness.ts "One or more steps failed"): a steps test with any
-      // failed step throws after teardown so the dispatcher reports failed + exit 1
-      // — unlike a simple test's soft assertion failure, which "completes" (codex P2).
-      throw new Error("One or more steps failed");
+      // Node parity (harness.ts:2686): a steps test with any failed step throws after
+      // teardown so the dispatcher reports failed + exit 1 — unlike a simple test's
+      // soft assertion ("completes"). A branch-decision failure carries its own message.
+      throw new Error(result.stepsFailMessage ?? "One or more steps failed");
     }
     if (result.status === "skipped") {
       // Legacy skip status (dispatcher) carries no peak memory.
