@@ -55,7 +55,8 @@ describe("engine.resolve — runtime expansion of SDK module exports", () => {
     expect(res.status).toBe("ok");
     expect(res.assertions).toEqual({ total: 2, passed: 2 });
     const traces = events.filter((e): e is Extract<ExecutionEvent, { type: "trace" }> => e.type === "trace");
-    expect(traces.map((e) => ({ id: e.id, url: e.url, status: e.status }))).toEqual([
+    // Rich Trace shape (Phase 4f): HTTP fields under `data`.
+    expect(traces.map((e) => ({ id: e.id, url: e.data.url, status: e.data.status }))).toEqual([
       { id: "golden", url: "https://api.test/ping", status: 200 },
     ]);
   });

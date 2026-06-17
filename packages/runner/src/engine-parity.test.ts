@@ -19,6 +19,7 @@ import { test, expect, afterAll, beforeAll } from "vitest";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer, type Server } from "node:http";
 import { TestExecutor } from "./executor.js";
 import type { ExecutionEvent } from "./executor.js";
 
@@ -28,12 +29,37 @@ const RUNNER_ROOT = resolve(__dirname, "..");
 const TMP_DIR = join(RUNNER_ROOT, ".tmp-engine-parity");
 let tmpSeq = 0;
 
+// A tiny deterministic local HTTP server for the ky-parity cases (httpbin.org is
+// down + nondeterministic — see handoff). Both legs hit the SAME baseUrl so only
+// the durations differ run-to-run (normalize() zeroes those).
+let server: Server;
+let baseUrl: string;
+
 beforeAll(async () => {
   await rm(TMP_DIR, { recursive: true, force: true }).catch(() => {});
   await mkdir(TMP_DIR, { recursive: true });
+  server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname === "/json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, items: [1, 2, 3] }));
+      return;
+    }
+    if (url.pathname === "/teapot") {
+      res.writeHead(418, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "teapot" }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const addr = server.address();
+  baseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
 });
 afterAll(async () => {
   await rm(TMP_DIR, { recursive: true, force: true }).catch(() => {});
+  await new Promise<void>((r) => server.close(() => r()));
 });
 
 async function makeTempFile(content: string, name = "test.ts"): Promise<string> {
@@ -69,17 +95,39 @@ async function rawEvents(
   return events;
 }
 
+/** Recursively zero any wall-clock duration field (duration / durationMs) — these
+ *  appear top-level (step_end.durationMs) AND nested in trace/action `data`. */
+function zeroDurationsDeep(v: unknown): void {
+  if (Array.isArray(v)) {
+    v.forEach(zeroDurationsDeep);
+    return;
+  }
+  if (v && typeof v === "object") {
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if ((k === "duration" || k === "durationMs") && typeof val === "number") {
+        (v as Record<string, unknown>)[k] = 0;
+      } else {
+        zeroDurationsDeep(val);
+      }
+    }
+  }
+}
+
 /** Drop fields that legitimately differ run-to-run (memory, wall-clock durations). */
 function normalize(events: ExecutionEvent[]): unknown[] {
   return events.map((e) => {
-    const c = { ...(e as Record<string, unknown>) };
+    // Deep clone first so zeroing nested duration fields never mutates the original.
+    const c = JSON.parse(JSON.stringify(e)) as Record<string, unknown>;
     delete c.peakMemoryBytes;
     delete c.peakMemoryMB;
     delete c.peakMemory;
-    if (typeof c.durationMs === "number") c.durationMs = 0;
-    if (typeof c.duration === "number") c.duration = 0;
     delete c.stack; // throw-site specific (re-raised error has a different stack)
     delete c.ts; // session:set carries Date.now()
+    zeroDurationsDeep(c); // top-level + nested (trace.data / action.data) durations
+    // The HTTP auto-trace metric value IS the (nondeterministic) duration.
+    if (c.type === "metric" && c.name === "http_duration_ms" && typeof c.value === "number") {
+      c.value = 0;
+    }
     return c;
   });
 }
@@ -275,6 +323,35 @@ export const metricInStepTest = test("metricInStepTest")
     ctx.event({ type: "db:slow", data: { ms: 9 } });
     ctx.assert(true, "in-step events");
   });
+export const httpGetTraceTest = test(
+  { id: "httpGetTraceTest", name: "HTTP GET trace" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/json");
+    ctx.assert(res.status === 200, "status 200", { actual: res.status, expected: 200 });
+  }
+);
+export const httpErrorTraceTest = test(
+  { id: "httpErrorTraceTest", name: "HTTP error trace" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/teapot");
+    ctx.assert(res.status === 418, "status 418", { actual: res.status, expected: 418 });
+  }
+);
+export const explicitTraceTest = test(
+  { id: "explicitTraceTest", name: "Explicit ctx.trace" },
+  async (ctx) => {
+    ctx.trace({ protocol: "grpc", target: "Greeter/SayHello", status: 0, durationMs: 5, ok: true, name: "SayHello" });
+    ctx.assert(true, "traced");
+  }
+);
+export const httpTraceInStepTest = test("httpTraceInStepTest")
+  .step("call", async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/json");
+    ctx.assert(res.status === 200, "200 in step");
+  });
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -434,4 +511,20 @@ ptest("engine parity: ctx.event → generic event (non-workflow passthrough)", a
 
 ptest("engine parity: ctx.metric/action/event inside a step carry stepIndex", async () => {
   await assertParity(MODULE, "metricInStepTest");
+});
+
+ptest("engine parity: HTTP GET auto-trace (rich Trace + derived action + http_duration_ms)", async () => {
+  await assertParity(MODULE, "httpGetTraceTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: HTTP error auto-trace (4xx → ok:false + action status error)", async () => {
+  await assertParity(MODULE, "httpErrorTraceTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: explicit ctx.trace (non-http protocol) → trace + derived action", async () => {
+  await assertParity(MODULE, "explicitTraceTest");
+});
+
+ptest("engine parity: HTTP auto-trace inside a step carries stepIndex", async () => {
+  await assertParity(MODULE, "httpTraceInStepTest", { vars: { BASE_URL: baseUrl } });
 });

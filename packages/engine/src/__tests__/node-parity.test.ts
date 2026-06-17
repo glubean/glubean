@@ -56,9 +56,10 @@ describe("node parity — engine + real NodeHost over a local server", () => {
     expect(res.assertions).toEqual({ total: 1, passed: 1 });
     const traces = traceEvents(host.events);
     expect(traces).toHaveLength(1);
-    expect(traces[0]).toMatchObject({ id: "simple", method: "GET", status: 200 });
-    expect(traces[0]!.url).toContain("/ping");
-    expect(traces[0]!.timeMs).toBeGreaterThanOrEqual(0);
+    // Rich Trace shape (Phase 4f): the HTTP fields live under `data`.
+    expect(traces[0]).toMatchObject({ id: "simple", data: { method: "GET", status: 200, ok: true, protocol: "http" } });
+    expect(traces[0]!.data.url).toContain("/ping");
+    expect(traces[0]!.data.durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it("builder steps: setup → http step (state threads) → assert step → teardown", async () => {
@@ -125,6 +126,6 @@ describe("node parity — engine + real NodeHost over a local server", () => {
     const [def] = engine.resolve(ns);
     const res = await engine.run(def!);
     expect(res.status).toBe("ok");
-    expect(traceEvents(host.events)[0]!.url).toBe(`${base}/ping`);
+    expect(traceEvents(host.events)[0]!.data.url).toBe(`${base}/ping`);
   });
 });

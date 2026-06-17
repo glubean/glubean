@@ -159,34 +159,16 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
       // Legacy shape: a control event (bypasses buffering) carrying ts. ts is
       // wall-clock here (node bridge) and normalized out of parity diffs.
       return { type: "session:set", key: e.key, value: e.value, ts: Date.now(), testId: e.id };
-    case "trace": {
-      // The runner wire wants { type:"trace", data: Trace }. The engine emits a flat
-      // trace today; build a well-shaped Trace with the required SDK fields (target /
-      // ok / duration alias). Header capture + the derived action + http_duration_ms
-      // metric are Phase 4 — until then HTTP tests aren't byte-parity, but the event
-      // carries the documented Trace fields and is never malformed.
-      let path = e.url;
-      try {
-        path = new URL(e.url).pathname;
-      } catch {
-        /* keep raw url */
-      }
+    case "trace":
+      // The engine now emits the FULL Trace shape (Phase 4f) — pass it through as the
+      // runner wire's { type:"trace", data: Trace }. The derived action +
+      // http_duration_ms metric are emitted by the engine as their own events.
       return {
         type: "trace",
-        data: {
-          protocol: "http",
-          method: e.method,
-          url: e.url,
-          status: e.status,
-          durationMs: e.timeMs,
-          duration: e.timeMs,
-          target: `${e.method} ${path}`,
-          ok: e.status < 400,
-        },
+        data: e.data,
         ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
         testId: e.id,
       };
-    }
     default:
       // pass-through with testId; richer mappings added per sub-slice
       return { ...(e as Record<string, unknown>), testId: (e as { id: string }).id };

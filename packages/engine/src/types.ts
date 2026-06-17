@@ -18,7 +18,7 @@
  */
 import type { KyInstance, Options } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
-import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
 
 /** ky request options plus Glubean's retained public `prefixUrl` (the engine maps
  *  it to ky 2's `prefix` at the boundary). */
@@ -61,7 +61,10 @@ export interface EnvProvider {
 export type ExecutionEvent =
   | { type: "start"; id: string; name: string; tags: string[]; retryCount?: number }
   | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown; stepIndex?: number }
-  | { type: "trace"; id: string; method: string; url: string; status: number; timeMs: number; stepIndex?: number }
+  // ctx.trace + the HTTP auto-trace carry the FULL Trace shape (node parity:
+  // harness.ts:767 / :1043) — not a flat {method,url,status,timeMs}. ctx.trace ALSO
+  // emits a derived `action`; the HTTP auto-trace ALSO emits an http_duration_ms metric.
+  | { type: "trace"; id: string; data: Trace; stepIndex?: number }
   | { type: "log"; id: string; message: string; data?: unknown; stepIndex?: number }
   | { type: "warning"; id: string; condition: boolean; message: string; stepIndex?: number }
   // ctx.validate / HTTP schema hooks — first-class (node parity: emitted regardless
@@ -232,6 +235,10 @@ export interface EngineContext {
   metric(name: string, value: number, options?: MetricOptions): void;
   /** Record a typed interaction (node parity: harness ctx.action). */
   action(a: GlubeanAction): void;
+  /** Emit a protocol trace (node parity: harness ctx.trace) — emits a trace event
+   *  AND a derived `action` ({protocol}:request). The HTTP auto-trace routes through
+   *  this too. */
+  trace(request: Trace): void;
   /** Emit a generic structured event (node parity: harness ctx.event — the workflow
    *  first-class unwrap stays node-legacy; the engine always emits generic). */
   event(ev: GlubeanEvent): void;
@@ -262,4 +269,9 @@ export interface ExecutionScope {
   assertions: { total: number; passed: number };
   http: GlubeanHttp;
   session: Record<string, unknown>;
+  /** The run's ctx, back-filled once makeCtx runs. The scope-bound ky hooks (built
+   *  in createScope, BEFORE makeCtx) read it lazily at request time so the HTTP
+   *  auto-trace can route through ctx.trace / ctx.metric (→ derived action,
+   *  http_duration_ms) + the schema hooks through ctx.assert / ctx.warn. */
+  ctxRef?: EngineContext;
 }

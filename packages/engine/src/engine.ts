@@ -17,7 +17,7 @@
  */
 import ky, { type KyInstance } from "ky";
 import { Expectation } from "@glubean/sdk";
-import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
@@ -33,6 +33,25 @@ import type {
 } from "./types.js";
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head"]);
+
+/** URL pathname, or the raw url if it doesn't parse (node parity: trace target). */
+function pathnameOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
+/** URL pathname, or undefined if it doesn't parse (node parity: the http_duration_ms
+ *  metric drops the `path` tag when the url is unparseable, harness.ts:1116-1127). */
+function tryPathname(url: string): string | undefined {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Layer per-run overrides over a host env object WITHOUT a destructive spread, so
@@ -287,7 +306,7 @@ export class RunnerCore {
       http: undefined as unknown as GlubeanHttp,
       session,
     };
-    const http = this.createScopedKy(def.meta.id, () => scope.currentStepIndex);
+    const http = this.createScopedKy(scope);
     scope.http = http;
 
     // Fresh runtime object per run (configure().http WeakMap-caches per identity).
@@ -305,14 +324,17 @@ export class RunnerCore {
   }
 
   /**
-   * Build a per-run ky instance: host fetch + scope-bound trace hooks. Trace is
-   * keyed by the Request object (per-scope WeakMap), NOT ky NormalizedOptions
-   * (codex P1-2: ky 2 strips ky options from hook state). throwHttpErrors:false
-   * matches the node harness default so 4xx/5xx surface as responses, not throws.
+   * Build a per-run ky instance: host fetch + scope-bound trace hooks. Per-request
+   * state is keyed by ky 2's stable `options.context` object (NOT the Request, which
+   * a hook may replace when an auth helper rebuilds it — codex ky2 P2 / plan 0005 §D).
+   * throwHttpErrors:false matches the node harness default so 4xx/5xx surface as
+   * responses, not throws. The auto-trace routes through scope.ctxRef.trace (→ trace
+   * event + derived action) + ctx.metric("http_duration_ms"), so it shares the run's
+   * stepIndex attribution (node parity: harness.ts:1010-1133).
    */
-  private createScopedKy(testId: string, getStepIndex: () => number | null): GlubeanHttp {
-    const { fetch: hostFetch, events, scheduler } = this.services;
-    const startedAt = new WeakMap<Request, number>();
+  private createScopedKy(scope: ExecutionScope): GlubeanHttp {
+    const { fetch: hostFetch, scheduler } = this.services;
+    const startedAt = new WeakMap<object, number>();
     const instance = ky.create({
       fetch: hostFetch as typeof fetch,
       throwHttpErrors: false,
@@ -322,23 +344,43 @@ export class RunnerCore {
       retry: 0,
       hooks: {
         beforeRequest: [
-          ({ request }) => {
-            startedAt.set(request, scheduler.now());
+          ({ options }) => {
+            startedAt.set(options.context, scheduler.now());
           },
         ],
         afterResponse: [
-          ({ request, response }) => {
-            const t0 = startedAt.get(request) ?? scheduler.now();
-            const stepIndex = getStepIndex();
-            events.emit({
-              type: "trace",
-              id: testId,
+          ({ request, options, response }) => {
+            const ctx = scope.ctxRef;
+            // No ctx yet (a request before makeCtx) should never happen during a run;
+            // bail rather than emit an un-attributed trace.
+            if (!ctx) return response;
+            const t0 = startedAt.get(options.context) ?? scheduler.now();
+            const durationMs = Math.round(scheduler.now() - t0);
+            // `request` is the final (possibly hook-replaced) request — correct target.
+            const pathname = pathnameOf(request.url);
+            const trace: Trace = {
+              protocol: "http",
+              target: `${request.method} ${pathname}`,
+              status: response.status,
+              durationMs,
+              ok: response.status < 400,
+              // Deprecated HTTP back-compat fields (node parity: harness.ts:1043).
               method: request.method,
               url: request.url,
-              status: response.status,
-              timeMs: scheduler.now() - t0,
-              ...(stepIndex !== null ? { stepIndex } : {}),
+              duration: durationMs,
+            };
+            // Operation name from the GraphQL client (X-Glubean-Op header).
+            const glubeanOp = request.headers.get("x-glubean-op");
+            if (glubeanOp) trace.name = glubeanOp;
+            // ctx.trace emits the trace event + the derived `http:request` action.
+            ctx.trace(trace);
+            // Auto-metric for response time (node parity: harness.ts:1116).
+            const urlPath = tryPathname(request.url);
+            ctx.metric("http_duration_ms", durationMs, {
+              unit: "ms",
+              tags: urlPath !== undefined ? { method: request.method, path: urlPath } : { method: request.method },
             });
+            return response;
           },
         ],
       },
@@ -356,6 +398,9 @@ export class RunnerCore {
       ...(scope.retryCount > 0 ? { retryCount: scope.retryCount } : {}),
     });
     const ctx = this.makeCtx(scope);
+    // Back-fill so the scope-bound ky hooks (built in createScope, before makeCtx)
+    // can route the HTTP auto-trace through ctx.trace / ctx.metric at request time.
+    scope.ctxRef = ctx;
 
     let threw = false;
     let thrownError: string | undefined;
@@ -761,6 +806,8 @@ export class RunnerCore {
     const warnFn = (condition: unknown, message?: string): void =>
       // First-class warning event (node parity) — NOT a log. condition=true means OK.
       emitStep({ type: "warning", id: scope.testMeta.id, condition: !!condition, message: message ?? "" });
+    // Extracted so ctx.trace's derived action reuses the SAME action path as ctx.action.
+    const actionFn = (a: GlubeanAction): void => emitStep({ type: "action", id: scope.testMeta.id, data: a });
     return {
       http: scope.http,
       expect: (actual: unknown) =>
@@ -824,7 +871,25 @@ export class RunnerCore {
       metric: (name: string, value: number, options?: MetricOptions) =>
         emitStep({ type: "metric", id: scope.testMeta.id, name, value, unit: options?.unit, tags: options?.tags }),
       // ctx.action — typed interaction record (node parity: harness.ts:790).
-      action: (a: GlubeanAction) => emitStep({ type: "action", id: scope.testMeta.id, data: a }),
+      action: actionFn,
+      // ctx.trace — protocol trace event + a derived `{protocol}:request` action
+      // (node parity: harness.ts:767-787). The HTTP auto-trace routes through here.
+      trace: (request: Trace) => {
+        emitStep({ type: "trace", id: scope.testMeta.id, data: request });
+        const protocol = request.protocol ?? "http";
+        const actionTarget =
+          request.target ??
+          (request.method && request.url ? `${request.method} ${pathnameOf(request.url)}` : "unknown");
+        const actionDuration = request.durationMs ?? request.duration ?? 0;
+        const actionOk = request.ok ?? (typeof request.status === "number" && request.status < 400);
+        actionFn({
+          category: `${protocol}:request`,
+          target: actionTarget,
+          duration: actionDuration,
+          status: actionOk ? "ok" : "error",
+          detail: { status: request.status },
+        });
+      },
       // ctx.event — generic structured event. The workflow first-class unwrap is
       // workflow-only → node-legacy (workflow is never engine-routed), so the engine
       // always emits the generic shape (node parity: harness.ts:804 fall-through).
