@@ -89,6 +89,33 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
         testId: e.id,
       };
+    case "metric":
+      return {
+        type: "metric",
+        name: e.name,
+        value: e.value,
+        unit: e.unit,
+        tags: e.tags,
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
+        testId: e.id,
+      };
+    case "action":
+      return {
+        type: "action",
+        data: e.data,
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
+        testId: e.id,
+      };
+    case "event":
+      // Generic structured event. The node harness's workflow first-class unwrap
+      // (workflowEventToTimeline) is workflow-only → node-legacy; workflow tests are
+      // never engine-routed, so the engine path only ever carries generic events.
+      return {
+        type: "event",
+        data: e.data,
+        ...(e.stepIndex !== undefined ? { stepIndex: e.stepIndex } : {}),
+        testId: e.id,
+      };
     case "schema_validation":
       return {
         type: "schema_validation",

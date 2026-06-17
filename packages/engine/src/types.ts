@@ -18,7 +18,7 @@
  */
 import type { KyInstance, Options } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
-import type { SchemaIssue, SchemaLike, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, ValidateOptions } from "@glubean/sdk";
 
 /** ky request options plus Glubean's retained public `prefixUrl` (the engine maps
  *  it to ky 2's `prefix` at the boundary). */
@@ -67,6 +67,15 @@ export type ExecutionEvent =
   // ctx.validate / HTTP schema hooks — first-class (node parity: emitted regardless
   // of success/severity; a failure ALSO routes through assert/warn per severity).
   | { type: "schema_validation"; id: string; label: string; success: boolean; severity: "error" | "warn" | "fatal"; issues?: SchemaIssue[]; stepIndex?: number }
+  // ctx.metric — numeric perf metric (node parity: harness.ts:818).
+  | { type: "metric"; id: string; name: string; value: number; unit?: string; tags?: Record<string, string>; stepIndex?: number }
+  // ctx.action — typed interaction record (node parity: harness.ts:790). ctx.trace
+  // ALSO emits a derived action (Phase 4f).
+  | { type: "action"; id: string; data: GlubeanAction; stepIndex?: number }
+  // ctx.event — generic structured event (node parity: harness.ts:804). The workflow
+  // first-class unwrap (workflowEventToTimeline) is workflow-only → stays node-legacy
+  // (workflow tests are never engine-routed), so the engine always emits generic.
+  | { type: "event"; id: string; data: GlubeanEvent; stepIndex?: number }
   | { type: "step_start"; id: string; index: number; name: string; total: number }
   | {
       type: "step_end";
@@ -219,6 +228,13 @@ export interface EngineContext {
    *  assertion, warn→warning, fatal→failed assertion + abort). Returns the parsed
    *  value on success, else undefined (node parity: harness ctx.validate). */
   validate<T>(data: unknown, schema: SchemaLike<T>, label?: string, options?: ValidateOptions): T | undefined;
+  /** Report a numeric metric (node parity: harness ctx.metric). */
+  metric(name: string, value: number, options?: MetricOptions): void;
+  /** Record a typed interaction (node parity: harness ctx.action). */
+  action(a: GlubeanAction): void;
+  /** Emit a generic structured event (node parity: harness ctx.event — the workflow
+   *  first-class unwrap stays node-legacy; the engine always emits generic). */
+  event(ev: GlubeanEvent): void;
   /** Skip the current test with an optional reason (node parity: throws a SkipError
    *  the run-loop turns into a `skipped` verdict; a step/branch-predicate skip skips
    *  the whole test unless a failure was already recorded). */

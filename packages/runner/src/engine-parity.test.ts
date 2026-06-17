@@ -246,6 +246,35 @@ export const validateParseFallbackTest = test(
 );
 export const validateInStepTest = test("validateInStepTest")
   .step("vstep", async (ctx) => { ctx.validate({}, failSchema, "in-step"); });
+export const metricTest = test(
+  { id: "metricTest", name: "Metric Test" },
+  async (ctx) => {
+    ctx.metric("latency_ms", 42, { unit: "ms", tags: { endpoint: "/x", method: "GET" } });
+    ctx.metric("bare_count", 7);
+    ctx.assert(true, "metrics emitted");
+  }
+);
+export const actionTest = test(
+  { id: "actionTest", name: "Action Test" },
+  async (ctx) => {
+    ctx.action({ category: "browser:click", target: "#submit", duration: 12, status: "ok", detail: { x: 1 } });
+    ctx.assert(true, "action emitted");
+  }
+);
+export const eventTest = test(
+  { id: "eventTest", name: "Event Test" },
+  async (ctx) => {
+    ctx.event({ type: "mcp:connected", data: { server: "weather", tools: ["get_weather"] } });
+    ctx.assert(true, "event emitted");
+  }
+);
+export const metricInStepTest = test("metricInStepTest")
+  .step("emit", async (ctx) => {
+    ctx.metric("step_metric", 3, { unit: "count" });
+    ctx.action({ category: "db:query", target: "users", duration: 5, status: "ok" });
+    ctx.event({ type: "db:slow", data: { ms: 9 } });
+    ctx.assert(true, "in-step events");
+  });
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -389,4 +418,20 @@ ptest("engine parity: ctx.validate parse() fallback path (throws → issues extr
 
 ptest("engine parity: ctx.validate in a step → schema_validation carries stepIndex; step fails", async () => {
   await assertParity(MODULE, "validateInStepTest");
+});
+
+ptest("engine parity: ctx.metric (with unit+tags, and bare) → metric events", async () => {
+  await assertParity(MODULE, "metricTest");
+});
+
+ptest("engine parity: ctx.action → action event (data passthrough)", async () => {
+  await assertParity(MODULE, "actionTest");
+});
+
+ptest("engine parity: ctx.event → generic event (non-workflow passthrough)", async () => {
+  await assertParity(MODULE, "eventTest");
+});
+
+ptest("engine parity: ctx.metric/action/event inside a step carry stepIndex", async () => {
+  await assertParity(MODULE, "metricInStepTest");
 });

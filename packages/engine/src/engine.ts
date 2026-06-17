@@ -17,7 +17,7 @@
  */
 import ky, { type KyInstance } from "ky";
 import { Expectation } from "@glubean/sdk";
-import type { SchemaIssue, SchemaLike, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
@@ -819,6 +819,16 @@ export class RunnerCore {
         },
       },
       log: (message, data) => emitStep({ type: "log", id: scope.testMeta.id, message, data }),
+      // ctx.metric — numeric perf metric. unit/tags are emitted as-is (undefined keys
+      // drop on the wire) to match the node harness exactly (harness.ts:818).
+      metric: (name: string, value: number, options?: MetricOptions) =>
+        emitStep({ type: "metric", id: scope.testMeta.id, name, value, unit: options?.unit, tags: options?.tags }),
+      // ctx.action — typed interaction record (node parity: harness.ts:790).
+      action: (a: GlubeanAction) => emitStep({ type: "action", id: scope.testMeta.id, data: a }),
+      // ctx.event — generic structured event. The workflow first-class unwrap is
+      // workflow-only → node-legacy (workflow is never engine-routed), so the engine
+      // always emits the generic shape (node parity: harness.ts:804 fall-through).
+      event: (ev: GlubeanEvent) => emitStep({ type: "event", id: scope.testMeta.id, data: ev }),
       // ctx.skip(reason?) — throws; the run-loop turns it into a `skipped` verdict.
       skip: (reason?: string): never => {
         throw new SkipError(reason);
