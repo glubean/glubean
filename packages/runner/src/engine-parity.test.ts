@@ -367,6 +367,81 @@ export const pluginRuntimeTest = test(
   { id: "pluginRuntimeTest", name: "Plugin runtime evidence" },
   async (ctx) => { evidenceCfg.evidence.fire(); ctx.assert(true, "plugin fired evidence"); }
 );
+export const httpPrefixLeadingSlashTest = test(
+  { id: "httpPrefixLeadingSlashTest", name: "prefixUrl + leading slash" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get("/json", { prefixUrl: base });
+    ctx.assert(res.status === 200, "200 via prefix", { actual: res.status, expected: 200 });
+  }
+);
+export const httpExtendPrefixTest = test(
+  { id: "httpExtendPrefixTest", name: "extend prefixUrl" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const api = ctx.http.extend({ prefixUrl: base });
+    const res = await api.get("json");
+    ctx.assert(res.status === 200, "200 via extend prefix");
+  }
+);
+export const httpEmptySearchParamsTest = test(
+  { id: "httpEmptySearchParamsTest", name: "empty searchParams removed" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/json", { searchParams: {} });
+    ctx.assert(res.url.indexOf("?") === -1, "no bare ?", { actual: res.url });
+  }
+);
+export const httpQuerySchemaFailTest = test(
+  { id: "httpQuerySchemaFailTest", name: "query schema fail" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    await ctx.http.get(base + "/json", { searchParams: { a: "1" }, schema: { query: failSchema } });
+    ctx.assert(true, "after query schema");
+  }
+);
+export const httpRequestSchemaFailTest = test(
+  { id: "httpRequestSchemaFailTest", name: "request body schema fail" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    await ctx.http.post(base + "/json", { json: { x: 1 }, schema: { request: failSchema } });
+    ctx.assert(true, "after request schema");
+  }
+);
+export const httpRequestHeaderSchemaFailTest = test(
+  { id: "httpRequestHeaderSchemaFailTest", name: "request header schema fail" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    await ctx.http.get(base + "/json", { headers: { "x-tenant": "t1" }, schema: { requestHeaders: failSchema } });
+    ctx.assert(true, "after request header schema");
+  }
+);
+export const httpResponseSchemaPassTest = test(
+  { id: "httpResponseSchemaPassTest", name: "response body schema pass" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/json", { schema: { response: okSchema } });
+    const body = await res.json();
+    ctx.assert(body.ok === true, "body ok");
+  }
+);
+export const httpResponseSchemaFailTest = test(
+  { id: "httpResponseSchemaFailTest", name: "response body schema fail" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const res = await ctx.http.get(base + "/json", { schema: { response: failSchema } });
+    await res.json();
+    ctx.assert(true, "after response schema");
+  }
+);
+export const httpResponseHeaderSchemaFailTest = test(
+  { id: "httpResponseHeaderSchemaFailTest", name: "response header schema fail" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    await ctx.http.get(base + "/json", { schema: { responseHeaders: failSchema } });
+    ctx.assert(true, "after response header schema");
+  }
+);
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -546,4 +621,40 @@ ptest("engine parity: HTTP auto-trace inside a step carries stepIndex", async ()
 
 ptest("engine parity: configure() plugin trace/action/event via runtime carrier (codex 4c-e P2)", async () => {
   await assertParity(MODULE, "pluginRuntimeTest");
+});
+
+ptest("engine parity: ky prefixUrl + leading-slash path normalization", async () => {
+  await assertParity(MODULE, "httpPrefixLeadingSlashTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky .extend({prefixUrl}) preserves normalization", async () => {
+  await assertParity(MODULE, "httpExtendPrefixTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky empty searchParams removed (no bare '?')", async () => {
+  await assertParity(MODULE, "httpEmptySearchParamsTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky schema.query fail → schema_validation + failed assertion", async () => {
+  await assertParity(MODULE, "httpQuerySchemaFailTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky schema.request fail → schema_validation + failed assertion", async () => {
+  await assertParity(MODULE, "httpRequestSchemaFailTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky schema.requestHeaders fail → schema_validation + failed assertion", async () => {
+  await assertParity(MODULE, "httpRequestHeaderSchemaFailTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky schema.response pass via .json() monkey-patch", async () => {
+  await assertParity(MODULE, "httpResponseSchemaPassTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky schema.response fail via .json() monkey-patch", async () => {
+  await assertParity(MODULE, "httpResponseSchemaFailTest", { vars: { BASE_URL: baseUrl } });
+});
+
+ptest("engine parity: ky schema.responseHeaders fail → schema_validation (afterResponse hook)", async () => {
+  await assertParity(MODULE, "httpResponseHeaderSchemaFailTest", { vars: { BASE_URL: baseUrl } });
 });

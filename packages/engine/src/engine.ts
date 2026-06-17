@@ -17,7 +17,7 @@
  */
 import ky, { type KyInstance } from "ky";
 import { Expectation } from "@glubean/sdk";
-import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, SchemaEntry, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
@@ -395,7 +395,7 @@ export class RunnerCore {
         ],
       },
     });
-    return withPrefixUrlAlias(instance);
+    return wrapScopedKy(instance, scope);
   }
 
   private async runLoop(def: TestDef, scope: ExecutionScope): Promise<TestResult> {
@@ -922,38 +922,155 @@ export class RunnerCore {
   }
 }
 
+type KyResp = ReturnType<KyInstance["get"]>;
+
+/** Resolve a SchemaEntry to {schema, severity} — a bare schema defaults to "error"
+ *  (node parity: harness resolveSchemaEntry). */
+function resolveSchemaEntry(entry: SchemaEntry<unknown>): {
+  schema: SchemaLike<unknown>;
+  severity: "error" | "warn" | "fatal";
+} {
+  if (entry && typeof entry === "object" && "schema" in entry && (entry as { schema?: unknown }).schema != null) {
+    const obj = entry as { schema: SchemaLike<unknown>; severity?: "error" | "warn" | "fatal" };
+    return { schema: obj.schema, severity: obj.severity ?? "error" };
+  }
+  return { schema: entry as SchemaLike<unknown>, severity: "error" };
+}
+
+/** Normalize a HeadersInit (Headers / plain object / tuple array) → Record<string,
+ *  string> for schema validation (node parity: harness normalizeHeadersForValidation). */
+function normalizeHeadersForValidation(headers: unknown): Record<string, string> {
+  if (headers == null) return {};
+  if (typeof Headers !== "undefined" && headers instanceof Headers) return Object.fromEntries(headers.entries());
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers.filter((p): p is [string, string] => Array.isArray(p) && p.length === 2));
+  }
+  if (typeof headers === "object") {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers as Record<string, unknown>)) if (v != null) out[k] = String(v);
+    return out;
+  }
+  return {};
+}
+
+/** Strip a leading '/' from a relative path so ky's `prefix` join works (node parity:
+ *  harness normalizeUrl). A protocol-relative '//host' is left intact. */
+function normalizeUrl(input: unknown): unknown {
+  if (typeof input === "string" && input.startsWith("/") && !input.startsWith("//")) return input.slice(1);
+  return input;
+}
+
 /**
- * Preserve Glubean's public `prefixUrl` option over ky 2 (which renamed it to
- * `prefix`). A Proxy over the real ky instance keeps the full KyInstance surface
- * and only rewrites `prefixUrl` → `prefix` on calls and `.extend()` (codex P2-5).
- * `prefix` (not `baseUrl`) preserves the ky-1 join semantics for "users" / "/users".
+ * Wrap a per-run ky instance into the public ctx.http facade. A Proxy preserves the
+ * full KyInstance surface and adds, on calls + `.extend()`:
+ *  - prefixUrl → ky 2 `prefix` + empty-searchParams removal (node parity: harness
+ *    normalizeOptions / normalizeUrl).
+ *  - automatic schema validation: request body / query / request headers BEFORE the
+ *    request, response headers via an injected afterResponse hook, and response body
+ *    by monkey-patching the response promise's `.json()` — all routed through the
+ *    run's ctx.validate (→ schema_validation event + severity routing), node parity:
+ *    harness wrapKy / runPreRequestSchemaValidation / wrapResponseWithSchema.
  */
-function withPrefixUrlAlias(instance: KyInstance): GlubeanHttp {
-  const mapOpts = (opts: unknown): unknown => {
-    if (opts && typeof opts === "object" && "prefixUrl" in opts) {
-      const { prefixUrl, ...rest } = opts as Record<string, unknown>;
-      return { ...rest, prefix: prefixUrl };
+function wrapScopedKy(instance: KyInstance, scope: ExecutionScope): GlubeanHttp {
+  // prefixUrl → ky 2 `prefix`, and drop an empty searchParams (no bare '?'). `schema`
+  // is RETAINED here (callWithSchema reads it, then strips it before handing to ky).
+  const normalizeKyOptions = (opts: unknown): Record<string, unknown> | undefined => {
+    if (!opts || typeof opts !== "object") return opts as undefined;
+    const n: Record<string, unknown> = { ...(opts as Record<string, unknown>) };
+    if ("prefixUrl" in n) {
+      n.prefix = n.prefixUrl;
+      delete n.prefixUrl;
     }
-    return opts;
+    const sp = n.searchParams;
+    if (sp != null) {
+      const empty =
+        (typeof URLSearchParams !== "undefined" && sp instanceof URLSearchParams && sp.toString() === "") ||
+        (typeof sp === "string" && sp === "") ||
+        (typeof sp === "object" && !(sp instanceof URLSearchParams) && !Array.isArray(sp) && Object.keys(sp as object).length === 0);
+      if (empty) delete n.searchParams;
+    }
+    return n;
   };
+
+  // Route a schema validation through the run's ctx (→ schema_validation event +
+  // severity routing). A request before makeCtx never happens during a run, so the
+  // optional-chain is just defensive.
+  const validate = (data: unknown, entry: SchemaEntry<unknown>, label: string): void => {
+    const { schema, severity } = resolveSchemaEntry(entry);
+    scope.ctxRef?.validate(data, schema, label, { severity });
+  };
+
+  const preRequest = (opts: Record<string, unknown> | undefined): void => {
+    const schemaOpts = opts?.schema as HttpSchemaOptions | undefined;
+    if (!schemaOpts) return;
+    if (schemaOpts.query && opts?.searchParams != null) validate(opts.searchParams, schemaOpts.query, "query params");
+    if (schemaOpts.request && opts?.json !== undefined) validate(opts.json, schemaOpts.request, "request body");
+    if (schemaOpts.requestHeaders && opts?.headers != null) {
+      validate(normalizeHeadersForValidation(opts.headers), schemaOpts.requestHeaders, "request headers");
+    }
+  };
+
+  // Strip the non-ky `schema` option, injecting a response-headers afterResponse hook
+  // when a responseHeaders schema is present (fires once per final response).
+  const toKyOptions = (opts: Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
+    if (!opts) return opts;
+    const schemaOpts = opts.schema as HttpSchemaOptions | undefined;
+    const { schema: _schema, ...rest } = opts;
+    let kyOptions: Record<string, unknown> = rest;
+    if (schemaOpts?.responseHeaders) {
+      const entry = schemaOpts.responseHeaders;
+      const hook = ({ response }: { response: Response }) =>
+        validate(normalizeHeadersForValidation(response.headers), entry, "response headers");
+      const hooks = (kyOptions.hooks ?? {}) as { afterResponse?: unknown[] };
+      kyOptions = { ...kyOptions, hooks: { ...hooks, afterResponse: [...(hooks.afterResponse ?? []), hook] } };
+    }
+    return kyOptions;
+  };
+
+  // Monkey-patch the response promise's `.json()` to validate the parsed body.
+  const wrapResponse = (promise: KyResp, opts: Record<string, unknown> | undefined): KyResp => {
+    const schemaOpts = opts?.schema as HttpSchemaOptions | undefined;
+    if (!schemaOpts?.response) return promise;
+    const entry = schemaOpts.response;
+    const originalJson = promise.json.bind(promise);
+    (promise as { json: typeof originalJson }).json = async <J = unknown>() => {
+      const body = await originalJson();
+      validate(body, entry, "response body");
+      return body as J;
+    };
+    return promise;
+  };
+
+  const callWithSchema = (
+    kyCall: (url: unknown, opts?: unknown) => KyResp,
+    input: unknown,
+    opts?: unknown,
+  ): KyResp => {
+    const normalized = normalizeKyOptions(opts);
+    preRequest(normalized);
+    const promise = kyCall(normalizeUrl(input), toKyOptions(normalized));
+    return wrapResponse(promise, normalized);
+  };
+
   return new Proxy(instance, {
     apply: (target, _thisArg, args: unknown[]) =>
-      (target as unknown as (...a: unknown[]) => unknown)(args[0], mapOpts(args[1])),
+      callWithSchema((u, o) => (target as unknown as (...a: unknown[]) => KyResp)(u, o), args[0], args[1]),
     get: (target, prop, recv) => {
       if (prop === "extend") {
         return (opts: unknown) =>
-          withPrefixUrlAlias(
+          wrapScopedKy(
             target.extend(
               typeof opts === "function"
-                ? (((parent: unknown) => mapOpts((opts as (p: unknown) => unknown)(parent))) as never)
-                : (mapOpts(opts) as never),
+                ? (((parent: unknown) => normalizeKyOptions((opts as (p: unknown) => unknown)(parent))) as never)
+                : (normalizeKyOptions(opts) as never),
             ),
+            scope,
           );
       }
       const value = Reflect.get(target, prop, recv);
       if (typeof value === "function" && typeof prop === "string" && HTTP_METHODS.has(prop)) {
         return (url: unknown, opts?: unknown) =>
-          (value as (...a: unknown[]) => unknown).call(target, url, mapOpts(opts));
+          callWithSchema((u, o) => (value as (...a: unknown[]) => KyResp).call(target, u, o), url, opts);
       }
       return typeof value === "function" ? value.bind(target) : value;
     },

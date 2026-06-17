@@ -18,11 +18,12 @@
  */
 import type { KyInstance, Options } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
-import type { GlubeanAction, GlubeanEvent, MetricOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
 
 /** ky request options plus Glubean's retained public `prefixUrl` (the engine maps
- *  it to ky 2's `prefix` at the boundary). */
-export type GlubeanHttpOptions = Options & { prefixUrl?: string };
+ *  it to ky 2's `prefix` at the boundary) and the `schema` option for automatic
+ *  request/response validation (node parity: harness KyOptionsWithSchema). */
+export type GlubeanHttpOptions = Options & { prefixUrl?: string; schema?: HttpSchemaOptions };
 
 /**
  * The http client both hosts expose as `ctx.http` / `runtime.http`: a ky instance
