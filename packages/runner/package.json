@@ -25,6 +25,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@glubean/engine": "workspace:*",
     "@glubean/sdk": "workspace:*",
     "@glubean/scanner": "workspace:*",
     "dotenv": "^16.4.0",

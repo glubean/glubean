@@ -33,6 +33,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # engine: shared run-loop core; depends on sdk, depended on by runner —
+      # MUST publish after sdk and before runner.
+      - name: Publish @glubean/engine
+        continue-on-error: true
+        run: pnpm --filter @glubean/engine publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish @glubean/scanner
         continue-on-error: true
         run: pnpm --filter @glubean/scanner publish --access public --no-git-checks
