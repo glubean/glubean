@@ -1387,6 +1387,9 @@ const engineCore = USE_ENGINE
       // without destroying the Proxy.
       vars: withEnvFallback(rawVars),
       secrets: withEnvFallback(rawSecrets),
+      // RAW vars (un-proxied) so ctx.vars.all() returns {...rawVars} exactly — legacy
+      // parity for empty/overlay vars (codex Phase-8 P2).
+      varsRaw: rawVars,
       // Forward the trace policy so the engine's ky auto-trace capture matches legacy.
       emitFullTrace: !!emitFullTrace,
       inferSchema: !!inferSchema,

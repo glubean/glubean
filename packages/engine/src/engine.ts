@@ -311,6 +311,11 @@ export class RunnerCore {
     const vars = layerEnv(env.vars(), input.vars);
     const secrets = layerEnv(env.secrets(), input.secrets);
     const session: Record<string, unknown> = { ...(input.session ?? {}) };
+    // Raw snapshot for ctx.vars.all() (node parity: {...rawVars}). Use the host's RAW
+    // map (varsAll) so empty/overlay vars aren't lost to the fallback Proxy; layer the
+    // per-run input on top. Falls back to spreading vars() for hosts without varsAll
+    // (e.g. a browser host whose vars() is already a plain map). (codex Phase-8 P2)
+    const varsAll: Record<string, string> = { ...(env.varsAll ? env.varsAll() : env.vars()), ...(input.vars ?? {}) };
 
     const scope: ExecutionScope = {
       runtime: undefined as unknown as InternalRuntime,
@@ -323,6 +328,7 @@ export class RunnerCore {
       // scope.currentStepIndex so HTTP traces inside a step carry stepIndex).
       http: undefined as unknown as GlubeanHttp,
       session,
+      varsAll,
     };
     const http = this.createScopedKy(scope);
     scope.http = http;
@@ -1070,9 +1076,10 @@ export class RunnerCore {
           if (validate) runEngineValidator(validate(v), k, "var");
           return v;
         },
-        // A copy of all vars (node parity: harness ctx.vars.all → {...rawVars}). The
-        // NodeHost provider's keys spread to their resolved values (codex Phase-8 P1).
-        all: () => ({ ...scope.runtime.vars }),
+        // A copy of all vars (node parity: harness ctx.vars.all → {...rawVars}). Returns
+        // the RAW snapshot (host raw map + input overlay), NOT a spread of the fallback
+        // Proxy — so empty / overlay-only vars survive identically (codex Phase-8 P2).
+        all: () => ({ ...scope.varsAll }),
       },
       secrets: {
         get: (k) => scope.runtime.secrets[k],

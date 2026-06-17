@@ -55,6 +55,12 @@ export type FetchImpl = (input: Request | string | URL, init?: RequestInit) => P
 export interface EnvProvider {
   vars(): Record<string, string>;
   secrets(): Record<string, string>;
+  /** Optional RAW vars snapshot for ctx.vars.all() (node parity: {...rawVars}). The
+   *  `vars()` accessor a host returns may be a fallback Proxy (.env→process.env) whose
+   *  spread would resolve empty values to the fallback / drop them; varsAll() returns
+   *  the un-proxied map so all() matches legacy exactly. Falls back to spreading vars()
+   *  when absent (codex Phase-8 P2). */
+  varsAll?(): Record<string, string>;
 }
 
 // Every event carries the owning test `id` so a host running runs concurrently
@@ -297,6 +303,9 @@ export interface ExecutionScope {
   assertions: { total: number; passed: number };
   http: GlubeanHttp;
   session: Record<string, unknown>;
+  /** Raw merged vars snapshot for ctx.vars.all() — host raw vars + per-run input.vars,
+   *  WITHOUT the fallback-proxy resolution (node parity: {...rawVars}; codex Phase-8 P2). */
+  varsAll: Record<string, string>;
   /** The run's ctx, back-filled once makeCtx runs. The scope-bound ky hooks (built
    *  in createScope, BEFORE makeCtx) read it lazily at request time so the HTTP
    *  auto-trace can route through ctx.trace / ctx.metric (→ derived action,

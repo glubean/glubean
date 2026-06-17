@@ -194,6 +194,9 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
 export interface EngineCoreOptions {
   vars: Record<string, string>;
   secrets: Record<string, string>;
+  /** RAW (un-proxied) vars map for ctx.vars.all() — the node harness passes `rawVars`
+   *  so all() returns {...rawVars} exactly, not the fallback-Proxy spread. */
+  varsRaw?: Record<string, string>;
   /** HTTP trace policy (ExecutorOptions), forwarded to the engine's ky hooks so the
    *  auto-trace capture matches the legacy harness (plan 0005 §D / Phase 4f-3). */
   emitFullTrace?: boolean;
@@ -212,7 +215,14 @@ export function createEngineCore(
 ): RunnerCore {
   const services: RunnerServices = {
     fetch: (input, init) => globalThis.fetch(input as RequestInfo, init),
-    env: { vars: () => opts.vars, secrets: () => opts.secrets },
+    env: {
+      vars: () => opts.vars,
+      secrets: () => opts.secrets,
+      // RAW vars for ctx.vars.all() — opts.vars is the .env→process.env fallback Proxy,
+      // whose spread would lose empty/overlay vars; varsRaw is the un-proxied map so
+      // all() matches legacy {...rawVars} exactly (codex Phase-8 P2).
+      varsAll: () => opts.varsRaw ?? opts.vars,
+    },
     events: { emit: (e) => sink(engineEventToWire(e)) },
     scheduler: { now: () => performance.now() },
     carrier: createAlsCarrier(),

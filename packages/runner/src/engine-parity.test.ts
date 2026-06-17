@@ -209,7 +209,9 @@ export const emptyVarTest = test(
 );
 export const varsAllTest = test(
   { id: "varsAllTest", name: "Vars All Test" },
-  async (ctx) => { const all = ctx.vars.all(); ctx.assert(all.A === "1" && all.B === "2", "vars.all() copy", { actual: all }); }
+  // E is an EMPTY var — legacy all() keeps it as ""; the engine must too (NOT drop it
+  // to a fallback via the proxy — codex Phase-8 P2). actual:all byte-compares the map.
+  async (ctx) => { const all = ctx.vars.all(); ctx.assert(all.A === "1" && all.E === "", "vars.all() copy (empty preserved)", { actual: all }); }
 );
 export const memUsageTest = test(
   { id: "memUsageTest", name: "Memory Usage Test" },
@@ -608,8 +610,8 @@ ptest("engine parity: vars.require throws for an EMPTY value (empty = unset)", a
   await assertParity(MODULE, "emptyVarTest", { vars: { GLUBEAN_EMPTY: "" } });
 });
 
-ptest("engine parity: ctx.vars.all() returns a copy of all vars (codex Phase-8 P1)", async () => {
-  await assertParity(MODULE, "varsAllTest", { vars: { A: "1", B: "2" } });
+ptest("engine parity: ctx.vars.all() returns a raw copy incl empty vars (codex Phase-8 P1+P2)", async () => {
+  await assertParity(MODULE, "varsAllTest", { vars: { A: "1", E: "" } });
 });
 
 ptest("engine parity: ctx.getMemoryUsage() returns a node memory snapshot (shape)", async () => {
