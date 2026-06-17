@@ -436,8 +436,9 @@ export const httpResponseSchemaPassTest = test(
   { id: "httpResponseSchemaPassTest", name: "response body schema pass" },
   async (ctx) => {
     const base = ctx.vars.require("BASE_URL");
-    const res = await ctx.http.get(base + "/json", { schema: { response: okSchema } });
-    const body = await res.json();
+    // CHAINED .json() on the ky ResponsePromise — the path response-schema validation
+    // actually hooks (await-first → res.json() bypasses it on BOTH legs; codex 4f P2).
+    const body = await ctx.http.get(base + "/json", { schema: { response: okSchema } }).json();
     ctx.assert(body.ok === true, "body ok");
   }
 );
@@ -445,8 +446,7 @@ export const httpResponseSchemaFailTest = test(
   { id: "httpResponseSchemaFailTest", name: "response body schema fail" },
   async (ctx) => {
     const base = ctx.vars.require("BASE_URL");
-    const res = await ctx.http.get(base + "/json", { schema: { response: failSchema } });
-    await res.json();
+    await ctx.http.get(base + "/json", { schema: { response: failSchema } }).json();
     ctx.assert(true, "after response schema");
   }
 );

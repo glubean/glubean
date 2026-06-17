@@ -1058,7 +1058,13 @@ function wrapScopedKy(instance: KyInstance, scope: ExecutionScope): GlubeanHttp 
     return kyOptions;
   };
 
-  // Monkey-patch the response promise's `.json()` to validate the parsed body.
+  // Monkey-patch the ky ResponsePromise's `.json()` shortcut to validate the parsed
+  // body. EXACT node-harness parity (harness.ts:1249-1268): only the promise shortcut
+  // (`http.get(url, {schema}).json()`) is patched, NOT the resolved Response — so an
+  // `await`-first-then-`res.json()` flow bypasses response-schema validation on BOTH
+  // legs identically (codex 4f P2). This is a shared legacy limitation, not an engine
+  // divergence; "fixing" it engine-only would break byte-parity. Any real fix must
+  // land in both legs (post-cutover), so the engine intentionally mirrors legacy here.
   const wrapResponse = (promise: KyResp, opts: Record<string, unknown> | undefined): KyResp => {
     const schemaOpts = opts?.schema as HttpSchemaOptions | undefined;
     if (!schemaOpts?.response) return promise;
