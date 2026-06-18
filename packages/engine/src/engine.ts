@@ -329,6 +329,7 @@ export class RunnerCore {
       http: undefined as unknown as GlubeanHttp,
       session,
       varsAll,
+      ...(input.ctxExtensions ? { ctxExtensions: input.ctxExtensions } : {}),
     };
     const http = this.createScopedKy(scope);
     scope.http = http;
@@ -466,6 +467,15 @@ export class RunnerCore {
       ...(scope.retryCount > 0 ? { retryCount: scope.retryCount } : {}),
     });
     const ctx = this.makeCtx(scope);
+    // Host-provided ctx extensions (e.g. the load runner's input / report /
+    // producerSlot / iteration). ADD-only: never override a built-in ctx member.
+    // The engine does not interpret these — it only surfaces them on ctx.
+    if (scope.ctxExtensions) {
+      const target = ctx as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(scope.ctxExtensions)) {
+        if (!(key in target)) target[key] = value;
+      }
+    }
     // Back-fill so the scope-bound ky hooks (built in createScope, before makeCtx)
     // can route the HTTP auto-trace through ctx.trace / ctx.metric at request time.
     scope.ctxRef = ctx;

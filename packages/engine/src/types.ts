@@ -175,6 +175,14 @@ export interface ScopeInput {
   /** Test-level retry attempt (the host re-runs a failed test); surfaced on
    *  ctx.retryCount + the start event, like the node harness. 0/undefined = first run. */
   retryCount?: number;
+  /**
+   * Host-provided extra ctx fields, merged onto the per-run ctx (e.g. a load
+   * runner adding `input` / `report` / `producerSlot` / `iteration`). The engine
+   * does NOT interpret these and only ADDS keys not already on the ctx — built-in
+   * members are never overridden — so host-defined step APIs can read them
+   * without the engine knowing their meaning.
+   */
+  ctxExtensions?: Record<string, unknown>;
 }
 
 export interface TestResult {
@@ -311,4 +319,7 @@ export interface ExecutionScope {
    *  auto-trace can route through ctx.trace / ctx.metric (→ derived action,
    *  http_duration_ms) + the schema hooks through ctx.assert / ctx.warn. */
   ctxRef?: EngineContext;
+  /** Host-provided extra ctx fields (from ScopeInput.ctxExtensions); merged
+   *  add-only onto ctx right after makeCtx. */
+  ctxExtensions?: Record<string, unknown>;
 }
