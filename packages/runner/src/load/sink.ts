@@ -12,6 +12,7 @@
  * sampling and producer-release events land in later milestones.
  */
 import type { LoadErrorKind, LoadEvent, LoadReducer } from "@glubean/sdk/load";
+import { resolveRouteKey } from "./route-key.js";
 
 /** Per-iteration attribution the sink stamps onto translated events. */
 export interface LoadIterationEnvelope {
@@ -28,6 +29,7 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 type LoadEventBody = DistributiveOmit<LoadEvent, "ts" | "seq" | "runId" | "runnerId">;
 
 interface TraceData {
+  protocol?: string;
   method?: string;
   url?: string;
   status?: number;
@@ -175,16 +177,18 @@ export class LoadSink {
         const t = (wire.data ?? {}) as TraceData;
         const stepIndex = wire.stepIndex as number | undefined;
         const stepName = stepIndex !== undefined ? this.stepNames.get(iterationId)?.get(stepIndex) : undefined;
-        const method = t.method ?? "GET";
+        // Resolve method + heuristic routeKey together (id-like path segments →
+        // ":id", M3-e). The method is recovered from the trace `target` when the
+        // explicit `method` is absent, so a target-only POST/PUT isn't mislabelled
+        // GET. Explicit routeKeys / a contract catalog land in M8.
+        const { method, routeKey } = resolveRouteKey(t.method, t.url, t.target, t.protocol);
         this.emit({
           type: "request:observed",
           ...base,
           ...(stepName !== undefined ? { stepId: this.stepIdOf(stepIndex!, stepName) } : {}),
           method,
           url: t.url ?? "",
-          routeKey: t.target ?? `${method} ${t.url ?? ""}`,
-          // MVP fallback: engine target is "METHOD /pathname" — heuristic until
-          // explicit routeKey / :id normalization (M3-e) lands.
+          routeKey,
           routeKeySource: "normalized-url",
           routeKeyHeuristic: true,
           ...(t.status !== undefined ? { status: t.status } : {}),

@@ -132,10 +132,10 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(steps.browse).toMatchObject({ invocationCount: 1, errorCount: 0, requestCount: 1 });
     expect(steps.checkout).toMatchObject({ invocationCount: 1, errorCount: 0, requestCount: 1 });
 
-    // Endpoint aggregates — one GET, one POST; routeKey is the engine target
-    // (heuristic until M3-e :id normalization).
+    // Endpoint aggregates — one GET, one POST; routeKey is heuristic-normalized
+    // (the `/items/42` id collapsed to `:id`, M3-e).
     const endpoints = Object.fromEntries(art.endpoints.map((e) => [e.routeKey, e]));
-    expect(endpoints["GET /items/42"]).toMatchObject({ requestCount: 1, errorCount: 0, method: "GET" });
+    expect(endpoints["GET /items/:id"]).toMatchObject({ requestCount: 1, errorCount: 0, method: "GET" });
     expect(endpoints["POST /orders"]).toMatchObject({ requestCount: 1, errorCount: 0, method: "POST" });
     for (const e of art.endpoints) {
       expect(e.routeKeyHeuristic).toBe(true);
@@ -144,7 +144,7 @@ describe("runLoadIteration — single iteration through the engine core", () => 
 
     // Matrix links each step to the endpoint it hit.
     const matrix = art.matrix.map((m) => `${m.stepName}→${m.routeKey}`).sort();
-    expect(matrix).toEqual(["browse→GET /items/42", "checkout→POST /orders"]);
+    expect(matrix).toEqual(["browse→GET /items/:id", "checkout→POST /orders"]);
   });
 
   it("aggregates two iterations and counts a failed one", async () => {
@@ -184,10 +184,10 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(art.summary.totalIterations).toBe(2);
     expect(art.summary.successfulIterations).toBe(1);
     expect(art.summary.failedIterations).toBe(1);
-    const getCount = art.endpoints
-      .filter((e) => e.method === "GET")
-      .reduce((n, e) => n + e.requestCount, 0);
-    expect(getCount).toBe(2);
+    // GET /items/1 and /items/2 collapse to ONE normalized endpoint (`:id`), not two.
+    const getEndpoints = art.endpoints.filter((e) => e.method === "GET");
+    expect(getEndpoints).toHaveLength(1);
+    expect(getEndpoints[0]).toMatchObject({ routeKey: "GET /items/:id", requestCount: 2 });
   });
 
   it("default `continue` policy: a soft assertion failure does NOT skip the rest", async () => {
@@ -220,7 +220,7 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(art.summary.failedIterations).toBe(1);
     // BOTH endpoints were hit — checkout ran despite browse's assertion failure.
     const routeKeys = art.endpoints.map((e) => e.routeKey).sort();
-    expect(routeKeys).toEqual(["GET /items/5", "POST /orders"]);
+    expect(routeKeys).toEqual(["GET /items/:id", "POST /orders"]);
     const steps = Object.fromEntries(art.steps.map((s) => [s.stepName, s.invocationCount]));
     expect(steps).toEqual({ browse: 1, checkout: 1 });
   });
@@ -251,7 +251,7 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     const art = reducer.finalize();
     // Only the GET was issued; checkout's POST was skipped.
     const routeKeys = art.endpoints.map((e) => e.routeKey).sort();
-    expect(routeKeys).toEqual(["GET /items/7"]);
+    expect(routeKeys).toEqual(["GET /items/:id"]);
     // The skipped step counts as skipped — NOT as its own error.
     const checkout = art.steps.find((s) => s.stepName === "checkout");
     expect(checkout).toMatchObject({ skippedCount: 1, errorCount: 0, errorRate: 0 });
