@@ -68,6 +68,13 @@ export type {
   LoadIterationInfo,
 } from "./runner.js";
 
+export { projectLoadPlan } from "./projection.js";
+export type { LoadProjection, LoadScenarioRefProjection } from "./projection.js";
+
+export { parseDurationMs } from "./duration.js";
+
+export type * from "./artifact.js";
+
 export { feeder } from "./feeder.js";
 
 export type {
