@@ -50,6 +50,17 @@ export type { FileSystem, Hasher, MetadataExtractor } from "./scanner.js";
 export { createStaticExtractor, extractFromSource, extractContractCases } from "./extractor-ast.js";
 export { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
 export type { ContractStaticMeta, ContractCaseStaticMeta } from "./extractor-static.js";
+
+export {
+  GLUBEAN_KINDS,
+  SUITE_KINDS,
+  GLUBEAN_EXTENSIONS,
+  buildSuffixes,
+  suffixesForKind,
+  classifyByStem,
+} from "./kinds.js";
+export type { GlubeanSuiteKind, GlubeanFileKind } from "./kinds.js";
+
 export {
   findTemplateMatch,
   hasTemplatePlaceholders,

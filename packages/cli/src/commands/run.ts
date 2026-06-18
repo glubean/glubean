@@ -19,11 +19,15 @@ import type { UploadResultPayload } from "../lib/upload.js";
 import { redactMetadataForUpload } from "../lib/redact-metadata.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
 import {
+  buildSuffixes,
+  classifyByStem,
   extractContractFromFile,
   findTemplateMatch,
+  GLUBEAN_KINDS,
   loadProjectOverlays,
   matchesTemplateFilter,
 } from "@glubean/scanner";
+import type { GlubeanFileKind } from "@glubean/scanner";
 import { applyEnvTemplating } from "@glubean/runner";
 
 // ANSI color codes for pretty output
@@ -249,13 +253,9 @@ function isGlob(target: string): boolean {
 // calls execute and register overlays before discovery runs (attachment-
 // model §7.4). `discoverTests()` is responsible for distinguishing
 // bootstrap-only files from runnable-emitting ones.
-const TEST_FILE_SUFFIXES = [
-  ".test.ts",
-  ".contract.ts",
-  ".workflow.ts",
-  ".flow.ts",
-  ".bootstrap.ts",
-];
+// CLI target resolution recognizes only `.ts` files across all kinds (including
+// bootstrap), derived from the canonical kind registry (scanner/kinds.ts).
+const TEST_FILE_SUFFIXES = GLUBEAN_KINDS.flatMap((k) => buildSuffixes(k.stems, [".ts"]));
 
 function isGlubeanTestFile(name: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => name.endsWith(suffix));
@@ -267,17 +267,11 @@ function isGlubeanTestFile(name: string): boolean {
 // the static test path — a `.workflow.` substring would mis-route it into
 // contract extraction (which ignores `test()` exports), silently dropping its
 // tests (codex 0.6 P2).
-const RUNTIME_ARTIFACT_SUFFIXES = [
-  ".contract.ts",
-  ".contract.js",
-  ".contract.mjs",
-  ".workflow.ts",
-  ".workflow.js",
-  ".workflow.mjs",
-  ".flow.ts",
-  ".flow.js",
-  ".flow.mjs",
-];
+// Contract/workflow/flow artifact files (NOT bootstrap), all extensions —
+// derived from the canonical kind registry (scanner/kinds.ts).
+const RUNTIME_ARTIFACT_SUFFIXES = GLUBEAN_KINDS.filter(
+  (k) => k.runtimeArtifact && k.kind !== "bootstrap",
+).flatMap((k) => buildSuffixes(k.stems));
 
 function isRuntimeExtractableArtifact(name: string): boolean {
   return RUNTIME_ARTIFACT_SUFFIXES.some((suffix) => name.endsWith(suffix));
@@ -312,14 +306,11 @@ async function walkTestFiles(dir: string, result: string[]): Promise<void> {
  * Returns undefined for non-Glubean files. The suite.kinds filter in
  * resolveTestFiles uses this to keep only files whose kind matches.
  */
-export type GlubeanFileKind = "test" | "contract" | "flow" | "bootstrap";
+export type { GlubeanFileKind };
 
 export function classifyGlubeanFile(filePath: string): GlubeanFileKind | undefined {
-  if (filePath.endsWith(".test.ts")) return "test";
-  if (filePath.endsWith(".contract.ts")) return "contract";
-  if (filePath.endsWith(".workflow.ts") || filePath.endsWith(".flow.ts")) return "flow";
-  if (filePath.endsWith(".bootstrap.ts")) return "bootstrap";
-  return undefined;
+  // `.ts`-only classification, by stem, from the canonical kind registry.
+  return classifyByStem(filePath, [".ts"]);
 }
 
 async function resolveSingleTarget(target: string): Promise<string[]> {

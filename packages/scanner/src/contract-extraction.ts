@@ -18,6 +18,7 @@
 import { pathToFileURL } from "node:url";
 import { resolve, basename } from "node:path";
 import { readdirSync, statSync } from "node:fs";
+import { GLUBEAN_KINDS, buildSuffixes } from "./kinds.js";
 
 // =============================================================================
 // Types — mirror sdk's ExtractedContractProjection / ExtractedFlowProjection
@@ -817,12 +818,11 @@ export async function extractContractFromFile(
 // `foo.workflow.config.ts` — non-artifact files that can throw on import or
 // run top-level side effects, and (for test files) violate the scanner's
 // never-import-test-files invariant (codex 0.6 P2).
-const ARTIFACT_FILE_SUFFIXES = [
-  ".contract.ts", ".contract.js", ".contract.mjs",
-  ".workflow.ts", ".workflow.js", ".workflow.mjs",
-  ".flow.ts", ".flow.js", ".flow.mjs",
-  ".bootstrap.ts", ".bootstrap.js", ".bootstrap.mjs",
-];
+// Artifact files safe to eagerly runtime-import (contract / workflow / flow /
+// bootstrap), derived from the canonical kind registry (kinds.ts).
+const ARTIFACT_FILE_SUFFIXES = GLUBEAN_KINDS.filter((k) => k.runtimeArtifact).flatMap((k) =>
+  buildSuffixes(k.stems),
+);
 
 function findContractAndFlowFiles(dir: string): string[] {
   const files: string[] = [];

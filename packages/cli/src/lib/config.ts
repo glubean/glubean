@@ -21,6 +21,8 @@ import type { RedactionConfig } from "@glubean/redaction";
 import { LOCAL_RUN_DEFAULTS } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import type { ThresholdConfig } from "@glubean/sdk";
+import { SUITE_KINDS } from "@glubean/scanner";
+import type { GlubeanSuiteKind } from "@glubean/scanner";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // V1 PROFILE-BASED CONFIG — the canonical (and only) project config model
@@ -37,7 +39,7 @@ export interface SuiteConfig {
   /** File path, directory, or glob (e.g. `./tests`, `./contracts/*.contract.ts`). */
   target: string;
   /** Which kinds of items to extract from `target`. */
-  kinds: Array<"test" | "contract" | "flow">;
+  kinds: GlubeanSuiteKind[];
   /** Optional path to fixture/eval data (for demo/eval-style suites). */
   data?: string;
 }
@@ -225,7 +227,7 @@ const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles", "mcp"]
 const V1_MCP_KEYS = new Set(["trace"]);
 const V1_MCP_TRACE_KEYS = new Set(["keepRequestHeaders", "keepResponseHeaders"]);
 const V1_SUITE_KEYS = new Set(["target", "kinds", "data"]);
-const V1_SUITE_KINDS = new Set(["test", "contract", "flow"]);
+const V1_SUITE_KINDS = new Set<string>(SUITE_KINDS);
 const V1_SELECTION_KEYS = new Set([
   "tags",
   "excludeTags",

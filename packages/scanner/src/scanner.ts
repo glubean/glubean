@@ -12,6 +12,7 @@ import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedContractMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
 import type { ExportMeta, FileMeta, ScanOptions, ScanResult, ValidationResult } from "./types.js";
+import { suffixesForKind } from "./kinds.js";
 
 /** File system interface for runtime abstraction */
 export interface FileSystem {
@@ -46,19 +47,12 @@ export type MetadataExtractor = (filePath: string, customFns?: string[]) => Prom
 const DEFAULT_SKIP_DIRS = ["node_modules", ".git", "dist", "build"];
 const DEFAULT_EXTENSIONS = [".ts", ".js", ".mjs"];
 
-const TEST_FILE_SUFFIXES = [".test.ts", ".test.js", ".test.mjs"];
-const CONTRACT_FILE_SUFFIXES = [".contract.ts", ".contract.js", ".contract.mjs"];
-// `.workflow.ts` is the canonical vNext extension for workflow files;
-// `.flow.ts` is the legacy alias and stays recognized (same treatment) during
-// the migration window. Both feed contract + workflow extraction identically.
-const FLOW_FILE_SUFFIXES = [
-  ".flow.ts",
-  ".flow.js",
-  ".flow.mjs",
-  ".workflow.ts",
-  ".workflow.js",
-  ".workflow.mjs",
-];
+// Suffix sets derived from the canonical kind registry (kinds.ts). `.workflow`
+// is the canonical vNext stem; `.flow` is the legacy alias — both ride "flow"
+// and feed contract + workflow extraction identically.
+const TEST_FILE_SUFFIXES = suffixesForKind("test");
+const CONTRACT_FILE_SUFFIXES = suffixesForKind("contract");
+const FLOW_FILE_SUFFIXES = suffixesForKind("flow");
 
 function isTestFile(filePath: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
