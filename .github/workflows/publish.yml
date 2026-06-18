@@ -24,9 +24,10 @@ jobs:
       - run: pnpm -r build
       - run: pnpm -r test
 
-      # Publish packages in dependency order
-      # pnpm publish converts workspace:* to real versions automatically
-      # Core packages (versions aligned)
+      # Publish in dependency order. pnpm publish converts workspace:* → real versions.
+      # All packages are LOCKSTEP (same version — see CLAUDE.md Version Policy); a final
+      # verify step gates the job on every package actually reaching the tag version.
+      # Core packages
       - name: Publish @glubean/sdk
         continue-on-error: true
         run: pnpm --filter @glubean/sdk publish --access public --no-git-checks
@@ -72,7 +73,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # Plugin packages (versioned independently)
+      # Plugin packages (lockstep — same version as core)
       - name: Publish @glubean/auth
         continue-on-error: true
         run: pnpm --filter @glubean/auth publish --access public --no-git-checks
@@ -108,5 +109,29 @@ jobs:
         run: pnpm --filter @glubean/oauth-code publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Gate: fail the job RED if any package did not actually reach the tag version on
+      # npm. The publish steps above keep continue-on-error so a re-run skips already-
+      # published packages (E403) instead of aborting — but without this gate a real
+      # publish failure (e.g. an expired NPM_TOKEN → every PUT 404s) would leave the job
+      # GREEN with nothing published. Retries absorb npm read-propagation lag (a brand-new
+      # package can 404 on read for a few seconds after its first publish).
+      - name: Verify every package is live at the tag version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKGS="@glubean/sdk @glubean/engine @glubean/scanner @glubean/redaction @glubean/runner @glubean/cli glubean @glubean/auth @glubean/browser @glubean/graphql @glubean/mcp @glubean/grpc @glubean/oauth-code"
+          echo "Verifying all packages at version $VERSION"
+          FAIL=0
+          for pkg in $PKGS; do
+            ok=0
+            for attempt in 1 2 3 4 5 6; do
+              live=$(npm view "$pkg@$VERSION" version 2>/dev/null || true)
+              if [ "$live" = "$VERSION" ]; then ok=1; break; fi
+              sleep 5
+            done
+            if [ "$ok" = 1 ]; then echo "  ok  $pkg@$VERSION"; else echo "::error::$pkg is NOT at $VERSION on npm"; FAIL=1; fi
+          done
+          if [ "$FAIL" != 0 ]; then echo "::error::release incomplete — one or more packages did not publish"; exit 1; fi
+          echo "All ${VERSION} packages confirmed live on npm."
 
       # lens and skill removed — now in glubean/skill repo (Agent Skills standard)

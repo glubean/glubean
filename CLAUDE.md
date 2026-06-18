@@ -4,38 +4,61 @@
 
 ## Repo Structure
 - Monorepo with pnpm workspaces
-- Packages: sdk, scanner, redaction, runner, auth, mcp, graphql, browser, cli
+- Packages (13 published): **core** — sdk, engine, scanner, redaction, runner, cli · **plugins** — auth, browser, graphql, grpc, mcp, oauth-code · **meta** — `glubean` (the `npx glubean` CLI). Intra-repo deps are all `workspace:*`.
 - Publish workflow triggers on git tags matching `v*`
 
 ## Version Policy
 
-### Core packages (minor-aligned, patch independent)
-sdk, scanner, redaction, runner, cli
+### Lockstep — every package shares ONE version (owner 2026-06-18)
+ALL 13 published packages (core + plugins + `glubean` meta) carry the **same version** and
+are bumped **together** on every release — even packages that didn't change. Currently `0.7.0`.
 
-- **All core packages share the same minor version** (currently `0.1`). Patch versions are independent — only bump the package(s) you changed.
-- Pre-launch: PATCH only (`0.1.x`) **except** one-off minor jumps for architecture rewrites. v0.1.x → v0.2.0 happens once at the contract-system rewrite (2026-04-18), and is OK because there are no external users.
-- Bump command (example): `pnpm --filter @glubean/cli exec -- npm version 0.1.X --no-git-tag-version`
-
-### Plugin packages (versioned independently)
-auth, browser, graphql, mcp
-
-- Each plugin has its own version. Bump only the plugin you changed.
-- Bump command (example): `pnpm --filter @glubean/browser exec -- npm version 0.2.X --no-git-tag-version`
+- **Why lockstep (not per-package semver):** these are one product split into modules with
+  hard internal coupling — e.g. the runner's workflow executor imports `@glubean/sdk/internal`,
+  so a runner/sdk version skew crashes at runtime. The version means "this SET is compatible."
+  Same model as Babel / Angular / Jest. **This supersedes the old minor-aligned / patch-independent
+  / plugins-independent rule** (which was the bookkeeping the owner moved away from).
+- **Never touch intra-repo dependency ranges.** They stay `workspace:*`; `pnpm publish` rewrites
+  them to the exact current version at publish time. You only edit the `version` field — to the
+  **same value in every package.json**.
+- Republishing an unchanged package (new number, identical content) is expected and ~free — fine.
 
 ### Release cadence
-- **Batch releases every 2-7 days.** Accumulate commits on main, then bump + tag + publish as one release.
-- **Do NOT bump/tag/publish after every commit.** Version inflation wastes version numbers and creates noisy changelogs.
-- **Exception: urgent bugfixes.** Ask the user before publishing an urgent fix outside the normal cadence.
-- When ready to release: bump changed packages → commit → `git tag v0.1.X` → `git push && git push origin v0.1.X`
+- **Batch releases.** Accumulate commits on main, then bump + tag + publish as ONE release.
+  Do NOT bump/tag/publish per commit. Urgent bugfix → ask the owner before an off-cadence release.
 
-### Release mechanics
-- Never publish a version that already exists on npm. Always bump before tagging.
-- CI publishes all packages on tag. Already-published versions are skipped (`continue-on-error`).
+### How to release `vX.Y.Z`
+1. Bump **every** publishable `version` to the same X.Y.Z (test-project is not published — skip it):
+   ```
+   node -e 'const fs=require("fs"),p=require("path");for(const d of fs.readdirSync("packages")){const f=p.join("packages",d,"package.json");if(fs.existsSync(f))fs.writeFileSync(f,fs.readFileSync(f,"utf8").replace(/("version":\s*")[^"]+(")/,"$1X.Y.Z$2"))}'
+   ```
+2. `pnpm install` (lockfile stays clean for a pure version bump) → `pnpm -r build` → **`pnpm -r test`**.
+   - **Run the FULL `pnpm -r test`, never a scoped subset.** A change to a shared shape (e.g. the
+     workflow wrapper, an `@glubean/sdk/internal` export) has monorepo-wide blast radius that
+     per-package gates miss (this bit us at the v0.7.0 release — graphql/grpc tests broke).
+3. `git commit -m "chore(release): vX.Y.Z"` → `git tag vX.Y.Z` → push the commit **and** the tag.
+
+### Release mechanics / gotchas
+- **Publish is tag-gated.** Pushing to `main` does NOT publish; only pushing a `v*` tag fires
+  `publish.yml` (which runs `pnpm install --frozen-lockfile && pnpm -r build && pnpm -r test`, then
+  publishes in dependency order).
+- **The `NPM_TOKEN` secret must be publish-capable.** It must be a current token with WRITE access
+  to the `@glubean` scope. A stale/read-only token publishes nothing and npm reports `E404` on the
+  PUT (npm hides scope existence behind 404, not 401/403). **Symptom: CI build+test pass but every
+  publish step E404s** → rotate the GitHub Actions `NPM_TOKEN` secret.
+- **`continue-on-error: true` on the publish steps HIDES publish failures** — the job shows green
+  even when nothing published. ALWAYS verify after a release: `npm view @glubean/sdk version`.
+  (Consider removing the continue-on-error so publish failures go red.)
+- Never publish an existing version — npm rejects it (`cannot publish over the previously published
+  versions: X.Y.Z`). Always bump first.
 
 ## Publish Order (dependency chain)
-sdk → scanner → redaction → runner → cli (core), then auth, browser, graphql, mcp (plugins)
+sdk → engine → scanner → redaction → runner → cli → glubean, then auth, browser, graphql, grpc,
+mcp, oauth-code.
 
-The CI workflow handles this automatically. Do not change the order without updating the dependency graph.
+engine depends on sdk; runner on engine/sdk/scanner; cli on sdk/runner/scanner/redaction; glubean
+(meta) on cli; mcp on runner/scanner/sdk; the other plugins on sdk. The CI workflow encodes this
+order — keep `publish.yml` and this list in sync when packages are added/removed.
 
 ## Branch Policy
 - Solo development: direct commits to main are OK.
