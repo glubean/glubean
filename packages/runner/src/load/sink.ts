@@ -11,7 +11,13 @@
  * (per-iteration step-name maps are dropped at iteration end). Failure-trace
  * sampling and producer-release events land in later milestones.
  */
-import type { LoadErrorKind, LoadEvent, LoadReducer } from "@glubean/sdk/load";
+import type {
+  LoadEndReason,
+  LoadErrorKind,
+  LoadEvent,
+  LoadReducer,
+  LoadResolvedConfig,
+} from "@glubean/sdk/load";
 import { resolveRouteKey } from "./route-key.js";
 
 /** Per-iteration attribution the sink stamps onto translated events. */
@@ -128,6 +134,26 @@ export class LoadSink {
       checkpointId,
       ...(data !== undefined ? { data } : {}),
     });
+  }
+
+  /** Emit `load:start` with the resolved config (orchestrator run boundary). */
+  emitLoadStart(config: LoadResolvedConfig): void {
+    this.emit({ type: "load:start", config });
+  }
+
+  /** Emit `load:end` with why the run stopped. */
+  emitLoadEnd(reason: LoadEndReason): void {
+    this.emit({ type: "load:end", reason });
+  }
+
+  /** Emit `producerSlot:start` when a producer slot begins generating load. */
+  emitProducerSlotStart(producerSlotIndex: number): void {
+    this.emit({ type: "producerSlot:start", producerSlotIndex });
+  }
+
+  /** Emit `producerSlot:end` with how many primary iterations the slot ran. */
+  emitProducerSlotEnd(producerSlotIndex: number, primaryIterations: number): void {
+    this.emit({ type: "producerSlot:end", producerSlotIndex, primaryIterations });
   }
 
   /** The engine-core sink callback: translate one wire event to LoadEvent(s). */

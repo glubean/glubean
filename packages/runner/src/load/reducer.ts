@@ -271,7 +271,8 @@ export class LoadReducerImpl implements LoadReducer {
       runtime: {
         engine: "local",
         processModel: "single-process-async-producer-slot",
-        executionModel: "closed-back-to-back",
+        // A configured think-time makes this a paced closed run, not back-to-back.
+        executionModel: this.config?.pacing?.thinkTimeMs !== undefined ? "closed-paced" : "closed-back-to-back",
         slotModel: "end-to-end",
         requestedConcurrency: this.requestedConcurrency,
         // Same reducer state as snapshot(): an interrupted run (abort/crash with
