@@ -4,7 +4,7 @@
 // browser supports HTTP for sure; we don't support any plugins). Each representative
 // test maps to an EXPECT status; the smoke is green iff every test matches + the HTTP
 // traces fired. Results are published on window.__GLUBEAN_SMOKE for the Chrome driver.
-import { test } from "@glubean/sdk";
+import { test, workflow } from "@glubean/sdk";
 import { RunnerCore } from "@glubean/engine";
 import { createGlobalThisCarrier } from "@glubean/sdk/internal";
 
@@ -141,10 +141,19 @@ const mem = test({ id: "mem", name: "getMemoryUsage browser-safe" }, async (ctx)
   ctx.assert(m === null || typeof m.heapUsed === "number", "memory usage null-or-shape");
 });
 
+// A built workflow is NODE-ONLY (plan 0005/0007 scope): the executor lives in
+// @glubean/runner, never in the browser-safe engine. The wrapper carries the IR but
+// has no self-executing fn (invocation inversion), so the engine MUST exclude the
+// workflow handle at resolve — never run it (a leaked wrapper would throw "missing
+// fn"). This asserts that exclusion in a REAL browser. (plan 0007)
+const wfNodeOnly = workflow("wf-node-only").compute("c", (s) => s).build();
+
 const namespace = {
   simplePass, simpleFail, httpGet, httpPost, httpSchema, steps, stepRetry,
   branchCond, branchSwitch, poll, validatePass, validateFail, warn, evidence,
   skip, fail, setTimeoutTest, pollUntil, session, vars, mem,
+  // Node-only — the engine must resolve-exclude this, NOT run it (asserted below).
+  wfNodeOnly,
 };
 
 // Expected status per id — the smoke is green iff every test matches its expectation.
@@ -171,6 +180,10 @@ async function main() {
   });
 
   const defs = engine.resolve(namespace);
+  // The node-only workflow handle must be excluded at resolve (never run in the
+  // browser) — plan 0005/0007 scope. If a future change let the wrapper through, it
+  // would surface as a runnable def here (and then throw "missing fn" at run).
+  const workflowExcluded = !defs.some((d) => d.meta.id === "wf-node-only");
   const results = [];
   for (const def of defs) {
     const res = await engine.run(def);
@@ -192,9 +205,9 @@ async function main() {
           : null,
     )
     .filter(Boolean);
-  const ok = resolvedAll && mismatches.length === 0 && httpTraceCount >= 3;
+  const ok = resolvedAll && mismatches.length === 0 && httpTraceCount >= 3 && workflowExcluded;
 
-  return { ok, resolvedAll, mismatches, httpTraceCount, count: results.length, results };
+  return { ok, resolvedAll, mismatches, httpTraceCount, workflowExcluded, count: results.length, results };
 }
 
 main()
