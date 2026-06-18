@@ -2559,13 +2559,17 @@ export const tests = test.each([
   { id: "b" },
   { id: "c" },
 ], { parallel: true })("par-$id", async (ctx, { id }) => {
-  // Each test sleeps 200ms. Sequential = ~600ms, parallel(3) = ~200ms.
-  await new Promise(r => setTimeout(r, 200));
+  // Each test sleeps 1000ms. Sequential = ~3000ms, parallel(3) = ~1000ms. The 2000ms
+  // gap dwarfs subprocess-spawn overhead so the parallel/sequential split is robust on
+  // slow CI runners (a 200ms sleep let spawn overhead alone exceed the threshold).
+  await new Promise(r => setTimeout(r, 1000));
   ctx.assert(true, id + " done");
 });
 `;
 
-test("parallel .each - concurrent execution is faster than sequential", async () => {
+// Wall-clock perf assertion — retry to absorb a slow/loaded CI runner (subprocess spawn
+// overhead can spike); the threshold has a wide margin vs the ~1000ms parallel sleep.
+test("parallel .each - concurrent execution is faster than sequential", { retry: 3, timeout: 30_000 }, async () => {
   const testFile = await makeTempFile(PARALLEL_EACH_CONTENT);
   const executor = new TestExecutor();
   const events: ExecutionEvent[] = [];
@@ -2589,12 +2593,13 @@ test("parallel .each - concurrent execution is faster than sequential", async ()
   const statuses = events.filter((e) => e.type === "status" && (e as any).status === "completed");
   expect(statuses.length).toBe(3);
 
-  // With concurrency=3, 3x200ms tests should finish well under sequential time (~600ms).
-  // CI runners can be slow, so use a generous threshold.
-  expect(elapsed).toBeLessThan(700);
+  // With concurrency=3, 3x1000ms tests run in ~1000ms + spawn overhead — far under the
+  // ~3000ms sequential time. Wide threshold tolerates slow CI; the sequential test below
+  // separately proves serialized execution takes the full ~3000ms.
+  expect(elapsed).toBeLessThan(2500);
 });
 
-test("parallel .each - sequential (concurrency=1) takes full time", async () => {
+test("parallel .each - sequential (concurrency=1) takes full time", { timeout: 30_000 }, async () => {
   const testFile = await makeTempFile(PARALLEL_EACH_CONTENT);
   const executor = new TestExecutor();
   const events: ExecutionEvent[] = [];
@@ -2617,8 +2622,11 @@ test("parallel .each - sequential (concurrency=1) takes full time", async () => 
   const statuses = events.filter((e) => e.type === "status" && (e as any).status === "completed");
   expect(statuses.length).toBe(3);
 
-  // Sequential: 3x200ms = ~600ms minimum
-  expect(elapsed).toBeGreaterThanOrEqual(550);
+  // Sequential: 3x1000ms = ~3000ms minimum (serialized). The bound sits ABOVE the
+  // two-wave case (~2000ms, if a regression ran 2 rows at a time) so it still proves
+  // FULL serialization, and below the real ~3000ms floor so a slow runner can't flake
+  // it (the 1000ms sleeps make ~3000ms a hard minimum) — codex P2.
+  expect(elapsed).toBeGreaterThanOrEqual(2600);
 });
 
 test("parallel .each - events carry testId for attribution", async () => {
