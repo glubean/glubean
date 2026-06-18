@@ -7,7 +7,7 @@
  */
 import type { LoadBuilder } from "./builder.js";
 import { parseDurationMs } from "./duration.js";
-import type { LoadPlan, LoadScenarioRef } from "./runner.js";
+import type { AnyLoadRunnerConfig, LoadScenarioRef } from "./runner.js";
 import type { LoadScenario } from "./scenario.js";
 
 /** One scenario reference within a projected plan. */
@@ -46,8 +46,14 @@ function stepNames(scenario: LoadScenario): string[] {
   return scenario.steps.map((step) => step.meta.name);
 }
 
-/** Project a `LoadPlan` into a static `LoadProjection` (pure; no execution). */
-export function projectLoadPlan(plan: LoadPlan): LoadProjection {
+/**
+ * Project a load plan into a static `LoadProjection` (pure; no execution).
+ *
+ * Takes the plan core (`id` + `config`) rather than a full `LoadPlan`, so
+ * `loadRunner()` can compute and attach the projection while constructing the
+ * plan (avoiding a `projection`-field self-reference).
+ */
+export function projectLoadPlan(plan: { id: string; config: AnyLoadRunnerConfig }): LoadProjection {
   const cfg = plan.config;
   const scenarios: LoadScenarioRefProjection[] = [];
 

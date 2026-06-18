@@ -11,6 +11,8 @@
  */
 import type { LoadBuilder } from "./builder.js";
 import type { FeederBinding } from "./feeder.js";
+import { projectLoadPlan } from "./projection.js";
+import type { LoadProjection } from "./projection.js";
 import type { LoadScenario } from "./scenario.js";
 import type { LoadAssertionFailureMode } from "./step.js";
 
@@ -153,6 +155,15 @@ export interface LoadPlan {
    * Absent for non-each plans.
    */
   row?: Record<string, unknown>;
+  /**
+   * Plain-data projection of this plan (runnerId / scenarios / steps /
+   * normalized durations / threshold scopes), exposed as a lazily-recomputed
+   * getter so it always reflects the current config / scenario builders — no
+   * stale snapshot if a scenario gains steps after `loadRunner()`. Discovery
+   * (scanner / CLI) reads it by duck-typing the exported value: no SDK import
+   * and no global registry needed.
+   */
+  readonly projection: LoadProjection;
 }
 
 /** Interpolate `$index` and `$field` placeholders in an `.each()` id template. */
@@ -193,11 +204,31 @@ interface LoadRunnerFn {
   ) => LoadPlan[];
 }
 
-const loadRunnerImpl = (id: string, config: AnyLoadRunnerConfig): LoadPlan => ({
-  __glubean_type: "load-runner",
-  id,
-  config,
-});
+/**
+ * Build a LoadPlan whose `projection` is a lazily-recomputed getter, so it
+ * always reflects the current config / scenario builders (no stale snapshot if
+ * a scenario gains steps after `loadRunner()` is called).
+ */
+function makeLoadPlan(
+  id: string,
+  config: AnyLoadRunnerConfig,
+  row?: Record<string, unknown>,
+): LoadPlan {
+  const plan = {
+    __glubean_type: "load-runner" as const,
+    id,
+    config,
+    ...(row !== undefined ? { row } : {}),
+  };
+  Object.defineProperty(plan, "projection", {
+    get: () => projectLoadPlan(plan),
+    enumerable: true,
+  });
+  return plan as LoadPlan;
+}
+
+const loadRunnerImpl = (id: string, config: AnyLoadRunnerConfig): LoadPlan =>
+  makeLoadPlan(id, config);
 
 loadRunnerImpl.each = <TRow extends object>(table: readonly TRow[]) => {
   return <Input>(
@@ -209,12 +240,11 @@ loadRunnerImpl.each = <TRow extends object>(table: readonly TRow[]) => {
   ): LoadPlan[] =>
     table.map((row, index) => {
       const rowRecord = row as Record<string, unknown>;
-      return {
-        __glubean_type: "load-runner" as const,
-        id: interpolateId(idTemplate, rowRecord, index),
-        config: factory(row, index) as AnyLoadRunnerConfig,
-        row: rowRecord,
-      };
+      return makeLoadPlan(
+        interpolateId(idTemplate, rowRecord, index),
+        factory(row, index) as AnyLoadRunnerConfig,
+        rowRecord,
+      );
     });
 };
 

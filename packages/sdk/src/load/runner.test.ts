@@ -33,6 +33,23 @@ describe("loadRunner", () => {
     expect(plan.config.concurrency).toBe(10);
   });
 
+  it("attaches a static projection to the plan (for marker-based discovery)", () => {
+    const plan = loadRunner("co", { scenario, concurrency: 5, duration: "30s" });
+    expect(plan.projection.runnerId).toBe("co");
+    expect(plan.projection.runMode).toBe("load");
+    expect(plan.projection.concurrency).toBe(5);
+    expect(plan.projection.durationMs).toBe(30_000);
+    expect(plan.projection.scenarios[0]).toEqual({ scenarioId: "checkout", steps: ["buy"] });
+  });
+
+  it("projection recomputes lazily (not a stale snapshot) if a scenario gains steps", () => {
+    const late = loadScenario("late").step("a", async (_c, s) => s);
+    const plan = loadRunner("late-plan", { scenario: late, concurrency: 1 });
+    expect(plan.projection.scenarios[0].steps).toEqual(["a"]);
+    late.step("b", async (_c, s) => s);
+    expect(plan.projection.scenarios[0].steps).toEqual(["a", "b"]);
+  });
+
   it("builds a traffic-mix plan with per-entry input", () => {
     const plan = loadRunner("mixed", {
       scenarios: [
