@@ -62,6 +62,18 @@ export {
 export type { GlubeanSuiteKind, GlubeanFileKind } from "./kinds.js";
 
 export {
+  extractLoadPlans,
+  extractLoadPlansFromFile,
+  isLoadFile,
+} from "./load-extraction.js";
+export type {
+  LoadPlanMeta,
+  LoadPlanProjection,
+  LoadScenarioRefMeta,
+  LoadExtractionResult,
+} from "./load-extraction.js";
+
+export {
   findTemplateMatch,
   hasTemplatePlaceholders,
   matchesTemplateFilter,
