@@ -30,3 +30,19 @@ export type {
   LoadStepFunction,
   LoadTeardownFunction,
 } from "./step.js";
+
+export { loadScenario, LoadBuilder } from "./builder.js";
+
+export { isLoadBranchStep, isLoadPollStep } from "./scenario.js";
+
+export type {
+  LoadScenario,
+  LoadScenarioMeta,
+  LoadStepMeta,
+  LoadStepDefinition,
+  LoadBranchData,
+  LoadPollData,
+  LoadConditionSpec,
+  LoadPollOpts,
+  LoadFragmentBuilder,
+} from "./scenario.js";
