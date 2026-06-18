@@ -46,3 +46,32 @@ export type {
   LoadPollOpts,
   LoadFragmentBuilder,
 } from "./scenario.js";
+
+export { loadRunner, loadMixEntry } from "./runner.js";
+
+export type {
+  LoadPlan,
+  LoadRunnerConfig,
+  LoadMixConfig,
+  LoadMixEntry,
+  AnyLoadRunnerConfig,
+  LoadInputOption,
+  LoadInputArgs,
+  LoadDuration,
+  LoadContinuationConfig,
+  LoadPacingConfig,
+  LoadThresholds,
+  LoadThresholdScope,
+  LoadReportConfig,
+  LoadScenarioRef,
+  LoadProducerSlotInfo,
+  LoadIterationInfo,
+} from "./runner.js";
+
+export type {
+  FeederBinding,
+  FeederStrategy,
+  ExhaustedPolicy,
+  FeederStrategyOptions,
+  WeightedRandomOptions,
+} from "./feeder.js";
