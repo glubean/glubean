@@ -10,7 +10,7 @@ import { registerTest } from "../internal.js";
 import { traceComputeFn } from "../contract-core.js";
 import { interpolateTemplate, normalizeEachTable } from "../test/utils.js";
 import type { Test } from "../types.js";
-import { validateRetryMeta } from "./execute.js";
+import { validateRetryMeta } from "./retry.js";
 import { projectWorkflow } from "./project.js";
 import type {
   ActionNode,

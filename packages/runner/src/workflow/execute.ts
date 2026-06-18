@@ -23,6 +23,12 @@
  * not `runNode`; remaining reserved kinds throw "not implemented yet".
  */
 
+// The workflow executor lives in @glubean/runner (node-only) as of plan 0007. It is
+// execution semantics, not authoring DSL, and it legitimately uses node:async_hooks
+// (the runner is node-only). Its SDK dependencies are split: authoring/projection
+// types + GlubeanSkipError + Expectation come from the public surface; the shared
+// runtime primitives (contract adapters, predicate eval, poll primitives, static
+// grading, retry validation) come through the @glubean/sdk/internal bridge.
 import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AssertionDetails,
@@ -33,23 +39,7 @@ import type {
   TestContext,
   Trace,
   ValidateOptions,
-} from "../types.js";
-import { GlubeanSkipError } from "../types.js";
-import { Expectation } from "../expect.js";
-import { getAdapter, validateNeedsOutput } from "../contract-core.js";
-import { evalPredicate, extractPredicate, resolvePath } from "../predicates.js";
-import type { ExtractedPredicate } from "../predicates.js";
-import type { BranchPredicate, OpaquePredicate } from "../predicates.js";
-import {
-  quarantinedCtx,
-  raceBudget,
-  validatePollBounds,
-  PollExhaustedError,
-  BACKOFF_CAP_MS,
-  DEFAULT_EVERY_MS,
-} from "../poll-primitives.js";
-import { staticGradeOf } from "./project.js";
-import type {
+  // workflow node types + IR (public via @glubean/sdk)
   ActionNode,
   GroupNode,
   BranchNode,
@@ -65,7 +55,28 @@ import type {
   Workflow,
   WorkflowContext,
   WorkflowNode,
-} from "./types.js";
+  // predicate types (public via @glubean/sdk)
+  ExtractedPredicate,
+  BranchPredicate,
+} from "@glubean/sdk";
+import { GlubeanSkipError } from "@glubean/sdk";
+import { Expectation } from "@glubean/sdk/expect";
+import {
+  getAdapter,
+  validateNeedsOutput,
+  evalPredicate,
+  extractPredicate,
+  resolvePath,
+  quarantinedCtx,
+  raceBudget,
+  validatePollBounds,
+  PollExhaustedError,
+  BACKOFF_CAP_MS,
+  DEFAULT_EVERY_MS,
+  staticGradeOf,
+  validateRetryMeta,
+} from "@glubean/sdk/internal";
+import type { OpaquePredicate } from "@glubean/sdk/internal";
 
 /**
  * Human-readable label for a declarative expect item (phase4 §7.2) — derived
@@ -509,35 +520,10 @@ function emitNodeEnd(
   base.event({ type: NODE_END_EVENT, data });
 }
 
-/**
- * Validate an explicit-intent retry (§17 #7). `attempts` must be an integer >= 2
- * (1 attempt is "no retry" — omit `retry` instead), `delay` finite >= 0, and
- * `reason` a non-empty statement of why replay is safe. Called by the builder at
- * construction AND by the executor before looping (an `as any`/JS caller could
- * smuggle an invalid retry — e.g. `attempts: Infinity` — past the types).
- */
-export function validateRetryMeta(retry: RetryMeta, stepLabel: string): void {
-  if (!Number.isInteger(retry.attempts) || retry.attempts < 2) {
-    throw new Error(
-      `workflow step "${stepLabel}": retry.attempts must be an integer >= 2 ` +
-        `(1 attempt is no retry — omit \`retry\`); got ${String(retry.attempts)}`,
-    );
-  }
-  if (
-    retry.delay !== undefined &&
-    (typeof retry.delay !== "number" || !Number.isFinite(retry.delay) || retry.delay < 0)
-  ) {
-    throw new Error(
-      `workflow step "${stepLabel}": retry.delay must be a finite number >= 0; got ${String(retry.delay)}`,
-    );
-  }
-  if (typeof retry.reason !== "string" || retry.reason.length === 0) {
-    throw new Error(
-      `workflow step "${stepLabel}": retry.reason is required — state why replaying ` +
-        `this step is safe (idempotency is the author's responsibility, §17 #7)`,
-    );
-  }
-}
+// `validateRetryMeta` (§17 #7 retry validation) moved to the SDK (`workflow/retry.ts`)
+// when the executor relocated here (plan 0007): it is shared with the authoring-side
+// builder. Imported from @glubean/sdk/internal above; still called by the executor
+// before looping (an `as any`/JS caller could smuggle an invalid retry past the types).
 
 /** True for a Promise or any Promise-like (`.then` is a function). */
 function isThenable(v: unknown): boolean {

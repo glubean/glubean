@@ -20,6 +20,8 @@ export type {
   PollBounds,
 } from "./builder.js";
 export { projectWorkflow } from "./project.js";
-// Host integration point: @glubean/runner's http hooks attribute auto-traces
-// to the active workflow node's scope (the ctx.http rebind, S2.10).
-export { __activeWorkflowNodeCtx } from "./execute.js";
+// The workflow executor (`runWorkflow` + the node-scope ALS / `__activeWorkflowNodeCtx`)
+// lives in @glubean/runner (node-only) as of plan 0007 — it is execution semantics,
+// not authoring DSL, and it drags node:async_hooks. The SDK exports only the authoring
+// surface + projection here; the host owns execution. `validateRetryMeta` (shared
+// authoring/run validation) lives in ./retry.js, bridged via @glubean/sdk/internal.

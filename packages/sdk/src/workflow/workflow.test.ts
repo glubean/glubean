@@ -1,9 +1,8 @@
 import { describe, it, expect } from "vitest";
 import type { ContractCaseRef } from "../contract-types.js";
 import { getRegistry } from "../internal.js";
-import type { Test, TestContext } from "../types.js";
+import type { Test } from "../types.js";
 import { workflow } from "./builder.js";
-import { runWorkflow } from "./execute.js";
 import { projectWorkflow } from "./project.js";
 import type { Workflow, ActionNode, CheckNode } from "./types.js";
 
@@ -258,28 +257,6 @@ describe("projectWorkflow() static grades", () => {
 
 // --- S2.5 discovery: build() finalizes into a registered Test handle ----------
 
-/** Minimal ctx double for driving the wrapped Test fn directly. */
-function fnCtx(): { ctx: TestContext; skips: string[] } {
-  const skips: string[] = [];
-  const ctx = {
-    assert: () => {},
-    validate: () => undefined,
-    trace: () => {},
-    metric: () => {},
-    event: () => {},
-    log: () => {},
-    warn: () => {},
-    action: () => {},
-    skip: (reason?: string): never => {
-      skips.push(reason ?? "");
-      const e = new Error(reason ?? "skipped");
-      e.name = "SkipError";
-      throw e;
-    },
-  } as unknown as TestContext;
-  return { ctx, skips };
-}
-
 describe("workflow build() — discovery handle (S2.5)", () => {
   it("returns a dual handle: the Workflow IR AND a one-element simple Test[]", () => {
     const wf = workflow("dual")
@@ -379,63 +356,16 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     expect(() => b.meta({ name: "x" })).toThrow(/after build\(\)/);
   });
 
-  // Invocation inversion (plan 0007): the wrapper no longer self-executes, so these
-  // assert the SDK-owned contract — what `runWorkflow` RETURNS — directly. The host's
-  // verdict→test mapping (skipped → ctx.skip; failed → rethrow) is harness-owned now
-  // and covered end-to-end by `runner/src/harness-workflow.test.ts`.
-  it("runWorkflow returns the workflow verdict: passed resolves, failed carries the cause", async () => {
-    const ok = workflow("verdict-ok")
-      .setup(async () => ({}))
-      .compute("c", (s) => s)
-      .build();
-    const okResult = await runWorkflow(ok, fnCtx().ctx);
-    expect(okResult.status).toBe("passed");
-
-    const bad = workflow("verdict-bad")
-      .setup(async () => ({}))
-      .action("boom", async () => {
-        throw new Error("kaput");
-      })
-      .build();
-    const badResult = await runWorkflow(bad, fnCtx().ctx);
-    expect(badResult.status).toBe("failed");
-    expect((badResult.error as Error).message).toBe("kaput"); // the node throw is the cause
-  });
-
-  it("runWorkflow surfaces a skip verdict + reason; meta.skip maps to TestMeta.deferred", async () => {
-    const skipping = workflow("verdict-skip")
-      .setup(async () => ({}))
-      .action("gate", async (c) => {
-        c.skip("feature off");
-      })
-      .build();
-    const skipResult = await runWorkflow(skipping, fnCtx().ctx);
-    expect(skipResult.status).toBe("skipped");
-    expect(skipResult.skipReason).toBe("feature off"); // authored runtime reason survives (codex S2.5 R6)
-
+  // The workflow VERDICT contract (passed/failed-with-cause, skip + reason, deferred
+  // per-node skipped evidence) is exercised against the executor directly in
+  // runner/src/workflow/execute.test.ts, and end-to-end through the host in
+  // runner/src/harness-workflow.test.ts. Plan 0007 moved the executor out of the SDK,
+  // so those runWorkflow assertions live with the executor now; this file stays
+  // authoring-only (builder shape / discovery / projection). The `deferred → TestMeta.
+  // deferred` mapping is pure builder output, so it is kept here:
+  it("meta.skip maps to TestMeta.deferred on the wrapper", () => {
     const deferred = workflow({ id: "deferred-wf", skip: "not ready" }).compute("c", (s) => s).build();
     expect(((deferred as unknown as Test[])[0].meta as { deferred?: string }).deferred).toBe("not ready");
-  });
-
-  it("an explicitly-run deferred workflow keeps per-node skipped evidence (codex S2.5 R1 P2)", async () => {
-    const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
-    const { ctx } = fnCtx();
-    (ctx as { event: unknown }).event = (ev: { type: string; data?: Record<string, unknown> }) => {
-      events.push(ev);
-    };
-    const wf = workflow({ id: "deferred-run", skip: "not ready" })
-      .compute("a", (s) => s)
-      .compute("b", (s) => s)
-      .build();
-    const result = await runWorkflow(wf, ctx);
-    expect(result.status).toBe("skipped");
-    expect(result.skipReason).toBe("not ready"); // the meta.skip reason, not a generic one
-    // Every authored node still emitted a skipped node_end (per-node evidence preserved).
-    const ends = events.filter((e) => e.type === "workflow:node_end");
-    expect(ends.map((e) => [e.data?.nodeId, e.data?.status])).toEqual([
-      ["a", "skipped"],
-      ["b", "skipped"],
-    ]);
   });
 });
 

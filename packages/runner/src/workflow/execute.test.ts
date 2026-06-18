@@ -1,14 +1,21 @@
 import { describe, it, expect, afterEach } from "vitest";
-import type { TestContext, Trace } from "../types.js";
-import { GlubeanSkipError } from "../types.js";
-import { contract, __unregisterProtocolForTesting } from "../contract-core.js";
-import { getRegistry as getRegistryForEach } from "../internal.js";
-import type { ContractCaseRef } from "../contract-types.js";
-import { workflow } from "./builder.js";
-import type { WorkflowBuilder } from "./builder.js";
-import type { WorkflowContext } from "./types.js";
-import { projectWorkflow } from "./project.js";
-import { PollExhaustedError } from "../poll-primitives.js";
+import type {
+  TestContext,
+  Trace,
+  ContractCaseRef,
+  WorkflowBuilder,
+  WorkflowContext,
+  ActionNode,
+  CheckNode,
+  WorkflowNode,
+  WorkflowTeardown,
+} from "@glubean/sdk";
+import { GlubeanSkipError, contract, workflow, projectWorkflow } from "@glubean/sdk";
+import {
+  __unregisterProtocolForTesting,
+  getRegistry as getRegistryForEach,
+  PollExhaustedError,
+} from "@glubean/sdk/internal";
 import {
   makeNodeScope,
   promoteGrade,
@@ -21,7 +28,6 @@ import {
   NODE_END_EVENT,
   POLL_ATTEMPT_EVENT,
 } from "./execute.js";
-import type { ActionNode, CheckNode, WorkflowNode, WorkflowTeardown } from "./types.js";
 
 const fakeRef = <I = unknown, O = unknown>(
   contractId: string,

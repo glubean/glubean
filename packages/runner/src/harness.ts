@@ -17,14 +17,16 @@ import {
   setExplicitInput,
   setBootstrapInput,
   setForceStandalone,
-  // Workflow executor (host integration). TEMPORARY import path (plan 0007 slice 1):
-  // the executor still lives in the SDK; slice 2 relocates it into this package and
-  // these become local imports. The host drives a built workflow via runWorkflow now
-  // (invocation inversion) instead of the SDK's wrapper executing itself.
-  runWorkflow,
-  WorkflowPhaseFailedError,
   type InternalRuntime,
 } from "@glubean/sdk/internal";
+// Workflow executor — now node-only and owned by this package (plan 0007). The host
+// drives a built workflow via runWorkflow (invocation inversion) and attributes inline
+// ctx.http traces to the active node scope via __activeWorkflowNodeCtx (the ALS rebind).
+import {
+  runWorkflow,
+  WorkflowPhaseFailedError,
+  __activeWorkflowNodeCtx,
+} from "./workflow/execute.js";
 import ky, { type KyInstance, type Options as KyOptions } from "ky";
 import type {
   Trace,
@@ -46,8 +48,7 @@ import type {
   TestContext,
   ValidateOptions,
 } from "@glubean/sdk";
-import {
-  __activeWorkflowNodeCtx, isTestBranchStep, isTestPollStep } from "@glubean/sdk";
+import { isTestBranchStep, isTestPollStep } from "@glubean/sdk";
 import type { TestPollData } from "@glubean/sdk";
 import { Expectation } from "@glubean/sdk/expect";
 

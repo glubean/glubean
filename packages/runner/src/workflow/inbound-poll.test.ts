@@ -5,12 +5,10 @@
 
 import { createHmac } from "node:crypto";
 import { describe, expect, it, beforeEach } from "vitest";
-import { contract, inboundCase, workflow } from "../index.js";
+import { contract, inboundCase, workflow } from "@glubean/sdk";
 import { runWorkflow } from "./execute.js";
-import type { InboundDelivery, ReceiverHandle } from "../contract-types.js";
-import type { TestContext, Trace } from "../types.js";
-import { clearRegistry } from "../internal.js";
-import { clearBootstrapRegistry } from "../bootstrap-registry.js";
+import type { InboundDelivery, ReceiverHandle, TestContext, Trace } from "@glubean/sdk";
+import { clearRegistry, clearBootstrapRegistry } from "@glubean/sdk/internal";
 
 beforeEach(() => {
   clearRegistry();
