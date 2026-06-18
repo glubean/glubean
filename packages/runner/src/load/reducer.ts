@@ -183,10 +183,17 @@ export class LoadReducerImpl implements LoadReducer {
           event.stepName,
         );
         step.stepName = event.stepName; // correct any placeholder set by an earlier request:observed
+        // A skipped leaf emits no step:start, so capture its group here too.
+        if (event.groupId !== undefined && step.groupId === undefined) step.groupId = event.groupId;
         step.invocationCount += 1;
-        if (event.skipped) step.skippedCount += 1;
-        else step.latency.record(event.durationMs);
-        if (!event.ok) step.errorCount += 1;
+        if (event.skipped) {
+          // A skipped step (fail-fast / skipRemainingSteps) is neither a latency
+          // sample nor a failure of its own — only an explicit skip.
+          step.skippedCount += 1;
+        } else {
+          step.latency.record(event.durationMs);
+          if (!event.ok) step.errorCount += 1;
+        }
         step.assertionFailureCount += event.assertionFailures ?? 0;
         break;
       }
@@ -450,7 +457,8 @@ export class LoadReducerImpl implements LoadReducer {
       skippedCount: agg.skippedCount,
       assertionFailureCount: agg.assertionFailureCount,
       errorCount: agg.errorCount,
-      errorRate: rate(agg.errorCount, agg.invocationCount),
+      // Error rate is over EXECUTED invocations — skipped steps aren't failures.
+      errorRate: rate(agg.errorCount, agg.invocationCount - agg.skippedCount),
       latency: agg.latency.count > 0 ? agg.latency.percentiles() : ZERO_PCT,
       requestCount: agg.requestCount,
     };

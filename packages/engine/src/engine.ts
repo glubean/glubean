@@ -488,6 +488,17 @@ export class RunnerCore {
     // run still "completes"); it must still make the test's verdict error.
     let stepFailed = false;
     let stepFailMsg: string | undefined;
+    // The first failing step's error NAME (e.g. "TimeoutError" / "HTTPError" /
+    // "StepTimeoutError"), captured so a host can classify a CAUGHT step failure —
+    // unlike a top-level throw, the engine swallows it, so `errorName` (top-level
+    // only) would be empty. Mirrors stepFailMsg's first-wins semantics.
+    let stepErrorName: string | undefined;
+    // Control-flow halt, distinct from the `stepFailed` verdict: once set, the
+    // remaining steps are skipped. A thrown step (and branch/poll failures) always
+    // halt; a step with `continueOnAssertionFailure` whose ONLY failure was soft
+    // assertions records the failure (stepFailed) WITHOUT halting (load `continue`
+    // policy). Default keeps node parity: any step failure halts.
+    let haltSteps = false;
     // First branch-decision failure → the test-level failure message (node parity:
     // the post-loop throw prefers it over "One or more steps failed").
     let branchDecisionError: string | undefined;
@@ -525,6 +536,7 @@ export class RunnerCore {
                 durationMs: 0,
                 assertions: 0,
                 failedAssertions: 0,
+                ...(s.meta.group !== undefined ? { group: s.meta.group } : {}),
               });
             }
           }
@@ -535,9 +547,18 @@ export class RunnerCore {
           const idx = stepSeq++;
           scope.currentStepIndex = idx;
           const startedAt = scheduler.now();
-          events.emit({ type: "step_start", id: scope.testMeta.id, index: idx, name: step.meta.name, total: stepTotal });
+          events.emit({
+            type: "step_start",
+            id: scope.testMeta.id,
+            index: idx,
+            name: step.meta.name,
+            total: stepTotal,
+            ...(step.meta.group !== undefined ? { group: step.meta.group } : {}),
+          });
 
-          const sm = (step as { meta?: { retries?: number; retryDelay?: number; backoff?: number; timeout?: number } }).meta ?? {};
+          const sm = (step as {
+            meta?: { retries?: number; retryDelay?: number; backoff?: number; timeout?: number; continueOnAssertionFailure?: boolean };
+          }).meta ?? {};
           const configuredRetries = Number.isFinite(sm.retries) ? Math.max(0, Math.floor(sm.retries as number)) : 0;
           const retryDelayMs = Number.isFinite(sm.retryDelay) ? Math.max(0, sm.retryDelay as number) : configuredRetries > 0 ? 1000 : 0;
           const backoff = Number.isFinite(sm.backoff) ? Math.max(1, sm.backoff as number) : 1;
@@ -545,6 +566,7 @@ export class RunnerCore {
           const maxAttempts = configuredRetries + 1;
 
           let stepError: string | undefined;
+          let stepErrorNameLocal: string | undefined;
           let stepReturnState: unknown;
           let attemptsUsed = 0;
           let lastAssertions = 0;
@@ -552,6 +574,7 @@ export class RunnerCore {
           for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             attemptsUsed = attempt;
             stepError = undefined;
+            stepErrorNameLocal = undefined;
             stepReturnState = undefined;
             const aBefore = scope.assertions.total;
             const fBefore = scope.assertions.total - scope.assertions.passed;
@@ -584,6 +607,7 @@ export class RunnerCore {
                 // A thrown step is caught + recorded as a failed step (node parity:
                 // the run still "completes"; the test fails via stepsFailed).
                 stepError = e instanceof Error ? e.message : String(e);
+                stepErrorNameLocal = e instanceof Error ? e.name : undefined;
                 timedOut = e instanceof StepTimeoutError;
               }
             }
@@ -647,7 +671,13 @@ export class RunnerCore {
           scope.currentStepIndex = null;
           if (failed) {
             stepFailed = true;
-            if (stepError && stepFailMsg === undefined) stepFailMsg = stepError;
+            if (stepError && stepFailMsg === undefined) {
+              stepFailMsg = stepError;
+              stepErrorName = stepErrorNameLocal;
+            }
+            // A throw always halts; an assertion-only failure halts unless this
+            // step opted into `continue` (load `continue` assertion policy).
+            if (stepError || sm.continueOnAssertionFailure !== true) haltSteps = true;
           }
         };
 
@@ -664,10 +694,14 @@ export class RunnerCore {
           let takenValue: string | number | boolean | null | undefined;
           const total = branch.cases.length;
           const baseEvent = { id: scope.testMeta.id, name: step.meta.name, ...(branch.message ? { message: branch.message } : {}) };
-          const failDecision = (errMessage: string): void => {
+          const failDecision = (errMessage: string, errName?: string): void => {
             events.emit({ type: "branch", ...baseEvent, index: branchSeq++, takenIndex: "default", total, error: errMessage });
             stepFailed = true;
+            haltSteps = true; // a branch-decision failure is hard — always halt.
             if (branchDecisionError === undefined) branchDecisionError = `branch "${step.meta.name}": ${errMessage}`;
+            // Capture a THROWN decision error's name (not an assertion/skip) so a host
+            // classifies a predicate/lens code error or timeout, not as an assertion.
+            if (errName !== undefined && stepErrorName === undefined) stepErrorName = errName;
             for (const c of branch.cases) emitSkippedTree(c.steps);
             emitSkippedTree(branch.default ?? []);
           };
@@ -720,6 +754,9 @@ export class RunnerCore {
                 : e instanceof Error
                   ? e.message
                   : String(e),
+              // Only a genuine throw carries a classifiable name; a skip-before-failure
+              // is an assertion-flavoured decision failure (left unnamed).
+              !(e instanceof SkipError) && e instanceof Error ? e.name : undefined,
             );
             return;
           }
@@ -762,7 +799,14 @@ export class RunnerCore {
           const aBefore = scope.assertions.total;
           const fBefore = scope.assertions.total - scope.assertions.passed;
           const stepStart = scheduler.now();
-          events.emit({ type: "step_start", id: scope.testMeta.id, index: idx, name: step.meta.name, total: stepTotal });
+          events.emit({
+            type: "step_start",
+            id: scope.testMeta.id,
+            index: idx,
+            name: step.meta.name,
+            total: stepTotal,
+            ...(step.meta.group !== undefined ? { group: step.meta.group } : {}),
+          });
 
           // Local budget sentinel so a budget timeout is distinguishable from a genuine
           // fn/until error or a SkipError.
@@ -788,10 +832,14 @@ export class RunnerCore {
           let satisfied = false;
           let exhausted = false;
           let pollError: string | undefined;
+          let pollErrorName: string | undefined;
           let lastRes: unknown;
           // A poll-phase throw must surface a non-empty message: pollError is tested for
           // truthiness below to decide failure, so an empty message would be a silent pass.
+          // Also captures the thrown error's NAME (only ever called on a real throw) so a
+          // host can classify a caught poll failure (e.g. ky "TimeoutError").
           const pollErrMsg = (e: unknown): string => {
+            pollErrorName = e instanceof Error ? e.name : undefined;
             const m = e instanceof Error ? e.message : String(e);
             return m || `poll "${step.meta.name}" threw an empty error`;
           };
@@ -907,7 +955,15 @@ export class RunnerCore {
           scope.currentStepIndex = null;
           if (failed) {
             stepFailed = true;
-            if (pollError && stepFailMsg === undefined) stepFailMsg = pollError;
+            // A HARD poll failure (threw / exhausted / `until` never met) always
+            // halts; a poll that satisfied but recorded only soft assertions
+            // respects `continueOnAssertionFailure`, exactly like a normal step.
+            const hardFailure = !!pollError || !satisfied;
+            if (hardFailure || step.meta.continueOnAssertionFailure !== true) haltSteps = true;
+            if (pollError && stepFailMsg === undefined) {
+              stepFailMsg = pollError;
+              stepErrorName = pollErrorName;
+            }
           }
         };
 
@@ -915,7 +971,7 @@ export class RunnerCore {
         // skips the rest (skipped step_end tree); branch steps make a decision + recurse.
         const runStepList = async (steps: StepDef[]): Promise<void> => {
           for (const step of steps) {
-            if (stepFailed || skipRequest) {
+            if (haltSteps || skipRequest) {
               emitSkippedTree([step]);
               continue;
             }
@@ -957,7 +1013,11 @@ export class RunnerCore {
         }
         // A step / branch-predicate called ctx.skip() (recorded without a throw):
         // after teardown the whole test is skipped (node parity: harness.ts:2692).
-        if (skipRequest) {
+        // A skip must NOT mask a prior failure: with the `continue` policy an earlier
+        // soft-failed step leaves `stepFailed` set while a later step still runs and
+        // may skip — the failure wins. (In default fail-fast mode a prior failure
+        // already halts the rest, so skipRequest only ever set when stepFailed=false.)
+        if (skipRequest && !stepFailed) {
           skipped = true;
           skipReason = skipRequest.reason;
         }
@@ -1012,6 +1072,9 @@ export class RunnerCore {
       // them (stack diagnostics + failure classification parity — codex P2).
       ...(threw && thrownStack ? { errorStack: thrownStack } : {}),
       ...(threw && thrownName ? { errorName: thrownName } : {}),
+      // The first CAUGHT step/poll failure's error name (a host classifies it; the
+      // engine swallowed the throw so `errorName` above stays top-level-only).
+      ...(!threw && stepErrorName !== undefined ? { stepErrorName } : {}),
       assertions: { ...scope.assertions },
     };
   }

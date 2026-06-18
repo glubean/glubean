@@ -75,6 +75,9 @@ export type LoadEvent =
       skipped?: boolean;
       assertionFailures?: number;
       errorKind?: LoadErrorKind;
+      /** Group label — present on step:end so a SKIPPED leaf (which emits no
+       *  step:start) still carries group attribution. */
+      groupId?: string;
     })
   | (LoadEventEnvelope & {
       type: "report:checkpoint";

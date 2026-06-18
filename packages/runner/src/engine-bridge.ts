@@ -152,7 +152,14 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         testId: e.id,
       };
     case "step_start":
-      return { type: "step_start", index: e.index, name: e.name, total: e.total, testId: e.id };
+      return {
+        type: "step_start",
+        index: e.index,
+        name: e.name,
+        total: e.total,
+        ...(e.group !== undefined ? { group: e.group } : {}),
+        testId: e.id,
+      };
     case "step_end":
       return {
         type: "step_end",
@@ -166,6 +173,7 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         ...(e.retriesUsed !== undefined ? { retriesUsed: e.retriesUsed } : {}),
         ...(e.error !== undefined ? { error: e.error } : {}),
         ...(e.returnState !== undefined ? { returnState: e.returnState } : {}),
+        ...(e.group !== undefined ? { group: e.group } : {}),
         testId: e.id,
       };
     case "timeout_update":

@@ -86,7 +86,7 @@ export type ExecutionEvent =
   // first-class unwrap (workflowEventToTimeline) is workflow-only → stays node-legacy
   // (workflow tests are never engine-routed), so the engine always emits generic.
   | { type: "event"; id: string; data: GlubeanEvent; stepIndex?: number }
-  | { type: "step_start"; id: string; index: number; name: string; total: number }
+  | { type: "step_start"; id: string; index: number; name: string; total: number; group?: string }
   | {
       type: "step_end";
       id: string;
@@ -102,6 +102,9 @@ export type ExecutionEvent =
       retriesUsed?: number;
       error?: string;
       returnState?: unknown;
+      // Group label (host-set, e.g. the SDK builder's `.group()`) — also on
+      // step_end so a SKIPPED leaf (which emits no step_start) keeps attribution.
+      group?: string;
     }
   | {
       type: "branch";
@@ -212,12 +215,29 @@ export interface TestResult {
   /** The original throw's error name (e.g. "TypeError", ky's "TimeoutError"), so a
    *  host can re-raise with it and keep failure classification (diagnostics parity). */
   errorName?: string;
+  /** The first CAUGHT step/poll failure's error name (set only when the run did NOT
+   *  throw at the top level). A host classifies a step-level failure with it — e.g.
+   *  the load runner mapping ky's "TimeoutError" / "HTTPError" / "StepTimeoutError"
+   *  to a load errorKind — since `errorName` carries only top-level throws. */
+  stepErrorName?: string;
   assertions: { total: number; passed: number };
 }
 
 export type TestFn = (ctx: EngineContext, state?: unknown) => unknown | Promise<unknown>;
 export interface StepDef {
-  meta: { name: string };
+  meta: {
+    name: string;
+    /** Logical group label — emitted on this step's `step_start` for report
+     *  grouping. Host-set (e.g. the SDK builder's `.group()`); the engine only
+     *  forwards it. */
+    group?: string;
+    /** When true, a failure caused ONLY by soft assertions (no throw) records the
+     *  failure + marks the test failed but does NOT skip the remaining steps. A
+     *  thrown step still halts. Default (false) = fail-fast on any step failure
+     *  (node parity). Host-set (e.g. the load runner's `continue` assertion
+     *  policy); the engine stays unaware of what the policy means. */
+    continueOnAssertionFailure?: boolean;
+  };
   fn: TestFn;
 }
 export interface TestDef {
