@@ -124,3 +124,12 @@ export { evaluateThresholds, MetricCollector } from "./thresholds.js";
 
 /** Test discovery helper; VSCode extension uses it to extract tests from a module. */
 export { resolveModuleTests } from "./resolve.js";
+
+/**
+ * Workflow executor entry. A built `workflow()` is a DEF the host runs (plan 0007
+ * invocation inversion); `runWorkflow(ir, ctx)` drives the graph and returns the
+ * verdict. The harness uses it internally; it's exported here so adapter packages
+ * (graphql/grpc) can exercise a contract call THROUGH a workflow in their tests.
+ */
+export { runWorkflow } from "./workflow/execute.js";
+export type { WorkflowRunResult, WorkflowNodeOutcome } from "./workflow/execute.js";

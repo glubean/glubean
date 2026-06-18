@@ -12,6 +12,9 @@ import { test, expect, beforeAll, beforeEach, describe } from "vitest";
 import { contract, installPlugin, workflow } from "@glubean/sdk";
 import type { TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";
+// A built workflow is a DEF the host runs (plan 0007 invocation inversion) — the
+// wrapper no longer self-executes, so drive it through the runner-owned executor.
+import { runWorkflow } from "@glubean/runner";
 import grpcPlugin from "../index.js";
 
 // Install the gRPC manifest once per test file. Replaces the old
@@ -76,6 +79,14 @@ function makeMockGrpcClient(
 // ---------------------------------------------------------------------------
 // Mock TestContext
 // ---------------------------------------------------------------------------
+
+// Run a built workflow and rethrow a failed verdict, preserving the old
+// throw-on-failure semantics of the (now removed) self-executing wrapper fn.
+async function runWf(wf: unknown, ctx: TestContext) {
+  const r = await runWorkflow(wf as any, ctx);
+  if (r.status === "failed") throw r.error ?? new Error("workflow failed");
+  return r;
+}
 
 function makeCtx(partial: Partial<TestContext> = {}): TestContext {
   const assertions: Array<{ passed: boolean; message?: string }> = [];
@@ -420,7 +431,7 @@ describe("executeCaseInFlow + flow integration", () => {
         in: (s: any) => ({ orderId: s.orderId, amount: s.amount }),
       } as any)
       .build();
-    await wf[0]!.fn!(makeCtx());
+    await runWf(wf, makeCtx());
 
     expect(client._calls).toHaveLength(1);
     expect(client._calls[0].method).toBe("Complete");
@@ -452,7 +463,7 @@ describe("executeCaseInFlow + flow integration", () => {
         },
       } as any)
       .build();
-    await wf[0]!.fn!(makeCtx());
+    await runWf(wf, makeCtx());
 
     expect(capturedOut.status.code).toBe(0);
     expect(capturedOut.message.serverId).toBe("server-1");
@@ -492,7 +503,7 @@ describe("executeCaseInFlow + flow integration", () => {
         in: (s: any) => ({ tag: s.lensTag }),
       } as any)
       .build();
-    await wf[0]!.fn!(makeCtx());
+    await runWf(wf, makeCtx());
 
     const opts = client._calls[0].options as { metadata: Record<string, string> };
     expect(opts.metadata).toMatchObject({
@@ -789,7 +800,7 @@ describe("schema validation failure path", () => {
       .call("do-thing", svcContract.case("ok") as any, {} as any)
       .build();
     // The workflow Test fn rethrows the failing node's cause.
-    await expect(wf[0]!.fn!(makeCtx())).rejects.toThrow(/validate failed/);
+    await expect(runWf(wf, makeCtx())).rejects.toThrow(/validate failed/);
   });
 });
 

@@ -118,6 +118,9 @@ importers:
         specifier: workspace:*
         version: link:../sdk
     devDependencies:
+      '@glubean/runner':
+        specifier: workspace:*
+        version: link:../runner
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
@@ -131,6 +134,9 @@ importers:
         specifier: workspace:*
         version: link:../sdk
     devDependencies:
+      '@glubean/runner':
+        specifier: workspace:*
+        version: link:../runner
       '@grpc/grpc-js':
         specifier: ^1.14.0
         version: 1.14.3

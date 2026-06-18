@@ -34,6 +34,7 @@
     "@grpc/proto-loader": "^0.7.0"
   },
   "devDependencies": {
+    "@glubean/runner": "workspace:*",
     "@grpc/grpc-js": "^1.14.0",
     "@grpc/proto-loader": "^0.7.0",
     "vitest": "^3.2.1",

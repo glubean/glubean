@@ -22,6 +22,9 @@ import { fileURLToPath } from "node:url";
 import { contract, workflow } from "@glubean/sdk";
 import type { TestContext } from "@glubean/sdk";
 import { clearRegistry } from "@glubean/sdk/internal";
+// A built workflow is a DEF the host runs (plan 0007 invocation inversion) — the
+// wrapper no longer self-executes, so drive it through the runner-owned executor.
+import { runWorkflow } from "@glubean/runner";
 
 import { createGrpcClient, type GrpcClient } from "../index.js";
 import { grpcAdapter } from "./adapter.js";
@@ -91,6 +94,14 @@ function startTestServer(): Promise<TestServer> {
 // ---------------------------------------------------------------------------
 // Mock TestContext (real-enough to run adapter without Glubean runner)
 // ---------------------------------------------------------------------------
+
+// Run a built workflow and rethrow a failed verdict, preserving the old
+// throw-on-failure semantics of the (now removed) self-executing wrapper fn.
+async function runWf(wf: unknown, ctx: TestContext) {
+  const r = await runWorkflow(wf as any, ctx);
+  if (r.status === "failed") throw r.error ?? new Error("workflow failed");
+  return r;
+}
 
 function makeCtx(partial: Partial<TestContext> = {}): TestContext {
   const ctx = {
@@ -265,7 +276,7 @@ describe("live gRPC smoke — execute + flow paths against real server", () => {
         },
       } as any)
       .build();
-    await wf[0]!.fn!(makeCtx());
+    await runWf(wf, makeCtx());
 
     expect(capturedMessage).toBe("Hello, bob!");
   });

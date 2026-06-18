@@ -312,7 +312,10 @@ export const skipAfterFail = test("skip-after-fail", async (ctx) => {
   expect(r.skipped).toBeUndefined();
 }, 15_000);
 
-test("runLocalTestsFromFile strips trace headers, keeping only content-type/set-cookie/location/authorization", async () => {
+// Hits the external dummyjson.com demo API — retry to absorb transient network
+// timeouts/outages so a third-party blip can't block a release (matches the
+// runner's httpbin-dependent tests).
+test("runLocalTestsFromFile strips trace headers, keeping only content-type/set-cookie/location/authorization", { retry: 3, timeout: 30_000 }, async () => {
   const dir = await makeSessionTempDir();
   await mkdir(join(dir, "tests"), { recursive: true });
 
