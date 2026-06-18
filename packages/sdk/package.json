@@ -24,6 +24,10 @@
     "./internal": {
       "types": "./dist/internal.d.ts",
       "import": "./dist/internal.js"
+    },
+    "./load": {
+      "types": "./dist/load/index.d.ts",
+      "import": "./dist/load/index.js"
     }
   },
   "files": [
