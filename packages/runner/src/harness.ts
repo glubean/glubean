@@ -17,6 +17,12 @@ import {
   setExplicitInput,
   setBootstrapInput,
   setForceStandalone,
+  // Workflow executor (host integration). TEMPORARY import path (plan 0007 slice 1):
+  // the executor still lives in the SDK; slice 2 relocates it into this package and
+  // these become local imports. The host drives a built workflow via runWorkflow now
+  // (invocation inversion) instead of the SDK's wrapper executing itself.
+  runWorkflow,
+  WorkflowPhaseFailedError,
   type InternalRuntime,
 } from "@glubean/sdk/internal";
 import ky, { type KyInstance, type Options as KyOptions } from "ky";
@@ -24,6 +30,7 @@ import type {
   Trace,
   AssertionDetails,
   AssertionResultInput,
+  BuiltWorkflow,
   GlubeanAction,
   GlubeanEvent,
   HttpClient as _HttpClient,
@@ -2063,6 +2070,29 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
     // Core test body — receives the effective ctx (base or fixture-augmented)
     const runTestBody = async (effectiveCtx: TestContext) => {
       if (test.type === "simple") {
+        // Invocation inversion (plan 0007): a built workflow is a first-class DEF, not a
+        // self-executing test. The SDK marks the wrapper `__glubean_kind === "workflow"`
+        // and attaches the Workflow IR to `__glubean_workflow`; the host run-loop drives
+        // it through the workflow executor here — like RunnerCore.run() dispatches simple
+        // vs steps. This replaces the SDK's old wfTest.fn (which called runWorkflow
+        // itself); the VERDICT mapping is identical, just host-owned: a skipped run →
+        // ctx.skip(reason) (throws GlubeanSkipError, caught by the same dispatcher); a
+        // failed run → rethrow the cause so the dispatcher reports failed + exit 1.
+        const wfIr = (test as { __glubean_workflow?: BuiltWorkflow }).__glubean_workflow;
+        if (wfIr) {
+          const result = await runWorkflow(wfIr, effectiveCtx);
+          if (result.status === "skipped") {
+            // Prefer the user-authored runtime ctx.skip(reason), then the authored
+            // meta.skip, then a generic fallback (parity with the old wfTest.fn).
+            effectiveCtx.skip(
+              result.skipReason ?? wfIr.meta.skip ?? `workflow "${wfIr.meta.id}" skipped`,
+            );
+          }
+          if (result.status === "failed") {
+            throw result.error ?? new WorkflowPhaseFailedError(wfIr.meta.id, "workflow");
+          }
+          return;
+        }
         if (!test.fn) {
           throw new Error(`Invalid test "${test.meta.id}": missing fn`);
         }

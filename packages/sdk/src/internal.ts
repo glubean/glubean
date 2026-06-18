@@ -31,6 +31,17 @@ export {
   __resetInstalledPluginsForTesting,
 } from "./install-plugin.js";
 
+// ── Workflow executor (host integration) ────────────────────────────────────
+// TEMPORARY (plan 0007, slice 1 — invocation inversion): `workflow()` no longer
+// self-executes; the host run-loop drives a built workflow through `runWorkflow`.
+// The harness imports it here while the executor still lives in the SDK. Slice 2
+// relocates `execute.ts` into `@glubean/runner` (node-only) and DELETES this
+// re-export — the harness will then import the executor locally.
+export {
+  runWorkflow,
+  WorkflowPhaseFailedError,
+} from "./workflow/execute.js";
+
 // Runner input channel — runner harness populates these before importing
 // the user module; dispatcher reads them when applying §5.1 algorithm.
 export {

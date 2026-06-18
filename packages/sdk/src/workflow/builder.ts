@@ -9,8 +9,8 @@ import { validatePollBounds, DEFAULT_EVERY_MS } from "../poll-primitives.js";
 import { registerTest } from "../internal.js";
 import { traceComputeFn } from "../contract-core.js";
 import { interpolateTemplate, normalizeEachTable } from "../test/utils.js";
-import type { Test, TestContext } from "../types.js";
-import { runWorkflow, validateRetryMeta, WorkflowPhaseFailedError } from "./execute.js";
+import type { Test } from "../types.js";
+import { validateRetryMeta } from "./execute.js";
 import { projectWorkflow } from "./project.js";
 import type {
   ActionNode,
@@ -527,10 +527,11 @@ export interface WorkflowBuilder<State> {
   ): ChainedWorkflowBuilder<NewState>;
   /**
    * Finalize into a `BuiltWorkflow`: the Workflow IR + a one-element `Test[]`
-   * (a simple test that executes the graph via `runWorkflow`), registered for
-   * discovery. Idempotent — repeat calls return the same handle. The builder
-   * auto-builds on a microtask (mirrors `contract.flow()`), so an exported,
-   * never-built builder is still discovered and registered.
+   * (a simple-shaped wrapper Test carrying the IR; the host run-loop drives the
+   * graph via `runWorkflow`), registered for discovery. Idempotent — repeat
+   * calls return the same handle. The builder auto-builds on a microtask
+   * (mirrors `contract.flow()`), so an exported, never-built builder is still
+   * discovered and registered.
    */
   build(): BuiltWorkflow<State>;
 }
@@ -1604,11 +1605,15 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
     }
     const meta = this._meta;
 
-    // The single simple Test that executes the graph (mirrors the flow's
-    // wrapping, contract-core.ts:1236). The WORKFLOW VERDICT is authoritative:
-    // a failed run rethrows its cause (a thrown-node failure leaves no failed
-    // assertion on the host, so the test must fail via the error); a skipped
-    // run skips the test (whole-workflow skip, matching the harness contract).
+    // The single simple-shaped Test that REPRESENTS the graph (mirrors the flow's
+    // wrapping, contract-core.ts:1236). Invocation inversion (plan 0007): the wrapper
+    // is a first-class workflow DEF — it carries the Workflow IR but does NOT execute
+    // itself. The host run-loop detects `__glubean_kind === "workflow"`, reads the IR
+    // off `__glubean_workflow`, and drives it through the (host-owned) workflow
+    // executor — exactly like RunnerCore.run() dispatches simple vs steps. The SDK
+    // stays authoring-only: it defines the workflow's SHAPE; the host runs it. The
+    // verdict (skipped → ctx.skip(reason); failed → rethrow the cause) is applied by
+    // the host, not here.
     const wfTest: Test = {
       meta: {
         id: meta.id,
@@ -1621,26 +1626,12 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         ...(meta.only !== undefined ? { only: meta.only } : {}),
       },
       type: "simple",
-      fn: async (ctx: TestContext) => {
-        // No early meta.skip exit here: runWorkflow owns the meta.skip branch
-        // and emits each authored node as `skipped` — an explicitly-run
-        // deferred workflow keeps its per-node timeline evidence (codex S2.5
-        // R1 P2). The skipped verdict then skips the wrapped test below.
-        const result = await runWorkflow(handle, ctx);
-        if (result.status === "skipped") {
-          // Prefer the user-authored runtime ctx.skip(reason) (codex S2.5 R6),
-          // then the authored meta.skip, then a generic fallback.
-          ctx.skip(result.skipReason ?? meta.skip ?? `workflow "${meta.id}" skipped`);
-        }
-        if (result.status === "failed") {
-          throw result.error ?? new WorkflowPhaseFailedError(meta.id, "workflow");
-        }
-      },
+      // No `fn`: a built workflow is a DEF the host run-loop owns, not a self-
+      // executing test (plan 0007 invocation inversion). The IR is attached below.
     };
-    // Mark the simple wrapper so the runner-on-engine gate (engineSupports) keeps it
-    // on the LEGACY harness: its fn emits workflow:* events the harness unwraps into
-    // node/poll timeline events, which the browser-safe engine does not (plan 0005
-    // §scope: workflow stays node-only / cloud; codex Phase-3 P2).
+    // Mark the wrapper so the host routes it to the workflow executor (and the
+    // runner-on-engine gate `engineSupports` keeps it OFF the browser-safe engine:
+    // workflow stays node-only / cloud — plan 0005 §scope; codex Phase-3 P2).
     (wfTest as { __glubean_kind?: string }).__glubean_kind = "workflow";
 
     // The handle IS both the Workflow IR (runWorkflow/projectWorkflow consume it
@@ -1659,6 +1650,17 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       ...(this._teardownNote !== undefined ? { teardownNote: this._teardownNote } : {}),
       nodes: this._nodes.slice(),
     }) as unknown as BuiltWorkflow<State>;
+
+    // Invocation inversion (plan 0007): attach the Workflow IR to the wrapper so the
+    // host run-loop can drive `runWorkflow(handle, ctx)` itself (the handle IS a
+    // `Workflow`). Non-enumerable so the wrapper still serializes/spreads as a plain
+    // simple Test — and so the wfTest↔handle cycle (handle[0] === wfTest) never leaks
+    // into JSON. Slice 1 of moving the executor out of the SDK (plan 0007).
+    Object.defineProperty(wfTest, "__glubean_workflow", {
+      value: handle,
+      enumerable: false,
+      configurable: true,
+    });
 
     // Pre-compute the graded projection ONCE; the registry entry and the
     // handle's `_projection` (the scanner's dep-free read, mirroring

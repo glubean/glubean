@@ -3,6 +3,7 @@ import type { ContractCaseRef } from "../contract-types.js";
 import { getRegistry } from "../internal.js";
 import type { Test, TestContext } from "../types.js";
 import { workflow } from "./builder.js";
+import { runWorkflow } from "./execute.js";
 import { projectWorkflow } from "./project.js";
 import type { Workflow, ActionNode, CheckNode } from "./types.js";
 
@@ -293,7 +294,12 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     const t = (wf as unknown as Test[])[0];
     expect(t.type).toBe("simple");
     expect(t.meta).toMatchObject({ id: "dual", name: "dual" });
-    expect(typeof t.fn).toBe("function");
+    // Invocation inversion (plan 0007): the wrapper is a workflow DEF, not a self-
+    // executing test — no `fn`. It is marked `__glubean_kind: "workflow"` and carries
+    // the Workflow IR on `__glubean_workflow` for the host run-loop to drive.
+    expect(t.fn).toBeUndefined();
+    expect((t as { __glubean_kind?: string }).__glubean_kind).toBe("workflow");
+    expect((t as { __glubean_workflow?: unknown }).__glubean_workflow).toBe(wf);
   });
 
   it("is idempotent and registers ONCE with the graded projection", () => {
@@ -373,13 +379,17 @@ describe("workflow build() — discovery handle (S2.5)", () => {
     expect(() => b.meta({ name: "x" })).toThrow(/after build\(\)/);
   });
 
-  it("the wrapped Test fn maps the workflow verdict: passed resolves, failed throws the cause", async () => {
+  // Invocation inversion (plan 0007): the wrapper no longer self-executes, so these
+  // assert the SDK-owned contract — what `runWorkflow` RETURNS — directly. The host's
+  // verdict→test mapping (skipped → ctx.skip; failed → rethrow) is harness-owned now
+  // and covered end-to-end by `runner/src/harness-workflow.test.ts`.
+  it("runWorkflow returns the workflow verdict: passed resolves, failed carries the cause", async () => {
     const ok = workflow("verdict-ok")
       .setup(async () => ({}))
       .compute("c", (s) => s)
       .build();
-    await expect(((ok as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(fnCtx().ctx))
-      .resolves.toBeUndefined();
+    const okResult = await runWorkflow(ok, fnCtx().ctx);
+    expect(okResult.status).toBe("passed");
 
     const bad = workflow("verdict-bad")
       .setup(async () => ({}))
@@ -387,22 +397,21 @@ describe("workflow build() — discovery handle (S2.5)", () => {
         throw new Error("kaput");
       })
       .build();
-    await expect(((bad as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(fnCtx().ctx))
-      .rejects.toThrow("kaput");
+    const badResult = await runWorkflow(bad, fnCtx().ctx);
+    expect(badResult.status).toBe("failed");
+    expect((badResult.error as Error).message).toBe("kaput"); // the node throw is the cause
   });
 
-  it("a skipped workflow run skips the wrapped test; meta.skip maps to TestMeta.deferred", async () => {
+  it("runWorkflow surfaces a skip verdict + reason; meta.skip maps to TestMeta.deferred", async () => {
     const skipping = workflow("verdict-skip")
       .setup(async () => ({}))
       .action("gate", async (c) => {
         c.skip("feature off");
       })
       .build();
-    const { ctx, skips } = fnCtx();
-    await expect(
-      ((skipping as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(ctx),
-    ).rejects.toMatchObject({ name: "SkipError" });
-    expect(skips).toEqual(["feature off"]); // the authored runtime reason survives (codex S2.5 R6)
+    const skipResult = await runWorkflow(skipping, fnCtx().ctx);
+    expect(skipResult.status).toBe("skipped");
+    expect(skipResult.skipReason).toBe("feature off"); // authored runtime reason survives (codex S2.5 R6)
 
     const deferred = workflow({ id: "deferred-wf", skip: "not ready" }).compute("c", (s) => s).build();
     expect(((deferred as unknown as Test[])[0].meta as { deferred?: string }).deferred).toBe("not ready");
@@ -410,7 +419,7 @@ describe("workflow build() — discovery handle (S2.5)", () => {
 
   it("an explicitly-run deferred workflow keeps per-node skipped evidence (codex S2.5 R1 P2)", async () => {
     const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
-    const { ctx, skips } = fnCtx();
+    const { ctx } = fnCtx();
     (ctx as { event: unknown }).event = (ev: { type: string; data?: Record<string, unknown> }) => {
       events.push(ev);
     };
@@ -418,11 +427,10 @@ describe("workflow build() — discovery handle (S2.5)", () => {
       .compute("a", (s) => s)
       .compute("b", (s) => s)
       .build();
-    await expect(
-      ((wf as unknown as Test[])[0].fn as (c: TestContext) => Promise<void>)(ctx),
-    ).rejects.toMatchObject({ name: "SkipError" });
-    expect(skips).toEqual(["not ready"]); // the meta.skip reason, not a generic one
-    // runWorkflow ran first: every authored node emitted a skipped node_end.
+    const result = await runWorkflow(wf, ctx);
+    expect(result.status).toBe("skipped");
+    expect(result.skipReason).toBe("not ready"); // the meta.skip reason, not a generic one
+    // Every authored node still emitted a skipped node_end (per-node evidence preserved).
     const ends = events.filter((e) => e.type === "workflow:node_end");
     expect(ends.map((e) => [e.data?.nodeId, e.data?.status])).toEqual([
       ["a", "skipped"],
