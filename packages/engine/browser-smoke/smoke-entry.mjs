@@ -36,9 +36,11 @@ const httpPost = test({ id: "http-post", name: "http POST json body" }, async (c
   ctx.expect(r.body.hello).toBe("world");
 });
 
-const httpSchema = test({ id: "http-schema", name: "http response schema validates" }, async (ctx) => {
-  const r = await ctx.http.get(`${BASE}/api/echo?x=1`, { schema: { response: okSchema } }).json();
-  ctx.expect(r.method).toBe("GET");
+// Uses a FAILING response schema so the .json() schema hook MUST add a failed
+// assertion (→ status error). A passing schema adds nothing, so a dropped hook would
+// pass silently; EXPECT=error here actually guards the HTTP response-schema path.
+const httpSchema = test({ id: "http-schema", name: "http response schema hook fires (fail path)" }, async (ctx) => {
+  await ctx.http.get(`${BASE}/api/echo?x=1`, { schema: { response: failSchema } }).json();
 });
 
 const steps = test({ id: "steps", name: "steps state carry" })
@@ -148,7 +150,7 @@ const namespace = {
 // Expected status per id — the smoke is green iff every test matches its expectation.
 const EXPECT = {
   "simple-pass": "ok", "simple-fail": "error", "http-get": "ok", "http-post": "ok",
-  "http-schema": "ok", steps: "ok", "step-retry": "ok", "branch-cond": "ok",
+  "http-schema": "error", steps: "ok", "step-retry": "ok", "branch-cond": "ok",
   "branch-switch": "ok", poll: "ok", "validate-pass": "ok", "validate-fail": "error",
   warn: "ok", evidence: "ok", skip: "skipped", fail: "error", "set-timeout": "ok",
   "poll-until": "ok", session: "ok", vars: "ok", mem: "ok",
@@ -175,7 +177,10 @@ async function main() {
     results.push({ id: res.id, status: res.status, assertions: res.assertions, error: res.error });
   }
 
-  const traceCount = events.filter((e) => e.type === "trace").length;
+  // Count ONLY the auto HTTP traces (protocol "http"): the 3 HTTP requests (GET / POST
+  // / schema'd GET) must EACH emit one — the manual ctx.trace() in `evidence` is a
+  // non-http protocol and must not pad this count (else a dropped auto-trace hides).
+  const httpTraceCount = events.filter((e) => e.type === "trace" && e.data?.protocol === "http").length;
   const resolvedAll = Object.keys(EXPECT).every((id) => results.some((r) => r.id === id));
   // An unmapped result id (EXPECT left un-updated) is itself a mismatch — fail loudly.
   const mismatches = results
@@ -187,9 +192,9 @@ async function main() {
           : null,
     )
     .filter(Boolean);
-  const ok = resolvedAll && mismatches.length === 0 && traceCount >= 3;
+  const ok = resolvedAll && mismatches.length === 0 && httpTraceCount >= 3;
 
-  return { ok, resolvedAll, mismatches, traceCount, count: results.length, results };
+  return { ok, resolvedAll, mismatches, httpTraceCount, count: results.length, results };
 }
 
 main()
