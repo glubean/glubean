@@ -68,10 +68,16 @@ export type {
   LoadIterationInfo,
 } from "./runner.js";
 
+export { feeder } from "./feeder.js";
+
 export type {
   FeederBinding,
+  FeederSource,
+  FeederSourceOptions,
   FeederStrategy,
   ExhaustedPolicy,
   FeederStrategyOptions,
   WeightedRandomOptions,
+  FeederDrawContext,
+  FeederDraw,
 } from "./feeder.js";

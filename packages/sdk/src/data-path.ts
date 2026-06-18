@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type DataPathMode = "file" | "project" | "absolute";
@@ -27,6 +27,11 @@ const INTERNAL_FRAME_FILE_NAMES = new Set([
   "data.js",
   "data-path.ts",
   "data-path.js",
+  // load/feeder.ts delegates to the data loaders, so it must be transparent for
+  // caller-relative path resolution (otherwise `./` paths resolve next to the
+  // feeder wrapper instead of the user's module).
+  "feeder.ts",
+  "feeder.js",
 ]);
 
 /**
@@ -111,8 +116,11 @@ export function findCallerFilePath(): string | undefined {
       }
 
       if (framePath === thisFile) continue;
+      // Skip known SDK-internal loader frames anywhere under the package dir
+      // (e.g. `data.ts` at the root, `load/feeder.ts` in a subdir). Restricted
+      // to specific basenames so co-located `*.test.ts` files are NOT skipped.
       if (
-        dirname(framePath) === internalDir &&
+        framePath.startsWith(internalDir + sep) &&
         INTERNAL_FRAME_FILE_NAMES.has(basename(framePath))
       ) {
         continue;
