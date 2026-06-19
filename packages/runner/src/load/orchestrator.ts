@@ -19,6 +19,7 @@ import type {
   FeederBinding,
   FeederDrawContext,
   LoadArtifact,
+  LoadArtifactConfig,
   LoadEndReason,
   LoadPlan,
   LoadResolvedConfig,
@@ -109,6 +110,27 @@ function isMixConfig(config: AnyLoadRunnerConfig): boolean {
 }
 
 /**
+ * Resolve the continuation (bounded-open) config to its ms-normalized artifact
+ * form, applying the documented default backlog policy. Present only when the user
+ * configured `continuation`; the producer-release scheduling that consumes it is
+ * M6 (a bare `primaryComplete` without `releaseProducerSlot` ignores it).
+ */
+function resolveContinuationConfig(
+  c: LoadRunnerConfig["continuation"],
+): LoadArtifactConfig["continuation"] | undefined {
+  if (c === undefined) return undefined;
+  return {
+    ...(c.maxOutstanding !== undefined ? { maxOutstanding: c.maxOutstanding } : {}),
+    ...(c.maxConcurrent !== undefined ? { maxConcurrent: c.maxConcurrent } : {}),
+    ...(c.minPollInterval !== undefined ? { minPollIntervalMs: parseDurationMs(c.minPollInterval) } : {}),
+    ...(c.drainTimeout !== undefined ? { drainTimeoutMs: parseDurationMs(c.drainTimeout) } : {}),
+    // When a configured backlog bound is hit the default is to back-pressure the
+    // producer (`await primaryComplete` waits for capacity); `fail-iteration` is opt-in.
+    onBacklogFull: c.onBacklogFull ?? "block-producer",
+  };
+}
+
+/**
  * Run a load plan locally and return its finalized `LoadArtifact`. Single-scenario
  * closed model; throws on a traffic-mix config (a later milestone) or a plan with
  * neither `duration` nor `iterations` (it would run forever).
@@ -137,6 +159,14 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   }
   if (durationMs !== undefined && (!Number.isFinite(durationMs) || durationMs <= 0)) {
     throw new Error(`loadRunner "${plan.id}": duration must resolve to a positive number of ms (got ${durationMs})`);
+  }
+
+  const continuationCfg = resolveContinuationConfig(single.continuation);
+  if (continuationCfg?.maxOutstanding !== undefined && (!Number.isInteger(continuationCfg.maxOutstanding) || continuationCfg.maxOutstanding < 1)) {
+    throw new Error(`loadRunner "${plan.id}": continuation.maxOutstanding must be a positive integer (got ${continuationCfg.maxOutstanding})`);
+  }
+  if (continuationCfg?.maxConcurrent !== undefined && (!Number.isInteger(continuationCfg.maxConcurrent) || continuationCfg.maxConcurrent < 1)) {
+    throw new Error(`loadRunner "${plan.id}": continuation.maxConcurrent must be a positive integer (got ${continuationCfg.maxConcurrent})`);
   }
 
   const now = opts.now ?? (() => Date.now());
@@ -176,6 +206,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     ...(iterations !== undefined ? { iterations } : {}),
     ...(rampUpMs !== undefined ? { rampUpMs } : {}),
     ...(thinkTimeMs !== undefined ? { pacing: { thinkTimeMs } } : {}),
+    ...(continuationCfg !== undefined ? { continuation: continuationCfg } : {}),
   };
 
   const start = now();

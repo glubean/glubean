@@ -374,3 +374,40 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
     expect(art.summary.successfulIterations).toBe(0);
   });
 });
+
+describe("runLoad — continuation config resolution (M6-a)", () => {
+  const noop = () => loadScenario("noop").step("noop", async () => {}).build();
+
+  it("records the continuation config ms-normalized with the default backlog policy", async () => {
+    const plan = loadRunner("cont-cfg", {
+      scenario: noop(),
+      concurrency: 1,
+      iterations: 1,
+      continuation: { maxOutstanding: 5, maxConcurrent: 2, minPollInterval: "250ms", drainTimeout: "2s" },
+    });
+    const art = await runLoad(plan);
+    expect(art.config.continuation).toEqual({
+      maxOutstanding: 5,
+      maxConcurrent: 2,
+      minPollIntervalMs: 250,
+      drainTimeoutMs: 2000,
+      onBacklogFull: "block-producer", // defaulted
+    });
+  });
+
+  it("omits continuation from the artifact config when unconfigured", async () => {
+    const plan = loadRunner("no-cont", { scenario: noop(), concurrency: 1, iterations: 1 });
+    const art = await runLoad(plan);
+    expect(art.config.continuation).toBeUndefined();
+  });
+
+  it("rejects a non-positive continuation.maxOutstanding", async () => {
+    const plan = loadRunner("bad-cont", {
+      scenario: noop(),
+      concurrency: 1,
+      iterations: 1,
+      continuation: { maxOutstanding: 0 },
+    });
+    await expect(runLoad(plan)).rejects.toThrow(/continuation\.maxOutstanding must be a positive integer/);
+  });
+});
