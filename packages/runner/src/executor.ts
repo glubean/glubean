@@ -1,204 +1,20 @@
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
-import { readFile, writeFile, rm } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, resolve, join } from "node:path";
-import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 import type { Trace, GlubeanAction, GlubeanEvent, RunContext } from "@glubean/sdk";
 import type { SharedRunConfig } from "./config.js";
 import { generateSummary } from "./generate_summary.js";
 import { buildRunContext } from "./run_context.js";
 import { discoverSessionFile, createContextWithSession } from "./orchestrator.js";
+import {
+  resolveRunnerRoot,
+  resolveTsxPath,
+  prepareZeroProject,
+  type RunnerWarning,
+} from "./runner-resolve.js";
 
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_TIMEOUT_MS = 30000;
-
-// ── Project-local runner resolution (Plan 1) ────────────────────────────────
-
-/**
- * Walk up from a starting file path looking for the first package.json
- * whose `name` field matches `expectedName`. Layout-independent — works
- * regardless of dist/ depth.
- *
- * Returns the realpath of the package root, or undefined if not found.
- */
-function findPackageRoot(startFile: string, expectedName: string): string | undefined {
-  let dir = dirname(startFile);
-  for (let i = 0; i < 16; i++) {
-    const candidate = resolve(dir, "package.json");
-    if (existsSync(candidate)) {
-      try {
-        const pkg = JSON.parse(readFileSync(candidate, "utf-8"));
-        if (pkg?.name === expectedName) {
-          try {
-            return realpathSync(dir);
-          } catch {
-            return dir;
-          }
-        }
-      } catch {
-        // corrupt / non-json; keep walking
-      }
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-  return undefined;
-}
-
-/**
- * Compare two version strings (numeric major.minor.patch). Returns true
- * if `a < b`. Tolerant of missing fields and non-numeric tails.
- */
-function semverLt(a: string, b: string): boolean {
-  const parse = (s: string) =>
-    s.split(/[.\-+]/).slice(0, 3).map((p) => parseInt(p, 10) || 0);
-  const [aMajor, aMinor, aPatch] = parse(a);
-  const [bMajor, bMinor, bPatch] = parse(b);
-  if (aMajor !== bMajor) return aMajor < bMajor;
-  if (aMinor !== bMinor) return aMinor < bMinor;
-  return aPatch < bPatch;
-}
-
-/** Diagnostic warning emitted by the executor's runner resolver. */
-interface RunnerWarning {
-  /** Human-readable message. */
-  message: string;
-  /** Stable code for filtering / consumer dedupe. */
-  code: "runner_fallback_no_project" | "runner_fallback_no_dist" | "runner_protocol_old" | "runner_pkg_root_not_found";
-}
-
-interface ResolvedRunner {
-  distDir: string;
-  pkgRoot: string;
-  source: "project" | "bundled";
-  resolvedFrom?: string;
-  version?: string;
-  pendingWarnings: RunnerWarning[];
-}
-
-/**
- * Resolve the runner dist/ directory + package root.
- *
- * Preference: project-local `@glubean/runner` (found from `projectCwd`'s
- * `node_modules` chain). Fallback: bundled (the consumer's own runner copy).
- *
- * Returns warnings to be yielded as `{ type: "warning", ... }` events at
- * the start of every `run()` call. Always emits a warning when falling
- * back to bundled (so users see why "configure() values..." errors may
- * appear in a misconfigured project).
- */
-function resolveRunnerRoot(
-  projectCwd: string,
-  bundledDistDir: string,
-  bundledPkgRoot: string,
-): ResolvedRunner {
-  const warnings: RunnerWarning[] = [];
-  try {
-    // Root `createRequire` at a stub path INSIDE the project cwd — not
-    // at `import.meta.url` (the workspace executor file). If we use the
-    // workspace URL, Node's resolver returns the workspace's own
-    // `@glubean/runner` via package self-reference (the `exports` field
-    // points back at itself), regardless of `paths: [projectCwd]`. With
-    // a cwd-rooted stub there's no self-reference and Node walks the
-    // project's node_modules chain correctly.
-    const req = createRequire(resolve(projectCwd, "__glubean_resolve_stub__.js"));
-    const mainEntry = req.resolve("@glubean/runner");
-
-    const pkgRoot = findPackageRoot(mainEntry, "@glubean/runner");
-    if (!pkgRoot) {
-      warnings.push({
-        code: "runner_pkg_root_not_found",
-        message: `Could not locate @glubean/runner's package.json above ${mainEntry}; using bundled runner.`,
-      });
-      return {
-        distDir: bundledDistDir,
-        pkgRoot: bundledPkgRoot,
-        source: "bundled",
-        pendingWarnings: warnings,
-      };
-    }
-
-    const projectDistDir = dirname(mainEntry);
-    if (!existsSync(resolve(projectDistDir, "harness.js"))) {
-      warnings.push({
-        code: "runner_fallback_no_dist",
-        message: `Project @glubean/runner at ${pkgRoot} has no built harness.js (looked in ${projectDistDir}); using bundled runner.`,
-      });
-      return {
-        distDir: bundledDistDir,
-        pkgRoot: bundledPkgRoot,
-        source: "bundled",
-        pendingWarnings: warnings,
-      };
-    }
-
-    let version: string | undefined;
-    let projectProtocol: string | undefined;
-    try {
-      const pkg = JSON.parse(readFileSync(resolve(pkgRoot, "package.json"), "utf-8"));
-      version = pkg.version;
-      projectProtocol = pkg.glubeanRunnerProtocol;
-    } catch {
-      // best effort
-    }
-
-    // Min-protocol check: emit a warning if project's protocol is older
-    // than what this consumer needs, but DON'T fall back. Using project-
-    // local runner with an old protocol just means some new env channels
-    // may be silently ignored. Falling back to bundled when the project
-    // has its own SDK would re-introduce the dual-package hazard the
-    // whole fix exists to prevent. Project-local wins; missing features
-    // are surfaced via warning so the user knows to upgrade.
-    try {
-      const bundledPkg = JSON.parse(
-        readFileSync(resolve(bundledPkgRoot, "package.json"), "utf-8"),
-      );
-      const bundledMin: string | undefined = bundledPkg.glubeanRunnerProtocolMinimum;
-      if (bundledMin && (!projectProtocol || semverLt(projectProtocol, bundledMin))) {
-        warnings.push({
-          code: "runner_protocol_old",
-          message:
-            `Project @glubean/runner ${version ?? "<unknown>"} declares glubeanRunnerProtocol=${projectProtocol ?? "<unset>"}, ` +
-            `but this consumer was built for >= ${bundledMin}. ` +
-            `Using project-local runner anyway; some newer features may be silently unavailable. ` +
-            `Run \`npm i -D @glubean/runner@latest\` to silence.`,
-        });
-      }
-    } catch {
-      // bundled pkg.json unreadable — skip the check; happens in test fixtures
-    }
-
-    return {
-      distDir: projectDistDir,
-      pkgRoot,
-      source: "project",
-      resolvedFrom: mainEntry,
-      version,
-      pendingWarnings: warnings,
-    };
-  } catch {
-    // No project-local runner installed. Plan 1 AC4: emit a warning whenever
-    // bundled is used so users see why version-skew "configure() values..."
-    // errors may appear.
-    warnings.push({
-      code: "runner_fallback_no_project",
-      message:
-        `No project-local @glubean/runner found at ${projectCwd}; using consumer's bundled runner. ` +
-        `If your tests import @glubean/sdk from this project, install runner to keep module identity ` +
-        `consistent: \`npm i -D @glubean/runner\`.`,
-    });
-    return {
-      distDir: bundledDistDir,
-      pkgRoot: bundledPkgRoot,
-      source: "bundled",
-      pendingWarnings: warnings,
-    };
-  }
-}
-
-// ── End of project-local resolution ─────────────────────────────────────────
 
 // ── Sibling-file suggestions for missing test file (Plan 4) ────────────────
 
@@ -509,15 +325,6 @@ export interface ExecutorOptions {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-let _tsxPath: string | undefined;
-
-function resolveTsxPath(): string {
-  if (_tsxPath) return _tsxPath;
-  const req = createRequire(import.meta.url);
-  _tsxPath = resolve(dirname(req.resolve("tsx/package.json")), "dist/cli.mjs");
-  return _tsxPath;
-}
-
 // ── TestExecutor ────────────────────────────────────────────────────────────
 
 export class TestExecutor {
@@ -548,8 +355,8 @@ export class TestExecutor {
   private _zeroProjectSetup = false;
   private _zeroProjectTsxArgs: string[] = [];
   private _zeroProjectEnv: Record<string, string> = {};
-  private _tempPackageJson: "created" | "patched" | false = false;
-  private _originalPackageJson?: string;
+  /** Undoes any temp package.json created/patched by zero-project setup. */
+  private _zeroProjectCleanup: () => void = () => {};
 
   // ── Resolved runner dist (Plan 1 — project-local or bundled) ──────────
   /** Directory containing harness.js, zero-project-register.mjs. */
@@ -746,62 +553,17 @@ export class TestExecutor {
     if (this._zeroProjectSetup) return;
     this._zeroProjectSetup = true;
 
-    if (existsSync(join(cwd, "node_modules", "@glubean", "sdk"))) return;
-
-    // Plan 1: relocate zero-project subpaths with the harness — if harness
-    // moved to project-local runner, register + vendored root must move too,
-    // otherwise scratch mode mixes project harness with bundled @glubean/*
-    // resolution.
-    const registerPath = resolve(this._runnerDistDir, "zero-project-register.mjs");
-    this._zeroProjectTsxArgs.push("--import", registerPath);
-
-    // Use the runner package root as the synthetic parent. From there,
-    // Node's normal package resolution finds sibling @glubean/* packages in
-    // both workspace installs (packages/runner/node_modules) and published
-    // installs (ancestor node_modules).
-    this._zeroProjectEnv["GLUBEAN_VENDORED_ROOT"] = this._runnerPkgRoot;
-
-    const pkgPath = join(cwd, "package.json");
-    if (!existsSync(pkgPath)) {
-      try {
-        writeFileSync(pkgPath, '{"type":"module"}\n');
-        this._tempPackageJson = "created";
-      } catch {
-        // Non-critical
-      }
-    } else {
-      try {
-        const original = readFileSync(pkgPath, "utf-8");
-        const pkg = JSON.parse(original);
-        if (pkg.type !== "module") {
-          this._originalPackageJson = original;
-          pkg.type = "module";
-          writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
-          this._tempPackageJson = "patched";
-        }
-      } catch {
-        // Non-critical
-      }
-    }
+    const zp = prepareZeroProject(cwd, this._runnerDistDir, this._runnerPkgRoot);
+    this._zeroProjectTsxArgs = zp.tsxArgs;
+    this._zeroProjectEnv = zp.env;
+    this._zeroProjectCleanup = zp.cleanup;
   }
 
   /**
    * Internal: clean up zero-project temp files.
    */
   private _cleanupZeroProject(): void {
-    if (!this._tempPackageJson) return;
-    const cwd = this.options.cwd || process.cwd();
-    const pkgPath = join(cwd, "package.json");
-    try {
-      if (this._tempPackageJson === "created") {
-        unlinkSync(pkgPath);
-      } else if (this._tempPackageJson === "patched" && this._originalPackageJson) {
-        writeFileSync(pkgPath, this._originalPackageJson);
-      }
-    } catch {
-      // Non-critical
-    }
-    this._tempPackageJson = false;
+    this._zeroProjectCleanup();
   }
 
   async *run(
