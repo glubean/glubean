@@ -2,30 +2,24 @@
  * `glubean load [target]` — run performance plans (M4-c).
  *
  * Discovers `loadRunner()` exports in `.load.ts` files, runs each through the
- * closed-model orchestrator (`@glubean/runner` `runLoad`), writes each finalized
- * `LoadArtifact` to `.glubean/<runnerId>.load.result.json`, prints a per-plan
- * summary, and exits non-zero if any plan's `summary.pass` is false (a crash or a
- * breached threshold). This is the dedicated load path — separate from
- * `glubean run` (the per-test ProjectRunner), since load's execution model differs.
+ * closed-model orchestrator (`@glubean/runner` `runLoad`) IN A CHILD PROCESS,
+ * writes each finalized `LoadArtifact` to `.glubean/<runnerId>.load.result.json`,
+ * prints a per-plan summary, and exits non-zero if any plan's `summary.pass` is
+ * false (a crash or a breached threshold). This is the dedicated load path —
+ * separate from `glubean run` (the per-test ProjectRunner), since load's
+ * execution model differs.
  *
- * KNOWN LIMITATION (in-process MVP — subprocess parity is a tracked follow-on):
- * the user `.load.ts` is imported IN-PROCESS and `runLoad` is the CLI's bundled
- * `@glubean/runner`/`@glubean/sdk`. When the SDK the load file resolves and the
- * SDK `runLoad` uses are the SAME instance — a local/workspace (deduped) install,
- * the dev-time common case — the shared runtime carrier works correctly. A
- * GLOBALLY-installed CLI run against a project with its OWN, non-deduped
- * `@glubean/sdk` can split-brain the runtime carrier (configure()/plugins). The
- * fix is subprocess execution with project resolution, as `glubean run` does;
- * until then prefer a local CLI install for load.
+ * Each `.load.ts` runs via `runLoadFileInSubprocess`, which spawns the
+ * project-local runner harness (as `glubean run` does) so the harness and the
+ * user file co-resolve one `@glubean/sdk` — no split-brain when a globally
+ * installed CLI runs against a project with its own non-deduped sdk.
  */
 import { resolve, dirname } from "node:path";
 import { stat, readdir, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
-import { tsImport } from "tsx/esm/api";
-import { bootstrap, loadProjectEnv, runLoad } from "@glubean/runner";
-import type { LoadArtifact, LoadPlan } from "@glubean/sdk/load";
+import { loadProjectEnv, runLoadFileInSubprocess } from "@glubean/runner";
+import type { LoadArtifact } from "@glubean/sdk/load";
 import { resolveEnvFileName } from "../lib/active_env.js";
 import { findProjectConfig } from "./run.js";
 
@@ -49,55 +43,6 @@ const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".glubean"])
 // twice. An explicit file target still runs whatever the user named.
 function isLoadSourceFile(name: string): boolean {
   return name.endsWith(".load.ts");
-}
-
-/** A LoadPlan-shaped export: the runnable marker the orchestrator consumes. */
-function isLoadPlan(value: unknown): value is LoadPlan {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { __glubean_type?: unknown }).__glubean_type === "load-runner"
-  );
-}
-
-/** Collect every LoadPlan exported by a module namespace (flattening `.each()`
- *  arrays of plans). */
-export function collectLoadPlans(ns: Record<string, unknown>): LoadPlan[] {
-  const plans: LoadPlan[] = [];
-  for (const value of Object.values(ns)) {
-    if (isLoadPlan(value)) {
-      plans.push(value);
-    } else if (Array.isArray(value)) {
-      for (const v of value) if (isLoadPlan(v)) plans.push(v);
-    }
-  }
-  return plans;
-}
-
-/**
- * Wrap an env map so a missing key falls back to `process.env` — the same
- * shell/CI env semantics the test harness gives `ctx.vars` / `ctx.secrets`, so
- * `BASE_URL=... glubean load ...` resolves even without a `.env` entry. Spreading
- * the proxy (for `ctx.vars.all()`) still yields only the explicit map's own keys,
- * not the whole environment.
- */
-export function withProcessEnvFallback(map: Record<string, string>): Record<string, string> {
-  // Parity with the test harness's env proxy: an empty/nullish map value is
-  // treated as MISSING and falls back to process.env (so `BASE_URL=` in .env plus
-  // `BASE_URL=... glubean load` resolves), and process.env empties read as unset.
-  return new Proxy(map, {
-    get(target, prop) {
-      if (typeof prop === "string") {
-        const value = target[prop];
-        if (value !== undefined && value !== null && value !== "") return value;
-        return process.env[prop] || undefined;
-      }
-      return Reflect.get(target, prop);
-    },
-    has(target, prop) {
-      return Reflect.has(target, prop) || (typeof prop === "string" && process.env[prop] !== undefined);
-    },
-  });
 }
 
 /** A filesystem-safe result filename for a runner id. */
@@ -126,58 +71,32 @@ export interface RunLoadFilesResult {
 }
 
 /**
- * Import each load file, run every plan it exports, and collect the artifacts.
- * A single file's import failure is recorded as a per-file error and the rest
- * still run — completed artifacts are never discarded because a LATER file is
- * broken. Free of fs writes / process exit / printing so it is unit-testable.
+ * Run each load file's plans in a CHILD PROCESS (`runLoadFileInSubprocess`) so the
+ * harness and the user file co-resolve one `@glubean/sdk`, and collect the
+ * artifacts. A single file's import failure (or a crash) is recorded as a per-file
+ * error and the rest still run — completed artifacts are never discarded because a
+ * LATER file is broken. The raw `{ vars, secrets }` flow to the child, which
+ * applies the process.env fallback. Free of fs writes / process exit / printing.
  */
 export async function runLoadFiles(
   files: string[],
   opts: {
     vars: Record<string, string>;
     secrets: Record<string, string>;
-    now?: () => number;
+    /** Project root the child runs in — drives runner resolution + bare imports. */
+    cwd: string;
   },
 ): Promise<RunLoadFilesResult> {
   const outcomes: LoadRunOutcome[] = [];
   const errors: LoadFileError[] = [];
   for (const file of files) {
-    let ns: Record<string, unknown>;
-    try {
-      // Import through tsx so full TypeScript (enums, parameter properties, …) is
-      // transformed — the published CLI runs as plain Node, whose strip-only TS
-      // would reject non-erasable syntax. Node still resolves the file's bare
-      // imports (`@glubean/sdk/load`) relative to the FILE's location, so a
-      // monorepo package target resolves even when the cwd has no node_modules.
-      ns = (await tsImport(pathToFileURL(file).href, import.meta.url)) as Record<string, unknown>;
-    } catch (e) {
-      errors.push({
-        file,
-        message:
-          `failed to import load file ${file}: ${e instanceof Error ? e.message : String(e)} ` +
-          `(ensure @glubean/sdk is installed/resolvable from the file; a scratch/zero-project ` +
-          `checkout without node_modules is not yet supported for load)`,
-      });
-      continue; // keep going so earlier/later files still produce results
-    }
-    for (const plan of collectLoadPlans(ns)) {
-      try {
-        // runLoad can throw for an invalid plan (traffic-mix, no termination
-        // bound, bad bounds) — record it per-plan and keep going so other plans'
-        // completed artifacts are still produced + persisted.
-        const artifact = await runLoad(plan, {
-          vars: opts.vars,
-          secrets: opts.secrets,
-          ...(opts.now ? { now: opts.now } : {}),
-        });
-        outcomes.push({ file, runnerId: plan.id, artifact });
-      } catch (e) {
-        errors.push({
-          file,
-          message: `load plan "${plan.id}" (${file}) failed: ${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
-    }
+    const res = await runLoadFileInSubprocess(file, {
+      vars: opts.vars,
+      secrets: opts.secrets,
+      cwd: opts.cwd,
+    });
+    for (const o of res.outcomes) outcomes.push({ file, runnerId: o.runnerId, artifact: o.artifact });
+    for (const e of res.errors) errors.push({ file, message: e.message });
   }
   return { outcomes, errors };
 }
@@ -297,15 +216,14 @@ export async function loadCommand(
   }
 
   // Derive the project root from the discovered file (not the shell cwd) so a
-  // targeted run outside cwd uses the load file's project for bootstrap / env /
-  // `.glubean` output.
+  // targeted run outside cwd uses the load file's project for runner resolution /
+  // env / `.glubean` output.
   const { rootDir } = await findProjectConfig(dirname(files[0]));
 
   // An EXPLICIT --env-file that's missing is an error (mirrors `glubean run`) —
   // silently running with empty env could send load to the wrong target / run
-  // without credentials. Validate BEFORE bootstrap so a missing file fails fast
-  // instead of running project setup code first. A resolved default/active env
-  // file may be absent.
+  // without credentials. Validate the env file up front so a missing one fails
+  // fast. A resolved default/active env file may be absent.
   const userSpecifiedEnvFile = options.envFile !== undefined;
   const envFileName = userSpecifiedEnvFile ? options.envFile! : await resolveEnvFileName(rootDir);
   if (userSpecifiedEnvFile && !existsSync(resolve(rootDir, envFileName))) {
@@ -313,19 +231,16 @@ export async function loadCommand(
     process.exit(1);
   }
 
-  // Plugins (matchers / protocol adapters) must be registered before importing
-  // load files that may use them, same as the test/contract paths.
-  await bootstrap(rootDir);
-
+  // Plugin bootstrap happens INSIDE each subprocess (the harness registers
+  // matchers / protocol adapters before importing the load file), so the CLI no
+  // longer bootstraps here.
   const { vars, secrets } = await loadProjectEnv(rootDir, envFileName);
 
-  // A single file's import failure is collected (not thrown) so earlier/later
-  // files still produce + persist results.
-  const { outcomes, errors } = await runLoadFiles(files, {
-    // process.env fallback so shell/CI-supplied vars/secrets resolve, same as run.
-    vars: withProcessEnvFallback(vars),
-    secrets: withProcessEnvFallback(secrets),
-  });
+  // A single file's import failure (or crash) is collected (not thrown) so
+  // earlier/later files still produce + persist results. Pass the raw resolved
+  // env — the child re-applies the process.env fallback (a Proxy can't cross the
+  // process boundary), so shell/CI-supplied vars/secrets still resolve.
+  const { outcomes, errors } = await runLoadFiles(files, { vars, secrets, cwd: rootDir });
 
   // Persist every completed artifact FIRST — a later broken file must not discard
   // an expensive successful plan's result.
