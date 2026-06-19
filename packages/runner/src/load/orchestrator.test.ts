@@ -591,3 +591,273 @@ describe("runLoad — producer release scheduling (M6-b)", () => {
     expect(art.summary.continuation?.rejectedReleaseSignals).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("runLoad — long-poll advisory (M6-d)", () => {
+  /** submit → poll-for-done, optionally marking / releasing the primary boundary. */
+  const submitThenPoll = (boundary: "none" | "bare" | "release") =>
+    loadScenario("async-job")
+      .step("submit", async (ctx) => {
+        await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        if (boundary === "bare") await ctx.report.primaryComplete("submitted");
+        if (boundary === "release") await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+      })
+      .poll("await-done", async () => ({ done: true }), {
+        until: (_c: unknown, r: { done: boolean }) => r.done,
+        every: 1,
+        maxAttempts: 1,
+        timeout: 2000,
+      })
+      .build();
+
+  it("advises when a long poll runs and the slot is never released (no primaryComplete)", async () => {
+    const plan = loadRunner("async-job", { scenario: submitThenPoll("none"), concurrency: 1, iterations: 1 });
+    const art = await runLoad(plan);
+    expect(art.runtime.slotModel).toBe("end-to-end");
+    expect(art.summary.advisories?.some((a) => a.includes("primaryComplete"))).toBe(true);
+  });
+
+  it("advises when release is called only AFTER the tail poll (misordered, slot held)", async () => {
+    // submit → poll → primaryComplete(release): the release comes too late, the slot was
+    // held for the whole poll. The advisory must fire (release belongs before the tail).
+    const plan = loadRunner("late-release", {
+      scenario: loadScenario("late-release")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        })
+        .poll("await-done", async () => ({ done: true }), {
+          until: (_c: unknown, r: { done: boolean }) => r.done,
+          every: 1,
+          maxAttempts: 1,
+          timeout: 2000,
+        })
+        .step("release-late", async (ctx) => {
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+      continuation: { maxOutstanding: 4 },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.advisories?.some((a) => a.includes("primaryComplete"))).toBe(true);
+  });
+
+  it("advises for a misordered late release even when the continuation is drain-abandoned", async () => {
+    // submit → poll1 (held) → release → slow poll2 that outlasts drainTimeout (abandoned at
+    // finalize, so its endIteration never runs). The advisory must still fire — poll1 held
+    // the slot, and the check runs at release time, before the abandonment.
+    const plan = loadRunner("late-release-abandoned", {
+      scenario: loadScenario("late-release-abandoned")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        })
+        .poll("await-1", async () => ({ done: true }), {
+          until: (_c: unknown, r: { done: boolean }) => r.done,
+          every: 1,
+          maxAttempts: 1,
+          timeout: 2000,
+        })
+        .step("release", async (ctx) => {
+          await ctx.report.primaryComplete("s", { releaseProducerSlot: true });
+        })
+        .poll(
+          "await-2-slow",
+          async () => {
+            await new Promise((r) => setTimeout(r, 500)); // outlasts the 20ms drain timeout
+            return { done: false };
+          },
+          { until: (_c: unknown, r: { done: boolean }) => r.done, every: 1, maxAttempts: 2, timeout: 1000 },
+        )
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+      continuation: { maxOutstanding: 4, drainTimeout: "20ms" },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.advisories?.some((a) => a.includes("primaryComplete"))).toBe(true);
+  });
+
+  it("still advises for a bare primaryComplete that marks the phase but holds the slot", async () => {
+    // P2: a bare primaryComplete records the boundary but does NOT release the slot,
+    // so the tail still ties it up — the advisory must persist.
+    const plan = loadRunner("async-job", { scenario: submitThenPoll("bare"), concurrency: 1, iterations: 1 });
+    const art = await runLoad(plan);
+    expect(art.runtime.slotModel).toBe("end-to-end-measured"); // boundary recorded, slot NOT released
+    expect(art.summary.advisories?.some((a) => a.includes("primaryComplete"))).toBe(true);
+  });
+
+  it("advises for a bare primaryComplete tail poll even when a continuation request follows", async () => {
+    // submit → bare primaryComplete (marks the phase but holds the slot) → poll → another
+    // request. The post-boundary request is continuation; the slot was held through the
+    // poll → advise (the bare primaryComplete should have been a releasing one).
+    const plan = loadRunner("bare-pc-tail", {
+      scenario: loadScenario("bare-pc-tail")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted"); // BARE — no releaseProducerSlot
+        })
+        .poll("await-done", async () => ({ done: true }), {
+          until: (_c: unknown, r: { done: boolean }) => r.done,
+          every: 1,
+          maxAttempts: 1,
+          timeout: 2000,
+        })
+        .step("fetch-result", async (ctx) => {
+          await ctx.http.get(`${base}/items/1`).json(); // continuation request after the poll
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.advisories?.some((a) => a.includes("primaryComplete"))).toBe(true);
+  });
+
+  it("omits the advisory once the producer slot is released", async () => {
+    const plan = loadRunner("async-job", { scenario: submitThenPoll("release"), concurrency: 1, iterations: 1 });
+    const art = await runLoad(plan);
+    expect(art.runtime.slotModel).toBe("producer-released");
+    expect(art.summary.advisories).toBeUndefined();
+  });
+
+  it("advises for an unreleased tail-poll path even when a sibling iteration released", async () => {
+    // iteration 0 releases; iteration 1 runs submit→poll with NO release. The run-wide
+    // continuation summary exists (iter0 released), but the advisory must still fire for
+    // the closed path (iter1) — gating is per-iteration, not artifact-wide.
+    const plan = loadRunner("mixed", {
+      input: ({ iteration }) => ({ release: iteration.index === 0 }),
+      scenario: loadScenario<{ release: boolean }>("mixed")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          if (ctx.input.release) await ctx.report.primaryComplete("s", { releaseProducerSlot: true });
+        })
+        .poll("await-done", async () => ({ done: true }), {
+          until: (_c: unknown, r: { done: boolean }) => r.done,
+          every: 1,
+          maxAttempts: 1,
+          timeout: 2000,
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 2,
+      continuation: { maxOutstanding: 4 },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.continuation).toBeDefined(); // iter0 released → summary exists run-wide
+    expect(art.summary.advisories?.some((a) => a.includes("primaryComplete"))).toBe(true); // iter1 still advised
+  });
+
+  it("omits the advisory when release was requested but rejected (already tried)", async () => {
+    // concurrency 2 / maxOutstanding 1 / a slow continuation poll: one iteration's
+    // release parks behind the other's held slot and is rejected (drain bound). The
+    // user DID request release, so "call releaseProducerSlot" would be misleading — the
+    // advisory must not fire even though no `producer:released` may have succeeded.
+    const plan = loadRunner("async-job", {
+      scenario: loadScenario("async-job")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .poll("await-done", async () => ({ done: false }), {
+          until: (_c: unknown, r: { done: boolean }) => r.done, // never satisfied → polls to timeout
+          every: 5,
+          timeout: 500,
+        })
+        .build(),
+      concurrency: 2,
+      duration: "40ms",
+      continuation: { maxOutstanding: 1, drainTimeout: "15ms" },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.continuation).toBeDefined(); // release WAS requested (some rejected)
+    expect(art.summary.continuation?.rejectedReleaseSignals).toBeGreaterThanOrEqual(1);
+    expect(art.summary.advisories).toBeUndefined();
+  });
+
+  it("omits the advisory for a scenario with no poll step", async () => {
+    const plan = loadRunner("browse-checkout", {
+      scenario: browseCheckout(),
+      concurrency: 1,
+      iterations: 1,
+      input: { sku: "1" },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.advisories).toBeUndefined();
+  });
+
+  it("omits the advisory when the poll is a readiness wait BEFORE the primary request", async () => {
+    // The poll (step 0, a token/readiness wait that even makes its own request) runs
+    // BEFORE the load-producing request (step 1). It's not a post-primary tail, so the
+    // advisory must not fire — releasing after the later request wouldn't help.
+    const plan = loadRunner("readiness-first", {
+      scenario: loadScenario("readiness-first")
+        .poll(
+          "await-ready",
+          async (ctx) => {
+            const r = (await ctx.http.get(`${base}/items/1`).json()) as { name: string };
+            return { ready: r.name === "widget" };
+          },
+          { until: (_c: unknown, r: { ready: boolean }) => r.ready, every: 1, maxAttempts: 1, timeout: 2000 },
+        )
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.advisories).toBeUndefined();
+  });
+
+  it("omits the advisory when an earlier failure means the poll never runs (P3)", async () => {
+    // The poll is statically present but a hard throw in the first step aborts the
+    // iteration before it — so no poll executes and the advisory must not fire.
+    const plan = loadRunner("never-polls", {
+      scenario: loadScenario("never-polls")
+        .step("boom", async () => {
+          throw new Error("fails before the poll");
+        })
+        .poll("await-done", async () => ({ done: true }), {
+          until: (_c: unknown, r: { done: boolean }) => r.done,
+          every: 1,
+          maxAttempts: 1,
+          timeout: 2000,
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.failedIterations).toBe(1); // the throw failed the iteration
+    expect(art.summary.advisories).toBeUndefined(); // poll never executed → no advisory
+  });
+
+  it("omits the advisory when a setup request precedes a readiness poll before the load", async () => {
+    // setup/auth request (step 0) → readiness poll (step 1) → submit (step 2). A request
+    // (the real load) FOLLOWS the poll, so it's not a post-primary tail — no advisory,
+    // even though the setup request preceded it.
+    const plan = loadRunner("setup-readiness", {
+      scenario: loadScenario("setup-readiness")
+        .step("auth", async (ctx) => {
+          await ctx.http.get(`${base}/items/1`).json();
+        })
+        .poll(
+          "await-ready",
+          async (ctx) => {
+            const r = (await ctx.http.get(`${base}/items/1`).json()) as { name: string };
+            return { ready: r.name === "widget" };
+          },
+          { until: (_c: unknown, r: { ready: boolean }) => r.ready, every: 1, maxAttempts: 1, timeout: 2000 },
+        )
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.advisories).toBeUndefined();
+  });
+});

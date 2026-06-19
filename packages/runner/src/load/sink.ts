@@ -32,6 +32,15 @@ export interface LoadIterationEnvelope {
  *  the first `primaryComplete` boundary (M5); `releaseProducerSlot` is M6. */
 type Phase = "primary" | "continuation";
 
+/** Per-iteration step-index span for the long-poll advisory (see the `iterSpan` field). */
+type IterPollSpan = {
+  minReq: number;
+  maxPrimaryReq: number;
+  maxUnreleasedPoll: number;
+  primaryCompleted: boolean;
+  releaseRequested: boolean;
+};
+
 /** Distributive Omit — applied per union member so each LoadEvent variant keeps
  *  its own discriminant-specific fields (a plain Omit over the union would keep
  *  only the common envelope keys). */
@@ -63,6 +72,24 @@ export class LoadSink {
   // into continuation. (Step aggregates stay coherent because the reducer keys steps
   // by stepId, not by phase, so a step that spans the boundary is one row.)
   private readonly phases = new Map<string, Phase>();
+  // Per-iteration state for spotting a poll that held the producer slot without (timely)
+  // release — the long-poll advisory's target. All step indices are STEP-SCOPED; a poll's
+  // own attempt requests share its index, and unscoped setup/teardown requests (no
+  // stepIndex) don't enter the span. Two boundaries gate the spans separately:
+  //  - `primaryCompleted` (a bare OR releasing `primaryComplete`): after it, requests are
+  //    continuation-phase, so `maxPrimaryReq` (the latest PRIMARY-phase request) stops
+  //    advancing — a post-boundary request must not disqualify a held poll;
+  //  - `releaseRequested` (a releasing `primaryComplete`): after it the slot is FREED, so
+  //    `maxUnreleasedPoll` (the latest poll that ran while the slot was held) stops.
+  // Plus `minReq`, the earliest request. The advisory fires iff a request preceded the held
+  // poll (minReq < maxUnreleasedPoll) AND no primary-phase request followed it
+  // (maxPrimaryReq <= maxUnreleasedPoll) — the latter excludes a pre-primary readiness wait
+  // whose load comes later, while a post-boundary continuation request doesn't disqualify.
+  private readonly iterSpan = new Map<string, IterPollSpan>();
+  // Whether any iteration ran a TAIL `.poll()` WITHOUT requesting producer release — the
+  // closed-scheduling case the long-poll advisory targets. Per-iteration (not run-wide):
+  // a row that releases doesn't mute the advisory for a sibling row that doesn't.
+  private sawUnreleasedTailPoll = false;
 
   constructor(
     private readonly reducer: LoadReducer,
@@ -90,18 +117,47 @@ export class LoadSink {
     this.sealed = true;
   }
 
+  /** Whether any iteration ran a post-primary TAIL `.poll()` without requesting producer
+   *  release (a request before it, none after, and no release asked). Gates the
+   *  long-poll advisory — the closed-scheduling case it nudges toward release. */
+  get unreleasedTailPollRan(): boolean {
+    return this.sawUnreleasedTailPoll;
+  }
+
+  /** Flag the advisory if `span` shows a poll that HELD the slot: a request preceded it
+   *  (minReq < maxUnreleasedPoll) and no primary-phase request followed it
+   *  (maxPrimaryReq <= maxUnreleasedPoll — excludes a pre-primary readiness wait while
+   *  ignoring post-boundary continuation requests). The sentinels make a missing held poll
+   *  / request fail the first test. Idempotent — safe to call at release time AND at
+   *  endIteration (the spans are frozen once the primary boundary / release is reached). */
+  private markUnreleasedTailPoll(span: IterPollSpan): void {
+    if (span.minReq < span.maxUnreleasedPoll && span.maxPrimaryReq <= span.maxUnreleasedPoll) {
+      this.sawUnreleasedTailPoll = true;
+    }
+  }
+
   /** Register an iteration's attribution before its engine run starts. */
   beginIteration(env: LoadIterationEnvelope): void {
     this.envelopes.set(env.iterationId, env);
     this.stepNames.set(env.iterationId, new Map());
     this.phases.set(env.iterationId, "primary");
+    // Sentinels: no request (min +∞) and no primary request / held poll (max −∞) until seen.
+    this.iterSpan.set(env.iterationId, {
+      minReq: Infinity, maxPrimaryReq: -Infinity, maxUnreleasedPoll: -Infinity, primaryCompleted: false, releaseRequested: false,
+    });
   }
 
   /** Drop an iteration's per-iteration buffers once it has finished. */
   endIteration(iterationId: string): void {
+    // Catch the no-release case (the iteration ran to completion without ever asking for
+    // release, so its whole span is now final). Released iterations are evaluated earlier,
+    // at release time, so a later drain-abandoned continuation can't lose the advisory.
+    const span = this.iterSpan.get(iterationId);
+    if (span !== undefined) this.markUnreleasedTailPoll(span);
     this.envelopes.delete(iterationId);
     this.stepNames.delete(iterationId);
     this.phases.delete(iterationId);
+    this.iterSpan.delete(iterationId);
   }
 
   /** The shared per-iteration attribution every translated event carries. Phase
@@ -181,6 +237,21 @@ export class LoadSink {
       primaryDurationMs: info.primaryDurationMs,
       releaseRequested: info.releaseRequested,
     });
+    // This is the PRIMARY BOUNDARY (bare or releasing): from here on, requests are
+    // continuation-phase and stop advancing `maxPrimaryReq`. A RELEASING boundary also
+    // frees the slot, so later polls stop extending `maxUnreleasedPoll`; but any poll that
+    // ALREADY ran still held the slot — a late release can't free it in hindsight. Since
+    // the spans are now frozen, evaluate the advisory at release time — the continuation
+    // may be abandoned by the drain timeout before endIteration runs, which would otherwise
+    // lose this misordered case. (A requested-but-rejected release still counts as "asked".)
+    const span = this.iterSpan.get(env.iterationId);
+    if (span !== undefined) {
+      span.primaryCompleted = true;
+      if (info.releaseRequested) {
+        span.releaseRequested = true;
+        this.markUnreleasedTailPoll(span);
+      }
+    }
     this.phases.set(env.iterationId, "continuation");
   }
 
@@ -291,6 +362,18 @@ export class LoadSink {
       case "trace": {
         const t = (wire.data ?? {}) as TraceData;
         const stepIndex = wire.stepIndex as number | undefined;
+        // Widen this iteration's request step-index span — ONLY for step-scoped requests.
+        // An unscoped setup/teardown HTTP call (no stepIndex) must not count as a request
+        // before a step, or a pre-primary readiness poll would look like a tail.
+        if (stepIndex !== undefined) {
+          const span = this.iterSpan.get(iterationId);
+          if (span !== undefined) {
+            if (stepIndex < span.minReq) span.minReq = stepIndex;
+            // Only PRIMARY-PHASE requests (before the boundary) bound the tail: a post-
+            // boundary continuation request mustn't make an earlier held poll look pre-primary.
+            if (!span.primaryCompleted && stepIndex > span.maxPrimaryReq) span.maxPrimaryReq = stepIndex;
+          }
+        }
         const stepName = stepIndex !== undefined ? this.stepNames.get(iterationId)?.get(stepIndex) : undefined;
         // Resolve method + heuristic routeKey together (id-like path segments →
         // ":id", M3-e). The method is recovered from the trace `target` when the
@@ -324,8 +407,23 @@ export class LoadSink {
         });
         break;
       }
-      // log / metric / action / event / warning / schema / branch / poll / start /
-      // status / timeout: not part of the M3 closed-model aggregates.
+      case "poll": {
+        // A poll step ran (the event fires after its attempt loop). Record its step
+        // index; whether it's a post-primary TAIL is decided in endIteration once the
+        // full request span is known (a later load request would disqualify it). No
+        // reducer mutation, so seal is irrelevant.
+        const pollIndex = wire.index as number;
+        const span = this.iterSpan.get(iterationId);
+        // Only a poll that ran while the slot was still HELD (no release yet) counts — a
+        // poll after release ran on a freed slot. Track the highest such index, so a later
+        // released poll can't erase an earlier held one.
+        if (span !== undefined && !span.releaseRequested && pollIndex > span.maxUnreleasedPoll) {
+          span.maxUnreleasedPoll = pollIndex;
+        }
+        break;
+      }
+      // log / metric / action / event / warning / schema / branch / start / status /
+      // timeout: not part of the M3 closed-model aggregates.
       default:
         break;
     }

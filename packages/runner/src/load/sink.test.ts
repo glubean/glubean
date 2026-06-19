@@ -32,3 +32,132 @@ describe("LoadSink — seal (M6)", () => {
     expect(reducer.applied).toBe(2); // unchanged — nothing forwarded after seal
   });
 });
+
+describe("LoadSink — tailPollExecuted (M6-d)", () => {
+  const reqTrace = (iterationId: string, stepIndex: number) => ({
+    testId: iterationId,
+    type: "trace",
+    stepIndex,
+    data: { method: "POST", url: "http://x/orders", ok: true, durationMs: 1 },
+  });
+  const pollEvent = (iterationId: string, index: number) => ({
+    testId: iterationId, type: "poll", index, name: "p", attempts: 1, satisfied: true,
+  });
+  const env = (iterationId: string) => ({ scenarioId: "s", producerSlotId: "p0", iterationId });
+
+  it("flags an unreleased TAIL poll — a request before it (earlier step) and none after", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0)); // step 0 (submit) issued the primary request
+    sink.handleWire(pollEvent("it", 1)); // poll is step 1, nothing after it
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(true);
+  });
+
+  it("does NOT flag a tail poll whose iteration requested release BEFORE the poll", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0));
+    sink.emitPrimaryCompleted(env("it"), { primaryId: "p", primaryDurationMs: 1, releaseRequested: true });
+    sink.handleWire(pollEvent("it", 1)); // poll runs AFTER release → slot was freed for it
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(false);
+  });
+
+  it("DOES flag a tail poll whose release was requested only AFTER the poll (misordered)", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0));
+    sink.handleWire(pollEvent("it", 1)); // poll runs FIRST — the slot was held for it
+    sink.emitPrimaryCompleted(env("it"), { primaryId: "p", primaryDurationMs: 1, releaseRequested: true });
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(true); // a late release can't free the slot in hindsight
+  });
+
+  it("flags a held poll at RELEASE time (survives a drain-abandoned continuation, no endIteration)", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0));
+    sink.handleWire(pollEvent("it", 1)); // poll held the slot
+    sink.emitPrimaryCompleted(env("it"), { primaryId: "p", primaryDurationMs: 1, releaseRequested: true });
+    // No endIteration() — the continuation is abandoned by the drain timeout. Still flagged.
+    expect(sink.unreleasedTailPollRan).toBe(true);
+  });
+
+  it("flags an earlier held poll even when a later poll runs after release", () => {
+    // submit → poll1 (slot held) → release → poll2 (freed, even with its own request). The
+    // later released poll2 must NOT erase poll1's held status.
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0)); // submit, step 0
+    sink.handleWire(pollEvent("it", 1)); // poll1 — held the slot (before release)
+    sink.emitPrimaryCompleted(env("it"), { primaryId: "p", primaryDurationMs: 1, releaseRequested: true });
+    sink.handleWire(reqTrace("it", 3)); // poll2's own attempt request, step 3
+    sink.handleWire(pollEvent("it", 3)); // poll2 — ran on the freed slot
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(true); // poll1 still held the slot
+  });
+
+  it("does NOT flag a readiness poll that only made its OWN requests (same step index)", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0)); // the poll's own attempt request, step 0
+    sink.handleWire(pollEvent("it", 0)); // poll is step 0 — no EARLIER step request
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(false);
+  });
+
+  it("does NOT flag a readiness poll followed by a later load request (setup → poll → submit)", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0)); // setup/auth request, step 0
+    sink.handleWire(pollEvent("it", 1)); // readiness poll, step 1
+    sink.handleWire(reqTrace("it", 2)); // the PRIMARY load, step 2 — AFTER the poll
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(false); // a request followed the poll → not a tail
+  });
+
+  it("flags a held poll after a BARE primaryComplete even if a continuation request follows", () => {
+    // submit(0) → bare primaryComplete (boundary, no release) → poll(1, held) → req(2). The
+    // post-boundary request is continuation and must not disqualify the held poll.
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0)); // submit, step 0
+    sink.emitPrimaryCompleted(env("it"), { primaryId: "p", primaryDurationMs: 1, releaseRequested: false }); // BARE
+    sink.handleWire(pollEvent("it", 1)); // poll held the slot (no release)
+    sink.handleWire(reqTrace("it", 2)); // continuation request, step 2 — post-boundary
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(true);
+  });
+
+  it("does NOT flag a readiness poll when release follows the actual load request", () => {
+    // setup-req(0) → readiness poll(1) → real load(2) → release(3). The poll is pre-primary
+    // (a primary-phase load request follows it), and release came correctly after the load.
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire(reqTrace("it", 0)); // setup/auth request, step 0
+    sink.handleWire(pollEvent("it", 1)); // readiness poll, step 1
+    sink.handleWire(reqTrace("it", 2)); // the real load, step 2 — a PRIMARY-phase request after the poll
+    sink.emitPrimaryCompleted(env("it"), { primaryId: "p", primaryDurationMs: 1, releaseRequested: true });
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(false); // primary request after the poll → not a tail
+  });
+
+  it("does NOT treat an unscoped setup request (no stepIndex) as a primary request", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire({ testId: "it", type: "trace", data: { method: "GET", url: "http://x/auth", ok: true, durationMs: 1 } });
+    sink.handleWire(pollEvent("it", 0)); // a pre-primary readiness poll at step 0
+    sink.handleWire(reqTrace("it", 1)); // the real load at step 1, AFTER the poll
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(false); // setup trace must not establish the span
+  });
+
+  it("stays false when no poll runs (only normal steps)", () => {
+    const sink = new LoadSink(countingReducer(), "run", "runner", () => 0);
+    sink.beginIteration(env("it"));
+    sink.handleWire({ testId: "it", type: "step_end", index: 0, name: "submit", status: "passed", durationMs: 1 });
+    sink.endIteration("it");
+    expect(sink.unreleasedTailPollRan).toBe(false);
+  });
+});

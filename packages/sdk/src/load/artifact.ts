@@ -309,6 +309,10 @@ export interface LoadArtifactSummary {
   endToEnd?: LoadEndToEndSummary;
   continuation?: LoadContinuationSummary;
   thresholds: ThresholdEvaluation[];
+  /** Non-fatal advisories about the run's shape (e.g. a long poll with no
+   *  `primaryComplete`, so closed scheduling may under-pressure the upstream).
+   *  Present only when there's something to surface. */
+  advisories?: string[];
 }
 
 /** Bounded failure / slow-transaction samples with their caps. */

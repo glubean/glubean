@@ -492,6 +492,20 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       artifact.runtime.continuationInFlight = abortedByDrainTimeout;
     }
   }
+  // Advisory: some iteration ran a long TAIL poll but didn't request producer release,
+  // so its slot stayed tied up for the whole tail (closed end-to-end scheduling), under-
+  // pressuring the upstream. The sink decides this PER ITERATION (`unreleasedTailPollRan`):
+  //  - a TAIL poll (a step-scoped request before it, none after) — excludes a poll in an
+  //    untaken branch (never runs) and a readiness/token poll before the primary request;
+  //  - in an iteration that did NOT ask for release — a bare `primaryComplete()` still
+  //    gets advised, but a requested-but-rejected release does not (they already asked),
+  //    and a row that releases doesn't mute the advisory for a sibling row that doesn't.
+  if (sink.unreleasedTailPollRan) {
+    (artifact.summary.advisories ??= []).push(
+      "Most producer slot time is spent after the primary request; closed end-to-end scheduling may reduce upstream pressure. Call `await ctx.report.primaryComplete(..., { releaseProducerSlot: true })` after the primary load is issued if you want sustained ingress pressure.",
+    );
+  }
+
   // Evaluate configured thresholds against the finalized artifact and refine the
   // pass verdict (a crash-free run still fails if a threshold is breached).
   if (single.thresholds !== undefined) {
