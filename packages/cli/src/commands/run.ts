@@ -198,7 +198,7 @@ interface LogEntry {
   data?: unknown;
 }
 
-async function findProjectConfig(
+export async function findProjectConfig(
   startDir: string,
 ): Promise<{ rootDir: string; configPath?: string }> {
   let dir = startDir;
@@ -253,9 +253,14 @@ function isGlob(target: string): boolean {
 // calls execute and register overlays before discovery runs (attachment-
 // model §7.4). `discoverTests()` is responsible for distinguishing
 // bootstrap-only files from runnable-emitting ones.
-// CLI target resolution recognizes only `.ts` files across all kinds (including
-// bootstrap), derived from the canonical kind registry (scanner/kinds.ts).
-const TEST_FILE_SUFFIXES = GLUBEAN_KINDS.flatMap((k) => buildSuffixes(k.stems, [".ts"]));
+// CLI target resolution for `glubean run` recognizes only `.ts` files across the
+// test-runner kinds (including bootstrap), derived from the canonical kind
+// registry (scanner/kinds.ts). `load` is EXCLUDED here: load plans run through
+// the dedicated `glubean load` command + the closed-model orchestrator, not the
+// per-test ProjectRunner, so `glubean run ./dir` must not sweep in `.load.ts`.
+const TEST_FILE_SUFFIXES = GLUBEAN_KINDS.filter((k) => k.kind !== "load").flatMap((k) =>
+  buildSuffixes(k.stems, [".ts"]),
+);
 
 function isGlubeanTestFile(name: string): boolean {
   return TEST_FILE_SUFFIXES.some((suffix) => name.endsWith(suffix));
@@ -669,6 +674,7 @@ export const __testing = {
   matchesTags: (...args: Parameters<typeof matchesTags>) => matchesTags(...args),
   matchesExcludeTags: (...args: Parameters<typeof matchesExcludeTags>) =>
     matchesExcludeTags(...args),
+  isGlubeanTestFile: (name: string) => isGlubeanTestFile(name),
 };
 
 function matchesTags(

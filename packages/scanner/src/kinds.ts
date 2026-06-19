@@ -18,8 +18,11 @@ export const GLUBEAN_EXTENSIONS = [".ts", ".js", ".mjs"] as const;
 /** Suite / runnable kinds (the values valid in `glubean.yaml` `kinds:`). */
 export type GlubeanSuiteKind = "test" | "contract" | "flow";
 
-/** File-classification kinds: suite kinds plus bootstrap overlay files. */
-export type GlubeanFileKind = GlubeanSuiteKind | "bootstrap";
+/** File-classification kinds: suite kinds plus bootstrap overlay + load files.
+ *  `load` is classified (and has suffixes) but is NOT a `kinds:` suite value —
+ *  load plans run via the dedicated `glubean load` command over file/dir/glob
+ *  targets, not through a `glubean.yaml` profile suite. */
+export type GlubeanFileKind = GlubeanSuiteKind | "bootstrap" | "load";
 
 interface GlubeanKindDef {
   kind: GlubeanFileKind;
@@ -37,6 +40,13 @@ export const GLUBEAN_KINDS: readonly GlubeanKindDef[] = [
   // `.workflow` is the canonical vNext stem; `.flow` is the legacy alias. Both
   // ride the "flow" kind during the migration window.
   { kind: "flow", stems: ["flow", "workflow"], suiteKind: true, runtimeArtifact: true },
+  // `.load.ts` performance plans. CLASSIFIED (stem + suffixes) but NOT a suite
+  // kind: load runs via the dedicated `glubean load` command over file/dir/glob
+  // targets, not a `glubean.yaml` profile suite — so it never validates as a
+  // `kinds:` value it can't execute through `glubean run`. runtimeArtifact:false:
+  // load uses its OWN discovery/exec path, not the contract/workflow eager-import
+  // nor the test runner's discovery.
+  { kind: "load", stems: ["load"], suiteKind: false, runtimeArtifact: false },
   // bootstrap files register contract overlays; not a runnable/suite kind, but
   // they must be eagerly loaded (hence runtimeArtifact).
   { kind: "bootstrap", stems: ["bootstrap"], suiteKind: false, runtimeArtifact: true },

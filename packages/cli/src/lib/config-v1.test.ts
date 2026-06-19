@@ -75,6 +75,22 @@ profiles:
       });
     });
 
+    it("rejects kinds: [load] — load runs via `glubean load`, not a profile suite (M4)", async () => {
+      const yaml = `
+version: 1
+suites:
+  perf:
+    target: ./load
+    kinds: [load]
+profiles:
+  bench:
+    suites: [perf]
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/Invalid kind "load"/);
+      });
+    });
+
     it("accepts defaults block", async () => {
       const yaml = `
 version: 1

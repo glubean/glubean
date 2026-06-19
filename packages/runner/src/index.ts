@@ -133,3 +133,16 @@ export { resolveModuleTests } from "./resolve.js";
  */
 export { runWorkflow } from "./workflow/execute.js";
 export type { WorkflowRunResult, WorkflowNodeOutcome } from "./workflow/execute.js";
+
+// =============================================================================
+// 4. Load runner (closed-model performance plans)
+// =============================================================================
+
+/**
+ * Run a `loadRunner()` plan locally through the closed-model orchestrator and
+ * return its finalized `LoadArtifact` (concurrency producer slots + feeder /
+ * session / pacing / thresholds). The `glubean load` command drives this; the
+ * `LoadArtifact` / `LoadPlan` types live in `@glubean/sdk/load`.
+ */
+export { runLoad } from "./load/orchestrator.js";
+export type { RunLoadOptions } from "./load/orchestrator.js";

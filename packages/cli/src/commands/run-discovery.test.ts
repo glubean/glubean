@@ -5,7 +5,17 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
 import { __testing, discoverTests } from "./run.js";
 
-const { matchesTags } = __testing;
+const { matchesTags, isGlubeanTestFile } = __testing;
+
+// M4-b: `.load.ts` plans run via the dedicated `glubean load` command + the
+// closed-model orchestrator, NOT the per-test ProjectRunner — so `glubean run`
+// discovery must NOT sweep them in (while test/contract/flow stay recognized).
+test("glubean run discovery excludes .load.ts files", () => {
+  expect(isGlubeanTestFile("checkout.load.ts")).toBe(false);
+  expect(isGlubeanTestFile("checkout.test.ts")).toBe(true);
+  expect(isGlubeanTestFile("api.contract.ts")).toBe(true);
+  expect(isGlubeanTestFile("flow.workflow.ts")).toBe(true);
+});
 
 // Contract fixtures must sit inside the package so dynamic-import in
 // extractContractFromFile can resolve `@glubean/sdk` via the workspace.

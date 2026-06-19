@@ -22,6 +22,7 @@ import { formatResolvedPlan } from "./lib/print-plan.js";
 import { initCommand } from "./commands/init.js";
 import { runCommand, resolveTestFilesForSuite } from "./commands/run.js";
 import { scanCommand } from "./commands/scan.js";
+import { loadCommand } from "./commands/load.js";
 import { validateMetadataCommand } from "./commands/validate_metadata.js";
 import { loginCommand } from "./commands/login.js";
 import { patchCommand } from "./commands/patch.js";
@@ -650,6 +651,17 @@ program
       dir: options.dir,
       output: options.out,
     });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// load command — run performance plans (.load.ts)
+// ─────────────────────────────────────────────────────────────────────────────
+program
+  .command("load [target]")
+  .description("Run loadRunner() performance plans (.load.ts) and write LoadArtifacts")
+  .option("--env-file <name>", "Env file basename (default: active env, else .env)")
+  .action(async (target, options) => {
+    await loadCommand(target, { envFile: options.envFile });
   });
 
 // ─────────────────────────────────────────────────────────────────────────────

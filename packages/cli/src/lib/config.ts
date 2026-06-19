@@ -385,7 +385,8 @@ function validateSuite(
   }
   return {
     target: s.target as string,
-    kinds: kinds as Array<"test" | "contract" | "flow">,
+    // Validated above against V1_SUITE_KINDS (= SUITE_KINDS, incl. "load").
+    kinds: kinds as GlubeanSuiteKind[],
     ...(s.data !== undefined && { data: s.data as string }),
   };
 }
