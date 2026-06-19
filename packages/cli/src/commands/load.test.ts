@@ -108,3 +108,74 @@ describe("printOutcome — phase-split display (M5)", () => {
     expect(out).not.toMatch(/primary \(to boundary\)/);
   });
 });
+
+describe("printOutcome — continuation + advisory display (M6-e)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const pct = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
+  const baseContinuation = {
+    backlog: 0, maxBacklog: 3, maxConcurrent: 3, active: 0,
+    releasedProducerSlots: 8, primaryBoundaryCoverage: 1, releaseCoverage: 1,
+    duplicateReleaseSignals: 0, rejectedReleaseSignals: 0, abortedByDrainTimeout: 0,
+  };
+  const outcome = (over: { continuation?: unknown; advisories?: string[]; slotModel?: string }): LoadRunOutcome =>
+    ({
+      runnerId: "async-job",
+      artifact: {
+        runtime: { slotModel: over.slotModel ?? "producer-released" },
+        summary: {
+          pass: true,
+          totalIterations: 10, successfulIterations: 10, failedIterations: 0,
+          errorRate: 0, throughputPerSec: 5, latency: { ...pct, p95: 120 },
+          thresholds: [],
+          ...(over.continuation !== undefined ? { continuation: over.continuation } : {}),
+          ...(over.advisories !== undefined ? { advisories: over.advisories } : {}),
+        },
+      },
+    }) as unknown as LoadRunOutcome;
+
+  it("prints a continuation line (slot model, released slots, backlog peak)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({ continuation: { ...baseContinuation, backpressureMs: { ...pct, p95: 42 } } }));
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/continuation \(producer-released\)/);
+    expect(out).toMatch(/released 8/);
+    expect(out).toMatch(/backlog max 3/);
+    expect(out).toMatch(/backpressure p95 42ms/);
+  });
+
+  it("warns on rejected releases and drain-timeout aborts", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome({ continuation: { ...baseContinuation, rejectedReleaseSignals: 2, abortedByDrainTimeout: 1 } }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/2 release\(s\) rejected/);
+    expect(out).toMatch(/1 continuation\(s\) aborted by the drain timeout/);
+  });
+
+  it("warns when only some iterations reached a primary boundary (partial coverage)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    // A branched run: every reached boundary released (releaseCoverage 1), but only 60%
+    // of iterations reached a boundary — the gap must still be surfaced.
+    printOutcome(
+      outcome({ continuation: { ...baseContinuation, primaryBoundaryCoverage: 0.6, releaseCoverage: 1 } }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/only 60\.00% of iterations reached a primary boundary/);
+  });
+
+  it("omits the continuation line for a closed run (no release)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({}));
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).not.toMatch(/continuation \(/);
+  });
+
+  it("prints run-shape advisories", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({ advisories: ["Most producer slot time is spent after the primary request; ..."] }));
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/Most producer slot time is spent after the primary request/);
+  });
+});

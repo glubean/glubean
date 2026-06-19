@@ -204,10 +204,59 @@ export function printOutcome(o: LoadRunOutcome): void {
       );
     }
   }
+  // Continuation / producer-release subsystem (M6): present once any iteration engaged
+  // release (released / rejected / duplicate / still pending). Show the slot model, how
+  // many slots were released, the backlog peak + back-pressure, then surface rejections,
+  // drain-timeout aborts, and coverage gaps as warnings.
+  const c = s.continuation;
+  if (c) {
+    console.log(
+      `${colors.dim}  continuation (${o.artifact.runtime.slotModel})  released ${c.releasedProducerSlots}` +
+        `  backlog max ${c.maxBacklog}` +
+        (c.backpressureMs ? `  backpressure p95 ${Math.round(c.backpressureMs.p95)}ms` : "") +
+        `${colors.reset}`,
+    );
+    if (c.rejectedReleaseSignals > 0) {
+      console.log(
+        `${colors.yellow}  ⚠ ${c.rejectedReleaseSignals} release(s) rejected (backlog full, drain bound, or run deadline)${colors.reset}`,
+      );
+    }
+    if (c.abortedByDrainTimeout > 0) {
+      console.log(
+        `${colors.yellow}  ⚠ ${c.abortedByDrainTimeout} continuation(s) aborted by the drain timeout` +
+          ` (still in flight at finalize)${colors.reset}`,
+      );
+    }
+    if (c.duplicateReleaseSignals > 0) {
+      console.log(
+        `${colors.yellow}  ⚠ ${c.duplicateReleaseSignals} duplicate release signal(s)` +
+          ` (one producer-release boundary per iteration)${colors.reset}`,
+      );
+    }
+    // Coverage gaps: only SOME iterations reached a primary boundary (a branch/error path
+    // skipped it), so the producer-release stats above reflect just that subset — warn,
+    // since `releaseCoverage` alone can read 100% while boundary coverage is partial.
+    if (c.primaryBoundaryCoverage < 1) {
+      console.log(
+        `${colors.yellow}  ⚠ only ${pct(c.primaryBoundaryCoverage)} of iterations reached a primary boundary` +
+          ` — producer-release stats cover that subset${colors.reset}`,
+      );
+    }
+    if (c.releaseCoverage < 1) {
+      console.log(
+        `${colors.dim}  release coverage ${pct(c.releaseCoverage)} of primary boundaries${colors.reset}`,
+      );
+    }
+  }
   for (const t of s.thresholds) {
     const mark = t.pass ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
     const where = t.target ? `${t.scope}[${t.target}]` : t.scope;
     console.log(`${colors.dim}  ${mark} ${where}.${t.metric} ${t.expression} (actual ${t.actual})${colors.reset}`);
+  }
+  // Non-fatal run-shape advisories (M6-d), e.g. a long tail poll that held the producer
+  // slot with no release.
+  for (const a of s.advisories ?? []) {
+    console.log(`${colors.yellow}  ⓘ ${a}${colors.reset}`);
   }
 }
 
