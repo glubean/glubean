@@ -274,6 +274,43 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
     expect(art.summary.pass).toBe(true);
   });
 
+  it("evaluates thresholds and refines summary.pass (M4-a)", async () => {
+    const plan = loadRunner("thresholded", {
+      scenario: browseCheckout(),
+      concurrency: 1,
+      iterations: 4,
+      input: ({ iteration }) => ({ sku: String(iteration.index) }),
+      thresholds: {
+        transaction: { errorRate: "<1%" }, // all succeed → 0% < 1% → pass
+        endpoints: { "GET /items/:id": { p95: "<60s" } }, // generous → pass
+      },
+    });
+
+    const art = await runLoad(plan);
+    expect(art.summary.pass).toBe(true);
+    expect(art.summary.thresholds.length).toBeGreaterThanOrEqual(2);
+    expect(art.summary.thresholds.every((t) => t.pass)).toBe(true);
+    expect(art.summary.thresholds.find((t) => t.scope === "transaction")).toMatchObject({
+      metric: "errorRate",
+      pass: true,
+    });
+  });
+
+  it("fails summary.pass when a threshold is breached (M4-a)", async () => {
+    const plan = loadRunner("breached", {
+      scenario: browseCheckout(),
+      concurrency: 1,
+      iterations: 2,
+      input: ({ iteration }) => ({ sku: String(iteration.index) }),
+      // Impossible latency bound → breached.
+      thresholds: { transaction: { p95: "<0ms" } },
+    });
+
+    const art = await runLoad(plan);
+    expect(art.summary.pass).toBe(false);
+    expect(art.summary.thresholds.find((t) => t.metric === "p95")?.pass).toBe(false);
+  });
+
   it("rejects a traffic-mix config (single-scenario only for now)", async () => {
     const plan = loadRunner("mix", {
       concurrency: 1,

@@ -32,6 +32,7 @@ import { createEngineCore } from "../engine-bridge.js";
 import { compileLoadScenario, runLoadIteration } from "./execute-iteration.js";
 import { createLoadReducer } from "./reducer.js";
 import { LoadSink, type LoadIterationEnvelope } from "./sink.js";
+import { evaluateThresholds } from "./threshold.js";
 
 /** Options for one local load run. */
 export interface RunLoadOptions {
@@ -347,5 +348,13 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     iterations !== undefined && claimed >= iterations ? "iterations" : durationMs !== undefined ? "duration" : "iterations";
   sink.emitLoadEnd(endReason);
 
-  return reducer.finalize();
+  const artifact = reducer.finalize();
+  // Evaluate configured thresholds against the finalized artifact and refine the
+  // pass verdict (a crash-free run still fails if a threshold is breached).
+  if (single.thresholds !== undefined) {
+    const { thresholds, pass } = evaluateThresholds(artifact, single.thresholds);
+    artifact.summary.thresholds = thresholds;
+    artifact.summary.pass = pass;
+  }
+  return artifact;
 }
