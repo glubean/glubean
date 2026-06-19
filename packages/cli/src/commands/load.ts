@@ -171,8 +171,12 @@ function pct(fraction: number): string {
   return `${(fraction * 100).toFixed(2)}%`;
 }
 
-/** Print a one-plan summary line block. */
-function printOutcome(o: LoadRunOutcome): void {
+/** Print a one-plan summary line block. The top `iterations` line is the
+ *  end-to-end (whole-transaction) view; when a scenario calls
+ *  `ctx.report.primaryComplete()` the artifact also carries a primary/end-to-end
+ *  phase split, surfaced as an extra line so an async-job run shows submit latency
+ *  vs full latency. (Exported for display tests.) */
+export function printOutcome(o: LoadRunOutcome): void {
   const s = o.artifact.summary;
   const verdict = s.pass
     ? `${colors.green}PASS${colors.reset}`
@@ -183,6 +187,23 @@ function printOutcome(o: LoadRunOutcome): void {
       `  errorRate ${pct(s.errorRate)}  p95 ${Math.round(s.latency.p95)}ms` +
       `  throughput ${s.throughputPerSec.toFixed(1)}/s${colors.reset}`,
   );
+  // Phase split (M5): the line above is end-to-end; show the primary phase (up to
+  // the primaryComplete boundary). `completed/started` indicates primary coverage —
+  // when fewer iterations complete primary than started, some failed before the
+  // boundary (a branch/error path); precise boundary coverage lands with M6.
+  if (s.primary) {
+    console.log(
+      `${colors.dim}  primary (to boundary)  p95 ${Math.round(s.primary.latency.p95)}ms` +
+        `  throughput ${s.primary.throughputPerSec.toFixed(1)}/s` +
+        `  completed ${s.primary.completed}/${s.primary.started}${colors.reset}`,
+    );
+    if (s.primary.completed < s.primary.started) {
+      console.log(
+        `${colors.yellow}  ⚠ ${s.primary.started - s.primary.completed} iteration(s) did not reach the primary boundary` +
+          ` (failed before it, or a branch skipped it)${colors.reset}`,
+      );
+    }
+  }
   for (const t of s.thresholds) {
     const mark = t.pass ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
     const where = t.target ? `${t.scope}[${t.target}]` : t.scope;

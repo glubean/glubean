@@ -1,14 +1,14 @@
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadResultFileName, writeLoadResults, type LoadRunOutcome } from "./load.js";
+import { loadResultFileName, printOutcome, writeLoadResults, type LoadRunOutcome } from "./load.js";
 
 // NOTE: plan execution (discover → run → collect) now happens in a child process
 // and is covered by `@glubean/runner`'s `runLoadFileInSubprocess` integration
 // tests. What stays CLI-owned — and tested here — is the result filename
-// sanitization + collision-safe artifact writing.
+// sanitization + collision-safe artifact writing, plus the terminal summary print.
 
 describe("loadResultFileName (M4-c)", () => {
   it("sanitizes a runner id into a safe filename", () => {
@@ -56,5 +56,55 @@ describe("writeLoadResults (M4-c)", () => {
     } finally {
       await rm(outDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("printOutcome — phase-split display (M5)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const pct = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
+  const outcome = (over: { primary?: unknown }): LoadRunOutcome =>
+    ({
+      runnerId: "checkout",
+      artifact: {
+        summary: {
+          pass: true,
+          totalIterations: 10,
+          successfulIterations: 10,
+          failedIterations: 0,
+          errorRate: 0,
+          throughputPerSec: 5,
+          latency: { ...pct, p95: 120 },
+          thresholds: [],
+          ...(over.primary !== undefined ? { primary: over.primary } : {}),
+        },
+      },
+    }) as unknown as LoadRunOutcome;
+
+  it("prints a primary line (vs the end-to-end top line) when the split is present", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome({ primary: { started: 10, completed: 10, failedBeforeRelease: 0, throughputPerSec: 8, latency: { ...pct, p95: 30 } } }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/primary \(to boundary\)/);
+    expect(out).toMatch(/completed 10\/10/);
+    expect(out).not.toMatch(/did not reach the primary boundary/); // full coverage
+  });
+
+  it("warns when fewer iterations complete primary than started", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome({ primary: { started: 10, completed: 7, failedBeforeRelease: 3, throughputPerSec: 8, latency: { ...pct, p95: 30 } } }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/3 iteration\(s\) did not reach the primary boundary/);
+  });
+
+  it("omits the primary line for a closed run with no boundary", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({}));
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).not.toMatch(/primary \(to boundary\)/);
   });
 });
