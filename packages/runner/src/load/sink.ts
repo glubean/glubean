@@ -28,6 +28,10 @@ export interface LoadIterationEnvelope {
   iterationId: string;
 }
 
+/** Which half of a logical iteration an event belongs to. Flipped per iteration at
+ *  the first `primaryComplete` boundary (M5); `releaseProducerSlot` is M6. */
+type Phase = "primary" | "continuation";
+
 /** Distributive Omit — applied per union member so each LoadEvent variant keeps
  *  its own discriminant-specific fields (a plain Omit over the union would keep
  *  only the common envelope keys). */
@@ -48,6 +52,14 @@ export class LoadSink {
   private seq = 0;
   private readonly envelopes = new Map<string, LoadIterationEnvelope>();
   private readonly stepNames = new Map<string, Map<number, string>>();
+  // Per-iteration phase: "primary" until that iteration's first primaryComplete
+  // boundary, "continuation" immediately after. Keyed by iterationId so concurrent
+  // iterations (one shared sink) flip independently. Every translated event carries
+  // this live phase, so post-boundary work (requests / assertions) is "continuation"
+  // — matching the public contract that `primaryComplete` switches the iteration
+  // into continuation. (Step aggregates stay coherent because the reducer keys steps
+  // by stepId, not by phase, so a step that spans the boundary is one row.)
+  private readonly phases = new Map<string, Phase>();
 
   constructor(
     private readonly reducer: LoadReducer,
@@ -71,23 +83,26 @@ export class LoadSink {
   beginIteration(env: LoadIterationEnvelope): void {
     this.envelopes.set(env.iterationId, env);
     this.stepNames.set(env.iterationId, new Map());
+    this.phases.set(env.iterationId, "primary");
   }
 
   /** Drop an iteration's per-iteration buffers once it has finished. */
   endIteration(iterationId: string): void {
     this.envelopes.delete(iterationId);
     this.stepNames.delete(iterationId);
+    this.phases.delete(iterationId);
   }
 
-  /** The shared per-iteration attribution every translated event carries. Phase is
-   *  always "primary" until the primaryComplete boundary lands (M5). */
+  /** The shared per-iteration attribution every translated event carries. Phase
+   *  starts "primary" and flips to "continuation" at the iteration's first
+   *  `primaryComplete` boundary (see `emitPrimaryCompleted`). */
   private baseOf(env: LoadIterationEnvelope) {
     return {
       scenarioId: env.scenarioId,
       ...(env.scenarioRefId !== undefined ? { scenarioRefId: env.scenarioRefId } : {}),
       producerSlotId: env.producerSlotId,
       iterationId: env.iterationId,
-      phase: "primary" as const,
+      phase: this.phases.get(env.iterationId) ?? "primary",
     };
   }
 
@@ -134,6 +149,28 @@ export class LoadSink {
       checkpointId,
       ...(data !== undefined ? { data } : {}),
     });
+  }
+
+  /** Emit `producer:primaryCompleted` (backs the first `ctx.report.primaryComplete`)
+   *  and FLIP this iteration into its continuation phase immediately, so every
+   *  request / checkpoint the sink translates afterwards carries
+   *  `phase: "continuation"` (the API's contract). The boundary event itself is
+   *  stamped with the pre-flip ("primary") phase. A step that spans the boundary
+   *  still keeps a single phase because step:end uses its captured START phase
+   *  (see the `step_end` case). M5 records the measurement boundary only —
+   *  `releaseRequested` is forwarded for M6 scheduling, it does not release a slot. */
+  emitPrimaryCompleted(
+    env: LoadIterationEnvelope,
+    info: { primaryId: string; primaryDurationMs: number; releaseRequested: boolean },
+  ): void {
+    this.emit({
+      type: "producer:primaryCompleted",
+      ...this.baseOf(env),
+      primaryId: info.primaryId,
+      primaryDurationMs: info.primaryDurationMs,
+      releaseRequested: info.releaseRequested,
+    });
+    this.phases.set(env.iterationId, "continuation");
   }
 
   /** Emit `load:start` with the resolved config (orchestrator run boundary). */

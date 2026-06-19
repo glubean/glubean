@@ -220,22 +220,40 @@ function classifyIterationError(result: TestResult): LoadErrorKind {
   return "stepError";
 }
 
-/** A per-iteration `report` whose signals emit through the sink with attribution. */
-function makeIterationReport(sink: LoadSink, env: LoadIterationEnvelope): LoadReportSignal {
+/**
+ * A per-iteration `report` whose signals emit through the sink with attribution.
+ *
+ * `primaryComplete` (M5) records the measurement boundary: the FIRST call stamps
+ * `primaryDurationMs` (iteration start → now), emits `producer:primaryCompleted`,
+ * and flips the sink into this iteration's continuation phase; later calls are
+ * duplicates (no second boundary). Producer release / backpressure are M6, so
+ * `releasedProducerSlot` is always false and `releaseProducerSlot: true` is merely
+ * forwarded on the event as `releaseRequested`.
+ */
+function makeIterationReport(
+  sink: LoadSink,
+  env: LoadIterationEnvelope,
+  start: number,
+  now: () => number,
+): LoadReportSignal {
+  let primaryCompleted = false;
   return {
     checkpoint(id, data) {
       sink.emitCheckpoint(env, id, data);
     },
-    // The primaryComplete boundary (phase split) + producer release land in
-    // M5/M6; until then this is a no-op boundary that measures nothing and never
-    // applies backpressure, so a scenario that calls it still runs correctly.
-    async primaryComplete() {
-      return {
-        measuredPrimaryComplete: false,
-        releasedProducerSlot: false,
-        duplicate: false,
-        backpressureMs: 0,
-      };
+    async primaryComplete(id, data) {
+      if (primaryCompleted) {
+        // A second boundary in the same iteration is ignored (one boundary per
+        // logical iteration); report it as a duplicate for diagnostics.
+        return { measuredPrimaryComplete: false, releasedProducerSlot: false, duplicate: true, backpressureMs: 0 };
+      }
+      primaryCompleted = true;
+      sink.emitPrimaryCompleted(env, {
+        primaryId: id,
+        primaryDurationMs: Math.max(0, now() - start),
+        releaseRequested: data?.releaseProducerSlot === true,
+      });
+      return { measuredPrimaryComplete: true, releasedProducerSlot: false, duplicate: false, backpressureMs: 0 };
     },
   };
 }
@@ -258,6 +276,9 @@ export async function runLoadIteration<Input>(
     ...(args.feederKeys !== undefined ? { feederKeys: args.feederKeys } : {}),
   });
 
+  // Stamp the iteration start BEFORE building the report so `primaryComplete` can
+  // measure `primaryDurationMs` from it; `start` is also the end-to-end baseline.
+  const start = now();
   const scope: ScopeInput = {
     ...(session !== undefined ? { session } : {}),
     ctxExtensions: {
@@ -265,11 +286,10 @@ export async function runLoadIteration<Input>(
       producerSlot,
       iteration,
       now,
-      report: makeIterationReport(sink, envelope),
+      report: makeIterationReport(sink, envelope, start, now),
     },
   };
 
-  const start = now();
   let result: TestResult | null = null;
   let ok = false;
   let skipped = false;

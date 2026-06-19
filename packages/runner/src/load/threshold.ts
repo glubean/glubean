@@ -110,6 +110,55 @@ interface ScopeData {
   backpressureMs?: number;
 }
 
+/**
+ * A row that can be combined across phase splits. `errorRate` is the row's OWN
+ * (correctly-scoped) rate — request-based for endpoints, invocation-based for
+ * steps — and `errorWeight` is its denominator (requests / executed invocations),
+ * so combining preserves each scope's error-rate definition.
+ */
+interface CombinableRow {
+  errorRate: number;
+  errorWeight: number;
+  throughputPerSec?: number;
+  latency: { p50: number; p90: number; p95: number; p99: number };
+}
+
+/**
+ * Combine an endpoint's / step's per-phase rows (M5 splits a route or step hit in
+ * both phases into two rows) into ONE scope for thresholding:
+ *  - throughput is ADDITIVE → summed (60/s primary + 60/s continuation = 120/s);
+ *  - errorRate is weighted by each row's denominator (Σ rate·weight / Σ weight), so
+ *    it stays request-based for endpoints and invocation-based for steps;
+ *  - percentiles can't be merged from summaries, so each is the MAX across rows —
+ *    exact for the usual `<` upper-bound threshold (every row under X ⟺ max under X
+ *    ⟹ the merged distribution is under X), conservative otherwise.
+ * A single row (the no-split common case) combines to its own values unchanged.
+ */
+function combineRows(rows: CombinableRow[]): ScopeData {
+  let errorWeighted = 0;
+  let errorWeight = 0;
+  let throughput = 0;
+  let hasThroughput = false;
+  const latency = { p50: 0, p90: 0, p95: 0, p99: 0 };
+  for (const r of rows) {
+    errorWeighted += r.errorRate * r.errorWeight;
+    errorWeight += r.errorWeight;
+    if (r.throughputPerSec !== undefined) {
+      throughput += r.throughputPerSec;
+      hasThroughput = true;
+    }
+    latency.p50 = Math.max(latency.p50, r.latency.p50);
+    latency.p90 = Math.max(latency.p90, r.latency.p90);
+    latency.p95 = Math.max(latency.p95, r.latency.p95);
+    latency.p99 = Math.max(latency.p99, r.latency.p99);
+  }
+  return {
+    errorRate: errorWeight > 0 ? errorWeighted / errorWeight : 0,
+    ...(hasThroughput ? { throughputPerSec: throughput } : {}),
+    latency,
+  };
+}
+
 /** Pull the actual value for `metric` from a scope's data, or undefined if N/A. */
 function actualFor(metric: ThresholdMetric, data: ScopeData): number | undefined {
   switch (metric) {
@@ -180,16 +229,35 @@ export function evaluateThresholds(
   evalScope("endToEnd", undefined, s.endToEnd as ScopeData | undefined, thresholds.endToEnd);
   evalScope("continuation", undefined, s.continuation as ScopeData | undefined, thresholds.continuation);
 
+  // Endpoints / steps can split into per-phase rows (M5: a route or step hit in
+  // both the primary and continuation phase appears twice). Combine the matching
+  // rows into one scope so additive metrics (throughput) sum and a slow phase still
+  // shows up (latency = max) — picking one row (e.g. `find`) would let a slow
+  // continuation hide behind a fast primary. No matching row → skipped, not failed.
   if (thresholds.endpoints) {
     for (const [routeKey, cfg] of Object.entries(thresholds.endpoints)) {
-      const ep = artifact.endpoints.find((e) => e.routeKey === routeKey);
-      evalScope("endpoint", routeKey, ep, cfg);
+      const eps = artifact.endpoints.filter((e) => e.routeKey === routeKey);
+      // Endpoint error rate is over REQUESTS.
+      const rows = eps.map((e) => ({
+        errorRate: e.errorRate,
+        errorWeight: e.requestCount,
+        throughputPerSec: e.throughputPerSec,
+        latency: e.latency,
+      }));
+      evalScope("endpoint", routeKey, rows.length > 0 ? combineRows(rows) : undefined, cfg);
     }
   }
   if (thresholds.steps) {
     for (const [stepId, cfg] of Object.entries(thresholds.steps)) {
-      const st = artifact.steps.find((x) => x.stepId === stepId);
-      evalScope("step", stepId, st, cfg);
+      const sts = artifact.steps.filter((x) => x.stepId === stepId);
+      // Step error rate is over EXECUTED invocations (skipped ones aren't failures);
+      // steps have no throughput metric.
+      const rows = sts.map((s) => ({
+        errorRate: s.errorRate,
+        errorWeight: Math.max(0, s.invocationCount - s.skippedCount),
+        latency: s.latency,
+      }));
+      evalScope("step", stepId, rows.length > 0 ? combineRows(rows) : undefined, cfg);
     }
   }
 

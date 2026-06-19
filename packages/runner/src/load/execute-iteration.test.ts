@@ -585,3 +585,198 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(reducer.finalize().summary.successfulIterations).toBe(1);
   });
 });
+
+describe("runLoadIteration — primaryComplete boundary (M5)", () => {
+  it("records the boundary, flips events after it to continuation, and dedupes repeats", async () => {
+    const { reducer, sink, core } = rig("run-m5");
+
+    // submit (POST, primary) → primaryComplete → poll (GET, continuation). A second
+    // primaryComplete in the same iteration is a duplicate (one boundary only).
+    const receipts: Array<{ measuredPrimaryComplete: boolean; releasedProducerSlot: boolean; duplicate: boolean; backpressureMs: number }> = [];
+    const scenario = loadScenario("submit-poll")
+      .step("submit", async (ctx) => {
+        await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        receipts.push(await ctx.report.primaryComplete("submitted"));
+        receipts.push(await ctx.report.primaryComplete("again"));
+      })
+      .step("poll", async (ctx) => {
+        await ctx.http.get(`${base}/items/1`).json();
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("submit-poll", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+    });
+
+    expect(out.ok).toBe(true);
+    // First call measures the boundary; the second is a duplicate (no release in M5).
+    expect(receipts[0]).toMatchObject({ measuredPrimaryComplete: true, duplicate: false, releasedProducerSlot: false });
+    expect(receipts[1]).toMatchObject({ measuredPrimaryComplete: false, duplicate: true });
+
+    const art = reducer.finalize();
+
+    // The POST happened before the boundary (primary); the GET after it, in the
+    // poll step, is continuation (the flip is immediate at the boundary).
+    const byKeyPhase = Object.fromEntries(art.endpoints.map((e) => [`${e.routeKey}@${e.phase}`, e]));
+    expect(byKeyPhase["POST /orders@primary"]?.requestCount).toBe(1);
+    expect(byKeyPhase["GET /items/:id@continuation"]?.requestCount).toBe(1);
+
+    // Each step stays in ONE phase: `submit` (boundary at its tail) wholly primary,
+    // `poll` wholly continuation — step:end is stamped with the step's start phase.
+    const stepByName = Object.fromEntries(art.steps.map((s) => [`${s.stepName}@${s.phase}`, s]));
+    expect(stepByName["submit@primary"]).toMatchObject({ invocationCount: 1, requestCount: 1 });
+    expect(stepByName["poll@continuation"]).toMatchObject({ invocationCount: 1, requestCount: 1 });
+
+    // Phase split surfaced: primary (up to the boundary) vs end-to-end (full
+    // iteration). The deterministic clock advances per event, so primary latency
+    // (submit only) is strictly less than the end-to-end latency.
+    expect(art.summary.primary).toBeDefined();
+    expect(art.summary.endToEnd).toBeDefined();
+    expect(art.summary.primary!.completed).toBe(1);
+    expect(art.summary.primary!.failedBeforeRelease).toBe(0);
+    expect(art.summary.endToEnd!.completed).toBe(1);
+    expect(art.summary.primary!.latency.p95).toBeGreaterThan(0);
+    expect(art.summary.primary!.latency.p95).toBeLessThan(art.summary.endToEnd!.latency.p95);
+  });
+
+  it("counts an iteration that fails before its boundary as failedBeforeRelease", async () => {
+    const { reducer, sink, core } = rig("run-m5b");
+
+    // it-1 reaches the boundary; it-2 fails BEFORE calling primaryComplete.
+    const scenario = compileLoadScenario(
+      loadScenario<{ fail: boolean }>("submit")
+        .step("submit", async (ctx) => {
+          await ctx.http.get(`${base}/items/1`).json();
+          if (ctx.input.fail) ctx.fail("boom before primaryComplete");
+          await ctx.report.primaryComplete("submitted");
+        })
+        .build(),
+    );
+
+    const ok = await runLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("submit", "it-1"),
+      input: { fail: false },
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+    });
+    const bad = await runLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("submit", "it-2"),
+      input: { fail: true },
+      producerSlot: { id: "p0", index: 1 },
+      iteration: { id: "it-2", index: 1 },
+    });
+
+    expect(ok.ok).toBe(true);
+    expect(bad.ok).toBe(false);
+
+    const art = reducer.finalize();
+    // One boundary reached → phase split present; the failed-before-boundary
+    // iteration is counted, not folded into primary completion.
+    expect(art.summary.primary!.completed).toBe(1);
+    expect(art.summary.primary!.failedBeforeRelease).toBe(1);
+    expect(art.summary.endToEnd!.completed).toBe(2);
+    expect(art.summary.endToEnd!.failed).toBe(1);
+  });
+
+  it("keeps a step that spans the boundary in a single phase (no phantom rows)", async () => {
+    const { reducer, sink, core } = rig("run-m5c");
+
+    // primaryComplete is called in the MIDDLE of one step that then issues another
+    // request. Phase is step-granular, so the step + both its requests stay in the
+    // step's start phase — no split step / endpoint / matrix rows.
+    const scenario = loadScenario("submit-and-poll-in-one-step")
+      .step("both", async (ctx) => {
+        await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        await ctx.report.primaryComplete("submitted");
+        await ctx.http.get(`${base}/items/1`).json();
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("submit-and-poll-in-one-step", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+    });
+
+    expect(out.ok).toBe(true);
+    const art = reducer.finalize();
+
+    // The straddling step appears exactly once (its start phase = primary) with BOTH
+    // requests counted — not a phantom continuation row with requestCount only.
+    const both = art.steps.filter((s) => s.stepName === "both");
+    expect(both).toHaveLength(1);
+    expect(both[0]).toMatchObject({ phase: "primary", invocationCount: 1, requestCount: 2 });
+    // Endpoints still split by the request's LIVE phase: the POST (pre-boundary) is
+    // primary, the GET (post-boundary) is continuation — matching the API contract
+    // that primaryComplete switches the iteration into continuation.
+    const epPhase = Object.fromEntries(art.endpoints.map((e) => [`${e.routeKey}@${e.phase}`, e]));
+    expect(epPhase["POST /orders@primary"]?.requestCount).toBe(1);
+    expect(epPhase["GET /items/:id@continuation"]?.requestCount).toBe(1);
+    // Every matrix row resolves its step name (no orphan continuation-phase cell).
+    expect(art.matrix.every((m) => m.stepName === "both")).toBe(true);
+    // The iteration-level boundary is still measured (phase split present).
+    expect(art.summary.primary?.completed).toBe(1);
+  });
+
+  it("splits a stepId into per-phase rows when it starts in different phases across iterations", async () => {
+    const { reducer, sink, core } = rig("run-m5d");
+
+    // `work` runs AFTER a gate step that conditionally fires the boundary: iter "a"
+    // crosses it first (work starts continuation), iter "b" doesn't (work primary).
+    const scenario = compileLoadScenario(
+      loadScenario<{ early: boolean }>("conditional")
+        .step("gate", async (ctx) => {
+          if (ctx.input.early) await ctx.report.primaryComplete("early");
+        })
+        .step("work", async (ctx) => {
+          await ctx.http.get(`${base}/items/1`).json();
+        })
+        .build(),
+    );
+
+    await runLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("conditional", "a"),
+      input: { early: true },
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "a", index: 0 },
+    });
+    await runLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("conditional", "b"),
+      input: { early: false },
+      producerSlot: { id: "p0", index: 1 },
+      iteration: { id: "b", index: 1 },
+    });
+
+    const art = reducer.finalize();
+    const work = art.steps.filter((s) => s.stepName === "work");
+    // Two rows — one per start phase — not merged into one first-seen-phase row.
+    expect(work.map((s) => s.phase).sort()).toEqual(["continuation", "primary"]);
+    for (const w of work) {
+      expect(w.invocationCount).toBe(1); // each row counts only its own invocation
+      expect(w.requestCount).toBe(1);
+    }
+
+    // The primary summary stays internally consistent across the conditional
+    // boundary: the no-boundary success (iter "b") still counts as a primary
+    // completion, so started = completed + failedBeforeRelease (+ 0 in-flight).
+    const p = art.summary.primary!;
+    expect(p.started).toBe(2);
+    expect(p.completed).toBe(2); // 1 boundary (iter a) + 1 no-boundary success (iter b)
+    expect(p.failedBeforeRelease).toBe(0);
+    expect(p.started).toBe(p.completed + p.failedBeforeRelease);
+  });
+});

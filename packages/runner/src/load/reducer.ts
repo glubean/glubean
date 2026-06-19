@@ -21,8 +21,10 @@ import type {
   LoadCrashSummary,
   LoadEndReason,
   LoadEndpointSummary,
+  LoadEndToEndSummary,
   LoadEvent,
   LoadFailureSummary,
+  LoadPrimaryPhaseSummary,
   LoadProgressSnapshot,
   LoadReducer,
   LoadResolvedConfig,
@@ -110,6 +112,20 @@ export class LoadReducerImpl implements LoadReducer {
   private iterFailed = 0;
   private readonly iterLatency = new LoadHistogram();
 
+  // primary-phase boundary (M5): present only when a scenario calls
+  // `ctx.report.primaryComplete()`. `primaryLatency` aggregates `primaryDurationMs`
+  // (iteration start → boundary); `iterHadPrimary` tracks in-flight iterations that
+  // reached the boundary so a later failure is classified before/after it.
+  private primaryBoundaries = 0;
+  private failedBeforePrimary = 0;
+  private endedWithoutBoundary = 0;
+  private readonly primaryLatency = new LoadHistogram();
+  private readonly iterHadPrimary = new Set<string>();
+  // Per in-flight iteration: each step's START phase (recorded at step:start), so a
+  // step's step:end + requests aggregate under the phase it started in even after a
+  // mid-step boundary flips the live phase. Cleared at iteration:end (bounded).
+  private readonly iterStepPhase = new Map<string, Map<string, Phase>>();
+
   private readonly scenarios = new Map<string, ScenarioAgg>();
   private readonly steps = new Map<string, StepAgg>();
   private readonly endpoints = new Map<string, EndpointAgg>();
@@ -142,6 +158,18 @@ export class LoadReducerImpl implements LoadReducer {
         if (event.ok) this.iterSucceeded += 1;
         else this.iterFailed += 1;
         this.iterLatency.record(event.durationMs);
+        // Boundary accounting (M5): did this iteration reach its primary boundary?
+        // A failure WITHOUT a boundary failed before primary completion.
+        const hadBoundary = event.iterationId ? this.iterHadPrimary.delete(event.iterationId) : false;
+        if (!hadBoundary) {
+          this.endedWithoutBoundary += 1;
+          // A no-boundary iteration has no continuation phase — its whole run IS its
+          // primary phase. On success it COMPLETED primary (record its full duration
+          // as primary latency); on failure it failed before any boundary.
+          if (!event.ok) this.failedBeforePrimary += 1;
+          else this.primaryLatency.record(event.durationMs);
+        }
+        if (event.iterationId) this.iterStepPhase.delete(event.iterationId); // bounded cleanup
         const sc = this.scenarioAgg(event.scenarioId, event.scenarioRefId);
         if (sc) {
           sc.iterations += 1;
@@ -162,13 +190,11 @@ export class LoadReducerImpl implements LoadReducer {
       }
       case "step:start": {
         const stepId = event.stepId ?? event.stepName;
-        const step = this.getStep(
-          event.scenarioId,
-          event.scenarioRefId,
-          stepId,
-          this.phaseOf(event),
-          event.stepName,
-        );
+        // step:start carries the step's START phase — record it so this step's later
+        // events (step:end, requests) all resolve to it, even after a mid-step flip.
+        const phase = this.phaseOf(event);
+        this.rememberStepPhase(event.iterationId, stepId, phase);
+        const step = this.getStep(event.scenarioId, event.scenarioRefId, stepId, phase, event.stepName);
         // groupId is only on step:start — capture it now (step:end omits it).
         if (event.groupId !== undefined) step.groupId = event.groupId;
         break;
@@ -179,7 +205,7 @@ export class LoadReducerImpl implements LoadReducer {
           event.scenarioId,
           event.scenarioRefId,
           stepId,
-          this.phaseOf(event),
+          this.stepStartPhase(event.iterationId, stepId, this.phaseOf(event)),
           event.stepName,
         );
         step.stepName = event.stepName; // correct any placeholder set by an earlier request:observed
@@ -210,23 +236,34 @@ export class LoadReducerImpl implements LoadReducer {
         if (!event.ok) cell.errorCount += 1;
         cell.latency.record(event.durationMs);
 
-        // attribute the request to its step's requestCount (lazily create the
-        // step agg: request:observed often arrives before step:end).
+        // Attribute the request to its STEP's requestCount under the step's START
+        // phase (not the request's live phase), so a post-boundary same-step request
+        // lands in the step's single row — endpoint/matrix above already used the
+        // live phase. (request:observed often arrives before step:end, so the step
+        // agg is created lazily here under the same start phase as step:start.)
         if (event.stepId) {
           const step = this.getStep(
             event.scenarioId,
             event.scenarioRefId,
             event.stepId,
-            this.phaseOf(event),
+            this.stepStartPhase(event.iterationId, event.stepId, this.phaseOf(event)),
             event.stepId,
           );
           step.requestCount += 1;
         }
         break;
       }
-      // assertion:observed / log:sampled / producer:* / checkpoints are handled
-      // by the sink (failure traces) or by later milestones (phase split,
-      // producer release); they do not affect the M3 closed-model aggregates.
+      case "producer:primaryCompleted": {
+        // The first primaryComplete boundary of an iteration (M5): record the
+        // primary-phase duration and mark the iteration as having reached it.
+        this.primaryBoundaries += 1;
+        this.primaryLatency.record(event.primaryDurationMs);
+        if (event.iterationId) this.iterHadPrimary.add(event.iterationId);
+        break;
+      }
+      // assertion:observed / log:sampled / producer:released|releaseRejected /
+      // checkpoints are handled by the sink (failure traces) or by later milestones
+      // (producer release / backpressure); they don't affect these aggregates.
       default:
         break;
     }
@@ -239,11 +276,14 @@ export class LoadReducerImpl implements LoadReducer {
     return {
       elapsedMs,
       requestedConcurrency: this.requestedConcurrency,
-      primaryInFlight: Math.max(0, this.iterStarted - this.iterCompleted),
+      primaryInFlight: this.primaryInFlightCount(),
       continuationInFlight: 0,
       blockedOnBacklog: 0,
       primaryStarted: this.iterStarted,
-      primaryCompleted: this.iterCompleted,
+      // With a phase split, "primary completed" = boundaries + no-boundary successes;
+      // in the pure closed model (no primaryComplete) it coincides with completed
+      // iterations.
+      primaryCompleted: this.primaryBoundaries > 0 ? this.primaryCompletedCount() : this.iterCompleted,
       endToEndCompleted: this.iterCompleted,
       failedIterations: this.iterFailed,
       throughputPerSec: elapsedSec > 0 ? this.iterCompleted / elapsedSec : 0,
@@ -273,11 +313,13 @@ export class LoadReducerImpl implements LoadReducer {
         processModel: "single-process-async-producer-slot",
         // A configured think-time makes this a paced closed run, not back-to-back.
         executionModel: this.config?.pacing?.thinkTimeMs !== undefined ? "closed-paced" : "closed-back-to-back",
-        slotModel: "end-to-end",
+        // A primaryComplete boundary makes this a MEASURED closed run (phase split);
+        // producer release ("producer-released") is M6.
+        slotModel: this.primaryBoundaries > 0 ? "end-to-end-measured" : "end-to-end",
         requestedConcurrency: this.requestedConcurrency,
         // Same reducer state as snapshot(): an interrupted run (abort/crash with
         // started-but-not-ended iterations) shows its in-flight count, not 0.
-        primaryInFlight: Math.max(0, this.iterStarted - this.iterCompleted),
+        primaryInFlight: this.primaryInFlightCount(),
         continuationInFlight: 0, // producer-release continuation lands in M6
         blockedOnBacklog: 0, // backpressure lands in M6
         feederGuarantee: "single-node",
@@ -295,6 +337,12 @@ export class LoadReducerImpl implements LoadReducer {
         errorRate: rate(this.iterFailed, this.iterCompleted),
         throughputPerSec: elapsedSec > 0 ? this.iterCompleted / elapsedSec : 0,
         latency: this.iterCompleted > 0 ? this.iterLatency.percentiles() : ZERO_PCT,
+        // Phase split (M5): present only once an iteration reached a primaryComplete
+        // boundary. The top-level compat fields above stay end-to-end; `primary` /
+        // `endToEnd` expose the split (primary = up to the boundary).
+        ...(this.primaryBoundaries > 0
+          ? { primary: this.primaryPhaseSummary(elapsedSec), endToEnd: this.endToEndPhaseSummary(elapsedSec) }
+          : {}),
         thresholds: [],
       },
       scenarios: this.scenarioSummaries(),
@@ -315,6 +363,24 @@ export class LoadReducerImpl implements LoadReducer {
 
   private phaseOf(event: LoadEvent): Phase {
     return event.phase ?? "primary";
+  }
+
+  /** Record the phase a step started in for this iteration (from step:start). */
+  private rememberStepPhase(iterationId: string | undefined, stepId: string, phase: Phase): void {
+    if (!iterationId) return;
+    let m = this.iterStepPhase.get(iterationId);
+    if (!m) {
+      m = new Map();
+      this.iterStepPhase.set(iterationId, m);
+    }
+    m.set(stepId, phase);
+  }
+
+  /** The phase a step started in this iteration (falls back to `live` for a SKIPPED
+   *  leaf, which emits no step:start, or an untracked iteration). */
+  private stepStartPhase(iterationId: string | undefined, stepId: string, live: Phase): Phase {
+    if (!iterationId) return live;
+    return this.iterStepPhase.get(iterationId)?.get(stepId) ?? live;
   }
 
   private scenarioKey(scenarioId: string, scenarioRefId?: string): string {
@@ -339,6 +405,13 @@ export class LoadReducerImpl implements LoadReducer {
     return agg;
   }
 
+  // Steps are keyed by (stepId, the phase the invocation STARTED in). A step that
+  // spans the boundary stays ONE row — every event of that invocation resolves to
+  // its captured start phase (`iterStepPhase`), so a post-boundary same-step request
+  // can't fork a phantom row — while the SAME stepId starting in different phases
+  // across iterations (a conditional boundary) correctly splits into two rows.
+  // Endpoints / matrix still split by the request's LIVE phase, so post-boundary
+  // requests show as continuation.
   private stepKey(
     scenarioId: string | undefined,
     scenarioRefId: string | undefined,
@@ -363,7 +436,7 @@ export class LoadReducerImpl implements LoadReducer {
         ...(scenarioRefId !== undefined ? { scenarioRefId } : {}),
         stepId,
         stepName,
-        phase,
+        phase, // the phase of the step's FIRST event (its start)
         invocationCount: 0,
         skippedCount: 0,
         assertionFailureCount: 0,
@@ -434,6 +507,47 @@ export class LoadReducerImpl implements LoadReducer {
   }
 
   // ── summary builders ───────────────────────────────────────────────────
+
+  /** Iterations still in their primary phase: started, not yet at a boundary, and
+   *  not ended before reaching one. Without any boundary this is the ordinary
+   *  end-to-end in-flight count (started − completed). */
+  private primaryInFlightCount(): number {
+    return Math.max(0, this.iterStarted - this.primaryBoundaries - this.endedWithoutBoundary);
+  }
+
+  /** Iterations that COMPLETED their primary phase: those that hit the boundary,
+   *  plus no-boundary successes (whose primary phase is the whole iteration). Keeps
+   *  `started = completed + failedBeforeRelease + inFlightAtEnd` consistent. */
+  private primaryCompletedCount(): number {
+    return this.primaryBoundaries + (this.endedWithoutBoundary - this.failedBeforePrimary);
+  }
+
+  /** Primary-phase aggregate (producer side) — present only with a boundary. */
+  private primaryPhaseSummary(elapsedSec: number): LoadPrimaryPhaseSummary {
+    const completed = this.primaryCompletedCount();
+    return {
+      started: this.iterStarted,
+      completed,
+      failedBeforeRelease: this.failedBeforePrimary,
+      throughputPerSec: elapsedSec > 0 ? completed / elapsedSec : 0,
+      latency: this.primaryLatency.count > 0 ? this.primaryLatency.percentiles() : ZERO_PCT,
+    };
+  }
+
+  /** End-to-end aggregate (full logical iteration) — the structured form of the
+   *  top-level compat fields, surfaced alongside `primary` when the split exists. */
+  private endToEndPhaseSummary(elapsedSec: number): LoadEndToEndSummary {
+    return {
+      started: this.iterStarted,
+      completed: this.iterCompleted,
+      successful: this.iterSucceeded,
+      failed: this.iterFailed,
+      inFlightAtEnd: Math.max(0, this.iterStarted - this.iterCompleted),
+      errorRate: rate(this.iterFailed, this.iterCompleted),
+      throughputPerSec: elapsedSec > 0 ? this.iterCompleted / elapsedSec : 0,
+      latency: this.iterCompleted > 0 ? this.iterLatency.percentiles() : ZERO_PCT,
+    };
+  }
 
   private attribution(anyHeuristicEndpoint: boolean): LoadArtifact["runtime"]["attribution"] {
     const canonical: LoadAttributionQuality = "canonical";
@@ -506,11 +620,17 @@ export class LoadReducerImpl implements LoadReducer {
   }
 
   private matrixSummaries(): LoadScenarioEndpointMatrix[] {
+    // Resolve a matrix cell's stepName by stepId regardless of phase: the cell's
+    // phase is the request's LIVE phase, but the step agg is keyed by its start
+    // phase, so a post-boundary request's cell would otherwise miss its step row.
+    const stepNameById = new Map<string, string>();
+    for (const s of this.steps.values()) {
+      stepNameById.set(`${this.scenarioKey(s.scenarioId, s.scenarioRefId)}${SEP}${s.stepId}`, s.stepName);
+    }
     return [...this.matrix.values()].map((m) => {
       const stepName =
         m.stepId !== undefined
-          ? this.steps.get(this.stepKey(m.scenarioId, m.scenarioRefId, m.stepId, m.phase ?? "primary"))
-              ?.stepName
+          ? stepNameById.get(`${this.scenarioKey(m.scenarioId, m.scenarioRefId)}${SEP}${m.stepId}`)
           : undefined;
       return {
         scenarioId: m.scenarioId,

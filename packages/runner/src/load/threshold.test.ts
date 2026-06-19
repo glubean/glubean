@@ -49,6 +49,8 @@ function artifactStub(over: {
   latency?: { p50: number; p90: number; p95: number; p99: number; max: number };
   endpoints?: LoadArtifact["endpoints"];
   steps?: LoadArtifact["steps"];
+  primary?: LoadArtifact["summary"]["primary"];
+  endToEnd?: LoadArtifact["summary"]["endToEnd"];
 }): LoadArtifact {
   const pct = over.latency ?? { p50: 10, p90: 20, p95: 30, p99: 40, max: 50 };
   return {
@@ -60,6 +62,8 @@ function artifactStub(over: {
       errorRate: over.errorRate ?? 0,
       throughputPerSec: over.throughputPerSec ?? 200,
       latency: pct,
+      ...(over.primary !== undefined ? { primary: over.primary } : {}),
+      ...(over.endToEnd !== undefined ? { endToEnd: over.endToEnd } : {}),
       thresholds: [],
     },
     endpoints: over.endpoints ?? [],
@@ -123,13 +127,98 @@ describe("evaluateThresholds (M4-a)", () => {
     expect(evals[0]).toMatchObject({ scope: "endpoint", target: "GET /items/:id", metric: "p95", actual: 15, pass: true });
   });
 
-  it("skips thresholds whose scope data is absent or metric is N/A", () => {
-    const art = artifactStub({});
+  const mkEp = (phase: "primary" | "continuation", p95: number, throughputPerSec: number) => ({
+    routeKey: "GET /status",
+    phase,
+    routeKeySource: "normalized-url",
+    routeKeyHeuristic: true,
+    requestCount: 50,
+    errorCount: 0,
+    errorRate: 0,
+    statusCounts: { "200": 50 },
+    latency: { p50: p95 / 2, p90: p95 - 1, p95, p99: p95 + 5, max: p95 + 10 },
+    throughputPerSec,
+  });
+
+  it("combines an endpoint's phase rows for latency (slow continuation fails)", () => {
+    // A fast primary row must not let a slow continuation row pass: combined p95 is
+    // the max across phases.
+    const art = artifactStub({
+      endpoints: [mkEp("primary", 20, 25), mkEp("continuation", 900, 25)] as unknown as LoadArtifact["endpoints"],
+    });
     const { thresholds: evals, pass } = evaluateThresholds(art, {
-      primary: { p95: "<800ms" }, // phase split not populated (M5) → skipped
+      endpoints: { "GET /status": { p95: "<800ms" } },
+    });
+    expect(evals).toHaveLength(1); // combined into one evaluation
+    expect(evals[0]).toMatchObject({ scope: "endpoint", metric: "p95", actual: 900, pass: false });
+    expect(pass).toBe(false);
+  });
+
+  it("sums throughput across an endpoint's phase rows (additive metric)", () => {
+    // 60/s primary + 60/s continuation = 120/s total → passes a `>100/s` floor that
+    // neither phase meets alone.
+    const art = artifactStub({
+      endpoints: [mkEp("primary", 20, 60), mkEp("continuation", 20, 60)] as unknown as LoadArtifact["endpoints"],
+    });
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      endpoints: { "GET /status": { throughputPerSec: ">100/s" } },
+    });
+    expect(evals).toHaveLength(1);
+    expect(evals[0]).toMatchObject({ metric: "throughputPerSec", actual: 120, pass: true });
+    expect(pass).toBe(true);
+  });
+
+  it("evaluates a step errorRate threshold over invocations, not requests", () => {
+    // A step that failed 50% of its invocations while issuing ZERO HTTP requests
+    // must fail an errorRate threshold — a request-based denominator would read 0%.
+    const step = {
+      scenarioId: "s",
+      stepId: "0:checkout",
+      stepName: "checkout",
+      phase: "primary",
+      invocationCount: 2,
+      skippedCount: 0,
+      assertionFailureCount: 1,
+      errorCount: 1,
+      errorRate: 0.5,
+      latency: { p50: 10, p90: 20, p95: 30, p99: 40, max: 50 },
+      requestCount: 0,
+    };
+    const art = artifactStub({ steps: [step] as unknown as LoadArtifact["steps"] });
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      steps: { "0:checkout": { errorRate: "<1%" } },
+    });
+    expect(evals[0]).toMatchObject({ scope: "step", metric: "errorRate", actual: 0.5, pass: false });
+    expect(pass).toBe(false);
+  });
+
+  it("skips thresholds whose scope data is absent or metric is N/A", () => {
+    const art = artifactStub({}); // no phase split present → primary scope skipped
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      primary: { p95: "<800ms" }, // summary.primary absent → skipped (not failed)
       endpoints: { "GET /missing": { p95: "<1ms" } }, // no such endpoint → skipped
     });
     expect(evals).toHaveLength(0);
     expect(pass).toBe(true); // nothing evaluable, crash-free → pass
+  });
+
+  it("evaluates primary / endToEnd scope thresholds when the phase split is present (M5)", () => {
+    const art = artifactStub({
+      primary: {
+        started: 100, completed: 100, failedBeforeRelease: 0, throughputPerSec: 200,
+        latency: { p50: 5, p90: 9, p95: 12, p99: 18, max: 25 },
+      },
+      endToEnd: {
+        started: 100, completed: 100, successful: 100, failed: 0, inFlightAtEnd: 0,
+        errorRate: 0, throughputPerSec: 80, latency: { p50: 40, p90: 70, p95: 120, p99: 180, max: 240 },
+      },
+    });
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      primary: { p95: "<50ms" }, // 12 < 50 → pass
+      endToEnd: { p95: "<100ms" }, // 120 < 100 → FAIL
+    });
+    expect(pass).toBe(false);
+    expect(evals.find((e) => e.scope === "primary")).toMatchObject({ metric: "p95", actual: 12, pass: true });
+    expect(evals.find((e) => e.scope === "endToEnd")).toMatchObject({ metric: "p95", actual: 120, pass: false });
   });
 });
