@@ -68,6 +68,14 @@ export function parseEndpoint(endpoint: string): { method: string; path: string 
   };
 }
 
+/** The contract's exact route TEMPLATE (e.g. "GET /runs/:runId") for the request's ky
+ *  `context` — a NON-WIRE channel (never a request header), so it can't leak to the SUT
+ *  through any client. The engine forwards it to the trace and the load runner uses it for
+ *  an exact endpoint routeKey; harmless outside load (only consumed there). */
+function routeContext(method: string, path: string): { glubeanRoute: string } {
+  return { glubeanRoute: `${method} ${path}` };
+}
+
 function extractParamValue(v: unknown): string {
   if (typeof v === "string") return v;
   if (v && typeof v === "object" && "value" in v) {
@@ -356,6 +364,7 @@ async function executeStandaloneCase(
     ? (caseSpec.headers as (input: unknown) => Record<string, string>)(resolvedInput)
     : caseSpec.headers;
   if (headers) requestOptions.headers = headers;
+  requestOptions.context = routeContext(method, path);
 
   if (caseSpec.query) {
     const rawQuery = typeof caseSpec.query === "function"
@@ -828,6 +837,7 @@ async function executeCaseInFlowHttp(input: {
     );
   }
   if (headers) requestOptions.headers = headers;
+  requestOptions.context = routeContext(method, path);
 
   if (caseSpec.query) {
     const rawQuery = typeof caseSpec.query === "function"

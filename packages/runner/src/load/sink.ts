@@ -55,6 +55,8 @@ interface TraceData {
   durationMs?: number;
   ok?: boolean;
   target?: string;
+  /** Exact route template from the `X-Glubean-Route` header (M8), e.g. "GET /runs/:runId". */
+  routeKey?: string;
 }
 
 export class LoadSink {
@@ -375,11 +377,14 @@ export class LoadSink {
           }
         }
         const stepName = stepIndex !== undefined ? this.stepNames.get(iterationId)?.get(stepIndex) : undefined;
-        // Resolve method + heuristic routeKey together (id-like path segments →
-        // ":id", M3-e). The method is recovered from the trace `target` when the
-        // explicit `method` is absent, so a target-only POST/PUT isn't mislabelled
-        // GET. Explicit routeKeys / a contract catalog land in M8.
-        const { method, routeKey } = resolveRouteKey(t.method, t.url, t.target, t.protocol);
+        // Resolve the routeKey. An EXACT route template from the trace (M8 — a
+        // `contract.http()` client / user `X-Glubean-Route` header, e.g. "GET /runs/:runId")
+        // wins and is exact (`contract-metadata`, not heuristic). Otherwise fall back to
+        // method + heuristic URL normalization (id-like segments → ":id", M3-e): the method
+        // is recovered from the trace `target` when explicit `method` is absent, so a
+        // target-only POST/PUT isn't mislabelled GET.
+        const exact = t.routeKey !== undefined && t.routeKey !== "";
+        const { method, routeKey } = resolveRouteKey(t.method, t.url, t.target, t.protocol, t.routeKey);
         this.emit({
           type: "request:observed",
           ...base,
@@ -387,8 +392,8 @@ export class LoadSink {
           method,
           url: t.url ?? "",
           routeKey,
-          routeKeySource: "normalized-url",
-          routeKeyHeuristic: true,
+          routeKeySource: exact ? "contract-metadata" : "normalized-url",
+          routeKeyHeuristic: !exact,
           ...(t.status !== undefined ? { status: t.status } : {}),
           ok: t.ok ?? false,
           durationMs: t.durationMs ?? 0,

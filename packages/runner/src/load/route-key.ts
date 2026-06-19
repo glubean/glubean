@@ -87,7 +87,19 @@ export function resolveRouteKey(
   url: string | undefined,
   target: string | undefined,
   protocol: string | undefined,
+  explicitRouteKey?: string,
 ): ResolvedRoute {
+  // An EXACT route template (M8) wins over every heuristic: a `contract.http()` client
+  // (or a user header) supplies its `endpoint`, e.g. "GET /runs/:runId", verbatim. Method
+  // precedence: the template's own verb > explicit `method` > the verb in `target`
+  // ("POST /orders") > "GET". A PATH-ONLY template ("/orders", no verb) is prefixed with
+  // the recovered method, since the reducer keys endpoints by routeKey alone — otherwise a
+  // GET and POST on the same path would collapse into one endpoint.
+  if (explicitRouteKey !== undefined && explicitRouteKey !== "") {
+    const keyMethod = splitTarget(explicitRouteKey).method;
+    const resolved = keyMethod ?? method ?? splitTarget(target).method ?? "GET";
+    return { method: resolved, routeKey: keyMethod ? explicitRouteKey : `${resolved} ${explicitRouteKey}` };
+  }
   // Only an explicit non-"http" protocol opts out of HTTP normalization; a missing
   // protocol is the legacy HTTP shape (method/url) and must still normalize.
   if (protocol !== undefined && protocol !== "http") {

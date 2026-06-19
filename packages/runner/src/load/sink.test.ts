@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { LoadArtifact, LoadProgressSnapshot, LoadReducer } from "@glubean/sdk/load";
+import type { LoadArtifact, LoadEvent, LoadProgressSnapshot, LoadReducer } from "@glubean/sdk/load";
 import { LoadSink } from "./sink.js";
+
+/** A reducer that captures every event forwarded to it (for asserting emitted shapes). */
+function capturingReducer(): LoadReducer & { events: LoadEvent[] } {
+  const events: LoadEvent[] = [];
+  return {
+    events,
+    apply(e) { events.push(e); },
+    snapshot: () => ({}) as unknown as LoadProgressSnapshot,
+    finalize: () => ({}) as unknown as LoadArtifact,
+  };
+}
 
 /** A reducer that just counts the events forwarded to it. */
 function countingReducer(): LoadReducer & { applied: number } {
@@ -159,5 +170,38 @@ describe("LoadSink — tailPollExecuted (M6-d)", () => {
     sink.handleWire({ testId: "it", type: "step_end", index: 0, name: "submit", status: "passed", durationMs: 1 });
     sink.endIteration("it");
     expect(sink.unreleasedTailPollRan).toBe(false);
+  });
+});
+
+describe("LoadSink — exact routeKey from a trace (M8)", () => {
+  const requestOf = (reducer: ReturnType<typeof capturingReducer>) =>
+    reducer.events.find((e) => e.type === "request:observed") as Extract<LoadEvent, { type: "request:observed" }>;
+
+  it("uses the trace's exact route template (contract-metadata, not heuristic)", () => {
+    const reducer = capturingReducer();
+    const sink = new LoadSink(reducer, "run", "runner", () => 0);
+    sink.beginIteration({ scenarioId: "s", producerSlotId: "p0", iterationId: "it" });
+    sink.handleWire({
+      testId: "it", type: "trace", stepIndex: 0,
+      data: { method: "GET", url: "http://h/runs/run-abc", target: "GET /runs/run-abc", routeKey: "GET /runs/:runId", status: 200, ok: true, durationMs: 5 },
+    });
+    const req = requestOf(reducer);
+    expect(req.routeKey).toBe("GET /runs/:runId");
+    expect(req.routeKeySource).toBe("contract-metadata");
+    expect(req.routeKeyHeuristic).toBe(false);
+  });
+
+  it("falls back to heuristic URL normalization when the trace has no route template", () => {
+    const reducer = capturingReducer();
+    const sink = new LoadSink(reducer, "run", "runner", () => 0);
+    sink.beginIteration({ scenarioId: "s", producerSlotId: "p0", iterationId: "it" });
+    sink.handleWire({
+      testId: "it", type: "trace", stepIndex: 0,
+      data: { method: "GET", url: "http://h/items/42", target: "GET /items/42", status: 200, ok: true, durationMs: 5 },
+    });
+    const req = requestOf(reducer);
+    expect(req.routeKey).toBe("GET /items/:id");
+    expect(req.routeKeySource).toBe("normalized-url");
+    expect(req.routeKeyHeuristic).toBe(true);
   });
 });

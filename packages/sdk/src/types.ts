@@ -1446,6 +1446,14 @@ export interface HttpRequestOptions {
    * ```
    */
   schema?: HttpSchemaOptions;
+  /**
+   * Per-request context — a non-wire object shared across this request's hooks (never
+   * sent to the server). The runtime reads `context.glubeanRoute` (an exact route
+   * template like `"GET /runs/:runId"`) to attribute the load runner's endpoint stats
+   * exactly instead of heuristically normalizing the URL; a `contract.http()` client
+   * sets it automatically. A custom `HttpClient` may ignore this option.
+   */
+  context?: { glubeanRoute?: string } & Record<string, unknown>;
 }
 
 /**
@@ -1899,6 +1907,12 @@ export interface Trace {
   name?: string;
   /** Optional detailed description */
   description?: string;
+  /** Optional EXACT route template, e.g. "GET /runs/:runId". Carried via the request's
+   *  non-wire `context.glubeanRoute` option (set by a `contract.http()` client from its
+   *  `endpoint`, or by a caller) — NEVER a request header, so it can't leak to the server.
+   *  The load runner uses it for an exact endpoint routeKey instead of the heuristic
+   *  URL-normalization fallback. Absent → fall back. */
+  routeKey?: string;
 
   // ── HTTP backward-compat fields (populated when protocol === "http") ──
 

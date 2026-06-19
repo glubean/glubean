@@ -247,6 +247,9 @@ test("v10 overlay: bootstrap resolvedInput drives real HTTP request construction
   expect(call.url).toBe("/projects/p_42/orders");                      // :projectId resolved
   expect(call.options.json).toEqual({ items: [{ sku: "X", qty: 1 }] }); // body from bootstrap
   expect(call.options.headers).toEqual({ Authorization: "Bearer tok-abc" }); // headers from bootstrap
+  // The exact route template (M8) rides on ky's NON-WIRE `context`, not a header, so it
+  // can't leak to the SUT; the load runner reads it for an exact endpoint routeKey.
+  expect(call.options.context).toEqual({ glubeanRoute: "POST /projects/:projectId/orders" });
 });
 
 // ---------------------------------------------------------------------------

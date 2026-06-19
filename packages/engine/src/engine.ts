@@ -415,6 +415,12 @@ export class RunnerCore {
             // Operation name from the GraphQL client (X-Glubean-Op header).
             const glubeanOp = request.headers.get("x-glubean-op");
             if (glubeanOp) trace.name = glubeanOp;
+            // Exact route template from a contract.http() client / a `context` option,
+            // e.g. "GET /runs/:runId". Carried via ky's NON-WIRE `context` (never a request
+            // header), so it can't leak to the SUT through any client — the load runner uses
+            // it for an exact endpoint routeKey instead of heuristic URL normalization.
+            const ctxRoute = (options.context as { glubeanRoute?: string } | undefined)?.glubeanRoute;
+            if (ctxRoute) trace.routeKey = ctxRoute;
 
             // Full-trace capture (node parity: harness.ts:1062-1106), gated by
             // emitFullTrace. Reads a CLONE so the user's res.json()/text() still works.

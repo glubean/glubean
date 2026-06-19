@@ -113,4 +113,53 @@ describe("route-key heuristic normalization (M3-e)", () => {
       });
     });
   });
+
+  describe("resolveRouteKey — exact route template (M8)", () => {
+    it("uses an explicit template verbatim, recovering the method (no :id mangling)", () => {
+      // The concrete URL has a real id, but the template stays templated and exact.
+      expect(
+        resolveRouteKey("GET", "http://h/runs/run-abc123", "GET /runs/run-abc123", "http", "GET /runs/:runId"),
+      ).toEqual({ method: "GET", routeKey: "GET /runs/:runId" });
+    });
+
+    it("wins over heuristic normalization (different ids share the exact template)", () => {
+      const a = resolveRouteKey("GET", "http://h/runs/1", "GET /runs/1", "http", "GET /runs/:runId");
+      const b = resolveRouteKey("GET", "http://h/runs/2", "GET /runs/2", "http", "GET /runs/:runId");
+      expect(a.routeKey).toBe("GET /runs/:runId");
+      expect(a.routeKey).toBe(b.routeKey);
+    });
+
+    it("prefixes the request method onto a path-only template (no method collapse)", () => {
+      // A path-only key is prefixed with the method so GET/POST on the same path stay
+      // distinct (the reducer keys endpoints by routeKey alone).
+      expect(resolveRouteKey("POST", undefined, undefined, "http", "/orders")).toEqual({
+        method: "POST",
+        routeKey: "POST /orders",
+      });
+    });
+
+    it("recovers the method from `target` for a path-only template (no deprecated method)", () => {
+      // Preferred trace shape: target "POST /orders", no `method` field — a path-only
+      // explicit key must still report POST and prefix it, not default to GET.
+      expect(resolveRouteKey(undefined, undefined, "POST /orders", "http", "/orders")).toEqual({
+        method: "POST",
+        routeKey: "POST /orders",
+      });
+    });
+
+    it("keeps GET and POST on the same path-only template as distinct routeKeys", () => {
+      const get = resolveRouteKey("GET", undefined, undefined, "http", "/orders");
+      const post = resolveRouteKey("POST", undefined, undefined, "http", "/orders");
+      expect(get.routeKey).toBe("GET /orders");
+      expect(post.routeKey).toBe("POST /orders");
+      expect(get.routeKey).not.toBe(post.routeKey);
+    });
+
+    it("ignores an empty template (falls back to normalization)", () => {
+      expect(resolveRouteKey("GET", "http://h/items/9", undefined, "http", "")).toEqual({
+        method: "GET",
+        routeKey: "GET /items/:id",
+      });
+    });
+  });
 });

@@ -14,9 +14,13 @@ import { rampDelayMs, runLoad } from "./orchestrator.js";
 
 let server: Server;
 let base: string;
+/** Captures the `x-glubean-route` header value the SERVER received on the last request
+ *  (to assert the engine strips this internal load metadata before the wire). */
+let lastRouteHeader: string | undefined;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
+    lastRouteHeader = req.headers["x-glubean-route"] as string | undefined;
     const url = new URL(req.url ?? "/", "http://localhost");
     let body = "";
     req.on("data", (c) => (body += c));
@@ -859,5 +863,46 @@ describe("runLoad — long-poll advisory (M6-d)", () => {
     });
     const art = await runLoad(plan);
     expect(art.summary.advisories).toBeUndefined();
+  });
+});
+
+describe("runLoad — exact routeKey via X-Glubean-Route (M8)", () => {
+  it("uses the context route template for an exact, non-heuristic endpoint key (never on the wire)", async () => {
+    lastRouteHeader = "UNSET";
+    const plan = loadRunner("exact-route", {
+      scenario: loadScenario("exact-route")
+        .step("get-item", async (ctx) => {
+          // The route template rides on ky's non-wire `context`, never a header.
+          await ctx.http.get(`${base}/items/42`, { context: { glubeanRoute: "GET /items/:id" } }).json();
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+    });
+    const art = await runLoad(plan);
+    const ep = art.endpoints.find((e) => e.routeKey === "GET /items/:id");
+    expect(ep).toBeDefined();
+    expect(ep!.routeKeySource).toBe("contract-metadata"); // exact, from the route context
+    expect(ep!.routeKeyHeuristic).toBe(false);
+    // The template never became a request header, so the SUT never saw it.
+    expect(lastRouteHeader).toBeUndefined();
+  });
+
+  it("stays heuristic for a plain request with no route header", async () => {
+    const plan = loadRunner("heuristic-route", {
+      scenario: loadScenario("heuristic-route")
+        .step("get-item", async (ctx) => {
+          await ctx.http.get(`${base}/items/42`).json();
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+    });
+    const art = await runLoad(plan);
+    const ep = art.endpoints.find((e) => e.method === "GET");
+    expect(ep).toBeDefined();
+    expect(ep!.routeKey).toBe("GET /items/:id"); // normalized heuristically
+    expect(ep!.routeKeySource).toBe("normalized-url");
+    expect(ep!.routeKeyHeuristic).toBe(true);
   });
 });
