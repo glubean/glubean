@@ -296,6 +296,25 @@ function makeIterationReport(
 }
 
 /**
+ * The producer slot's end-state for one iteration (the M6 release lifecycle). It
+ * starts `held`, the release coordinator moves it to `released` / `releasedForDrain`
+ * AT MOST ONCE (mutually-exclusive code paths), and it drives the `completed`
+ * finalizer:
+ *  - `held`            — no release happened: the closed model, no continuation
+ *                        coordinator, or a `fail-iteration` backlog-full that threw.
+ *                        The slot was held to the end; the finalizer resolves
+ *                        `primaryDone({ released: false })`.
+ *  - `released`        — a pool slot was acquired at the boundary and the producer
+ *                        moved on; the finalizer pairs it with `pool.release()` once
+ *                        the continuation tail settles.
+ *  - `releasedForDrain`— the boundary freed the producer but acquired NO pool slot
+ *                        (the run deadline closed the pool, or this release's drain
+ *                        bound expired). `primaryDone` was already resolved; the tail
+ *                        drains at run-end and the finalizer does nothing.
+ */
+type SlotDisposition = "held" | "released" | "releasedForDrain";
+
+/**
  * Start one scenario iteration through the engine core, bracketing it with
  * `iteration:start` / `iteration:end`. Returns a handle: `primaryDone` resolves
  * when the producer slot is free (release boundary, or full completion when no
@@ -317,11 +336,18 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
   // measure `primaryDurationMs` from it; `start` is also the end-to-end baseline.
   const start = now();
 
-  let released = false; // a real continuation slot was acquired (pool.release pairs it)
-  let deadlineReleased = false; // release rejected at the run deadline; tail still drains
-  let backlogRejected = false; // fail-iteration: backlog full → the iteration MUST fail
-  let drainTimeoutRejected = false; // block-producer drain bound expired → the iteration MUST fail
-  let iterationSettled = false; // the iteration has fully ended (e.g. a step timeout)
+  // The producer-slot lifecycle (see SlotDisposition). Starts "held"; the release
+  // coordinator moves it to "released" / "releasedForDrain" at most once. The `as`
+  // widens past the "held" literal so reads in `completed` see the full union — the
+  // coordinator's writes are in an async closure CFA can't fold back into the narrowing.
+  let slot = "held" as SlotDisposition;
+  // The iteration couldn't honor the continuation backlog bound — a `fail-iteration`
+  // release hit a full backlog, or a `block-producer` release parked past its drain
+  // bound — so it MUST fail, regardless of step retries or a tail that later settles.
+  let failedBacklogBound = false;
+  // The iteration has fully ended (its `completed` finalizer ran). Guards a release
+  // still parked on back-pressure so it hands its slot back instead of leaking.
+  let iterationSettled = false;
   let resolvePrimaryDone!: (v: { released: boolean }) => void;
   const primaryDone = new Promise<{ released: boolean }>((r) => { resolvePrimaryDone = r; });
 
@@ -338,7 +364,7 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
             pool.release();
             return { measuredPrimaryComplete: true, releasedProducerSlot: false, duplicate: false, backpressureMs };
           }
-          released = true;
+          slot = "released";
           sink.emitProducerReleased(envelope, {
             releaseId: primaryId,
             primaryDurationMs,
@@ -370,8 +396,8 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
               waitMs: e.waitMs,
               continuationBacklog: pool.outstanding,
             });
-            deadlineReleased = true; // released-for-drain: no pool slot to pair with release()
-            if (e.reason === "drainTimeout") drainTimeoutRejected = true;
+            slot = "releasedForDrain"; // freed at the boundary, no pool slot to pair with release()
+            if (e.reason === "drainTimeout") failedBacklogBound = true;
             resolvePrimaryDone({ released: true }); // free the slot + track the tail
             return { measuredPrimaryComplete: true, releasedProducerSlot: false, duplicate: false, backpressureMs: e.waitMs };
           }
@@ -383,10 +409,11 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
               continuationBacklog: pool.outstanding,
             });
             // fail-iteration: the iteration MUST fail. Throw the TYPED error so a
-            // non-retried step classifies as "continuationBacklogFull"; also latch a
+            // non-retried step classifies as "continuationBacklogFull"; also latch the
             // flag so that if the step has `retries`, the retry's duplicate
-            // primaryComplete (which returns success) can't let the iteration pass.
-            backlogRejected = true;
+            // primaryComplete (which returns success) can't let the iteration pass. The
+            // slot stays "held" — the throw propagates and the finalizer frees it.
+            failedBacklogBound = true;
           }
           throw e;
         }
@@ -437,13 +464,13 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
       ok = false;
       errorKind = "runnerCrash";
     }
-    // A backlog rejection is terminal regardless of step retries / a tail that later
-    // settles: the iteration couldn't honor the backlog bound, so it fails. This covers
-    // both fail-iteration (full → throw immediately) and block-producer drain-timeout
-    // (parked past the drain bound → give up) — a retry's duplicate primaryComplete
-    // returns success and could otherwise let the iteration (and a re-run primary side
-    // effect) pass.
-    if (backlogRejected || drainTimeoutRejected) {
+    // A backlog-bound failure is terminal regardless of step retries / a tail that
+    // later settles: the iteration couldn't honor the backlog bound, so it fails. This
+    // covers both fail-iteration (full → throw immediately) and block-producer
+    // drain-timeout (parked past the drain bound → give up) — a retry's duplicate
+    // primaryComplete returns success and could otherwise let the iteration (and a
+    // re-run primary side effect) pass.
+    if (failedBacklogBound) {
       ok = false;
       errorKind = "continuationBacklogFull";
     }
@@ -459,13 +486,13 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
       // Finalization is best-effort — a sink hiccup must neither reject this
       // promise nor (via the finally below) hang the producer slot.
     } finally {
-      // Free the continuation slot once the (released) continuation has settled. A
-      // drain-rejected release (run deadline OR drain-timeout) acquired NO pool slot
-      // (and already resolved primaryDone), so it neither releases nor re-resolves.
-      // Otherwise no release happened and the producer slot was held until now — free
-      // it. This MUST run so the slot loop's `await primaryDone` never hangs.
-      if (released) pool?.release();
-      else if (!deadlineReleased) resolvePrimaryDone({ released: false });
+      // Settle the slot per its end-state (see SlotDisposition). This MUST run so the
+      // slot loop's `await primaryDone` never hangs.
+      //  - "released":        pair the acquired pool slot with a release now the tail settled.
+      //  - "held":            no release happened — free the producer slot it held to the end.
+      //  - "releasedForDrain": primaryDone already resolved at the boundary, no pool slot held.
+      if (slot === "released") pool?.release();
+      else if (slot === "held") resolvePrimaryDone({ released: false });
     }
 
     return {
