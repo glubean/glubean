@@ -30,7 +30,13 @@ import type {
 import { parseDurationMs } from "@glubean/sdk/load";
 
 import { createEngineCore } from "../engine-bridge.js";
-import { compileLoadScenario, runLoadIteration } from "./execute-iteration.js";
+import {
+  compileLoadScenario,
+  startLoadIteration,
+  type LoadIterationHandle,
+  type RunLoadIterationResult,
+} from "./execute-iteration.js";
+import { ContinuationPool } from "./continuation-pool.js";
 import { createLoadReducer } from "./reducer.js";
 import { LoadSink, type LoadIterationEnvelope } from "./sink.js";
 import { evaluateThresholds } from "./threshold.js";
@@ -107,6 +113,34 @@ function thinkDelay(thinkTimeMs: number | { min: number; max: number } | undefin
 
 function isMixConfig(config: AnyLoadRunnerConfig): boolean {
   return "scenarios" in config;
+}
+
+/**
+ * Drain the in-flight continuations from released iterations before the run
+ * finalizes. With a `drainTimeoutMs`, stop waiting once it elapses and return how
+ * many were still unsettled (abandoned) — so a continuation that never settles
+ * (e.g. an unbounded poll) can't hang an otherwise-bounded run. With no timeout,
+ * wait for them all (continuations are expected to be self-bounded via poll
+ * timeouts). The abandoned continuations keep running but are no longer awaited.
+ */
+async function drainContinuations(
+  continuations: Set<Promise<unknown>>,
+  drainTimeoutMs: number | undefined,
+): Promise<number> {
+  const inflight = [...continuations]; // snapshot the still-in-flight continuations
+  if (inflight.length === 0) return 0;
+  if (drainTimeoutMs === undefined) {
+    await Promise.allSettled(inflight);
+    return 0;
+  }
+  // Track settlement so we can count what the timeout abandons.
+  let settled = 0;
+  const tracked = inflight.map((p) => p.then(() => { settled += 1; }, () => { settled += 1; }));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, drainTimeoutMs); });
+  await Promise.race([Promise.allSettled(tracked), timeout]);
+  if (timer !== undefined) clearTimeout(timer);
+  return inflight.length - settled;
 }
 
 /**
@@ -200,6 +234,34 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     secrets: opts.secrets ?? {},
   });
 
+  // Continuation backlog for producer release (M6). The pool bound is the tighter of
+  // maxOutstanding / maxConcurrent (every in-flight continuation is concurrently
+  // scheduled, so the two coincide); unset on both → unbounded. Default backlog
+  // policy is block-producer (back-pressure). Continuations from released iterations
+  // are drained before the run finalizes.
+  const continuationBound =
+    continuationCfg?.maxOutstanding !== undefined && continuationCfg?.maxConcurrent !== undefined
+      ? Math.min(continuationCfg.maxOutstanding, continuationCfg.maxConcurrent)
+      : continuationCfg?.maxOutstanding ?? continuationCfg?.maxConcurrent;
+  const continuationPool = new ContinuationPool(
+    continuationBound,
+    continuationCfg?.onBacklogFull ?? "block-producer",
+    continuationCfg?.drainTimeoutMs,
+    now,
+  );
+  // In-flight continuations from released iterations. A Set with settle-time removal
+  // keeps only the CURRENTLY in-flight ones, so a long / high-rate run doesn't retain
+  // every released iteration's promise until the final drain.
+  const continuations = new Set<Promise<RunLoadIterationResult>>();
+  // Peak concurrent continuation tails — including deadline-released ones the pool
+  // never admitted — so the reported backlog peak isn't understated.
+  let peakContinuations = 0;
+  const trackContinuation = (p: Promise<RunLoadIterationResult>): void => {
+    continuations.add(p);
+    if (continuations.size > peakContinuations) peakContinuations = continuations.size;
+    void p.finally(() => continuations.delete(p));
+  };
+
   const resolvedConfig: LoadResolvedConfig = {
     concurrency,
     ...(durationMs !== undefined ? { durationMs } : {}),
@@ -220,19 +282,30 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // will claim nothing, or a think-time after the final iteration, wake instantly).
   let ended = false;
   const activeWaiters = new Map<ReturnType<typeof setTimeout>, () => void>();
-  const markEnded = (): void => {
-    if (ended) return;
-    ended = true;
-    for (const [timer, resolve] of activeWaiters) {
-      clearTimeout(timer);
-      resolve();
+  // The wall-clock (duration) deadline `closeImmediate()`s the pool: every parked
+  // producer is cancelled at once (the run's hard bound is up) and any later park is
+  // rejected immediately. The per-park `drainTimeout` bound is always-on in the pool
+  // (armed from when each producer parks, even before the run ends — so an
+  // all-producers-blocked backlog can't hang an iterations-bounded run), so the
+  // iterations cap needs no pool action here: a parked release self-bounds by its
+  // drainTimeout, or — with no drainTimeout — waits for capacity until either a
+  // continuation frees a slot or a duration deadline (if any) closes the pool.
+  const markEnded = (wallClockUp = false): void => {
+    const firstEnd = !ended;
+    if (firstEnd) {
+      ended = true;
+      for (const [timer, resolve] of activeWaiters) {
+        clearTimeout(timer);
+        resolve();
+      }
+      activeWaiters.clear();
     }
-    activeWaiters.clear();
+    if (wallClockUp) continuationPool.closeImmediate();
   };
   // A duration deadline timer wakes ramp/think waiters at the bound even if no slot
   // happens to claim (and thus re-check) right then.
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-  if (durationMs !== undefined) deadlineTimer = setTimeout(markEnded, durationMs);
+  if (durationMs !== undefined) deadlineTimer = setTimeout(() => markEnded(true), durationMs);
 
   /** Wait `ms`, returning early the instant the run ends (never overruns the bound). */
   const pausedSleep = (ms: number): Promise<void> => {
@@ -256,7 +329,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     // injected) clock, so honour it directly — not just `durationExpired()`.
     if (ended) return -1;
     if (durationExpired()) {
-      markEnded();
+      markEnded(true); // duration bound hit on a claim → wall-clock is up
       return -1;
     }
     if (iterations !== undefined && claimed >= iterations) {
@@ -269,13 +342,19 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     return index;
   };
 
-  /** Run one iteration; returns true if it actually ran (false = feeder skip). */
-  const runOneIteration = async (
+  /**
+   * Start one iteration's PRIMARY phase. Returns its handle (the producer slot is
+   * freed when `primaryDone` resolves), or `"skip"` (feeder opt-out, not counted) /
+   * `"failed"` (a setup failure recorded as a started+failed iteration). The slot
+   * loop awaits the handle's `primaryDone`; with producer release that resolves at
+   * the boundary so the slot can start the next primary while the continuation runs.
+   */
+  const startOneIteration = (
     slotIndex: number,
     producerSlotId: string,
     slotIteration: number,
     globalIteration: number,
-  ): Promise<boolean> => {
+  ): LoadIterationHandle | "skip" | "failed" => {
     const iterationId = `it-${globalIteration}`;
     const producerSlot = { id: producerSlotId, index: slotIndex };
     const iteration = { id: iterationId, index: globalIteration };
@@ -288,14 +367,14 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       globalIteration,
     };
 
-    const failSetup = (): true => {
+    const failSetup = (): "failed" => {
       // A setup-time failure (feeder exhausted / input threw) still counts as a
       // started+failed iteration so the artifact reflects it.
       sink.beginIteration(envelope);
       sink.emitIterationStart(envelope, {});
       sink.emitIterationEnd(envelope, { ok: false, durationMs: 0, errorKind: "setupError" });
       sink.endIteration(iterationId);
-      return true;
+      return "failed";
     };
 
     // Feeder allocation + input resolution are the iteration's SETUP. Any failure
@@ -321,7 +400,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
           return failSetup(); // exhausted (fail policy)
         }
       }
-      if (skipped) return false;
+      if (skipped) return "skip";
       input =
         typeof single.input === "function"
           ? (single.input as (args: unknown) => unknown)({
@@ -335,7 +414,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       return failSetup();
     }
 
-    await runLoadIteration({
+    return startLoadIteration({
       core,
       sink,
       scenario: compiled,
@@ -346,8 +425,8 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       session: cloneSession(baseSession), // copy-on-write: each iteration gets its own (deep)
       ...(Object.keys(feederKeys).length > 0 ? { feederKeys } : {}),
       now,
+      continuation: { pool: continuationPool },
     });
-    return true;
   };
 
   const runSlot = async (slotIndex: number): Promise<void> => {
@@ -361,16 +440,30 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     for (;;) {
       const globalIteration = claimIteration();
       if (globalIteration < 0) break;
-      const ran = await runOneIteration(slotIndex, producerSlotId, slotIteration, globalIteration);
-      if (ran) primaryIterations += 1;
+      const started = startOneIteration(slotIndex, producerSlotId, slotIteration, globalIteration);
       slotIteration += 1;
+      if (started !== "skip") {
+        // A real (or failed-setup) primary iteration.
+        if (started !== "failed") {
+          // Hold the slot until the primary phase finishes: at the producer-release
+          // boundary (then the continuation drains in the background) or, with no
+          // release, at full completion (closed model).
+          const { released } = await started.primaryDone;
+          if (released) trackContinuation(started.completed);
+        }
+        primaryIterations += 1;
+      }
+      // Pace EVERY slot turn — including a feeder skip/wait — so an exhausted
+      // skip/wait feeder doesn't spin the loop in a paced run.
       if (thinkTimeMs !== undefined) await pausedSleep(thinkDelay(thinkTimeMs));
     }
     sink.emitProducerSlotEnd(slotIndex, primaryIterations);
   };
 
+  let abortedByDrainTimeout = 0;
   try {
     await Promise.all(Array.from({ length: concurrency }, (_, i) => runSlot(i)));
+    abortedByDrainTimeout = await drainContinuations(continuations, continuationCfg?.drainTimeoutMs);
   } finally {
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
   }
@@ -378,8 +471,27 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   const endReason: LoadEndReason =
     iterations !== undefined && claimed >= iterations ? "iterations" : durationMs !== undefined ? "duration" : "iterations";
   sink.emitLoadEnd(endReason);
+  // Seal the sink so a continuation the drain timeout abandoned can't emit into the
+  // reducer after the artifact is built (it keeps running, but its late events are
+  // dropped; full in-flight HTTP/poll cancellation needs engine AbortSignal support).
+  sink.seal();
 
   const artifact = reducer.finalize();
+  // Continuations the drain timeout abandoned are still in flight at finalize —
+  // surface them (the reducer can't know the orchestrator's drain decision).
+  if (artifact.summary.continuation) {
+    const c = artifact.summary.continuation;
+    // The orchestrator saw the true peak of concurrent tails (incl. deadline-released
+    // ones the pool never admitted, so the reducer's maxBacklog can't see them).
+    c.maxBacklog = Math.max(c.maxBacklog, peakContinuations);
+    c.maxConcurrent = Math.max(c.maxConcurrent, peakContinuations);
+    if (abortedByDrainTimeout > 0) {
+      c.abortedByDrainTimeout = abortedByDrainTimeout;
+      c.backlog = abortedByDrainTimeout;
+      c.active = abortedByDrainTimeout;
+      artifact.runtime.continuationInFlight = abortedByDrainTimeout;
+    }
+  }
   // Evaluate configured thresholds against the finalized artifact and refine the
   // pass verdict (a crash-free run still fails if a threshold is breached).
   if (single.thresholds !== undefined) {

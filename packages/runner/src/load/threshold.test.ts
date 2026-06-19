@@ -51,6 +51,7 @@ function artifactStub(over: {
   steps?: LoadArtifact["steps"];
   primary?: LoadArtifact["summary"]["primary"];
   endToEnd?: LoadArtifact["summary"]["endToEnd"];
+  continuation?: LoadArtifact["summary"]["continuation"];
 }): LoadArtifact {
   const pct = over.latency ?? { p50: 10, p90: 20, p95: 30, p99: 40, max: 50 };
   return {
@@ -64,6 +65,7 @@ function artifactStub(over: {
       latency: pct,
       ...(over.primary !== undefined ? { primary: over.primary } : {}),
       ...(over.endToEnd !== undefined ? { endToEnd: over.endToEnd } : {}),
+      ...(over.continuation !== undefined ? { continuation: over.continuation } : {}),
       thresholds: [],
     },
     endpoints: over.endpoints ?? [],
@@ -189,6 +191,45 @@ describe("evaluateThresholds (M4-a)", () => {
       steps: { "0:checkout": { errorRate: "<1%" } },
     });
     expect(evals[0]).toMatchObject({ scope: "step", metric: "errorRate", actual: 0.5, pass: false });
+    expect(pass).toBe(false);
+  });
+
+  it("evaluates continuation backlog / backpressure thresholds numerically (M6)", () => {
+    // backpressureMs is a percentile object (compare p95) and backlog uses the PEAK.
+    const art = artifactStub({
+      continuation: {
+        backlog: 0,
+        maxBacklog: 12,
+        maxConcurrent: 12,
+        active: 0,
+        backpressureMs: { p50: 5, p90: 40, p95: 80, p99: 120, max: 150 },
+        queueWaitMs: { p50: 5, p90: 40, p95: 80, p99: 120, max: 150 },
+        releasedProducerSlots: 100,
+        primaryBoundaryCoverage: 1,
+        releaseCoverage: 1,
+        duplicateReleaseSignals: 0,
+        rejectedReleaseSignals: 0,
+        abortedByDrainTimeout: 0,
+      } as LoadArtifact["summary"]["continuation"],
+    });
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      continuation: { backlog: "<20", backpressureMs: "<100ms" }, // peak 12 < 20; p95 80 < 100
+    });
+    expect(pass).toBe(true);
+    expect(evals.find((e) => e.metric === "backlog")).toMatchObject({ scope: "continuation", actual: 12, pass: true });
+    expect(evals.find((e) => e.metric === "backpressureMs")).toMatchObject({ actual: 80, pass: true });
+  });
+
+  it("fails a continuation backpressure threshold when p95 exceeds it", () => {
+    const art = artifactStub({
+      continuation: {
+        backlog: 0, maxBacklog: 5, maxConcurrent: 5, active: 0,
+        backpressureMs: { p50: 100, p90: 300, p95: 450, p99: 600, max: 700 },
+        releasedProducerSlots: 50, primaryBoundaryCoverage: 1, releaseCoverage: 1,
+        duplicateReleaseSignals: 0, rejectedReleaseSignals: 0, abortedByDrainTimeout: 0,
+      } as LoadArtifact["summary"]["continuation"],
+    });
+    const { pass } = evaluateThresholds(art, { continuation: { backpressureMs: "<200ms" } }); // p95 450 ≥ 200
     expect(pass).toBe(false);
   });
 

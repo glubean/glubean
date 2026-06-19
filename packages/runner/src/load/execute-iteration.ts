@@ -31,12 +31,14 @@ import type {
   LoadAssertionFailureMode,
   LoadErrorKind,
   LoadIteration,
+  LoadPrimaryCompletionReceipt,
   LoadProducerSlot,
   LoadReportSignal,
   LoadScenario,
   LoadStepDefinition,
 } from "@glubean/sdk/load";
 import { isLoadBranchStep } from "@glubean/sdk/load";
+import { AdmissionCancelledError, ContinuationBacklogFullError, type ContinuationPool } from "./continuation-pool.js";
 import type { LoadIterationEnvelope, LoadSink } from "./sink.js";
 
 /** Phantom-typed Input so a compiled scenario stays coupled to its input type. */
@@ -178,6 +180,24 @@ export interface RunLoadIterationArgs<Input = unknown> {
   feederKeys?: Record<string, string>;
   /** Monotonic clock for the iteration duration; defaults to `performance.now`. */
   now?: () => number;
+  /** Producer-release wiring (M6). When present, `ctx.report.primaryComplete(...,
+   *  { releaseProducerSlot: true })` reserves a continuation slot from this pool
+   *  (back-pressure / fail-iteration) and frees the producer slot at the boundary;
+   *  absent → the M5 closed model (release is a no-op phase split). */
+  continuation?: { pool: ContinuationPool };
+}
+
+/**
+ * Handle to a started iteration whose producer slot may be released mid-run (M6).
+ * `primaryDone` lets the orchestrator free the slot at the right moment;
+ * `completed` is the whole iteration (continuation included) for drain + counting.
+ */
+export interface LoadIterationHandle {
+  /** Resolves when the PRODUCER SLOT is free to start the next primary: at the
+   *  release boundary (`released: true`) or, with no release, at full completion. */
+  primaryDone: Promise<{ released: boolean }>;
+  /** Resolves when the whole iteration (incl. any continuation) settles. */
+  completed: Promise<RunLoadIterationResult>;
 }
 
 /** Outcome of one iteration run (the engine `TestResult` plus the load verdict). */
@@ -215,26 +235,34 @@ function classifyIterationError(result: TestResult): LoadErrorKind {
   const msg = result.error ?? "";
   if (name === "TimeoutError" || name === "StepTimeoutError" || /timed out/i.test(msg)) return "timeout";
   if (name === "HTTPError") return "http";
+  // A backlog-full release rejection (fail-iteration policy) failed the iteration.
+  if (name === "ContinuationBacklogFullError") return "continuationBacklogFull";
   if (name !== undefined) return "stepError";
   if (msg === "" || msg === "assertion failed") return "assertion";
   return "stepError";
 }
 
+/** A producer-slot release request, handled by `startLoadIteration`'s coordinator
+ *  (admit to the continuation pool, emit producer:released, free the slot). */
+type ReleaseFn = (info: { primaryId: string; primaryDurationMs: number }) => Promise<LoadPrimaryCompletionReceipt>;
+
 /**
  * A per-iteration `report` whose signals emit through the sink with attribution.
  *
- * `primaryComplete` (M5) records the measurement boundary: the FIRST call stamps
+ * `primaryComplete` records the measurement boundary (M5): the FIRST call stamps
  * `primaryDurationMs` (iteration start → now), emits `producer:primaryCompleted`,
  * and flips the sink into this iteration's continuation phase; later calls are
- * duplicates (no second boundary). Producer release / backpressure are M6, so
- * `releasedProducerSlot` is always false and `releaseProducerSlot: true` is merely
- * forwarded on the event as `releaseRequested`.
+ * duplicates. With `releaseProducerSlot: true` AND a `release` coordinator (M6) it
+ * also frees the producer slot via the continuation pool (back-pressure /
+ * fail-iteration); without a coordinator release is a no-op phase split.
  */
 function makeIterationReport(
   sink: LoadSink,
   env: LoadIterationEnvelope,
   start: number,
   now: () => number,
+  release?: ReleaseFn,
+  rejectDuplicateRelease?: (id: string) => void,
 ): LoadReportSignal {
   let primaryCompleted = false;
   return {
@@ -244,30 +272,39 @@ function makeIterationReport(
     async primaryComplete(id, data) {
       if (primaryCompleted) {
         // A second boundary in the same iteration is ignored (one boundary per
-        // logical iteration); report it as a duplicate for diagnostics.
+        // logical iteration); report it as a duplicate for diagnostics. A duplicate
+        // that re-requested release is recorded as a rejected duplicate signal.
+        if (data?.releaseProducerSlot === true) rejectDuplicateRelease?.(id);
         return { measuredPrimaryComplete: false, releasedProducerSlot: false, duplicate: true, backpressureMs: 0 };
       }
       primaryCompleted = true;
-      sink.emitPrimaryCompleted(env, {
-        primaryId: id,
-        primaryDurationMs: Math.max(0, now() - start),
-        releaseRequested: data?.releaseProducerSlot === true,
-      });
+      // `releaseProducerSlot` only requests a release when a coordinator is wired (M6).
+      // Without one (the M5-only phase split), it's a documented no-op — so report
+      // releaseRequested:false, else the reducer would treat this boundary as a producer
+      // parked on backlog and surface spurious blockedOnBacklog / a continuation summary.
+      const releaseRequested = data?.releaseProducerSlot === true && release !== undefined;
+      const primaryDurationMs = Math.max(0, now() - start);
+      sink.emitPrimaryCompleted(env, { primaryId: id, primaryDurationMs, releaseRequested });
+      if (releaseRequested && release) {
+        // Release the producer slot (may back-pressure, or throw under
+        // fail-iteration → the iteration fails). Returns the full receipt.
+        return release({ primaryId: id, primaryDurationMs });
+      }
       return { measuredPrimaryComplete: true, releasedProducerSlot: false, duplicate: false, backpressureMs: 0 };
     },
   };
 }
 
 /**
- * Run one scenario iteration through the engine core, bracket it with
- * `iteration:start` / `iteration:end`, and feed every wire event to the sink.
- * Never rejects: an infra-level throw from the core is recorded as a failed
- * iteration (so one bad iteration can't take down the orchestrator).
+ * Start one scenario iteration through the engine core, bracketing it with
+ * `iteration:start` / `iteration:end`. Returns a handle: `primaryDone` resolves
+ * when the producer slot is free (release boundary, or full completion when no
+ * release), and `completed` resolves when the whole iteration settles. Never
+ * rejects: an infra-level throw from the core is recorded as a failed iteration.
  */
-export async function runLoadIteration<Input>(
-  args: RunLoadIterationArgs<Input>,
-): Promise<RunLoadIterationResult> {
+export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): LoadIterationHandle {
   const { core, sink, scenario, envelope, input, producerSlot, iteration, session } = args;
+  const pool = args.continuation?.pool;
   const now = args.now ?? (() => performance.now());
 
   sink.beginIteration(envelope);
@@ -279,6 +316,95 @@ export async function runLoadIteration<Input>(
   // Stamp the iteration start BEFORE building the report so `primaryComplete` can
   // measure `primaryDurationMs` from it; `start` is also the end-to-end baseline.
   const start = now();
+
+  let released = false; // a real continuation slot was acquired (pool.release pairs it)
+  let deadlineReleased = false; // release rejected at the run deadline; tail still drains
+  let backlogRejected = false; // fail-iteration: backlog full → the iteration MUST fail
+  let drainTimeoutRejected = false; // block-producer drain bound expired → the iteration MUST fail
+  let iterationSettled = false; // the iteration has fully ended (e.g. a step timeout)
+  let resolvePrimaryDone!: (v: { released: boolean }) => void;
+  const primaryDone = new Promise<{ released: boolean }>((r) => { resolvePrimaryDone = r; });
+
+  // M6 release coordinator (only wired when a continuation pool is provided).
+  const release: ReleaseFn | undefined = pool
+    ? async ({ primaryId, primaryDurationMs }) => {
+        try {
+          const backpressureMs = await pool.admit(); // back-pressure, or throw under fail-iteration
+          if (iterationSettled) {
+            // The iteration already ended (e.g. a step timeout) while this release
+            // was parked on back-pressure. Hand the just-acquired slot straight back
+            // and do NOT release the producer slot or emit a late producer:released —
+            // otherwise the slot would leak at capacity and deadlock future releases.
+            pool.release();
+            return { measuredPrimaryComplete: true, releasedProducerSlot: false, duplicate: false, backpressureMs };
+          }
+          released = true;
+          sink.emitProducerReleased(envelope, {
+            releaseId: primaryId,
+            primaryDurationMs,
+            continuationBacklog: pool.outstanding,
+            backpressureMs,
+          });
+          resolvePrimaryDone({ released: true }); // free the producer slot NOW
+          return { measuredPrimaryComplete: true, releasedProducerSlot: true, duplicate: false, backpressureMs };
+        } catch (e) {
+          if (e instanceof AdmissionCancelledError) {
+            if (iterationSettled) {
+              // The iteration already ended (e.g. a step timeout) before the cancel
+              // hit this parked admit. It's no longer tracked — don't emit a
+              // rejection or resolve primaryDone (already done), just return.
+              return { measuredPrimaryComplete: true, releasedProducerSlot: false, duplicate: false, backpressureMs: e.waitMs };
+            }
+            // Either the run's wall-clock deadline closed the pool, or this release's
+            // own drain bound expired (the backlog never freed). Both free the producer
+            // for liveness and leave the continuation tail to be drained at run-end
+            // (no pool slot acquired), but they're DIFFERENT outcomes:
+            //  - runDeadlineReached: the run is ending; the primary was already complete
+            //    and is released-for-drain — NOT an iteration failure.
+            //  - drainTimeout: the backlog stayed full past the drain bound mid-run — the
+            //    same terminal outcome as fail-iteration, so the iteration MUST fail (else
+            //    the slot would silently run over the configured backlog bound).
+            sink.emitProducerReleaseRejected(envelope, {
+              releaseId: primaryId,
+              reason: e.reason,
+              waitMs: e.waitMs,
+              continuationBacklog: pool.outstanding,
+            });
+            deadlineReleased = true; // released-for-drain: no pool slot to pair with release()
+            if (e.reason === "drainTimeout") drainTimeoutRejected = true;
+            resolvePrimaryDone({ released: true }); // free the slot + track the tail
+            return { measuredPrimaryComplete: true, releasedProducerSlot: false, duplicate: false, backpressureMs: e.waitMs };
+          }
+          if (e instanceof ContinuationBacklogFullError) {
+            sink.emitProducerReleaseRejected(envelope, {
+              releaseId: primaryId,
+              reason: "continuationBacklogFull",
+              waitMs: 0,
+              continuationBacklog: pool.outstanding,
+            });
+            // fail-iteration: the iteration MUST fail. Throw the TYPED error so a
+            // non-retried step classifies as "continuationBacklogFull"; also latch a
+            // flag so that if the step has `retries`, the retry's duplicate
+            // primaryComplete (which returns success) can't let the iteration pass.
+            backlogRejected = true;
+          }
+          throw e;
+        }
+      }
+    : undefined;
+
+  // Record a duplicate release request (a second primaryComplete that re-asks for
+  // release) so the continuation summary's duplicateReleaseSignals reflects it.
+  const rejectDuplicateRelease = pool
+    ? (id: string) =>
+        sink.emitProducerReleaseRejected(envelope, {
+          releaseId: id,
+          reason: "duplicateRelease",
+          waitMs: 0,
+          continuationBacklog: pool.outstanding,
+        })
+    : undefined;
+
   const scope: ScopeInput = {
     ...(session !== undefined ? { session } : {}),
     ctxExtensions: {
@@ -286,42 +412,81 @@ export async function runLoadIteration<Input>(
       producerSlot,
       iteration,
       now,
-      report: makeIterationReport(sink, envelope, start, now),
+      report: makeIterationReport(sink, envelope, start, now, release, rejectDuplicateRelease),
     },
   };
 
-  let result: TestResult | null = null;
-  let ok = false;
-  let skipped = false;
-  let errorKind: LoadErrorKind | undefined;
-  try {
-    result = await core.run(loadScenarioToTestDef(scenario, envelope.iterationId), scope);
-    if (result.status === "skipped") {
-      // `ctx.skip()` opted this iteration out — not a success and not a failure.
-      // Report it `ok` (errorKind undefined) so it never lands in failure stats;
-      // the `skipped` flag lets a caller account for it separately later.
-      ok = true;
-      skipped = true;
-    } else {
-      ok = result.status === "ok";
-      errorKind = ok ? undefined : classifyIterationError(result);
+  const completed = (async (): Promise<RunLoadIterationResult> => {
+    let result: TestResult | null = null;
+    let ok = false;
+    let skipped = false;
+    let errorKind: LoadErrorKind | undefined;
+    try {
+      result = await core.run(loadScenarioToTestDef(scenario, envelope.iterationId), scope);
+      if (result.status === "skipped") {
+        // `ctx.skip()` opted this iteration out — not a success and not a failure.
+        ok = true;
+        skipped = true;
+      } else {
+        ok = result.status === "ok";
+        errorKind = ok ? undefined : classifyIterationError(result);
+      }
+    } catch {
+      // The engine resolves user errors into a TestResult; reaching here means the
+      // core itself threw (infra). Record it as a runner-crash-flavoured failure.
+      ok = false;
+      errorKind = "runnerCrash";
     }
-  } catch {
-    // The engine resolves user errors into a TestResult; reaching here means the
-    // core itself threw (infra). Record it as a runner-crash-flavoured failure.
-    ok = false;
-    errorKind = "runnerCrash";
-  }
-  const durationMs = now() - start;
+    // A backlog rejection is terminal regardless of step retries / a tail that later
+    // settles: the iteration couldn't honor the backlog bound, so it fails. This covers
+    // both fail-iteration (full → throw immediately) and block-producer drain-timeout
+    // (parked past the drain bound → give up) — a retry's duplicate primaryComplete
+    // returns success and could otherwise let the iteration (and a re-run primary side
+    // effect) pass.
+    if (backlogRejected || drainTimeoutRejected) {
+      ok = false;
+      errorKind = "continuationBacklogFull";
+    }
+    const durationMs = now() - start;
+    // Mark the iteration done BEFORE finalizing, so a release still parked on
+    // back-pressure (its step having timed out) returns its slot instead of leaking.
+    iterationSettled = true;
 
-  sink.emitIterationEnd(envelope, { ok, durationMs, ...(errorKind !== undefined ? { errorKind } : {}) });
-  sink.endIteration(envelope.iterationId);
+    try {
+      sink.emitIterationEnd(envelope, { ok, durationMs, ...(errorKind !== undefined ? { errorKind } : {}) });
+      sink.endIteration(envelope.iterationId);
+    } catch {
+      // Finalization is best-effort — a sink hiccup must neither reject this
+      // promise nor (via the finally below) hang the producer slot.
+    } finally {
+      // Free the continuation slot once the (released) continuation has settled. A
+      // drain-rejected release (run deadline OR drain-timeout) acquired NO pool slot
+      // (and already resolved primaryDone), so it neither releases nor re-resolves.
+      // Otherwise no release happened and the producer slot was held until now — free
+      // it. This MUST run so the slot loop's `await primaryDone` never hangs.
+      if (released) pool?.release();
+      else if (!deadlineReleased) resolvePrimaryDone({ released: false });
+    }
 
-  return {
-    ok,
-    durationMs,
-    ...(errorKind !== undefined ? { errorKind } : {}),
-    ...(skipped ? { skipped: true } : {}),
-    result,
-  };
+    return {
+      ok,
+      durationMs,
+      ...(errorKind !== undefined ? { errorKind } : {}),
+      ...(skipped ? { skipped: true } : {}),
+      result,
+    };
+  })();
+
+  return { primaryDone, completed };
+}
+
+/**
+ * Run one scenario iteration to completion (closed model). The M5/M3 entry: it
+ * awaits the WHOLE iteration. The orchestrator uses `startLoadIteration` directly
+ * for M6 producer-release scheduling.
+ */
+export async function runLoadIteration<Input>(
+  args: RunLoadIterationArgs<Input>,
+): Promise<RunLoadIterationResult> {
+  return startLoadIteration(args).completed;
 }

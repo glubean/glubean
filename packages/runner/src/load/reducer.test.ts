@@ -299,3 +299,117 @@ describe("LoadReducer — interrupted runs + attribution quality", () => {
     expect(art.runtime.attribution.endpoint).toBe("heuristic");
   });
 });
+
+describe("continuation summary — producer release (M6)", () => {
+  it("aggregates releases, rejections, duplicates, backpressure, and coverage", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 2, iterations: 3 } }));
+
+    // Three iterations all reach a boundary; i1 + i2 release (i2 back-pressured 30ms),
+    // i3's release is rejected (backlog full), plus one duplicate release signal.
+    for (const id of ["i1", "i2", "i3"]) {
+      r.apply(ev(T0, { type: "iteration:start", scenarioId: "job", iterationId: id }));
+      r.apply(ev(T0 + 5, { type: "producer:primaryCompleted", scenarioId: "job", iterationId: id, primaryId: id, primaryDurationMs: 5, releaseRequested: true }));
+    }
+    r.apply(ev(T0 + 6, { type: "producer:released", scenarioId: "job", iterationId: "i1", releaseId: "i1", primaryDurationMs: 5, continuationBacklog: 1, backpressureMs: 0 }));
+    r.apply(ev(T0 + 7, { type: "producer:released", scenarioId: "job", iterationId: "i2", releaseId: "i2", primaryDurationMs: 5, continuationBacklog: 2, continuationBackpressure: true, backpressureMs: 30 }));
+    r.apply(ev(T0 + 8, { type: "producer:releaseRejected", scenarioId: "job", iterationId: "i3", releaseId: "i3", reason: "continuationBacklogFull", waitMs: 0, continuationBacklog: 2 }));
+    r.apply(ev(T0 + 9, { type: "producer:releaseRejected", scenarioId: "job", iterationId: "i1", releaseId: "i1", reason: "duplicateRelease", waitMs: 0, continuationBacklog: 2 }));
+
+    r.apply(ev(T0 + 100, { type: "iteration:end", scenarioId: "job", iterationId: "i1", ok: true, durationMs: 100 }));
+    r.apply(ev(T0 + 110, { type: "iteration:end", scenarioId: "job", iterationId: "i2", ok: true, durationMs: 110 }));
+    r.apply(ev(T0 + 120, { type: "iteration:end", scenarioId: "job", iterationId: "i3", ok: false, durationMs: 120, errorKind: "continuationBacklogFull" }));
+    r.apply(ev(T0 + 130, { type: "load:end", reason: "iterations" }));
+
+    const art = r.finalize();
+    expect(art.runtime.slotModel).toBe("producer-released");
+    const c = art.summary.continuation!;
+    expect(c.releasedProducerSlots).toBe(2);
+    expect(c.rejectedReleaseSignals).toBe(1);
+    expect(c.duplicateReleaseSignals).toBe(1);
+    expect(c.maxBacklog).toBe(2);
+    expect(c.maxConcurrent).toBe(2);
+    expect(c.primaryBoundaryCoverage).toBe(1); // 3 boundaries / 3 started
+    expect(c.releaseCoverage).toBeCloseTo(2 / 3); // 2 released / 3 boundaries
+    expect(c.backpressureMs?.max).toBe(30);
+    expect(c.backlog).toBe(0); // drained at finalize
+    expect(c.abortedByDrainTimeout).toBe(0);
+  });
+
+  it("counts a deadline-rejected release's stall as back-pressure", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1, iterations: 1 } }));
+    r.apply(ev(T0, { type: "iteration:start", scenarioId: "job", iterationId: "i1" }));
+    r.apply(ev(T0 + 5, { type: "producer:primaryCompleted", scenarioId: "job", iterationId: "i1", primaryId: "i1", primaryDurationMs: 5, releaseRequested: true }));
+    // Parked on a full backlog until the deadline (stalled 50ms), then rejected.
+    r.apply(ev(T0 + 55, { type: "producer:releaseRejected", scenarioId: "job", iterationId: "i1", releaseId: "i1", reason: "runDeadlineReached", waitMs: 50, continuationBacklog: 1 }));
+    r.apply(ev(T0 + 100, { type: "iteration:end", scenarioId: "job", iterationId: "i1", ok: true, durationMs: 100 }));
+    r.apply(ev(T0 + 110, { type: "load:end", reason: "duration" }));
+
+    const c = r.finalize().summary.continuation!;
+    expect(c.rejectedReleaseSignals).toBe(1);
+    expect(c.backpressureMs?.max).toBe(50); // the producer stall is recorded, not lost
+  });
+
+  it("omits the continuation summary when no release is attempted", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1, iterations: 1 } }));
+    r.apply(ev(T0, { type: "iteration:start", scenarioId: "s", iterationId: "i1" }));
+    r.apply(ev(T0 + 50, { type: "iteration:end", scenarioId: "s", iterationId: "i1", ok: true, durationMs: 50 }));
+    r.apply(ev(T0 + 60, { type: "load:end", reason: "iterations" }));
+    const art = r.finalize();
+    expect(art.summary.continuation).toBeUndefined();
+    expect(art.runtime.slotModel).toBe("end-to-end");
+  });
+
+  it("tracks LIVE continuations between release and iteration:end (snapshot + interrupted finalize)", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 2, iterations: 2 } }));
+    for (const id of ["i1", "i2"]) {
+      r.apply(ev(T0, { type: "iteration:start", scenarioId: "job", iterationId: id }));
+      r.apply(ev(T0 + 5, { type: "producer:primaryCompleted", scenarioId: "job", iterationId: id, primaryId: id, primaryDurationMs: 5, releaseRequested: true }));
+      r.apply(ev(T0 + 6, { type: "producer:released", scenarioId: "job", iterationId: id, releaseId: id, primaryDurationMs: 5, continuationBacklog: 1, backpressureMs: 0 }));
+    }
+    // Both iterations are in their continuation phase — the live snapshot shows it.
+    expect(r.snapshot(T0 + 50).continuationInFlight).toBe(2);
+
+    r.apply(ev(T0 + 100, { type: "iteration:end", scenarioId: "job", iterationId: "i1", ok: true, durationMs: 100 }));
+    expect(r.snapshot(T0 + 110).continuationInFlight).toBe(1); // i1 done, i2 still live
+
+    // Interrupted finalize: i2 never ended → its live continuation is reported, not 0.
+    const art = r.finalize();
+    expect(art.runtime.continuationInFlight).toBe(1);
+    expect(art.summary.continuation?.backlog).toBe(1);
+    expect(art.summary.continuation?.active).toBe(1);
+  });
+
+  it("counts a release parked on a full backlog as blockedOnBacklog until granted", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1, iterations: 1 } }));
+    r.apply(ev(T0, { type: "iteration:start", scenarioId: "job", iterationId: "i1" }));
+    // Boundary hit + release requested, not yet granted → parked on the backlog: it's
+    // left primary but isn't a continuation yet.
+    r.apply(ev(T0 + 5, { type: "producer:primaryCompleted", scenarioId: "job", iterationId: "i1", primaryId: "i1", primaryDurationMs: 5, releaseRequested: true }));
+    let snap = r.snapshot(T0 + 50);
+    expect(snap.blockedOnBacklog).toBe(1);
+    expect(snap.continuationInFlight).toBe(0);
+
+    r.apply(ev(T0 + 60, { type: "producer:released", scenarioId: "job", iterationId: "i1", releaseId: "i1", primaryDurationMs: 5, continuationBacklog: 1, backpressureMs: 44 }));
+    snap = r.snapshot(T0 + 70);
+    expect(snap.blockedOnBacklog).toBe(0); // granted
+    expect(snap.continuationInFlight).toBe(1); // now a continuation
+  });
+
+  it("includes the continuation summary when a release is still parked at finalize", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1, iterations: 1 } }));
+    r.apply(ev(T0, { type: "iteration:start", scenarioId: "job", iterationId: "i1" }));
+    // Release requested but never granted/rejected — an interrupted finalize while parked.
+    r.apply(ev(T0 + 5, { type: "producer:primaryCompleted", scenarioId: "job", iterationId: "i1", primaryId: "i1", primaryDurationMs: 5, releaseRequested: true }));
+
+    const art = r.finalize();
+    expect(art.summary.continuation).toBeDefined(); // not omitted despite no released/rejected
+    expect(art.runtime.blockedOnBacklog).toBe(1);
+    expect(art.summary.continuation?.releasedProducerSlots).toBe(0);
+  });
+});

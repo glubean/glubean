@@ -101,7 +101,7 @@ export type LoadEvent =
   | (LoadEventEnvelope & {
       type: "producer:releaseRejected";
       releaseId: string;
-      reason: "continuationBacklogFull" | "duplicateRelease" | "runDeadlineReached";
+      reason: "continuationBacklogFull" | "duplicateRelease" | "drainTimeout" | "runDeadlineReached";
       waitMs: number;
       continuationBacklog: number;
     })

@@ -50,6 +50,9 @@ interface TraceData {
 
 export class LoadSink {
   private seq = 0;
+  // Once the run is finalized, events from continuations the drain timeout abandoned
+  // must not mutate reducer state (they'd land after the artifact was built).
+  private sealed = false;
   private readonly envelopes = new Map<string, LoadIterationEnvelope>();
   private readonly stepNames = new Map<string, Map<number, string>>();
   // Per-iteration phase: "primary" until that iteration's first primaryComplete
@@ -68,8 +71,11 @@ export class LoadSink {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  /** Stamp envelope basics (ts / seq / runId / runnerId) and apply to the reducer. */
+  /** Stamp envelope basics (ts / seq / runId / runnerId) and apply to the reducer.
+   *  A no-op once sealed (post-finalize), so abandoned continuations can't mutate
+   *  the already-built artifact. */
   emit(body: LoadEventBody): void {
+    if (this.sealed) return;
     this.reducer.apply({
       ts: this.now(),
       seq: this.seq++,
@@ -77,6 +83,11 @@ export class LoadSink {
       runnerId: this.runnerId,
       ...body,
     } as LoadEvent);
+  }
+
+  /** Stop forwarding events to the reducer (called once the run is finalized). */
+  seal(): void {
+    this.sealed = true;
   }
 
   /** Register an iteration's attribution before its engine run starts. */
@@ -171,6 +182,47 @@ export class LoadSink {
       releaseRequested: info.releaseRequested,
     });
     this.phases.set(env.iterationId, "continuation");
+  }
+
+  /** Emit `producer:released` (M6): the producer slot was freed at this iteration's
+   *  primaryComplete boundary so a new primary can start; the rest of this iteration
+   *  runs as a continuation. `backpressureMs` is the wait the release incurred when
+   *  the continuation backlog was full. */
+  emitProducerReleased(
+    env: LoadIterationEnvelope,
+    info: { releaseId: string; primaryDurationMs: number; continuationBacklog: number; backpressureMs: number },
+  ): void {
+    this.emit({
+      type: "producer:released",
+      ...this.baseOf(env),
+      releaseId: info.releaseId,
+      primaryDurationMs: info.primaryDurationMs,
+      continuationBacklog: info.continuationBacklog,
+      ...(info.backpressureMs > 0 ? { continuationBackpressure: true } : {}),
+      backpressureMs: info.backpressureMs,
+    });
+  }
+
+  /** Emit `producer:releaseRejected` (M6): a release was requested but not granted —
+   *  backlog full under `fail-iteration`, a duplicate, a parked release whose drain
+   *  bound expired (`drainTimeout`), or one cancelled by the run deadline. */
+  emitProducerReleaseRejected(
+    env: LoadIterationEnvelope,
+    info: {
+      releaseId: string;
+      reason: "continuationBacklogFull" | "duplicateRelease" | "drainTimeout" | "runDeadlineReached";
+      waitMs: number;
+      continuationBacklog: number;
+    },
+  ): void {
+    this.emit({
+      type: "producer:releaseRejected",
+      ...this.baseOf(env),
+      releaseId: info.releaseId,
+      reason: info.reason,
+      waitMs: info.waitMs,
+      continuationBacklog: info.continuationBacklog,
+    });
   }
 
   /** Emit `load:start` with the resolved config (orchestrator run boundary). */

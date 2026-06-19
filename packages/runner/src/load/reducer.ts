@@ -18,6 +18,7 @@ import type {
   LoadArtifact,
   LoadArtifactConfig,
   LoadAttributionQuality,
+  LoadContinuationSummary,
   LoadCrashSummary,
   LoadEndReason,
   LoadEndpointSummary,
@@ -121,6 +122,20 @@ export class LoadReducerImpl implements LoadReducer {
   private endedWithoutBoundary = 0;
   private readonly primaryLatency = new LoadHistogram();
   private readonly iterHadPrimary = new Set<string>();
+
+  // continuation / producer-release (M6): present once any release is attempted.
+  private releasedProducerSlots = 0;
+  private rejectedReleaseSignals = 0;
+  private duplicateReleaseSignals = 0;
+  private maxContinuationBacklog = 0;
+  private readonly continuationBackpressure = new LoadHistogram();
+  // Released iterations still in their continuation phase (released, not yet ended):
+  // the LIVE in-flight count for snapshot() and an interrupted finalize().
+  private readonly liveContinuations = new Set<string>();
+  // Iterations that reached their boundary requesting release but aren't yet granted
+  // / rejected — i.e. parked on a full backlog. They've left the primary phase but
+  // aren't continuations yet, so they're the LIVE `blockedOnBacklog` count.
+  private readonly pendingRelease = new Set<string>();
   // Per in-flight iteration: each step's START phase (recorded at step:start), so a
   // step's step:end + requests aggregate under the phase it started in even after a
   // mid-step boundary flips the live phase. Cleared at iteration:end (bounded).
@@ -169,7 +184,11 @@ export class LoadReducerImpl implements LoadReducer {
           if (!event.ok) this.failedBeforePrimary += 1;
           else this.primaryLatency.record(event.durationMs);
         }
-        if (event.iterationId) this.iterStepPhase.delete(event.iterationId); // bounded cleanup
+        if (event.iterationId) {
+          this.iterStepPhase.delete(event.iterationId); // bounded cleanup
+          this.liveContinuations.delete(event.iterationId); // continuation finished
+          this.pendingRelease.delete(event.iterationId); // a fail-iteration tail ended
+        }
         const sc = this.scenarioAgg(event.scenarioId, event.scenarioRefId);
         if (sc) {
           sc.iterations += 1;
@@ -258,12 +277,47 @@ export class LoadReducerImpl implements LoadReducer {
         // primary-phase duration and mark the iteration as having reached it.
         this.primaryBoundaries += 1;
         this.primaryLatency.record(event.primaryDurationMs);
-        if (event.iterationId) this.iterHadPrimary.add(event.iterationId);
+        if (event.iterationId) {
+          this.iterHadPrimary.add(event.iterationId);
+          // A release request leaves the primary phase but isn't a continuation until
+          // granted — until then it's parked on the backlog (blockedOnBacklog).
+          if (event.releaseRequested) this.pendingRelease.add(event.iterationId);
+        }
         break;
       }
-      // assertion:observed / log:sampled / producer:released|releaseRejected /
-      // checkpoints are handled by the sink (failure traces) or by later milestones
-      // (producer release / backpressure); they don't affect these aggregates.
+      case "producer:released": {
+        // A producer slot was freed at the boundary (M6): track release count, the
+        // back-pressure wait, the peak backlog, and the now-live continuation (its
+        // iteration is in continuation phase until its iteration:end).
+        this.releasedProducerSlots += 1;
+        this.continuationBackpressure.record(event.backpressureMs);
+        if (event.continuationBacklog > this.maxContinuationBacklog) {
+          this.maxContinuationBacklog = event.continuationBacklog;
+        }
+        if (event.iterationId) {
+          this.pendingRelease.delete(event.iterationId); // granted → now a continuation
+          this.liveContinuations.add(event.iterationId);
+        }
+        break;
+      }
+      case "producer:releaseRejected": {
+        // A release that wasn't granted: a duplicate signal, or rejected (backlog full
+        // under fail-iteration, a parked release whose drain bound expired, or one
+        // cancelled by the run deadline).
+        if (event.reason === "duplicateRelease") {
+          this.duplicateReleaseSignals += 1;
+        } else {
+          this.rejectedReleaseSignals += 1;
+          // A deadline-rejected release still STALLED the producer (it parked on the
+          // full backlog until the deadline) — count that wait as back-pressure, and
+          // it's no longer parked. (A duplicate's original release already cleared.)
+          if (event.waitMs > 0) this.continuationBackpressure.record(event.waitMs);
+          if (event.iterationId) this.pendingRelease.delete(event.iterationId);
+        }
+        break;
+      }
+      // assertion:observed / log:sampled / checkpoints are handled by the sink
+      // (failure traces) or don't affect these aggregates.
       default:
         break;
     }
@@ -277,8 +331,8 @@ export class LoadReducerImpl implements LoadReducer {
       elapsedMs,
       requestedConcurrency: this.requestedConcurrency,
       primaryInFlight: this.primaryInFlightCount(),
-      continuationInFlight: 0,
-      blockedOnBacklog: 0,
+      continuationInFlight: this.liveContinuations.size,
+      blockedOnBacklog: this.pendingRelease.size,
       primaryStarted: this.iterStarted,
       // With a phase split, "primary completed" = boundaries + no-boundary successes;
       // in the pure closed model (no primaryComplete) it coincides with completed
@@ -313,15 +367,24 @@ export class LoadReducerImpl implements LoadReducer {
         processModel: "single-process-async-producer-slot",
         // A configured think-time makes this a paced closed run, not back-to-back.
         executionModel: this.config?.pacing?.thinkTimeMs !== undefined ? "closed-paced" : "closed-back-to-back",
-        // A primaryComplete boundary makes this a MEASURED closed run (phase split);
-        // producer release ("producer-released") is M6.
-        slotModel: this.primaryBoundaries > 0 ? "end-to-end-measured" : "end-to-end",
+        // Producer release ("producer-released") wins; else a primaryComplete
+        // boundary is a MEASURED closed run (phase split); else plain closed.
+        slotModel: this.releasedProducerSlots > 0
+          ? "producer-released"
+          : this.primaryBoundaries > 0
+            ? "end-to-end-measured"
+            : "end-to-end",
         requestedConcurrency: this.requestedConcurrency,
         // Same reducer state as snapshot(): an interrupted run (abort/crash with
         // started-but-not-ended iterations) shows its in-flight count, not 0.
         primaryInFlight: this.primaryInFlightCount(),
-        continuationInFlight: 0, // producer-release continuation lands in M6
-        blockedOnBacklog: 0, // backpressure lands in M6
+        // Released iterations still in their continuation phase at finalize (an
+        // interrupted run; a clean run drains to 0). The orchestrator may raise this
+        // for drain-timeout aborts whose tails it abandoned.
+        continuationInFlight: this.liveContinuations.size,
+        // Producers still parked on a full backlog at finalize (an interrupted run;
+        // a clean run has none).
+        blockedOnBacklog: this.pendingRelease.size,
         feederGuarantee: "single-node",
         sampleGranularity: "event",
         attribution: this.attribution(anyHeuristicEndpoint),
@@ -343,6 +406,8 @@ export class LoadReducerImpl implements LoadReducer {
         ...(this.primaryBoundaries > 0
           ? { primary: this.primaryPhaseSummary(elapsedSec), endToEnd: this.endToEndPhaseSummary(elapsedSec) }
           : {}),
+        // Continuation (M6): present once producer release is attempted.
+        ...(this.releaseUsed() ? { continuation: this.continuationSummary() } : {}),
         thresholds: [],
       },
       scenarios: this.scenarioSummaries(),
@@ -546,6 +611,44 @@ export class LoadReducerImpl implements LoadReducer {
       errorRate: rate(this.iterFailed, this.iterCompleted),
       throughputPerSec: elapsedSec > 0 ? this.iterCompleted / elapsedSec : 0,
       latency: this.iterCompleted > 0 ? this.iterLatency.percentiles() : ZERO_PCT,
+    };
+  }
+
+  /** Whether producer release was attempted at all (release granted, rejected, a
+   *  duplicate, or still parked on the backlog at finalize) — gates the continuation
+   *  summary's presence so an interrupted run with a parked release still reports it. */
+  private releaseUsed(): boolean {
+    return (
+      this.releasedProducerSlots > 0 ||
+      this.rejectedReleaseSignals > 0 ||
+      this.duplicateReleaseSignals > 0 ||
+      this.pendingRelease.size > 0
+    );
+  }
+
+  /** Continuation (bounded-open) subsystem summary (M6). A finalized run has drained
+   *  its continuations, so live counts (backlog / active / blockedOnBacklog) are 0;
+   *  the cumulative release / back-pressure / coverage figures are what matter. */
+  private continuationSummary(): LoadContinuationSummary {
+    const hasBackpressure = this.continuationBackpressure.count > 0;
+    const waits = hasBackpressure ? this.continuationBackpressure.percentiles() : undefined;
+    const live = this.liveContinuations.size; // in-flight at finalize (0 for a clean run)
+    return {
+      backlog: live,
+      maxBacklog: this.maxContinuationBacklog,
+      // Every in-flight continuation is concurrently scheduled in this single-process
+      // model, so peak concurrency coincides with peak backlog.
+      maxConcurrent: this.maxContinuationBacklog,
+      active: live,
+      ...(waits ? { queueWaitMs: waits, backpressureMs: waits } : {}),
+      releasedProducerSlots: this.releasedProducerSlots,
+      // Coverage: how many iterations reached a boundary, and of those how many
+      // actually released — a low value flags branch/error paths that skipped it.
+      primaryBoundaryCoverage: this.iterStarted > 0 ? this.primaryBoundaries / this.iterStarted : 0,
+      releaseCoverage: this.primaryBoundaries > 0 ? this.releasedProducerSlots / this.primaryBoundaries : 0,
+      duplicateReleaseSignals: this.duplicateReleaseSignals,
+      rejectedReleaseSignals: this.rejectedReleaseSignals,
+      abortedByDrainTimeout: 0, // drain-timeout abort lands in M6-d
     };
   }
 

@@ -4,8 +4,9 @@ import { createServer, type Server } from "node:http";
 import { loadScenario } from "@glubean/sdk/load";
 
 import { createEngineCore } from "../engine-bridge.js";
+import { ContinuationPool } from "./continuation-pool.js";
 import { createLoadReducer } from "./reducer.js";
-import { compileLoadScenario, runLoadIteration } from "./execute-iteration.js";
+import { compileLoadScenario, runLoadIteration, startLoadIteration } from "./execute-iteration.js";
 import { LoadSink, type LoadIterationEnvelope } from "./sink.js";
 
 // M3-d-ii end-to-end: ONE load iteration runs through the shared engine core
@@ -778,5 +779,243 @@ describe("runLoadIteration — primaryComplete boundary (M5)", () => {
     expect(p.completed).toBe(2); // 1 boundary (iter a) + 1 no-boundary success (iter b)
     expect(p.failedBeforeRelease).toBe(0);
     expect(p.started).toBe(p.completed + p.failedBeforeRelease);
+  });
+});
+
+describe("startLoadIteration — producer release (M6)", () => {
+  it("frees the producer slot at the boundary while the continuation runs on", async () => {
+    const { sink, core } = rig("run-m6-rel");
+    const pool = new ContinuationPool(undefined, "block-producer", undefined, () => 0);
+
+    let receipt: { measuredPrimaryComplete: boolean; releasedProducerSlot: boolean; duplicate: boolean; backpressureMs: number } | undefined;
+    let continuationDone = false;
+    const scenario = compileLoadScenario(
+      loadScenario("async-job")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          receipt = await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .step("poll", async (ctx) => {
+          await ctx.http.get(`${base}/slow`).json(); // delayed endpoint (~120ms)
+          continuationDone = true;
+        })
+        .build(),
+    );
+
+    const handle = startLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("async-job", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      continuation: { pool },
+    });
+
+    const { released } = await handle.primaryDone;
+    // The slot is free at the boundary — BEFORE the continuation (slow poll) finished.
+    expect(released).toBe(true);
+    expect(continuationDone).toBe(false);
+    expect(pool.outstanding).toBe(1); // one continuation in flight
+
+    const out = await handle.completed;
+    expect(out.ok).toBe(true);
+    expect(continuationDone).toBe(true);
+    expect(pool.outstanding).toBe(0); // freed once the continuation settled
+    // The receipt is assigned when the scenario's `await primaryComplete` resolves
+    // (just after the slot was freed), so assert it once the iteration has settled.
+    expect(receipt).toMatchObject({ measuredPrimaryComplete: true, releasedProducerSlot: true, backpressureMs: 0 });
+  });
+
+  it("fail-iteration: a full backlog fails the iteration without releasing the slot", async () => {
+    const { sink, core } = rig("run-m6-fail");
+    const pool = new ContinuationPool(1, "fail-iteration", undefined, () => 0);
+    // Pre-fill the single backlog slot so the iteration's release is rejected.
+    await pool.admit();
+
+    const scenario = compileLoadScenario(
+      loadScenario("submit")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .build(),
+    );
+
+    const handle = startLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("submit", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      continuation: { pool },
+    });
+
+    const { released } = await handle.primaryDone;
+    const out = await handle.completed;
+    // Release rejected → primaryComplete threw → the iteration failed, slot not released.
+    expect(released).toBe(false);
+    expect(out.ok).toBe(false);
+    expect(out.errorKind).toBe("continuationBacklogFull"); // classified, not a generic stepError
+    expect(pool.outstanding).toBe(1); // still just the pre-filled slot; nothing leaked
+  });
+
+  it("fail-iteration survives step retries (a retried duplicate primaryComplete can't pass it)", async () => {
+    const { sink, core } = rig("run-m6-fail-retry");
+    const pool = new ContinuationPool(1, "fail-iteration", undefined, () => 0);
+    await pool.admit(); // pre-fill → the release is rejected
+
+    // The step has retries: the first attempt throws (backlog full); the retry's
+    // primaryComplete is a duplicate that RETURNS success — the iteration must still
+    // fail, not pass on the retry.
+    const scenario = compileLoadScenario(
+      loadScenario("submit")
+        .step("submit", { retries: 2 }, async (ctx) => {
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .build(),
+    );
+    const handle = startLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("submit", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      continuation: { pool },
+    });
+    await handle.primaryDone;
+    const out = await handle.completed;
+    expect(out.ok).toBe(false); // failed despite the retry's duplicate-success
+    expect(out.errorKind).toBe("continuationBacklogFull");
+  });
+
+  it("returns a back-pressured slot when its iteration times out (no backlog leak)", async () => {
+    const { sink, core } = rig("run-m6-timeout");
+    const pool = new ContinuationPool(1, "block-producer", undefined, () => 0);
+    await pool.admit(); // fill the single slot so the iteration's release back-pressures
+    expect(pool.outstanding).toBe(1);
+
+    const scenario = compileLoadScenario(
+      loadScenario("slow-release")
+        .step("submit", { timeout: 10 }, async (ctx) => {
+          // The release parks on the full backlog; the 10ms step budget fires first.
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .build(),
+    );
+
+    const handle = startLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("slow-release", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      continuation: { pool },
+    });
+
+    const { released } = await handle.primaryDone;
+    const out = await handle.completed;
+    expect(released).toBe(false); // the slot was never released (timed out while parked)
+    expect(out.ok).toBe(false);
+    expect(out.errorKind).toBe("timeout");
+
+    // Free the pre-filled slot — it transfers to the stale parked admit, which must
+    // hand it straight back (iterationSettled guard) rather than leak it.
+    pool.release();
+    await new Promise((r) => setTimeout(r, 0)); // let the stale admit resolve + give back
+    expect(pool.outstanding).toBe(0); // no leak
+
+    // The backlog is usable again (no deadlock).
+    expect(await pool.admit()).toBe(0);
+  });
+
+  it("ignores a deadline-cancelled admit that arrives after its iteration timed out", async () => {
+    const { reducer, sink, core } = rig("run-m6-cancel-after-timeout");
+    const pool = new ContinuationPool(1, "block-producer", undefined, () => 0);
+    await pool.admit(); // fill → the iteration's release parks
+
+    const scenario = compileLoadScenario(
+      loadScenario("slow-release")
+        .step("submit", { timeout: 10 }, async (ctx) => {
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .build(),
+    );
+    const handle = startLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("slow-release", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      continuation: { pool },
+    });
+    await handle.primaryDone;
+    await handle.completed; // the iteration timed out + settled, its admit still parked
+
+    pool.closeImmediate(); // deadline fires AFTER settlement → the stale admit is cancelled
+    await new Promise((r) => setTimeout(r, 0)); // let the cancelled admit resolve
+
+    // No producer:releaseRejected was emitted for the already-ended iteration, so no
+    // release activity is recorded at all (the continuation summary stays absent).
+    expect(reducer.finalize().summary.continuation).toBeUndefined();
+  });
+
+  it("fails the iteration when a parked release's drain bound expires mid-run", async () => {
+    const { reducer, sink, core } = rig("run-m6-drain-timeout");
+    // drainTimeout = 15ms; pre-fill the only slot with a continuation that never frees
+    // it, so the iteration's release parks and its own drain bound (not a run deadline)
+    // cuts it off.
+    const pool = new ContinuationPool(1, "block-producer", 15, () => Date.now());
+    await pool.admit(); // a "hung" continuation holds the single slot
+
+    const scenario = compileLoadScenario(
+      loadScenario("slow-release")
+        .step("submit", async (ctx) => {
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .build(),
+    );
+    const handle = startLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("slow-release", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      continuation: { pool },
+    });
+
+    const { released } = await handle.primaryDone;
+    expect(released).toBe(true); // freed for drain (acquired NO pool slot)
+    const out = await handle.completed;
+    // The backlog never freed within the drain bound → the iteration fails (it couldn't
+    // honor the configured bound), rather than silently running over capacity.
+    expect(out.ok).toBe(false);
+    expect(out.errorKind).toBe("continuationBacklogFull");
+    // Recorded as a rejection (the run-deadline path would NOT fail the iteration).
+    expect(reducer.finalize().summary.continuation?.rejectedReleaseSignals).toBe(1);
+  });
+
+  it("treats releaseProducerSlot as a no-op phase split with no continuation coordinator", async () => {
+    const { reducer, sink, core } = rig("run-m5-noop-release");
+    const scenario = compileLoadScenario(
+      loadScenario("phase-split")
+        .step("submit", async (ctx) => {
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .build(),
+    );
+    // No `continuation` arg → no release coordinator (the M5-only path): the release
+    // request is a documented no-op.
+    const out = await startLoadIteration({
+      core, sink, scenario,
+      envelope: envelope("phase-split", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+    }).completed;
+    expect(out.ok).toBe(true);
+    // No coordinator → no parked release: a live snapshot shows nothing blocked on the
+    // backlog and the artifact carries no continuation summary.
+    expect(reducer.snapshot().blockedOnBacklog).toBe(0);
+    expect(reducer.finalize().summary.continuation).toBeUndefined();
   });
 });

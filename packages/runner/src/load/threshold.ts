@@ -227,7 +227,13 @@ export function evaluateThresholds(
   );
   evalScope("primary", undefined, s.primary as ScopeData | undefined, thresholds.primary);
   evalScope("endToEnd", undefined, s.endToEnd as ScopeData | undefined, thresholds.endToEnd);
-  evalScope("continuation", undefined, s.continuation as ScopeData | undefined, thresholds.continuation);
+  // The continuation summary needs numeric projection: `backpressureMs` is a
+  // percentile distribution (compare against p95), and the threshold-relevant
+  // backlog is the PEAK (`maxBacklog`), not the drained-to-0 live count.
+  const continuationData: ScopeData | undefined = s.continuation
+    ? { backlog: s.continuation.maxBacklog, backpressureMs: s.continuation.backpressureMs?.p95 ?? 0 }
+    : undefined;
+  evalScope("continuation", undefined, continuationData, thresholds.continuation);
 
   // Endpoints / steps can split into per-phase rows (M5: a route or step hit in
   // both the primary and continuation phase appears twice). Combine the matching

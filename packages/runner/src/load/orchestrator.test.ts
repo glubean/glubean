@@ -411,3 +411,183 @@ describe("runLoad — continuation config resolution (M6-a)", () => {
     await expect(runLoad(plan)).rejects.toThrow(/continuation\.maxOutstanding must be a positive integer/);
   });
 });
+
+describe("runLoad — producer release scheduling (M6-b)", () => {
+  /** submit (POST, primary) → release the slot → poll (GET, continuation). */
+  const asyncJob = () =>
+    loadScenario("async-job")
+      .step("submit", async (ctx) => {
+        await ctx.http.post(`${base}/orders`, { json: {} }).json();
+        await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+      })
+      .step("poll", async (ctx) => {
+        await ctx.http.get(`${base}/items/1`).json();
+      })
+      .build();
+
+  it("releases the slot per primary and drains every continuation to completion", async () => {
+    const plan = loadRunner("async-job", { scenario: asyncJob(), concurrency: 1, iterations: 4 });
+    const art = await runLoad(plan);
+    // All 4 primary iterations started, released, and their continuations drained.
+    expect(art.summary.totalIterations).toBe(4);
+    expect(art.summary.successfulIterations).toBe(4);
+    expect(art.summary.failedIterations).toBe(0);
+    expect(art.summary.primary?.completed).toBe(4); // 4 measured boundaries
+    // The POST is primary, the post-release GET is continuation.
+    const epPhase = Object.fromEntries(art.endpoints.map((e) => [`${e.routeKey}@${e.phase}`, e]));
+    expect(epPhase["POST /orders@primary"]?.requestCount).toBe(4);
+    expect(epPhase["GET /items/:id@continuation"]?.requestCount).toBe(4);
+    // The artifact reflects producer release (not a closed model).
+    expect(art.runtime.slotModel).toBe("producer-released");
+    expect(art.summary.continuation).toMatchObject({
+      releasedProducerSlots: 4,
+      primaryBoundaryCoverage: 1, // every iteration hit a boundary
+      releaseCoverage: 1, // every boundary released
+      rejectedReleaseSignals: 0,
+      duplicateReleaseSignals: 0,
+      abortedByDrainTimeout: 0,
+      backlog: 0, // drained
+    });
+  });
+
+  it("does not deadlock under a tight continuation backlog (block-producer back-pressure)", async () => {
+    const plan = loadRunner("async-job", {
+      scenario: asyncJob(),
+      concurrency: 2,
+      iterations: 6,
+      continuation: { maxOutstanding: 1 }, // forces back-pressure, must still drain
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.totalIterations).toBe(6);
+    expect(art.summary.successfulIterations).toBe(6);
+    // Reaching the iterations cap must NOT cancel parked releases: the last primary
+    // waits for backlog capacity normally, so there are no deadline rejections.
+    expect(art.summary.continuation?.rejectedReleaseSignals).toBe(0);
+    expect(art.summary.continuation?.releasedProducerSlots).toBe(6);
+  });
+
+  it("bounds the backlog by maxConcurrent even with no maxOutstanding set", async () => {
+    // maxConcurrent alone must still bound the pool (it coincides with backlog here),
+    // not leave release unbounded.
+    const plan = loadRunner("async-job", {
+      scenario: asyncJob(),
+      concurrency: 2,
+      iterations: 6,
+      continuation: { maxConcurrent: 1 },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.totalIterations).toBe(6);
+    expect(art.summary.successfulIterations).toBe(6);
+    expect(art.summary.continuation?.maxConcurrent).toBe(1);
+  });
+
+  it("aborts continuations that outlast the drain timeout instead of hanging", async () => {
+    const plan = loadRunner("slow-job", {
+      scenario: loadScenario("slow-job")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .step("poll", async () => {
+          // Outlasts the 20ms drain timeout → the run must finalize without it.
+          await new Promise((r) => setTimeout(r, 200));
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+      continuation: { drainTimeout: "20ms" },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.primary?.completed).toBe(1); // primary still measured
+    const c = art.summary.continuation!;
+    expect(c.abortedByDrainTimeout).toBe(1);
+    expect(art.runtime.continuationInFlight).toBe(1); // still in flight at finalize
+    // Peak stays ≥ the live backlog (else backlog thresholds could read a too-low peak).
+    expect(c.maxBacklog).toBeGreaterThanOrEqual(c.backlog);
+    expect(c.maxConcurrent).toBeGreaterThanOrEqual(c.active);
+  });
+
+  it("does not overrun the run deadline when a slot is parked on a full backlog", async () => {
+    // duration-bounded, backlog=1, long continuations: the 2nd release parks on the
+    // full backlog; the deadline must cancel that park (runDeadlineReached) so the
+    // run finalizes near its bound instead of waiting out the 500ms continuations.
+    // (If the deadline weren't honored, this test would hit the vitest timeout.)
+    const plan = loadRunner("slow-job", {
+      scenario: loadScenario("slow-job")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .step("poll", async () => {
+          await new Promise((r) => setTimeout(r, 500));
+        })
+        .build(),
+      concurrency: 1,
+      duration: "40ms",
+      continuation: { maxOutstanding: 1, drainTimeout: "20ms" },
+    });
+    const started = Date.now();
+    const art = await runLoad(plan);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(400); // bounded ≪ the 500ms continuation
+    // A release was deadline-rejected, and the in-flight continuations were aborted.
+    expect(art.summary.continuation?.rejectedReleaseSignals).toBeGreaterThanOrEqual(1);
+    expect(art.summary.continuation?.abortedByDrainTimeout).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not hang an iterations-bounded run when a release parks behind a hung continuation", async () => {
+    // No duration timer here — so a release parked on a full backlog (held by a
+    // long continuation) must still be bounded by drainTimeout, or the run hangs.
+    const plan = loadRunner("hung", {
+      scenario: loadScenario("hung")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .step("poll", async () => {
+          await new Promise((r) => setTimeout(r, 1000));
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 2,
+      continuation: { maxOutstanding: 1, drainTimeout: "25ms" },
+    });
+    const startedAt = Date.now();
+    const art = await runLoad(plan);
+    expect(Date.now() - startedAt).toBeLessThan(800); // bounded ≪ the 1000ms continuation
+    expect(art.summary.primary?.completed).toBeGreaterThanOrEqual(1);
+    expect(art.summary.continuation?.abortedByDrainTimeout).toBeGreaterThanOrEqual(1);
+    // The drain-timeout (not a run deadline) cut the release off mid-run, so the breach
+    // surfaces as a rejected release. (Its tail outlasts the drain window and is
+    // abandoned, so it's counted as in-flight/aborted rather than a recorded failure;
+    // a tail that DOES settle is recorded as failed — see execute-iteration.test.ts.)
+    expect(art.summary.continuation?.rejectedReleaseSignals).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a duration deadline cancels a release parked after the iterations cap (both bounds, no drainTimeout)", async () => {
+    // With BOTH iterations and duration set and NO drainTimeout, the iterations cap
+    // ends the run first; a later release parks on the full backlog. The duration
+    // deadline must still cancel that parked admit — otherwise the run hangs forever
+    // (the slot never unblocks). The continuations are self-bounded (~80ms), so the
+    // drain finishes naturally; the point is the run COMPLETES at all.
+    const plan = loadRunner("both-bounds", {
+      scenario: loadScenario("both-bounds")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${base}/orders`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .step("poll", async () => {
+          await new Promise((r) => setTimeout(r, 80));
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 2,
+      duration: "25ms",
+      continuation: { maxOutstanding: 1 }, // NO drainTimeout
+    });
+    const startedAt = Date.now();
+    const art = await runLoad(plan);
+    expect(Date.now() - startedAt).toBeLessThan(2000); // completes (no infinite hang)
+    expect(art.summary.continuation?.rejectedReleaseSignals).toBeGreaterThanOrEqual(1);
+  });
+});
