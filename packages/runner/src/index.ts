@@ -146,3 +146,22 @@ export type { WorkflowRunResult, WorkflowNodeOutcome } from "./workflow/execute.
  */
 export { runLoad } from "./load/orchestrator.js";
 export type { RunLoadOptions } from "./load/orchestrator.js";
+
+/**
+ * Run a single `.load.ts` file's plans in a child process so the harness and the
+ * user file co-resolve one `@glubean/sdk` (no in-process split-brain). The
+ * `glubean load` command drives this; `collectLoadPlans` / `withProcessEnvFallback`
+ * are the shared helpers the child `load-harness` uses.
+ */
+export {
+  runLoadFileInSubprocess,
+  collectLoadPlans,
+  withProcessEnvFallback,
+} from "./load/subprocess.js";
+export type {
+  RunLoadFileOptions,
+  RunLoadFileResult,
+  LoadSubprocessOutcome,
+  LoadSubprocessError,
+  LoadHarnessMessage,
+} from "./load/subprocess.js";
