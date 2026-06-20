@@ -929,6 +929,24 @@ describe("runLoad — timeline (over-time series)", () => {
   });
 });
 
+// Latency distribution: the artifact carries fixed-ladder latency histograms (overall +
+// per-endpoint) so a consumer can draw distribution / CDF charts comparable across runs.
+describe("runLoad — latency distribution", () => {
+  it("emits fixed-ladder latency histograms whose counts sum to the totals", async () => {
+    const plan = loadRunner("dist", { scenario: browseCheckout(), concurrency: 2, iterations: 8 });
+    const art = await runLoad(plan);
+    // The overall transaction distribution covers every completed iteration.
+    const sd = art.summary.latencyDistribution;
+    expect(sd).toBeDefined();
+    expect(sd!.reduce((s, b) => s + b.count, 0)).toBe(art.summary.totalIterations);
+    // Each endpoint's distribution covers exactly that endpoint's requests.
+    for (const e of art.endpoints) {
+      expect(e.latencyDistribution).toBeDefined();
+      expect(e.latencyDistribution!.reduce((s, b) => s + b.count, 0)).toBe(e.requestCount);
+    }
+  });
+})
+
 // Traffic mix: a `scenarios[]` plan runs multiple weighted scenarios in one run; each
 // iteration picks one by weight (deterministic here via an injected RNG) and results are
 // attributed per scenario via each entry's id (scenarioRefId).

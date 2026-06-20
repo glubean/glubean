@@ -20,6 +20,14 @@ export interface Percentiles {
   max: number;
 }
 
+/** One bucket of a latency distribution: observations in (previous bucket's `leMs`, `leMs`].
+ *  The buckets use a FIXED ladder so two runs' distributions line up for comparison; the
+ *  final bucket's `leMs` is the observed max (the tail catch-all past the last boundary). */
+export interface LoadLatencyBucket {
+  leMs: number;
+  count: number;
+}
+
 /** How trustworthy a reported dimension is (Glubean-native vs adapter heuristic). */
 export type LoadAttributionQuality =
   | "canonical" // Glubean generated/instrumented; all canonical dimensions present
@@ -230,6 +238,8 @@ export interface LoadEndpointSummary {
   errorRate: number;
   statusCounts: Record<string, number>;
   latency: Percentiles;
+  /** Request-latency distribution (fixed-ladder buckets) for a per-endpoint histogram. */
+  latencyDistribution?: LoadLatencyBucket[];
   throughputPerSec: number;
 }
 
@@ -347,6 +357,9 @@ export interface LoadArtifactSummary {
   errorRate: number;
   throughputPerSec: number;
   latency: Percentiles;
+  /** Transaction (iteration) latency distribution (fixed-ladder buckets) for the overall
+   *  latency histogram — comparable bucket-for-bucket across runs. */
+  latencyDistribution?: LoadLatencyBucket[];
   primary?: LoadPrimaryPhaseSummary;
   endToEnd?: LoadEndToEndSummary;
   continuation?: LoadContinuationSummary;

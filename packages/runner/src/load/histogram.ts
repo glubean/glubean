@@ -100,6 +100,44 @@ export class LoadHistogram {
     };
   }
 
+  /**
+   * Bucket the observations against fixed upper-bound `boundaries` (ms, ascending) for a
+   * distribution / CDF chart. Each emitted bucket counts observations in (prevBound, leMs];
+   * a final overflow bucket (leMs = the observed max) carries anything PAST the last
+   * boundary. A FIXED ladder keeps two runs' distributions directly comparable (aligned
+   * x-axis). Empty when there are no observations.
+   *
+   * Each log bucket is placed by its LOWER bound `base^(idx-1)` — the largest value strictly
+   * below every observation in the bucket. The upper bound over-estimates by up to
+   * `relativeError`, which would push an exact ladder-edge value (e.g. 1000ms) into the next
+   * bucket or a false overflow; the lower bound keeps an exact boundary latency in its own
+   * bucket. So a run whose max is at/below the last boundary emits no overflow, every
+   * observation lands in exactly one bucket (counts sum to the total), and the buckets stay
+   * monotonic (codex). Values strictly between two boundaries but within one log bucket of a
+   * boundary may round down by that bucket — the histogram's inherent `relativeError`.
+   */
+  distribution(boundaries: number[]): { leMs: number; count: number }[] {
+    if (this._count === 0 || boundaries.length === 0) return [];
+    const counts = new Array<number>(boundaries.length).fill(0);
+    let overflow = 0;
+    counts[0] += this.zeroCount; // a zero observation is ≤ the first (positive) boundary
+    for (const [idx, cnt] of this.buckets) {
+      const lower = this.base ** (idx - 1); // lower bound of (base^(idx-1), base^idx]
+      let placed = false;
+      for (let i = 0; i < boundaries.length; i++) {
+        if (lower <= boundaries[i]) {
+          counts[i] += cnt;
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) overflow += cnt;
+    }
+    const out = boundaries.map((leMs, i) => ({ leMs, count: counts[i] }));
+    if (overflow > 0) out.push({ leMs: this._max, count: overflow });
+    return out;
+  }
+
   /** Fold another histogram (same relativeError) into this one. */
   merge(other: LoadHistogram): void {
     if (other.base !== this.base) {

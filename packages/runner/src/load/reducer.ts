@@ -40,6 +40,9 @@ import { LoadTimeline } from "./timeline.js";
 
 const SEP = "\u0000";
 const ZERO_PCT: Percentiles = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
+// Fixed latency ladder (ms) for the distribution histograms. Fixed (not data-derived) so two
+// runs' distributions line up bucket-for-bucket; a final overflow bucket carries the tail.
+const LATENCY_LADDER = [10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 2000, 5000];
 
 type Phase = "primary" | "continuation";
 
@@ -423,6 +426,7 @@ export class LoadReducerImpl implements LoadReducer {
         errorRate: rate(this.iterFailed, this.iterCompleted),
         throughputPerSec: elapsedSec > 0 ? this.iterCompleted / elapsedSec : 0,
         latency: this.iterCompleted > 0 ? this.iterLatency.percentiles() : ZERO_PCT,
+        ...(this.iterCompleted > 0 ? { latencyDistribution: this.iterLatency.distribution(LATENCY_LADDER) } : {}),
         // Phase split (M5): present only once an iteration reached a primaryComplete
         // boundary. The top-level compat fields above stay end-to-end; `primary` /
         // `endToEnd` expose the split (primary = up to the boundary).
@@ -746,6 +750,7 @@ export class LoadReducerImpl implements LoadReducer {
       errorRate: rate(e.errorCount, e.requestCount),
       statusCounts: e.statusCounts,
       latency: e.latency.count > 0 ? e.latency.percentiles() : ZERO_PCT,
+      ...(e.latency.count > 0 ? { latencyDistribution: e.latency.distribution(LATENCY_LADDER) } : {}),
       throughputPerSec: elapsedSec > 0 ? e.requestCount / elapsedSec : 0,
     }));
   }

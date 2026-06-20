@@ -79,4 +79,53 @@ describe("LoadHistogram", () => {
     expect(() => new LoadHistogram(0)).toThrow();
     expect(() => new LoadHistogram(1)).toThrow();
   });
+
+  it("distribution() buckets observations against a fixed ladder + a tail overflow", () => {
+    const h = new LoadHistogram();
+    [5, 5, 5, 60, 60, 250, 8000].forEach((v) => h.record(v));
+    expect(h.distribution([10, 100, 500])).toEqual([
+      { leMs: 10, count: 3 }, // the three 5ms
+      { leMs: 100, count: 2 }, // the two 60ms
+      { leMs: 500, count: 1 }, // the 250ms
+      { leMs: 8000, count: 1 }, // overflow (> 500ms) — leMs is the observed max
+    ]);
+  });
+
+  it("distribution() has no overflow bucket when everything is within the ladder", () => {
+    const h = new LoadHistogram();
+    [5, 60].forEach((v) => h.record(v));
+    expect(h.distribution([10, 100])).toEqual([
+      { leMs: 10, count: 1 },
+      { leMs: 100, count: 1 },
+    ]);
+  });
+
+  it("distribution() puts a boundary-edge sample in its bucket, not a false overflow", () => {
+    // codex: 5000ms with the default 1% histogram has a log-bucket upper bound ~5001 > 5000;
+    // it must still land in the ≤5000 bucket, not spawn a bogus overflow bucket.
+    const h = new LoadHistogram();
+    [100, 5000].forEach((v) => h.record(v));
+    const dist = h.distribution([200, 5000]);
+    expect(dist).toEqual([
+      { leMs: 200, count: 1 }, // the 100ms
+      { leMs: 5000, count: 1 }, // the 5000ms — in the last bucket, NOT a separate overflow
+    ]);
+    expect(dist.reduce((s, b) => s + b.count, 0)).toBe(2); // every sample counted exactly once
+  });
+
+  it("distribution() keeps an exact boundary value in its own bucket (1000 → ≤1000)", () => {
+    // codex: with the 1% histogram, record(1000) sits in a log bucket whose upper bound /
+    // midpoint exceed 1000; it must still land in the ≤1000 bucket, not ≤2000 / overflow.
+    const h = new LoadHistogram();
+    h.record(1000);
+    expect(h.distribution([500, 1000, 2000])).toEqual([
+      { leMs: 500, count: 0 },
+      { leMs: 1000, count: 1 }, // exactly on the boundary → this bucket
+      { leMs: 2000, count: 0 },
+    ]);
+  });
+
+  it("distribution() is empty with no observations", () => {
+    expect(new LoadHistogram().distribution([10, 100])).toEqual([]);
+  });
 });
