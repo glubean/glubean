@@ -248,6 +248,40 @@ export interface LoadScenarioEndpointMatrix {
   latency: Percentiles;
 }
 
+/** One fixed-width time window of the run — the unit of the over-time timeline. */
+export interface LoadTimelineWindow {
+  /** Window start, ms from the run start (`startedAt`). Width is `LoadTimeline.windowMs`. */
+  offsetMs: number;
+  /** Requests observed in this window. */
+  requests: number;
+  /** Requests with a non-2xx / failed response in this window. */
+  errors: number;
+  errorRate: number;
+  /** Request throughput (requests / windowSec) — RPS over time. */
+  throughputPerSec: number;
+  /** Request latency percentiles within this window. */
+  latency: Percentiles;
+  /** Iterations COMPLETED (iteration:end) in this window — iteration throughput over time. */
+  iterations: number;
+  /** Peak concurrent in-flight iterations during this window — concurrency over time. It is
+   *  max(the peak sampled within the window, the count carried in from earlier windows), so a
+   *  long iteration spanning quiet windows keeps the curve up AND a short iteration that starts
+   *  and ends within one window still shows its concurrency (rather than netting to zero). */
+  peakInFlight: number;
+}
+
+/**
+ * Over-time series: fixed-width windows from run start, so a consumer can draw the
+ * classic load curves (RPS / error-rate / latency / concurrency vs time). Windows are
+ * dense (an idle window is present with zero counts) so the x-axis has no gaps. The width
+ * (`windowMs`) starts fine and is coarsened (doubled) as needed so the series stays bounded
+ * for an arbitrarily long run. Present for the local engine; an external adapter may omit it.
+ */
+export interface LoadTimeline {
+  windowMs: number;
+  windows: LoadTimelineWindow[];
+}
+
 /** Per-scenario aggregate. */
 export interface LoadScenarioSummary {
   scenarioId: string;
@@ -346,6 +380,9 @@ export interface LoadArtifact {
   steps: LoadStepSummary[];
   endpoints: LoadEndpointSummary[];
   matrix: LoadScenarioEndpointMatrix[];
+  /** Over-time series (RPS / error-rate / latency / concurrency vs time). Present for the
+   *  local engine; an external adapter that only has summary stats may omit it. */
+  timeline?: LoadTimeline;
   samples: LoadArtifactSamples;
   externalArtifacts?: LoadExternalArtifactRef[];
 }

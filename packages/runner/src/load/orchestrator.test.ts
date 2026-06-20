@@ -909,6 +909,26 @@ describe("runLoad — exact routeKey via X-Glubean-Route (M8)", () => {
   });
 });
 
+// Timeline: the artifact carries an over-time series (RPS / error-rate / latency /
+// concurrency by window) so a consumer can draw the load curves.
+describe("runLoad — timeline (over-time series)", () => {
+  it("emits a dense time-series whose totals match the run", async () => {
+    const plan = loadRunner("tl", { scenario: browseCheckout(), concurrency: 2, iterations: 6 });
+    const art = await runLoad(plan);
+    const tl = art.timeline;
+    expect(tl).toBeDefined();
+    expect(tl!.windowMs).toBeGreaterThan(0);
+    expect(tl!.windows.length).toBeGreaterThanOrEqual(1);
+    // Iterations summed across the windows == total iterations (count, timing-independent).
+    expect(tl!.windows.reduce((s, w) => s + w.iterations, 0)).toBe(art.summary.totalIterations);
+    // Requests summed across the windows == total requests (sum across endpoints).
+    const totalReq = art.endpoints.reduce((s, e) => s + e.requestCount, 0);
+    expect(tl!.windows.reduce((s, w) => s + w.requests, 0)).toBe(totalReq);
+    // Dense: window offsets are contiguous multiples of windowMs (no x-axis gaps).
+    tl!.windows.forEach((w, i) => expect(w.offsetMs).toBe(i * tl!.windowMs));
+  });
+});
+
 // Traffic mix: a `scenarios[]` plan runs multiple weighted scenarios in one run; each
 // iteration picks one by weight (deterministic here via an injected RNG) and results are
 // attributed per scenario via each entry's id (scenarioRefId).

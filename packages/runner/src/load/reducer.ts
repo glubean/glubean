@@ -36,6 +36,7 @@ import type {
   Percentiles,
 } from "@glubean/sdk/load";
 import { LoadHistogram } from "./histogram.js";
+import { LoadTimeline } from "./timeline.js";
 
 const SEP = "\u0000";
 const ZERO_PCT: Percentiles = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
@@ -146,6 +147,9 @@ export class LoadReducerImpl implements LoadReducer {
   private readonly endpoints = new Map<string, EndpointAgg>();
   private readonly matrix = new Map<string, MatrixAgg>();
   private readonly recentFailures: LoadFailureSummary[] = [];
+  // Over-time series (RPS / error-rate / latency / concurrency vs time), bucketed by the
+  // event ts offset from the run start.
+  private readonly timeline = new LoadTimeline();
 
   apply(event: LoadEvent): void {
     if (this.firstTs === undefined) this.firstTs = event.ts;
@@ -170,6 +174,9 @@ export class LoadReducerImpl implements LoadReducer {
         break;
       case "iteration:start":
         this.iterStarted += 1;
+        // Concurrency-over-time: sample the live in-flight (post-increment local peak); the
+        // window also carries the count forward at finalize.
+        this.timeline.recordIterationStart(this.offsetOf(event.ts), this.iterStarted - this.iterCompleted);
         // Seed the scenario aggregate (no completed-count change) so a run that
         // aborts/crashes before this scenario's first iteration:end still keeps
         // scenario-level attribution in the finalized artifact.
@@ -180,6 +187,7 @@ export class LoadReducerImpl implements LoadReducer {
         if (event.ok) this.iterSucceeded += 1;
         else this.iterFailed += 1;
         this.iterLatency.record(event.durationMs);
+        this.timeline.recordIterationEnd(this.offsetOf(event.ts)); // iteration throughput over time
         // Boundary accounting (M5): did this iteration reach its primary boundary?
         // A failure WITHOUT a boundary failed before primary completion.
         const hadBoundary = event.iterationId ? this.iterHadPrimary.delete(event.iterationId) : false;
@@ -250,6 +258,9 @@ export class LoadReducerImpl implements LoadReducer {
         break;
       }
       case "request:observed": {
+        // RPS / error-rate / latency over time, with a live-in-flight sample (a request-busy
+        // window — e.g. a poll — still shows concurrency).
+        this.timeline.recordRequest(this.offsetOf(event.ts), event.durationMs, event.ok, this.iterStarted - this.iterCompleted);
         const ep = this.endpointAgg(event);
         ep.requestCount += 1;
         if (!event.ok) ep.errorCount += 1;
@@ -328,6 +339,11 @@ export class LoadReducerImpl implements LoadReducer {
       default:
         break;
     }
+  }
+
+  /** Ms from the run start (the first event's ts) — the timeline's window axis. */
+  private offsetOf(ts: number): number {
+    return this.firstTs !== undefined ? Math.max(0, ts - this.firstTs) : 0;
   }
 
   snapshot(now?: number): LoadProgressSnapshot {
@@ -421,6 +437,7 @@ export class LoadReducerImpl implements LoadReducer {
       steps: this.stepSummaries(),
       endpoints,
       matrix: this.matrixSummaries(),
+      timeline: this.timeline.finalize(durationMs),
       samples: {
         // Failure-trace / slow-transaction sampling is wired with the sink (M3-e/M4).
         maxFailureTraces: 0,
