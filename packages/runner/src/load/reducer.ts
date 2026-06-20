@@ -37,6 +37,7 @@ import type {
 } from "@glubean/sdk/load";
 import { LoadHistogram } from "./histogram.js";
 import { LoadTimeline } from "./timeline.js";
+import { LoadSampleCollector } from "./samples.js";
 
 const SEP = "\u0000";
 const ZERO_PCT: Percentiles = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
@@ -153,6 +154,13 @@ export class LoadReducerImpl implements LoadReducer {
   // Over-time series (RPS / error-rate / latency / concurrency vs time), bucketed by the
   // event ts offset from the run start.
   private readonly timeline = new LoadTimeline();
+  // Bounded failure-trace / slow-transaction samples (the "show me one" view).
+  private readonly samples: LoadSampleCollector;
+
+  /** @param reportCaps `report` sample caps (0 disables a sample type entirely). */
+  constructor(reportCaps: { maxFailureTraces?: number; maxSlowTransactionSummaries?: number } = {}) {
+    this.samples = new LoadSampleCollector(reportCaps);
+  }
 
   apply(event: LoadEvent): void {
     if (this.firstTs === undefined) this.firstTs = event.ts;
@@ -180,6 +188,14 @@ export class LoadReducerImpl implements LoadReducer {
         // Concurrency-over-time: sample the live in-flight (post-increment local peak); the
         // window also carries the count forward at finalize.
         this.timeline.recordIterationStart(this.offsetOf(event.ts), this.iterStarted - this.iterCompleted);
+        if (event.iterationId) {
+          this.samples.beginIteration(event.iterationId, {
+            scenarioId: event.scenarioId ?? "",
+            ...(event.scenarioRefId !== undefined ? { scenarioRefId: event.scenarioRefId } : {}),
+            producerSlotId: event.producerSlotId ?? "",
+            ...(event.feederKeys !== undefined ? { feederKeys: event.feederKeys } : {}),
+          });
+        }
         // Seed the scenario aggregate (no completed-count change) so a run that
         // aborts/crashes before this scenario's first iteration:end still keeps
         // scenario-level attribution in the finalized artifact.
@@ -203,6 +219,11 @@ export class LoadReducerImpl implements LoadReducer {
           else this.primaryLatency.record(event.durationMs);
         }
         if (event.iterationId) {
+          this.samples.endIteration(event.iterationId, {
+            ok: event.ok,
+            durationMs: event.durationMs,
+            ...(event.errorKind !== undefined ? { errorKind: event.errorKind } : {}),
+          });
           this.iterStepPhase.delete(event.iterationId); // bounded cleanup
           this.liveContinuations.delete(event.iterationId); // continuation finished
           this.pendingRelease.delete(event.iterationId); // a fail-iteration tail ended
@@ -258,12 +279,34 @@ export class LoadReducerImpl implements LoadReducer {
           if (!event.ok) step.errorCount += 1;
         }
         step.assertionFailureCount += event.assertionFailures ?? 0;
+        if (event.iterationId) {
+          this.samples.recordStep(event.iterationId, {
+            stepId,
+            stepName: event.stepName,
+            durationMs: event.durationMs,
+            ok: event.ok,
+            skipped: event.skipped ?? false,
+          });
+        }
         break;
       }
       case "request:observed": {
         // RPS / error-rate / latency over time, with a live-in-flight sample (a request-busy
         // window — e.g. a poll — still shows concurrency).
         this.timeline.recordRequest(this.offsetOf(event.ts), event.durationMs, event.ok, this.iterStarted - this.iterCompleted);
+        if (event.iterationId) {
+          this.samples.recordRequest(event.iterationId, {
+            tsOffsetMs: this.offsetOf(event.ts),
+            ...(event.stepId !== undefined ? { stepId: event.stepId } : {}),
+            phase: this.phaseOf(event),
+            method: event.method,
+            routeKey: event.routeKey,
+            ...(event.status !== undefined ? { status: event.status } : {}),
+            ok: event.ok,
+            durationMs: event.durationMs,
+            ...(event.errorKind !== undefined ? { errorKind: event.errorKind } : {}),
+          });
+        }
         const ep = this.endpointAgg(event);
         ep.requestCount += 1;
         if (!event.ok) ep.errorCount += 1;
@@ -290,6 +333,22 @@ export class LoadReducerImpl implements LoadReducer {
             event.stepId,
           );
           step.requestCount += 1;
+        }
+        break;
+      }
+      case "assertion:observed": {
+        // Only failed assertions matter to a failure trace (they don't feed an aggregate —
+        // step:end already carries the per-step failed-assertion count).
+        if (!event.passed && event.iterationId) {
+          this.samples.recordAssertionFailure(event.iterationId, {
+            tsOffsetMs: this.offsetOf(event.ts),
+            ...(event.stepId !== undefined ? { stepId: event.stepId } : {}),
+            phase: this.phaseOf(event),
+            ...(event.message !== undefined ? { message: event.message } : {}),
+            // Presence (not value) checks so a deliberately-`undefined` operand survives.
+            ...("actual" in event ? { actual: event.actual, hasActual: true } : {}),
+            ...("expected" in event ? { expected: event.expected, hasExpected: true } : {}),
+          });
         }
         break;
       }
@@ -442,13 +501,7 @@ export class LoadReducerImpl implements LoadReducer {
       endpoints,
       matrix: this.matrixSummaries(),
       timeline: this.timeline.finalize(durationMs),
-      samples: {
-        // Failure-trace / slow-transaction sampling is wired with the sink (M3-e/M4).
-        maxFailureTraces: 0,
-        maxSlowTransactionSummaries: 0,
-        failureTraces: [],
-        slowTransactions: [],
-      },
+      samples: this.samples.finalize(),
     };
   }
 
@@ -791,7 +844,11 @@ export class LoadReducerImpl implements LoadReducer {
   }
 }
 
-/** Create a fresh streaming load reducer. */
-export function createLoadReducer(): LoadReducer {
-  return new LoadReducerImpl();
+/** Create a fresh streaming load reducer. `reportCaps` bounds the failure-trace /
+ *  slow-transaction samples (from the plan's `report` config; 0 disables a type). */
+export function createLoadReducer(reportCaps?: {
+  maxFailureTraces?: number;
+  maxSlowTransactionSummaries?: number;
+}): LoadReducer {
+  return new LoadReducerImpl(reportCaps);
 }

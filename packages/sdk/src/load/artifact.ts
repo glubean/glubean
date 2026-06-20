@@ -135,13 +135,16 @@ export interface ThresholdEvaluation {
   attributionQuality?: LoadAttributionQuality;
 }
 
-/** Identity attached to a failure / slow-transaction sample. */
+/** Identity attached to a failure / slow-transaction sample. The feeder `key` is the data-row
+ *  attribution (which row produced this sample); `strategy` is optional metadata that may not
+ *  be known at the layer that emits the sample (e.g. a streaming load reducer sees only the
+ *  per-iteration keys, not each feeder's allocation strategy). */
 export interface LoadSampleIdentity {
   scenarioId: string;
   scenarioRefId?: string;
   producerSlotId: string;
   iterationId: string;
-  feeders?: Record<string, { key?: string; strategy: string }>;
+  feeders?: Record<string, { key?: string; strategy?: string }>;
 }
 
 /** A bounded observation kept for a failed iteration. */

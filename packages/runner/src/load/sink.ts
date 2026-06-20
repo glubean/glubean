@@ -409,6 +409,11 @@ export class LoadSink {
           ...(stepName !== undefined ? { stepId: this.stepIdOf(stepIndex!, stepName) } : {}),
           passed: wire.passed as boolean,
           ...(wire.message !== undefined ? { message: wire.message as string } : {}),
+          // Diagnostic operands so a failure sample can show what value failed (the reducer
+          // previews/bounds them — only retained for FAILED assertions). Presence checks, not
+          // `!== undefined`, so a deliberately-`undefined` operand is preserved (codex).
+          ...("actual" in wire ? { actual: wire.actual } : {}),
+          ...("expected" in wire ? { expected: wire.expected } : {}),
         });
         break;
       }

@@ -947,6 +947,53 @@ describe("runLoad — latency distribution", () => {
   });
 })
 
+// Samples: the artifact keeps bounded failure-trace + slow-transaction samples (the
+// "show me one" view) so a consumer can drill into the tail.
+describe("runLoad — failure / slow samples", () => {
+  it("captures failure traces with the failed step + observations", async () => {
+    const scenario = loadScenario<{ sku: string }>("flaky")
+      .step("check", async (ctx) => {
+        const item = (await ctx.http.get(`${base}/items/${ctx.input.sku}`).json()) as { name: string };
+        ctx.expect(item.name).toBe("NOPE"); // always fails → the iteration fails
+      })
+      .build();
+    const plan = loadRunner("samples-fail", { scenario, concurrency: 1, iterations: 3, input: () => ({ sku: "1" }) });
+    const art = await runLoad(plan);
+    expect(art.summary.failedIterations).toBe(3);
+    expect(art.samples.maxFailureTraces).toBeGreaterThan(0);
+    expect(art.samples.failureTraces.length).toBeGreaterThan(0);
+    const f = art.samples.failureTraces[0];
+    expect(f.failedStepName).toBe("check");
+    expect(f.observations.length).toBeGreaterThan(0); // the GET /items request + the failed assertion
+    // The failed assertion's diagnostic operands survive the sink → reducer → collector path.
+    const assertionObs = f.observations.find((o) => o.type === "assertion");
+    expect(assertionObs).toBeDefined();
+    expect((assertionObs as { expectedPreview?: unknown }).expectedPreview).toBe("NOPE");
+  });
+
+  it("captures slow-transaction samples for a successful run", async () => {
+    const plan = loadRunner("samples-slow", { scenario: browseCheckout(), concurrency: 1, iterations: 4 });
+    const art = await runLoad(plan);
+    expect(art.samples.slowTransactions.length).toBeGreaterThan(0);
+    expect(art.samples.slowTransactions.length).toBeLessThanOrEqual(art.summary.totalIterations);
+    const t = art.samples.slowTransactions[0];
+    expect(t.topEndpoints.length).toBeGreaterThan(0); // GET /items + POST /orders
+    expect(t.slowStepName).toBeDefined();
+  });
+
+  it("honors a 0 report cap — disables that sample type", async () => {
+    const plan = loadRunner("samples-off", { scenario: browseCheckout(), concurrency: 1, iterations: 3, report: { slowTransactionSummaries: 0 } });
+    const art = await runLoad(plan);
+    expect(art.samples.maxSlowTransactionSummaries).toBe(0);
+    expect(art.samples.slowTransactions).toHaveLength(0);
+  });
+
+  it("rejects an invalid report sample cap", async () => {
+    const plan = loadRunner("bad-cap", { scenario: browseCheckout(), concurrency: 1, iterations: 1, report: { failureTraces: 1.5 } });
+    await expect(runLoad(plan)).rejects.toThrow(/report\.failureTraces must be a non-negative integer/);
+  });
+})
+
 // Traffic mix: a `scenarios[]` plan runs multiple weighted scenarios in one run; each
 // iteration picks one by weight (deterministic here via an injected RNG) and results are
 // attributed per scenario via each entry's id (scenarioRefId).

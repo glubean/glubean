@@ -245,6 +245,16 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   if (continuationCfg?.maxConcurrent !== undefined && (!Number.isInteger(continuationCfg.maxConcurrent) || continuationCfg.maxConcurrent < 1)) {
     throw new Error(`loadRunner "${plan.id}": continuation.maxConcurrent must be a positive integer (got ${continuationCfg.maxConcurrent})`);
   }
+  // Report sample caps bound retained samples — a non-integer / negative / Infinity cap
+  // would break the bounded-sampling guarantee. 0 is allowed (disables that sample type).
+  const failureTraceCap = config.report?.failureTraces;
+  if (failureTraceCap !== undefined && (!Number.isInteger(failureTraceCap) || failureTraceCap < 0)) {
+    throw new Error(`loadRunner "${plan.id}": report.failureTraces must be a non-negative integer (got ${failureTraceCap})`);
+  }
+  const slowSummaryCap = config.report?.slowTransactionSummaries;
+  if (slowSummaryCap !== undefined && (!Number.isInteger(slowSummaryCap) || slowSummaryCap < 0)) {
+    throw new Error(`loadRunner "${plan.id}": report.slowTransactionSummaries must be a non-negative integer (got ${slowSummaryCap})`);
+  }
 
   const now = opts.now ?? (() => Date.now());
   const runnerId = opts.runnerId ?? plan.id;
@@ -359,7 +369,10 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
 
   const thinkTimeMs = normalizeThinkTime(config.pacing);
 
-  const reducer = createLoadReducer();
+  const reducer = createLoadReducer({
+    maxFailureTraces: config.report?.failureTraces,
+    maxSlowTransactionSummaries: config.report?.slowTransactionSummaries,
+  });
   const sink = new LoadSink(reducer, runId, runnerId, now);
   const core = createEngineCore(sink.handleWire, {
     vars: opts.vars ?? {},
