@@ -906,3 +906,81 @@ describe("runLoad — exact routeKey via X-Glubean-Route (M8)", () => {
     expect(ep!.routeKeyHeuristic).toBe(true);
   });
 });
+
+// True mid-run abort: when the drain phase abandons a continuation tail, the run aborts
+// it so its in-flight HTTP is actually CANCELLED — not left to run to completion in the
+// background. Proven server-side: the continuation request the drain timeout abandons is
+// observed as a client-cancelled connection, not a completed response.
+describe("runLoad — abort cancels an abandoned continuation's in-flight HTTP", () => {
+  let hangServer: Server;
+  let hangBase: string;
+  let cancelled = 0; // continuation requests the server saw the client cancel mid-flight
+  let completed = 0; // continuation requests that ran to a full response (NOT cancelled)
+
+  beforeAll(async () => {
+    hangServer = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        if (req.method === "POST" && url.pathname === "/submit") {
+          res.writeHead(201, { "content-type": "application/json" });
+          res.end(JSON.stringify({ id: "j1" })); // primary — respond at once
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/result") {
+          // Continuation — hold the RESPONSE open well past the drain timeout. Decide
+          // cancel-vs-complete on the RESPONSE close (not the request's, which can close
+          // as soon as a bodyless GET is fully received — codex r5 P3): `writableFinished`
+          // is true only if we actually flushed the response, so a close before that means
+          // the client (the run's abort) tore the connection down.
+          const timer = setTimeout(() => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ done: true }));
+          }, 3000);
+          res.on("close", () => {
+            clearTimeout(timer);
+            if (res.writableFinished) completed += 1; // response fully sent → ran to completion
+            else cancelled += 1; // socket closed before the response finished → client aborted
+          });
+          return;
+        }
+        res.writeHead(404).end();
+      });
+    });
+    await new Promise<void>((r) => hangServer.listen(0, "127.0.0.1", r));
+    const addr = hangServer.address();
+    hangBase = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : addr}`;
+  });
+
+  afterAll(() => new Promise<void>((r) => hangServer.close(() => r())));
+
+  it("kills the continuation's in-flight request the drain timeout abandons", async () => {
+    const plan = loadRunner("abortable-job", {
+      scenario: loadScenario("abortable-job")
+        .step("submit", async (ctx) => {
+          await ctx.http.post(`${hangBase}/submit`, { json: {} }).json();
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .step("await-result", async (ctx) => {
+          // A real poll-for-result request that outlasts the 20ms drain timeout — abort
+          // must cancel it in flight, not let it run the full 3s server hold.
+          await ctx.http.get(`${hangBase}/result`).json();
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+      continuation: { drainTimeout: "20ms" },
+    });
+
+    const art = await runLoad(plan);
+    // The drain phase abandoned the continuation (it outlasted the 20ms bound).
+    expect(art.summary.continuation?.abortedByDrainTimeout).toBe(1);
+
+    // The abort settles the tail on later microtasks (post-seal); give the cancel a tick
+    // to reach the server, then assert the request was cancelled — not run to completion.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(cancelled).toBe(1);
+    expect(completed).toBe(0);
+  });
+});

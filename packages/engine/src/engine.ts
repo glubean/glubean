@@ -55,6 +55,28 @@ function tryPathname(url: string): string | undefined {
 }
 
 /**
+ * A sleep that resolves after `ms` OR the instant `signal` aborts — whichever comes
+ * first. The engine's internal waits (poll interval, retry backoff, ctx.pollUntil)
+ * use it so an aborted run (ScopeInput.signal) stops PROMPTLY instead of sitting out a
+ * long backoff before it notices the abort. In-flight HTTP is cancelled separately
+ * (the signal is handed to ky); this covers the gaps BETWEEN requests. The timer and
+ * the abort listener are always torn down, so neither leaks across a long run.
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
  * Layer per-run overrides over a host env object WITHOUT a destructive spread, so
  * a fallback-Proxy provider (node: .env → process.env) keeps its fallback for keys
  * the run never overrides. An empty-string override is treated as "unset" (node
@@ -329,6 +351,7 @@ export class RunnerCore {
       http: undefined as unknown as GlubeanHttp,
       session,
       varsAll,
+      ...(input.signal ? { signal: input.signal } : {}),
       ...(input.ctxExtensions ? { ctxExtensions: input.ctxExtensions } : {}),
     };
     const http = this.createScopedKy(scope);
@@ -490,6 +513,14 @@ export class RunnerCore {
     let thrownError: string | undefined;
     let thrownStack: string | undefined;
     let thrownName: string | undefined;
+    // The run-level abort signal (ScopeInput.signal) fired while the run was in flight.
+    // Set authoritatively post-loop from `scope.signal?.aborted` (true there can only mean
+    // the abort happened before the run returned). Forces an "error" verdict even when the
+    // steps that DID run passed — including a final/only step or a simple body that ran to
+    // completion through opaque, non-cancellable async (codex r1 P2). A signal that aborts
+    // only after this run has returned is never observed here, so a genuinely-finished run
+    // keeps its real verdict.
+    let aborted = false;
     // A step that throws is CAUGHT + recorded as a failed step (node parity: the
     // run still "completes"); it must still make the test's verdict error.
     let stepFailed = false;
@@ -516,8 +547,13 @@ export class RunnerCore {
     let skipReason: string | undefined;
     try {
       if (def.type === "simple") {
-        if (!def.fn) throw new Error(`test "${def.meta.id}": missing fn`);
-        await def.fn(ctx);
+        // Pre-aborted (the signal was already aborted before the run): never run the body
+        // — the post-loop abort check makes the verdict an error, no side effects (codex r1
+        // P2). A mid-run abort is handled inline (ky cancels in-flight HTTP).
+        if (!scope.signal?.aborted) {
+          if (!def.fn) throw new Error(`test "${def.meta.id}": missing fn`);
+          await def.fn(ctx);
+        }
       } else {
         let state: unknown;
         const stepTotal = countLeafSteps(def.steps ?? []);
@@ -620,6 +656,9 @@ export class RunnerCore {
             lastAssertions = scope.assertions.total - aBefore;
             lastFailedAssertions = scope.assertions.total - scope.assertions.passed - fBefore;
             if (skipRequest) break; // skip is terminal — never retry a skip
+            // An abort (run-level signal) is terminal too: this attempt's failure (an
+            // in-flight HTTP threw AbortError) stands; never retry into a shutting-down run.
+            if (scope.signal?.aborted) break;
             const attemptFailed = !!stepError || lastFailedAssertions > 0;
             if (!attemptFailed || timedOut) break; // success, or a timeout (terminal — no retry)
             if (attempt < maxAttempts) {
@@ -631,7 +670,11 @@ export class RunnerCore {
                 stepIndex: idx,
                 message: `Retrying step "${step.meta.name}" (${attempt + 1}/${maxAttempts}) after failure: ${reason}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`,
               });
-              if (delay > 0) await new Promise<void>((r) => setTimeout(r, delay));
+              if (delay > 0) await abortableSleep(delay, scope.signal);
+              // An abort that fired DURING the backoff wakes the sleep early; bail before
+              // the next attempt runs, so post-abort user code never executes and this
+              // failed attempt's verdict isn't overwritten by a retry (codex r1 P2).
+              if (scope.signal?.aborted) break;
             }
           }
 
@@ -851,6 +894,15 @@ export class RunnerCore {
           };
 
           for (;;) {
+            // Aborted (run-level signal) — stop the poll tail at once. Distinct from
+            // exhaustion: the run is shutting down, not the poll's own budget running out.
+            // (An abort DURING an attempt's HTTP surfaces as a caught AbortError below; this
+            // catches an abort during the inter-attempt wait, which abortableSleep wakes.)
+            if (scope.signal?.aborted) {
+              pollError = `poll "${step.meta.name}" aborted`;
+              pollErrorName = "AbortError";
+              break;
+            }
             attempt += 1;
             const remainingTotal = deadline - scheduler.now();
             if (remainingTotal <= 0) { exhausted = true; break; }
@@ -903,7 +955,7 @@ export class RunnerCore {
             // Not satisfied → check bounds, then wait.
             if (poll.maxAttempts && attempt >= poll.maxAttempts) { exhausted = true; break; }
             if (Number.isFinite(deadline) && scheduler.now() + delay >= deadline) { exhausted = true; break; }
-            await new Promise<void>((r) => setTimeout(r, delay));
+            await abortableSleep(delay, scope.signal);
             delay = Math.min(delay * backoff, 30_000);
           }
 
@@ -977,7 +1029,10 @@ export class RunnerCore {
         // skips the rest (skipped step_end tree); branch steps make a decision + recurse.
         const runStepList = async (steps: StepDef[]): Promise<void> => {
           for (const step of steps) {
-            if (haltSteps || skipRequest) {
+            // An aborted run starts no further steps (the in-flight one, if any, is
+            // cancelled via ky's signal); the remaining steps emit a skipped tree. The
+            // post-loop abort check turns this into an error verdict — the run can't pass.
+            if (haltSteps || skipRequest || scope.signal?.aborted) {
               emitSkippedTree([step]);
               continue;
             }
@@ -995,37 +1050,47 @@ export class RunnerCore {
           }
         };
 
-        try {
-          if (def.setup) {
-            events.emit({ type: "log", id: scope.testMeta.id, message: "Running setup..." });
-            state = await def.setup(ctx);
-          }
-          await runStepList((def.steps ?? []) as StepDef[]);
-        } finally {
-          // teardown runs even when setup/a step throws (builder contract); its
-          // own errors never fail the run (parity with the node harness). (codex P2)
-          if (def.teardown) {
-            events.emit({ type: "log", id: scope.testMeta.id, message: "Running teardown..." });
-            try {
-              await def.teardown(ctx, state);
-            } catch (e) {
-              events.emit({
-                type: "log",
-                id: scope.testMeta.id,
-                message: `Teardown error: ${e instanceof Error ? e.message : String(e)}`,
-              });
+        if (scope.signal?.aborted) {
+          // Pre-aborted (the signal was already aborted before the run): run NOTHING —
+          // no setup, no steps, and no teardown (there was no setup to undo). Emit the
+          // skipped tree so the event stream still shows every step skipped; the post-loop
+          // abort check makes the verdict an error (codex r1 P2). A mid-run abort is handled
+          // inline (ky cancels in-flight HTTP; runStepList skips the remaining steps;
+          // teardown still runs as cleanup, per the builder contract).
+          emitSkippedTree((def.steps ?? []) as StepDef[]);
+        } else {
+          try {
+            if (def.setup) {
+              events.emit({ type: "log", id: scope.testMeta.id, message: "Running setup..." });
+              state = await def.setup(ctx);
+            }
+            await runStepList((def.steps ?? []) as StepDef[]);
+          } finally {
+            // teardown runs even when setup/a step throws (builder contract); its
+            // own errors never fail the run (parity with the node harness). (codex P2)
+            if (def.teardown) {
+              events.emit({ type: "log", id: scope.testMeta.id, message: "Running teardown..." });
+              try {
+                await def.teardown(ctx, state);
+              } catch (e) {
+                events.emit({
+                  type: "log",
+                  id: scope.testMeta.id,
+                  message: `Teardown error: ${e instanceof Error ? e.message : String(e)}`,
+                });
+              }
             }
           }
-        }
-        // A step / branch-predicate called ctx.skip() (recorded without a throw):
-        // after teardown the whole test is skipped (node parity: harness.ts:2692).
-        // A skip must NOT mask a prior failure: with the `continue` policy an earlier
-        // soft-failed step leaves `stepFailed` set while a later step still runs and
-        // may skip — the failure wins. (In default fail-fast mode a prior failure
-        // already halts the rest, so skipRequest only ever set when stepFailed=false.)
-        if (skipRequest && !stepFailed) {
-          skipped = true;
-          skipReason = skipRequest.reason;
+          // A step / branch-predicate called ctx.skip() (recorded without a throw):
+          // after teardown the whole test is skipped (node parity: harness.ts:2692).
+          // A skip must NOT mask a prior failure: with the `continue` policy an earlier
+          // soft-failed step leaves `stepFailed` set while a later step still runs and
+          // may skip — the failure wins. (In default fail-fast mode a prior failure
+          // already halts the rest, so skipRequest only ever set when stepFailed=false.)
+          if (skipRequest && !stepFailed) {
+            skipped = true;
+            skipReason = skipRequest.reason;
+          }
         }
       }
     } catch (e) {
@@ -1040,6 +1105,13 @@ export class RunnerCore {
         thrownName = e instanceof Error ? e.name : undefined;
       }
     }
+
+    // The run-level abort signal fired while this run was in flight (`aborted` is only
+    // reachable here because the abort happened before the run returned). Force an error
+    // verdict even when the steps/body that ran completed — including a final/only step or
+    // a simple body that ran out an opaque, non-cancellable await past the abort. A genuine
+    // ctx.skip() below still wins (an intentional skip isn't an abort). (codex r1 P2)
+    if (scope.signal?.aborted) aborted = true;
 
     // ctx.skip() wins over any partial assertion bookkeeping: a skipped test has no
     // verdict (the host re-raises its own SkipError(reason) so the dispatcher emits
@@ -1064,7 +1136,7 @@ export class RunnerCore {
     // cumulative assertion count, so a step that fails then RETRIES to success does
     // not fail the run. Simple tests use the cumulative count (soft-fail).
     const verdict: "ok" | "error" =
-      threw || (def.type === "steps" ? stepFailed : assertionsFailed) ? "error" : "ok";
+      threw || aborted || (def.type === "steps" ? stepFailed : assertionsFailed) ? "error" : "ok";
     return {
       id: scope.testMeta.id,
       name: def.meta.name ?? def.meta.id,
@@ -1073,7 +1145,9 @@ export class RunnerCore {
       // A branch decision failure promotes its message over "One or more steps failed"
       // (node parity: harness throws `branchDecisionError ?? "One or more steps failed"`).
       ...(stepFailed ? { stepsFailed: true, stepsFailMessage: branchDecisionError ?? "One or more steps failed" } : {}),
-      error: verdict === "ok" ? undefined : threw ? thrownError : (stepFailMsg ?? "assertion failed"),
+      // A step failure message wins (most specific); else an abort reads "run aborted";
+      // else a soft assertion failure.
+      error: verdict === "ok" ? undefined : threw ? thrownError : (stepFailMsg ?? (aborted ? "run aborted" : "assertion failed")),
       // Preserve the user's original throw stack + name so a host can re-raise with
       // them (stack diagnostics + failure classification parity — codex P2).
       ...(threw && thrownStack ? { errorStack: thrownStack } : {}),
@@ -1227,6 +1301,9 @@ export class RunnerCore {
         const deadline = this.services.scheduler.now() + timeoutMs;
         let lastError: Error | undefined;
         while (this.services.scheduler.now() < deadline) {
+          // Aborted (run-level signal) — stop polling at once rather than wait out the
+          // interval or the full timeout (the in-flight fn's HTTP is cancelled via ky).
+          if (scope.signal?.aborted) break;
           try {
             if (await fn()) return; // truthy → done
           } catch (err) {
@@ -1234,7 +1311,13 @@ export class RunnerCore {
           }
           const remaining = deadline - this.services.scheduler.now();
           if (remaining <= 0) break;
-          await new Promise<void>((r) => setTimeout(r, Math.min(intervalMs, remaining)));
+          await abortableSleep(Math.min(intervalMs, remaining), scope.signal);
+        }
+        // An aborted run did NOT time out — surface the abort accurately (and as a
+        // classifiable AbortError) instead of falling through to onTimeout / a "timed out"
+        // throw, neither of which is true when the run is being torn down.
+        if (scope.signal?.aborted) {
+          throw new DOMException("The operation was aborted", "AbortError");
         }
         if (onTimeout) {
           onTimeout(lastError);
@@ -1392,6 +1475,29 @@ function wrapScopedKy(instance: KyInstance, scope: ExecutionScope): GlubeanHttp 
     return promise;
   };
 
+  // Hand the run-level abort signal (ScopeInput.signal) to ky so an aborted run cancels
+  // its in-flight requests. If the caller already has their OWN signal, compose both so
+  // either can abort. ky resolves the caller's signal as `options.signal ?? input.signal`
+  // (a `Request` may carry its own), so mirror that precedence here — else injecting our
+  // signal as `options.signal` would silently drop a Request-level signal (codex r1 P2).
+  // On a runtime without AbortSignal.any, keep the caller's (their abort must not regress
+  // — the run signal still covers every other request). No run signal → input untouched.
+  const injectSignal = (
+    rawInput: unknown,
+    opts: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined => {
+    const runSignal = scope.signal;
+    if (!runSignal) return opts;
+    const optsSignal = (opts as { signal?: AbortSignal } | undefined)?.signal;
+    const reqSignal = typeof Request !== "undefined" && rawInput instanceof Request ? rawInput.signal : undefined;
+    const own = optsSignal ?? reqSignal; // ky's own precedence: options.signal ?? input.signal
+    if (!own) return { ...(opts ?? {}), signal: runSignal };
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+      return { ...(opts ?? {}), signal: AbortSignal.any([own, runSignal]) };
+    }
+    return opts;
+  };
+
   const callWithSchema = (
     kyCall: (url: unknown, opts?: unknown) => KyResp,
     input: unknown,
@@ -1399,7 +1505,7 @@ function wrapScopedKy(instance: KyInstance, scope: ExecutionScope): GlubeanHttp 
   ): KyResp => {
     const normalized = normalizeKyOptions(opts);
     preRequest(normalized);
-    const promise = kyCall(normalizeUrl(input), toKyOptions(normalized));
+    const promise = kyCall(normalizeUrl(input), injectSignal(input, toKyOptions(normalized)));
     return wrapResponse(promise, normalized);
   };
 

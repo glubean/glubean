@@ -185,6 +185,11 @@ export interface RunLoadIterationArgs<Input = unknown> {
    *  (back-pressure / fail-iteration) and frees the producer slot at the boundary;
    *  absent → the M5 closed model (release is a no-op phase split). */
   continuation?: { pool: ContinuationPool };
+  /** Run-level abort signal. Threaded to the engine so the run can truly cancel this
+   *  iteration's in-flight HTTP / poll tail — the orchestrator fires it at finalization
+   *  to kill continuation tails the drain phase abandons (instead of leaving them to run
+   *  to completion in the background). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -229,7 +234,17 @@ export interface RunLoadIterationResult {
  * `request:observed` (endpoint error rate), not as an iteration `errorKind`; only
  * an explicit HTTP throw yields `"http"` here.
  */
-function classifyIterationError(result: TestResult): LoadErrorKind {
+function classifyIterationError(result: TestResult, runAborted: boolean): LoadErrorKind {
+  // A run-level abort (the orchestrator's `signal`) — distinct from a user failure. Only
+  // when the orchestrator actually aborted THIS iteration: the engine surfaces it as a
+  // top-level "AbortError" throw (a simple/setup body awaiting an aborted request), a
+  // caught step/poll "AbortError", or the post-loop "run aborted" verdict (an opaque,
+  // non-cancellable await that outran the abort). A scenario that aborts its OWN request
+  // raises the same AbortError, so gate on `runAborted` — else an ordinary user
+  // cancellation would be mislabelled and real setup/step errors under-reported.
+  if (runAborted && (result.errorName === "AbortError" || result.stepErrorName === "AbortError" || result.error === "run aborted")) {
+    return "aborted";
+  }
   if (result.threw) return "setupError";
   const name = result.stepErrorName;
   const msg = result.error ?? "";
@@ -434,6 +449,7 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
 
   const scope: ScopeInput = {
     ...(session !== undefined ? { session } : {}),
+    ...(args.signal !== undefined ? { signal: args.signal } : {}),
     ctxExtensions: {
       input,
       producerSlot,
@@ -456,7 +472,10 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
         skipped = true;
       } else {
         ok = result.status === "ok";
-        errorKind = ok ? undefined : classifyIterationError(result);
+        // Only treat an AbortError as a cancellation when the orchestrator's run signal
+        // actually aborted this iteration (a scenario aborting its own request is a real
+        // user failure, not an orchestrator cancellation).
+        errorKind = ok ? undefined : classifyIterationError(result, args.signal?.aborted === true);
       }
     } catch {
       // The engine resolves user errors into a TestResult; reaching here means the

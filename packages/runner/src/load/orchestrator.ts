@@ -234,6 +234,13 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     secrets: opts.secrets ?? {},
   });
 
+  // Run-level abort, handed to every iteration's engine run. Fired once at finalization
+  // (see the `finally` below) to truly CANCEL any continuation tail still in flight —
+  // its in-flight HTTP and engine poll/retry waits stop at once, instead of running to
+  // completion in the background after the drain phase stopped awaiting them. (Opaque
+  // user async — a bare `setTimeout` in a step — still can't be cancelled.)
+  const runAbort = new AbortController();
+
   // Continuation backlog for producer release (M6). The pool bound is the tighter of
   // maxOutstanding / maxConcurrent (every in-flight continuation is concurrently
   // scheduled, so the two coincide); unset on both → unbounded. Default backlog
@@ -426,6 +433,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       ...(Object.keys(feederKeys).length > 0 ? { feederKeys } : {}),
       now,
       continuation: { pool: continuationPool },
+      signal: runAbort.signal,
     });
   };
 
@@ -466,14 +474,23 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     abortedByDrainTimeout = await drainContinuations(continuations, continuationCfg?.drainTimeoutMs);
   } finally {
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    // All primaries are done and the drain phase has run; abort whatever continuation
+    // tail is still in flight so its in-flight HTTP / engine poll waits stop NOW rather
+    // than running on in the background. A tail that already settled (drain awaited it,
+    // or there was no drainTimeout) makes this a no-op. The aborted tails settle on later
+    // microtasks — after the synchronous `seal()` below — so their late events are still
+    // dropped, leaving the artifact unchanged; only the wasted in-flight work is cut.
+    runAbort.abort();
   }
 
   const endReason: LoadEndReason =
     iterations !== undefined && claimed >= iterations ? "iterations" : durationMs !== undefined ? "duration" : "iterations";
   sink.emitLoadEnd(endReason);
   // Seal the sink so a continuation the drain timeout abandoned can't emit into the
-  // reducer after the artifact is built (it keeps running, but its late events are
-  // dropped; full in-flight HTTP/poll cancellation needs engine AbortSignal support).
+  // reducer after the artifact is built. The `runAbort.abort()` above already cancelled
+  // its in-flight HTTP / engine poll waits, so a tail settles promptly; seal is the
+  // backstop for the late events that abort can't pre-empt (e.g. a bare `setTimeout` in
+  // user code, which no signal can cancel) and for the settle that lands post-seal.
   sink.seal();
 
   const artifact = reducer.finalize();

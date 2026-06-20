@@ -364,6 +364,60 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(out.errorKind).toBe("timeout");
   });
 
+  it("classifies a signal-aborted iteration as `aborted`", async () => {
+    // codex r6 P2: when the run-level signal cancels an in-flight request, the iteration
+    // must classify as "aborted" (a cancellation), not a generic stepError/setupError.
+    const { sink, core } = rig("run-aborted");
+    const controller = new AbortController();
+    const scenario = loadScenario("aborted-job")
+      .step("fetch-slow", async (ctx) => {
+        // /slow responds at 120ms; the abort fires first → ky throws AbortError in-step.
+        await ctx.http.get(`${base}/slow`).json();
+      })
+      .build();
+
+    const out = runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("aborted-job", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+    const result = await out;
+    expect(result.ok).toBe(false);
+    expect(result.errorKind).toBe("aborted");
+  });
+
+  it("does NOT classify a scenario's OWN AbortError as `aborted` (run signal not aborted)", async () => {
+    // codex r7 P2: a scenario that aborts its own request is a real user failure, not an
+    // orchestrator cancellation — gating on the run signal keeps it a stepError.
+    const { sink, core } = rig("run-self-abort");
+    const scenario = loadScenario("self-abort")
+      .step("self-cancel", async (ctx) => {
+        const ac = new AbortController();
+        ac.abort(); // the scenario cancels its OWN request, not the orchestrator
+        await ctx.http.get(`${base}/items/1`, { signal: ac.signal }).json();
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("self-abort", "it-1"),
+      input: {},
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      // NO run signal — the orchestrator did not abort this iteration.
+    });
+    expect(out.ok).toBe(false);
+    expect(out.errorKind).toBe("stepError"); // a real user failure, NOT "aborted"
+  });
+
   it("honors `continue` policy for a poll soft-assertion failure", async () => {
     const { reducer, sink, core } = rig("run-poll-continue");
     const scenario = loadScenario("poll-continue")

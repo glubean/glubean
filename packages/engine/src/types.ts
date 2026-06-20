@@ -179,6 +179,16 @@ export interface ScopeInput {
    *  ctx.retryCount + the start event, like the node harness. 0/undefined = first run. */
   retryCount?: number;
   /**
+   * Abort the run mid-flight. The engine hands this to ky (so an in-flight HTTP request
+   * is cancelled) and checks it between steps + during its own waits (poll interval,
+   * retry backoff, ctx.pollUntil), so an aborted run stops promptly instead of running
+   * its residual poll/HTTP to completion. Errors from an aborted request surface as a
+   * caught step/poll failure (the run still resolves a TestResult — it never rejects).
+   * Used by the load runner to truly kill continuation tails the drain phase abandons;
+   * arbitrary opaque user async (a bare `setTimeout`) cannot be cancelled.
+   */
+  signal?: AbortSignal;
+  /**
    * Host-provided extra ctx fields, merged onto the per-run ctx (e.g. a load
    * runner adding `input` / `report` / `producerSlot` / `iteration`). The engine
    * does NOT interpret these and only ADDS keys not already on the ctx — built-in
@@ -342,4 +352,8 @@ export interface ExecutionScope {
   /** Host-provided extra ctx fields (from ScopeInput.ctxExtensions); merged
    *  add-only onto ctx right after makeCtx. */
   ctxExtensions?: Record<string, unknown>;
+  /** Run-level abort signal (from ScopeInput.signal): handed to ky and checked between
+   *  steps + during the engine's own waits, so an aborted run cancels in-flight HTTP and
+   *  stops its poll/retry tail promptly. */
+  signal?: AbortSignal;
 }
