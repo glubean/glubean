@@ -11,8 +11,10 @@
  *
  * Closed model: a slot holds exactly one in-flight iteration at a time (back to
  * back), so offered concurrency == `concurrency`. Producer release / continuation
- * (the open-ish model) is M6; traffic-mix selection is a later milestone — this
- * orchestrator handles a single scenario and rejects a mix config explicitly.
+ * (the open-ish model) is M6. A traffic mix (`scenarios[]`) is supported: the plan
+ * is lowered to weighted `Workload`s and every iteration picks one by weight, so
+ * concurrency / pacing / continuation / thresholds stay run-level while per-scenario
+ * results are attributed via each entry's id.
  */
 import type {
   AnyLoadRunnerConfig,
@@ -21,6 +23,7 @@ import type {
   LoadArtifact,
   LoadArtifactConfig,
   LoadEndReason,
+  LoadMixConfig,
   LoadPlan,
   LoadResolvedConfig,
   LoadRunnerConfig,
@@ -33,6 +36,7 @@ import { createEngineCore } from "../engine-bridge.js";
 import {
   compileLoadScenario,
   startLoadIteration,
+  type CompiledLoadScenario,
   type LoadIterationHandle,
   type RunLoadIterationResult,
 } from "./execute-iteration.js";
@@ -55,6 +59,48 @@ export interface RunLoadOptions {
   baseSession?: Record<string, unknown>;
   /** Clock for wall-clock timing + event ts (default `Date.now`). */
   now?: () => number;
+  /** RNG in [0,1) for weighted traffic-mix scenario selection (default `Math.random`).
+   *  Injectable so a mix run can be made deterministic in tests. Unused for a
+   *  single-scenario run (selection is trivial). */
+  random?: () => number;
+}
+
+/**
+ * One feeder slot of a workload, plus the `counterKey` its draw count is tracked under.
+ * The key is the slot's logical identity (NOT the binding object — a binding may be reused
+ * across slots), defining the DRAW SCOPE:
+ *  - a SHARED feeder (a mix's top-level): one key per NAME, reused across the entries that
+ *    don't override it, so its draws advance run-globally;
+ *  - an ENTRY feeder (a mix entry's own): a UNIQUE marker per (entry, name), so two entries
+ *    that reuse the same binding object still get independent per-entry sequences.
+ * Two slots that reuse one binding object thus stay independent (codex); for a single
+ * scenario each feeder is its own shared name, so its draw count tracks the iteration index.
+ */
+interface WorkloadFeeder {
+  name: string;
+  binding: FeederBinding;
+  counterKey: object;
+}
+
+/**
+ * One workload the orchestrator can schedule: a compiled scenario plus its resolved
+ * feeders / input. A single-scenario run has exactly one (weight is irrelevant); a
+ * traffic mix has one per `scenarios[]` entry, each weighted and carrying its own
+ * `scenarioRefId` (the entry id) for per-scenario report attribution.
+ *
+ * `feeders` is the entry's effective set (a mix's top-level feeders merged with the
+ * entry's own, the entry winning a name clash), each carrying its draw-scope `counterKey`.
+ * A shared feeder advances run-globally while a per-entry feeder advances only when that
+ * entry runs. For a single scenario every feeder is shared and drawn every iteration, so
+ * its draw count tracks the iteration index (pre-mix parity).
+ */
+interface Workload {
+  scenarioId: string;
+  scenarioRefId?: string;
+  compiled: CompiledLoadScenario;
+  feeders: WorkloadFeeder[];
+  input?: unknown;
+  weight: number;
 }
 
 /**
@@ -165,18 +211,15 @@ function resolveContinuationConfig(
 }
 
 /**
- * Run a load plan locally and return its finalized `LoadArtifact`. Single-scenario
- * closed model; throws on a traffic-mix config (a later milestone) or a plan with
- * neither `duration` nor `iterations` (it would run forever).
+ * Run a load plan locally and return its finalized `LoadArtifact`. Handles BOTH a
+ * single-scenario run and a traffic mix (`scenarios[]`): each is lowered to a list of
+ * weighted `Workload`s, and every iteration picks one (weighted-random for a mix, the
+ * sole workload otherwise). Throws on a plan with neither `duration` nor `iterations`
+ * (it would run forever). Closed model; continuation / pacing / thresholds are
+ * run-level (shared across a mix), per-scenario results attributed via each entry id.
  */
 export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promise<LoadArtifact> {
   const config = plan.config;
-  if (isMixConfig(config)) {
-    throw new Error(
-      `loadRunner "${plan.id}": traffic-mix execution is not yet supported by the local orchestrator (single-scenario only)`,
-    );
-  }
-  const single = config as LoadRunnerConfig;
   const projection = plan.projection;
   const { concurrency, durationMs, iterations, rampUpMs } = projection;
 
@@ -195,7 +238,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     throw new Error(`loadRunner "${plan.id}": duration must resolve to a positive number of ms (got ${durationMs})`);
   }
 
-  const continuationCfg = resolveContinuationConfig(single.continuation);
+  const continuationCfg = resolveContinuationConfig(config.continuation);
   if (continuationCfg?.maxOutstanding !== undefined && (!Number.isInteger(continuationCfg.maxOutstanding) || continuationCfg.maxOutstanding < 1)) {
     throw new Error(`loadRunner "${plan.id}": continuation.maxOutstanding must be a positive integer (got ${continuationCfg.maxOutstanding})`);
   }
@@ -219,13 +262,102 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     );
   }
 
-  const scenario = resolveScenario(single.scenario);
-  const scenarioId = scenario.meta.id;
-  const compiled = compileLoadScenario(scenario, {
-    ...(single.assertions?.onFailure !== undefined ? { defaultOnFailure: single.assertions.onFailure } : {}),
-  });
-  const feeders = Object.entries(single.feeders ?? {}) as [string, FeederBinding][];
-  const thinkTimeMs = normalizeThinkTime(single.pacing);
+  // Lower the plan to weighted workloads (one for a single scenario, one per mix entry).
+  // The runner-level `assertions.onFailure` default is shared; each entry's scenario /
+  // step meta can still override it during compilation.
+  const compileOpts = config.assertions?.onFailure !== undefined ? { defaultOnFailure: config.assertions.onFailure } : {};
+  // One stable counter key per SHARED feeder NAME, reused across the entries that draw it, so
+  // its draws advance run-globally. Keyed by name (not the binding) so two shared names that
+  // happen to reuse the same binding object stay independent slots (and single-scenario feeders
+  // each get their own per-name sequence regardless of binding reuse).
+  const sharedCounterKeys = new Map<string, object>();
+  const sharedCounterKey = (name: string): object => {
+    let key = sharedCounterKeys.get(name);
+    if (key === undefined) { key = {}; sharedCounterKeys.set(name, key); }
+    return key;
+  };
+  const makeWorkload = (
+    ref: LoadScenarioRef,
+    weight: number,
+    scenarioRefId: string | undefined,
+    sharedFeeders: Record<string, FeederBinding> | undefined,
+    entryFeeders: Record<string, FeederBinding> | undefined,
+    input: unknown,
+  ): Workload => {
+    const scenario = resolveScenario(ref);
+    const entry = entryFeeders ?? {};
+    const feeders: WorkloadFeeder[] = [];
+    // Shared (top-level) feeders the entry does NOT override: keyed per NAME, shared across
+    // the non-overriding entries → one run-global draw sequence. `Object.entries` +
+    // `hasOwnProperty` are own-prop only, so a feeder named `toString` survives (a
+    // `name in entry` check would drop it via Object.prototype).
+    for (const [name, binding] of Object.entries(sharedFeeders ?? {})) {
+      if (!Object.prototype.hasOwnProperty.call(entry, name)) {
+        feeders.push({ name, binding, counterKey: sharedCounterKey(name) });
+      }
+    }
+    // The entry's own feeders (entry wins a name clash): each gets a UNIQUE marker key, so
+    // two entries reusing the same binding object still draw independent per-entry sequences.
+    for (const [name, binding] of Object.entries(entry)) {
+      feeders.push({ name, binding, counterKey: {} });
+    }
+    return {
+      scenarioId: scenario.meta.id,
+      ...(scenarioRefId !== undefined ? { scenarioRefId } : {}),
+      compiled: compileLoadScenario(scenario, compileOpts),
+      feeders,
+      input,
+      weight,
+    };
+  };
+
+  let workloads: Workload[];
+  if (isMixConfig(config)) {
+    const mix = config as LoadMixConfig;
+    if (!Array.isArray(mix.scenarios) || mix.scenarios.length === 0) {
+      throw new Error(`loadRunner "${plan.id}": a traffic mix needs at least one entry in \`scenarios\``);
+    }
+    const seenIds = new Set<string>();
+    workloads = mix.scenarios.map((entry) => {
+      if (typeof entry.id !== "string" || entry.id === "") {
+        throw new Error(`loadRunner "${plan.id}": every traffic-mix entry needs a non-empty \`id\``);
+      }
+      if (seenIds.has(entry.id)) {
+        throw new Error(
+          `loadRunner "${plan.id}": duplicate traffic-mix entry id "${entry.id}" — ids attribute per-scenario results, so they must be unique`,
+        );
+      }
+      seenIds.add(entry.id);
+      if (!Number.isFinite(entry.weight) || entry.weight <= 0) {
+        throw new Error(
+          `loadRunner "${plan.id}": traffic-mix entry "${entry.id}" weight must be a positive number (got ${entry.weight})`,
+        );
+      }
+      // Top-level feeders are shared (run-global draws); the entry's own are per-entry.
+      return makeWorkload(entry.scenario, entry.weight, entry.id, mix.feeders, entry.feeders, entry.input);
+    });
+  } else {
+    // Single scenario: all feeders are "shared" (run-global) so the indexing is exactly
+    // the pre-mix behavior; there are no per-entry feeders.
+    const single = config as LoadRunnerConfig;
+    workloads = [makeWorkload(single.scenario, 1, undefined, single.feeders, undefined, single.input)];
+  }
+
+  // Weighted scenario selection for a mix; the sole workload for a single scenario (no
+  // RNG draw, so a single-scenario run is byte-identical to before).
+  const random = opts.random ?? Math.random;
+  const totalWeight = workloads.reduce((sum, w) => sum + w.weight, 0);
+  const selectWorkload = (): Workload => {
+    if (workloads.length === 1) return workloads[0];
+    let r = random() * totalWeight;
+    for (const w of workloads) {
+      r -= w.weight;
+      if (r < 0) return w;
+    }
+    return workloads[workloads.length - 1]; // float-rounding safety net
+  };
+
+  const thinkTimeMs = normalizeThinkTime(config.pacing);
 
   const reducer = createLoadReducer();
   const sink = new LoadSink(reducer, runId, runnerId, now);
@@ -269,6 +401,12 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     void p.finally(() => continuations.delete(p));
   };
 
+  // Record the traffic-mix composition so the reducer can seed a 0-iteration aggregate for
+  // every configured entry (a low-weight entry that's never selected still shows up).
+  const mixScenarios = isMixConfig(config)
+    ? workloads.map((w) => ({ scenarioRefId: w.scenarioRefId as string, scenarioId: w.scenarioId, weight: w.weight }))
+    : undefined;
+
   const resolvedConfig: LoadResolvedConfig = {
     concurrency,
     ...(durationMs !== undefined ? { durationMs } : {}),
@@ -276,6 +414,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     ...(rampUpMs !== undefined ? { rampUpMs } : {}),
     ...(thinkTimeMs !== undefined ? { pacing: { thinkTimeMs } } : {}),
     ...(continuationCfg !== undefined ? { continuation: continuationCfg } : {}),
+    ...(mixScenarios !== undefined ? { scenarios: mixScenarios } : {}),
   };
 
   const start = now();
@@ -359,19 +498,34 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   const startOneIteration = (
     slotIndex: number,
     producerSlotId: string,
-    slotIteration: number,
     globalIteration: number,
+    slotIteration: number,
+    workload: Workload,
+    feederSlotDraws: Map<object, number>,
   ): LoadIterationHandle | "skip" | "failed" => {
     const iterationId = `it-${globalIteration}`;
     const producerSlot = { id: producerSlotId, index: slotIndex };
     const iteration = { id: iterationId, index: globalIteration };
-    const envelope: LoadIterationEnvelope = { scenarioId, producerSlotId, iterationId };
+    const envelope: LoadIterationEnvelope = {
+      scenarioId: workload.scenarioId,
+      ...(workload.scenarioRefId !== undefined ? { scenarioRefId: workload.scenarioRefId } : {}),
+      producerSlotId,
+      iterationId,
+    };
 
-    const drawCtx: FeederDrawContext = {
-      producerSlot: slotIndex,
-      producerCount: concurrency,
-      slotIteration,
-      globalIteration,
+    // `globalIteration`/`slotIteration` keep their public contract — the REAL run-global and
+    // per-slot iteration indices (so a custom feeder reading them is unaffected by mix
+    // scheduling). The built-in feeders index by `drawIndex`/`slotDrawIndex` instead: ITS OWN
+    // per-binding draw count, so a binding shared across entries advances run-wide while a
+    // per-entry (or partially-overridden) binding advances only when its entry runs — correct
+    // even when only some entries override a shared name (codex). For a single scenario a
+    // feeder is drawn every iteration, so its draw count equals the iteration index.
+    const drawCtxFor = (counterKey: object): FeederDrawContext => {
+      const g = feederGlobalDraws.get(counterKey) ?? 0;
+      feederGlobalDraws.set(counterKey, g + 1);
+      const s = feederSlotDraws.get(counterKey) ?? 0;
+      feederSlotDraws.set(counterKey, s + 1);
+      return { producerSlot: slotIndex, producerCount: concurrency, slotIteration, globalIteration, drawIndex: g, slotDrawIndex: s };
     };
 
     const failSetup = (): "failed" => {
@@ -393,8 +547,8 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     let input: unknown;
     let skipped = false;
     try {
-      for (const [name, binding] of feeders) {
-        const draw = binding.allocate(drawCtx);
+      for (const { name, binding, counterKey } of workload.feeders) {
+        const draw = binding.allocate(drawCtxFor(counterKey));
         if (draw.outcome === "value") {
           feed[name] = draw.value;
           if (draw.key !== undefined) feederKeys[name] = draw.key;
@@ -409,14 +563,14 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       }
       if (skipped) return "skip";
       input =
-        typeof single.input === "function"
-          ? (single.input as (args: unknown) => unknown)({
+        typeof workload.input === "function"
+          ? (workload.input as (args: unknown) => unknown)({
               row: plan.row,
               feed,
               producerSlot,
               iteration,
             })
-          : (single.input ?? {});
+          : (workload.input ?? {});
     } catch {
       return failSetup();
     }
@@ -424,7 +578,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     return startLoadIteration({
       core,
       sink,
-      scenario: compiled,
+      scenario: workload.compiled,
       envelope,
       input,
       producerSlot,
@@ -437,18 +591,30 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     });
   };
 
+  // Run-global per-feeder draw count, keyed by each feeder slot's `counterKey` (a shared
+  // feeder's binding object, or an entry feeder's unique marker — see WorkloadFeeder).
+  // Shared across slots, so a shared feeder advances run-wide while a per-entry slot advances
+  // only on its entry's turns. Feeds `drawIndex` (built-in uniquePerIteration / roundRobin).
+  const feederGlobalDraws = new Map<object, number>();
+
   const runSlot = async (slotIndex: number): Promise<void> => {
     if (rampUpMs !== undefined) {
       await pausedSleep(rampDelayMs(slotIndex, concurrency, rampUpMs));
     }
     sink.emitProducerSlotStart(slotIndex);
     const producerSlotId = `p${slotIndex}`;
+    // Per-slot iteration index (the `slotIteration` public contract field), and per-slot
+    // per-feeder draw counts (what partitionByVu actually indexes by, via `slotDrawIndex`).
     let slotIteration = 0;
+    const feederSlotDraws = new Map<object, number>();
     let primaryIterations = 0;
     for (;;) {
       const globalIteration = claimIteration();
       if (globalIteration < 0) break;
-      const started = startOneIteration(slotIndex, producerSlotId, slotIteration, globalIteration);
+      // Pick this iteration's workload (weighted-random for a mix, the sole one for a single
+      // scenario); the feeders it draws advance their own per-binding counters (see drawCtxFor).
+      const workload = selectWorkload();
+      const started = startOneIteration(slotIndex, producerSlotId, globalIteration, slotIteration, workload, feederSlotDraws);
       slotIteration += 1;
       if (started !== "skip") {
         // A real (or failed-setup) primary iteration.
@@ -523,10 +689,11 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     );
   }
 
-  // Evaluate configured thresholds against the finalized artifact and refine the
-  // pass verdict (a crash-free run still fails if a threshold is breached).
-  if (single.thresholds !== undefined) {
-    const { thresholds, pass } = evaluateThresholds(artifact, single.thresholds);
+  // Evaluate configured thresholds against the finalized artifact and refine the pass
+  // verdict (a crash-free run still fails if a threshold is breached). Thresholds are
+  // run-level — for a mix they apply to the aggregate, not per scenario.
+  if (config.thresholds !== undefined) {
+    const { thresholds, pass } = evaluateThresholds(artifact, config.thresholds);
     artifact.summary.thresholds = thresholds;
     artifact.summary.pass = pass;
   }

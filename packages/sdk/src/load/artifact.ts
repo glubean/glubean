@@ -199,6 +199,10 @@ export interface LoadSlowTransactionSummary {
 /** Per-step aggregate (builder view). */
 export interface LoadStepSummary {
   scenarioId: string;
+  /** Traffic-mix entry id, when this step's scenario was referenced via a mix entry.
+   *  Disambiguates the SAME `loadScenario` referenced under two entry ids (otherwise two
+   *  rows would share scenarioId/stepId). Absent for a single-scenario run. */
+  scenarioRefId?: string;
   stepId: string;
   stepName: string;
   groupId?: string;
@@ -264,6 +268,10 @@ export interface LoadArtifactConfig {
   durationMs?: number;
   iterations?: number;
   rampUpMs?: number;
+  /** Traffic-mix composition (present only for a `scenarios[]` run): each configured entry
+   *  with its weight. Records WHAT was configured so a low-weight entry that drew zero
+   *  iterations still shows up (as a 0-iteration scenario), not as if it were never set. */
+  scenarios?: { scenarioRefId: string; scenarioId: string; weight: number }[];
   pacing?: { thinkTimeMs?: number | { min: number; max: number } };
   continuation?: {
     maxOutstanding?: number;

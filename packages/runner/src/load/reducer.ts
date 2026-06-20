@@ -156,6 +156,13 @@ export class LoadReducerImpl implements LoadReducer {
       case "load:start":
         this.config = event.config;
         this.requestedConcurrency = event.config.concurrency;
+        // Seed an aggregate for every configured traffic-mix entry, so a low-weight entry
+        // that never gets selected still appears in the artifact (configured, 0 iterations)
+        // rather than absent. A single-scenario run has no `scenarios` and seeds on its
+        // first iteration:start, as before.
+        for (const s of event.config.scenarios ?? []) {
+          this.scenarioAgg(s.scenarioId, s.scenarioRefId);
+        }
         break;
       case "load:end":
         this.endReason = event.reason;
@@ -667,6 +674,10 @@ export class LoadReducerImpl implements LoadReducer {
   private stepSummary(agg: StepAgg): LoadStepSummary {
     return {
       scenarioId: agg.scenarioId,
+      // Carry the mix entry id so two entries referencing the SAME scenario aren't
+      // indistinguishable in the flat `artifact.steps` (matches the scenario summaries
+      // + matrix, which already carry it). Omitted for a single scenario.
+      ...(agg.scenarioRefId !== undefined ? { scenarioRefId: agg.scenarioRefId } : {}),
       stepId: agg.stepId,
       stepName: agg.stepName,
       ...(agg.groupId !== undefined ? { groupId: agg.groupId } : {}),

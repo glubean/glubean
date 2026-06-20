@@ -51,6 +51,19 @@ export interface FeederDrawContext {
   slotIteration: number;
   /** 0-based global iteration index across all slots. */
   globalIteration: number;
+  /**
+   * 0-based count of how many times THIS feeder has already been drawn across all slots —
+   * the run-global DRAW index. Equals `globalIteration` for a single scenario (a feeder is
+   * drawn every iteration); in a traffic mix it advances only on iterations that draw this
+   * feeder, so a per-entry (or partially-overridden shared) feeder consumes its rows
+   * contiguously. Built-in `uniquePerIteration` / `roundRobin` index by it. Optional: a
+   * caller that omits it falls back to `globalIteration` (single-scenario parity).
+   */
+  drawIndex?: number;
+  /** 0-based count of how many times THIS feeder has already been drawn BY THIS producer
+   *  slot — the per-slot DRAW index (the slot-scoped analogue of `drawIndex`). Built-in
+   *  `partitionByVu` indexes by it; omitting it falls back to `slotIteration`. */
+  slotDrawIndex?: number;
 }
 
 /** Result of a feeder draw. */
@@ -160,7 +173,9 @@ function makeBinding<T extends object>(
         return drawIndexed(rows, ctx.producerSlot, exhausted, key);
       case "uniquePerIteration":
       case "roundRobin":
-        return drawIndexed(rows, ctx.globalIteration, exhausted, key);
+        // Index by THIS feeder's run-global draw count so a mix entry / overridden shared
+        // feeder stays contiguous; `?? globalIteration` keeps single-scenario parity.
+        return drawIndexed(rows, ctx.drawIndex ?? ctx.globalIteration, exhausted, key);
       case "random":
         return rows.length === 0
           ? missDraw(exhausted)
@@ -174,7 +189,9 @@ function makeBinding<T extends object>(
           ctx.producerCount > 0
             ? rows.filter((_, i) => i % ctx.producerCount === ctx.producerSlot)
             : rows.slice();
-        return drawIndexed(partition, ctx.slotIteration, exhausted, key);
+        // Index within the VU partition by THIS feeder's per-slot draw count (mix-correct);
+        // `?? slotIteration` keeps single-scenario parity.
+        return drawIndexed(partition, ctx.slotDrawIndex ?? ctx.slotIteration, exhausted, key);
       }
     }
   };

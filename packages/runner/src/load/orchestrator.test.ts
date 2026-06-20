@@ -315,7 +315,7 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
     expect(art.summary.thresholds.find((t) => t.metric === "p95")?.pass).toBe(false);
   });
 
-  it("rejects a traffic-mix config (single-scenario only for now)", async () => {
+  it("runs a single-entry traffic-mix config (mix is supported)", async () => {
     const plan = loadRunner("mix", {
       concurrency: 1,
       iterations: 1,
@@ -323,7 +323,9 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
         { id: "a", scenario: loadScenario("a").step("s", async () => {}).build(), weight: 1 },
       ],
     });
-    await expect(runLoad(plan)).rejects.toThrow(/traffic-mix/);
+    const art = await runLoad(plan);
+    expect(art.summary.totalIterations).toBe(1);
+    expect(art.scenarios).toMatchObject([{ scenarioId: "a", scenarioRefId: "a", iterations: 1 }]);
   });
 
   it("rejects a plan with no termination bound", async () => {
@@ -904,6 +906,296 @@ describe("runLoad — exact routeKey via X-Glubean-Route (M8)", () => {
     expect(ep!.routeKey).toBe("GET /items/:id"); // normalized heuristically
     expect(ep!.routeKeySource).toBe("normalized-url");
     expect(ep!.routeKeyHeuristic).toBe(true);
+  });
+});
+
+// Traffic mix: a `scenarios[]` plan runs multiple weighted scenarios in one run; each
+// iteration picks one by weight (deterministic here via an injected RNG) and results are
+// attributed per scenario via each entry's id (scenarioRefId).
+describe("runLoad — traffic mix (weighted multi-scenario)", () => {
+  /** Deterministic RNG cycling a fixed sequence — makes weighted selection reproducible. */
+  function seqRandom(values: number[]): () => number {
+    let i = 0;
+    return () => values[i++ % values.length];
+  }
+
+  const browse = () =>
+    loadScenario<{ sku: string }>("browse")
+      .step("get-item", async (ctx) => {
+        const item = (await ctx.http.get(`${base}/items/${ctx.input.sku}`).json()) as { name: string };
+        ctx.expect(item.name).toBe("widget");
+      })
+      .build();
+  const order = () =>
+    loadScenario("order")
+      .step("place", async (ctx) => {
+        const o = (await ctx.http.post(`${base}/orders`, { json: {} }).json()) as { orderId: string };
+        ctx.expect(o.orderId).toBe("o-1");
+      })
+      .build();
+
+  it("splits iterations across scenarios by weight and attributes per-scenario results", async () => {
+    const plan = loadRunner("mixed", {
+      scenarios: [
+        { id: "browse", scenario: browse(), weight: 75, input: () => ({ sku: "42" }) },
+        { id: "order", scenario: order(), weight: 25 },
+      ],
+      concurrency: 1,
+      iterations: 4,
+    });
+    // total weight 100 → r = random()*100; [0,75) browse, [75,100) order → 3 browse + 1 order.
+    const art = await runLoad(plan, { random: seqRandom([0.1, 0.2, 0.5, 0.9]) });
+
+    expect(art.summary.totalIterations).toBe(4);
+    expect(art.summary.successfulIterations).toBe(4);
+    const byRef = Object.fromEntries(art.scenarios.map((s) => [s.scenarioRefId, s]));
+    expect(byRef.browse).toMatchObject({ scenarioId: "browse", iterations: 3, successfulIterations: 3 });
+    expect(byRef.order).toMatchObject({ scenarioId: "order", iterations: 1, successfulIterations: 1 });
+    // Per-entry input reached the right scenario: browse got sku=42 (→ GET /items/42, ×3),
+    // order ran its POST once.
+    expect(art.endpoints.find((e) => e.routeKey === "GET /items/:id")?.requestCount).toBe(3);
+    expect(art.endpoints.find((e) => e.routeKey === "POST /orders")?.requestCount).toBe(1);
+  });
+
+  it("attributes the SAME scenario referenced by two entries under distinct ids", async () => {
+    const plan = loadRunner("same-twice", {
+      scenarios: [
+        { id: "fast", scenario: browse(), weight: 50, input: () => ({ sku: "1" }) },
+        { id: "slow", scenario: browse(), weight: 50, input: () => ({ sku: "2" }) },
+      ],
+      concurrency: 1,
+      iterations: 2,
+    });
+    const art = await runLoad(plan, { random: seqRandom([0.1, 0.9]) }); // one each
+    expect(art.scenarios).toHaveLength(2);
+    expect(art.scenarios.map((s) => s.scenarioRefId).sort()).toEqual(["fast", "slow"]);
+    expect(art.scenarios.every((s) => s.scenarioId === "browse")).toBe(true);
+    expect(art.scenarios.find((s) => s.scenarioRefId === "fast")?.iterations).toBe(1);
+    expect(art.scenarios.find((s) => s.scenarioRefId === "slow")?.iterations).toBe(1);
+    // The flat top-level step rows carry the entry id too, so the two same-scenario entries
+    // aren't indistinguishable (codex mix P2) — same scenarioId/stepName, distinct refs.
+    expect(art.steps.map((s) => s.scenarioRefId).sort()).toEqual(["fast", "slow"]);
+    expect(art.steps.every((s) => s.scenarioId === "browse" && s.stepName === "get-item")).toBe(true);
+  });
+
+  it("drives each mix entry's feeder by its OWN draw count, not the run-global index", async () => {
+    // codex mix P2: an entry-local uniquePerIteration must index by how many times THIS
+    // entry ran — else a later-selected entry over-indexes its rows and exhausts.
+    const aRows = feeder.fromArray([{ v: "a0" }, { v: "a1" }], { key: "v" });
+    const bRows = feeder.fromArray([{ v: "b0" }, { v: "b1" }], { key: "v" });
+    const seen: string[] = [];
+    const useRow = (id: string) => loadScenario<{ v: string }>(id).step("use", async () => {}).build();
+    const plan = loadRunner("mix-feeders", {
+      concurrency: 1,
+      iterations: 4,
+      scenarios: [
+        {
+          id: "a",
+          scenario: useRow("a"),
+          weight: 50,
+          feeders: { row: aRows.uniquePerIteration() },
+          input: ({ feed }) => { seen.push((feed.row as { v: string }).v); return feed.row; },
+        },
+        {
+          id: "b",
+          scenario: useRow("b"),
+          weight: 50,
+          feeders: { row: bRows.uniquePerIteration() },
+          input: ({ feed }) => { seen.push((feed.row as { v: string }).v); return feed.row; },
+        },
+      ],
+    });
+    // Select A,B,A,B (0.1 → a, 0.9 → b at 50/50) — each entry draws its own row 0 then 1.
+    const art = await runLoad(plan, { random: seqRandom([0.1, 0.9, 0.1, 0.9]) });
+    expect(art.summary.totalIterations).toBe(4);
+    expect(art.summary.failedIterations).toBe(0); // no feeder exhaustion (the bug exhausted at idx 3)
+    expect(seen.sort()).toEqual(["a0", "a1", "b0", "b1"]); // each entry drew its own rows in order
+  });
+
+  it("draws a SHARED top-level feeder by run-global index (distinct rows across the mix)", async () => {
+    // codex mix P2: a shared uniquePerIteration must consume distinct rows run-wide — A then
+    // B must NOT both draw row 0 (that's the per-entry behavior, wrong for a shared feeder).
+    const shared = feeder.fromArray([{ v: "s0" }, { v: "s1" }, { v: "s2" }, { v: "s3" }], { key: "v" });
+    const seen: string[] = [];
+    const useShared = (id: string) => loadScenario<{ v: string }>(id).step("use", async () => {}).build();
+    const plan = loadRunner("mix-shared", {
+      concurrency: 1,
+      iterations: 4,
+      feeders: { row: shared.uniquePerIteration() }, // shared across every entry
+      scenarios: [
+        { id: "a", scenario: useShared("a"), weight: 50, input: ({ feed }) => { seen.push((feed.row as { v: string }).v); return feed.row; } },
+        { id: "b", scenario: useShared("b"), weight: 50, input: ({ feed }) => { seen.push((feed.row as { v: string }).v); return feed.row; } },
+      ],
+    });
+    const art = await runLoad(plan, { random: seqRandom([0.1, 0.9, 0.1, 0.9]) }); // A,B,A,B
+    expect(art.summary.totalIterations).toBe(4);
+    expect(art.summary.failedIterations).toBe(0);
+    expect(seen.sort()).toEqual(["s0", "s1", "s2", "s3"]); // distinct rows, consumed run-globally
+  });
+
+  it("keeps an OVERRIDDEN shared feeder's draws contiguous (only some entries override it)", async () => {
+    // codex mix P2: a shared feeder that only SOME entries override is drawn on the non-
+    // overriding turns; it must index by its OWN draw count, not the run-global iteration
+    // (which skips indices and exhausts). A,B,A,B with only B overriding `row`.
+    const sharedRow = feeder.fromArray([{ v: "s0" }, { v: "s1" }], { key: "v" }); // 2 rows, fail on overrun
+    const bRow = feeder.fromArray([{ v: "b0" }, { v: "b1" }], { key: "v" });
+    const seen: string[] = [];
+    const use = (id: string) => loadScenario<{ v: string }>(id).step("noop", async () => {}).build();
+    const cap = ({ feed }: { feed: Record<string, unknown> }) => { seen.push((feed.row as { v: string }).v); return feed.row; };
+    const plan = loadRunner("mix-partial-override", {
+      concurrency: 1,
+      iterations: 4,
+      feeders: { row: sharedRow.uniquePerIteration() }, // shared across entries
+      scenarios: [
+        { id: "a", scenario: use("a"), weight: 50, input: cap }, // uses the shared `row`
+        { id: "b", scenario: use("b"), weight: 50, feeders: { row: bRow.uniquePerIteration() }, input: cap }, // overrides `row`
+      ],
+    });
+    const art = await runLoad(plan, { random: seqRandom([0.1, 0.9, 0.1, 0.9]) }); // A,B,A,B
+    expect(art.summary.totalIterations).toBe(4);
+    expect(art.summary.failedIterations).toBe(0); // shared feeder NOT exhausted (the bug hit row[2])
+    expect(seen.sort()).toEqual(["b0", "b1", "s0", "s1"]); // shared rows contiguous, B's own rows distinct
+  });
+
+  it("scopes entry-local feeder draws per entry even when entries reuse the same binding object", async () => {
+    // codex mix P2: a binding object reused under two entries' `feeders` is two LOGICAL slots
+    // (each entry-local) — each must draw its OWN sequence, not share one (which exhausts).
+    const rows = feeder.fromArray([{ v: "r0" }, { v: "r1" }], { key: "v" }).uniquePerIteration();
+    const seen: string[] = [];
+    const use = (id: string) => loadScenario<{ v: string }>(id).step("noop", async () => {}).build();
+    const cap = ({ feed }: { feed: Record<string, unknown> }) => { seen.push((feed.row as { v: string }).v); return feed.row; };
+    const plan = loadRunner("mix-reused-binding", {
+      concurrency: 1,
+      iterations: 4,
+      scenarios: [
+        { id: "a", scenario: use("a"), weight: 50, feeders: { row: rows }, input: cap }, // SAME binding object…
+        { id: "b", scenario: use("b"), weight: 50, feeders: { row: rows }, input: cap }, // …reused under B
+      ],
+    });
+    const art = await runLoad(plan, { random: seqRandom([0.1, 0.9, 0.1, 0.9]) }); // A,B,A,B
+    expect(art.summary.totalIterations).toBe(4);
+    expect(art.summary.failedIterations).toBe(0); // neither entry exhausts (each drew only twice)
+    expect(seen.sort()).toEqual(["r0", "r0", "r1", "r1"]); // each entry drew its own row0 then row1
+  });
+
+  it("keeps two feeder names that reuse one binding independent (per-name draw sequence)", async () => {
+    // codex mix P2: two top-level names assigned the SAME binding object are separate slots —
+    // each must see its own draw index (the iteration index), not a shared counter that
+    // advances between the two allocations within one iteration (a single-scenario regression).
+    const rows = feeder.fromArray([{ v: "x0" }, { v: "x1" }], { key: "v" }).uniquePerIteration();
+    const seenA: string[] = [];
+    const seenB: string[] = [];
+    const plan = loadRunner("dual-name", {
+      concurrency: 1,
+      iterations: 2,
+      scenario: loadScenario("s").step("noop", async () => {}).build(),
+      feeders: { a: rows, b: rows }, // SAME binding object under two names
+      input: ({ feed }) => {
+        seenA.push((feed.a as { v: string }).v);
+        seenB.push((feed.b as { v: string }).v);
+        return {};
+      },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.totalIterations).toBe(2);
+    expect(art.summary.failedIterations).toBe(0); // neither name exhausts early
+    expect(seenA).toEqual(["x0", "x1"]); // each name drew row0 then row1 by the iteration index…
+    expect(seenB).toEqual(["x0", "x1"]); // …not interleaved across the two names
+  });
+
+  it("does not drop a feeder whose name shadows an Object.prototype property", async () => {
+    // codex mix P2: `name in {}` is true for "toString"/"constructor", so the shared/entry
+    // override filter must use an own-property check — else such feeders silently vanish
+    // (this also affects single-scenario runs, which have no entry feeders).
+    const rows = feeder.fromArray([{ v: "x" }], { key: "v" });
+    let seenToString: unknown;
+    const plan = loadRunner("proto-feeder", {
+      concurrency: 1,
+      iterations: 1,
+      scenario: loadScenario("s").step("noop", async () => {}).build(),
+      feeders: { toString: rows.uniquePerIteration() },
+      input: ({ feed }) => { seenToString = (feed as Record<string, unknown>).toString; return {}; },
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.totalIterations).toBe(1);
+    expect(art.summary.failedIterations).toBe(0);
+    expect(seenToString).toEqual({ v: "x" }); // the feeder was drawn, not filtered out
+  });
+
+  it("keeps a configured mix entry that draws zero iterations in the artifact", async () => {
+    // codex mix P2: a never-selected entry must still appear (configured, 0 iterations), and
+    // the config records the mix composition + weights.
+    const plan = loadRunner("mix-zero", {
+      concurrency: 1,
+      iterations: 2,
+      scenarios: [
+        { id: "hot", scenario: browse(), weight: 99, input: () => ({ sku: "42" }) },
+        { id: "cold", scenario: order(), weight: 1 },
+      ],
+    });
+    // total weight 100 → both draws < 99 pick "hot"; "cold" is never selected.
+    const art = await runLoad(plan, { random: seqRandom([0.1, 0.2]) });
+    expect(art.summary.totalIterations).toBe(2);
+    const byRef = Object.fromEntries(art.scenarios.map((s) => [s.scenarioRefId, s]));
+    expect(byRef.hot?.iterations).toBe(2);
+    expect(byRef.cold).toBeDefined(); // present despite zero selections…
+    expect(byRef.cold?.iterations).toBe(0); // …as a configured 0-iteration scenario
+    expect(art.config.scenarios).toEqual([
+      { scenarioRefId: "hot", scenarioId: "browse", weight: 99 },
+      { scenarioRefId: "cold", scenarioId: "order", weight: 1 },
+    ]);
+  });
+
+  it("exposes the REAL global iteration index to a custom feeder (not the per-binding draw count)", async () => {
+    // codex mix P2: FeederDrawContext.globalIteration keeps its documented meaning (run-global
+    // iteration index) under mix scheduling — only the built-in feeders use the draw index.
+    const seenGlobal: number[] = [];
+    const customBinding = {
+      allocate: (ctx: { globalIteration: number }) => {
+        seenGlobal.push(ctx.globalIteration);
+        return { outcome: "value" as const, value: { n: ctx.globalIteration } };
+      },
+    } as unknown as FeederBinding;
+    const use = (id: string) => loadScenario(id).step("noop", async () => {}).build();
+    const plan = loadRunner("mix-ctx", {
+      concurrency: 1,
+      iterations: 4,
+      scenarios: [
+        { id: "a", scenario: use("a"), weight: 50, feeders: { x: customBinding }, input: () => ({}) },
+        { id: "b", scenario: use("b"), weight: 50, input: () => ({}) },
+      ],
+    });
+    await runLoad(plan, { random: seqRandom([0.1, 0.9, 0.1, 0.9]) }); // A,B,A,B
+    expect(seenGlobal).toEqual([0, 2]); // A ran at global iterations 0 and 2 (real indices, not 0,1)
+  });
+
+  it("rejects a duplicate traffic-mix entry id", async () => {
+    const plan = loadRunner("dup", {
+      scenarios: [
+        { id: "x", scenario: browse(), weight: 1, input: () => ({ sku: "1" }) },
+        { id: "x", scenario: order(), weight: 1 },
+      ],
+      concurrency: 1,
+      iterations: 1,
+    });
+    await expect(runLoad(plan)).rejects.toThrow(/duplicate traffic-mix entry id "x"/);
+  });
+
+  it("rejects a non-positive mix weight", async () => {
+    const plan = loadRunner("badweight", {
+      scenarios: [
+        { id: "a", scenario: browse(), weight: 0, input: () => ({ sku: "1" }) },
+        { id: "b", scenario: order(), weight: 1 },
+      ],
+      concurrency: 1,
+      iterations: 1,
+    });
+    await expect(runLoad(plan)).rejects.toThrow(/weight must be a positive number/);
+  });
+
+  it("rejects an empty traffic mix", async () => {
+    const plan = loadRunner("empty-mix", { scenarios: [], concurrency: 1, iterations: 1 });
+    await expect(runLoad(plan)).rejects.toThrow(/traffic mix needs at least one entry/);
   });
 });
 
