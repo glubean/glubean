@@ -155,7 +155,21 @@ export interface RunnerServices {
   /** HTTP trace policy (host-injected from ExecutorOptions, all default OFF): full
    *  request/response capture, response-body schema inference, and aggressive array
    *  truncation. Node parity: harness emitFullTrace / inferSchema / truncateArrays. */
-  http?: { emitFullTrace?: boolean; inferSchema?: boolean; truncateArrays?: boolean };
+  http?: {
+    emitFullTrace?: boolean;
+    inferSchema?: boolean;
+    truncateArrays?: boolean;
+    /** How a run-level abort signal reaches in-flight HTTP requests.
+     *  - "precise" (default): hand a per-iteration AbortSignal to ky so an aborted run
+     *    cancels its in-flight requests at once. Exactly ONE listener is added to the
+     *    long-lived run signal per iteration and removed when the iteration settles — no
+     *    per-request listener accumulation (the load-throughput footgun that otherwise
+     *    makes a long run get progressively slower).
+     *  - "coarse": never wire the run signal into ky; rely on the engine's between-step
+     *    `signal.aborted` checks instead. Drops in-flight cancellation for a few % more
+     *    throughput — for high-RPS load where requests are short. */
+    abortMode?: "precise" | "coarse";
+  };
 }
 
 // --- type sketches only (Stage 1 P3-1: NOT implemented/wired; here to fix the
@@ -356,4 +370,13 @@ export interface ExecutionScope {
    *  steps + during the engine's own waits, so an aborted run cancels in-flight HTTP and
    *  stops its poll/retry tail promptly. */
   signal?: AbortSignal;
+  /** Per-iteration abort bridge controller, SHARED across the base ky and every
+   *  `ctx.http.extend(...)` client of this scope. Lazily created on the first request;
+   *  its presence is the "bridge already wired" guard, so exactly one listener is added
+   *  to the long-lived `signal` per iteration regardless of how many ky instances exist. */
+  httpAbort?: AbortController;
+  /** Teardown for per-iteration HTTP resources (the abort bridge that links `signal`
+   *  to this iteration's ky). Called once when the iteration's run() settles, so the
+   *  single listener on the long-lived `signal` is removed (no accumulation). */
+  disposeHttp?: () => void;
 }

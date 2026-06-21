@@ -310,7 +310,11 @@ export class RunnerCore {
       });
     }
     const scope = this.createScope(def, input);
-    return runWithRuntime(scope.runtime, () => this.runLoop(def, scope));
+    // Tear down per-iteration HTTP resources (the abort bridge) once the run settles,
+    // so the single listener on the long-lived run signal is removed (no accumulation).
+    return runWithRuntime(scope.runtime, () => this.runLoop(def, scope)).finally(() =>
+      scope.disposeHttp?.(),
+    );
   }
 
   /**
@@ -483,7 +487,7 @@ export class RunnerCore {
         ],
       },
     });
-    return wrapScopedKy(instance, scope);
+    return wrapScopedKy(instance, scope, this.services.http?.abortMode ?? "precise");
   }
 
   private async runLoop(def: TestDef, scope: ExecutionScope): Promise<TestResult> {
@@ -1399,7 +1403,11 @@ function normalizeUrl(input: unknown): unknown {
  *    run's ctx.validate (→ schema_validation event + severity routing), node parity:
  *    harness wrapKy / runPreRequestSchemaValidation / wrapResponseWithSchema.
  */
-function wrapScopedKy(instance: KyInstance, scope: ExecutionScope): GlubeanHttp {
+function wrapScopedKy(
+  instance: KyInstance,
+  scope: ExecutionScope,
+  abortMode: "precise" | "coarse",
+): GlubeanHttp {
   // prefixUrl → ky 2 `prefix`, and drop an empty searchParams (no bare '?'). `schema`
   // is RETAINED here (callWithSchema reads it, then strips it before handing to ky).
   const normalizeKyOptions = (opts: unknown): Record<string, unknown> | undefined => {
@@ -1482,18 +1490,50 @@ function wrapScopedKy(instance: KyInstance, scope: ExecutionScope): GlubeanHttp 
   // signal as `options.signal` would silently drop a Request-level signal (codex r1 P2).
   // On a runtime without AbortSignal.any, keep the caller's (their abort must not regress
   // — the run signal still covers every other request). No run signal → input untouched.
+  //
+  // PERF (load footgun): the run signal is LONG-LIVED (whole run). Handing it to ky on
+  // every request makes ky/undici attach an abort listener to it per request; those
+  // accumulate, so each later signal op goes O(n) and a high-RPS run gets progressively
+  // slower (profiled at ~half of Node CPU under load). Fix: bridge the long-lived run
+  // signal to ONE per-iteration controller — a single listener, removed when the
+  // iteration settles (scope.disposeHttp) — and hand ky that short-lived per-iteration
+  // signal. `abortMode: "coarse"` skips the wiring entirely (abort handled between steps).
+  // The bridge controller lives on the SCOPE, not this closure, so the base ky and every
+  // ctx.http.extend(...) client share ONE controller — and add exactly ONE listener to the
+  // long-lived run signal per iteration (codex: per-closure state would re-leak via extend).
+  const iterationSignal = (runSignal: AbortSignal): AbortSignal => {
+    if (runSignal.aborted) return runSignal; // already aborted: nothing to bridge
+    if (!scope.httpAbort) {
+      const ac = new AbortController();
+      scope.httpAbort = ac;
+      const onAbort = (): void => ac.abort((runSignal as { reason?: unknown }).reason);
+      runSignal.addEventListener("abort", onAbort, { once: true });
+      const prev = scope.disposeHttp;
+      scope.disposeHttp = (): void => {
+        // Abort the per-iteration controller FIRST: once we drop the run-signal listener,
+        // nothing else can cancel a request still in flight (e.g. a step that timed out
+        // while its ky call kept running). Aborting here cancels such stragglers at
+        // iteration settle; it's a no-op when every request already completed.
+        if (!ac.signal.aborted) ac.abort();
+        runSignal.removeEventListener("abort", onAbort);
+        prev?.();
+      };
+    }
+    return scope.httpAbort.signal;
+  };
   const injectSignal = (
     rawInput: unknown,
     opts: Record<string, unknown> | undefined,
   ): Record<string, unknown> | undefined => {
     const runSignal = scope.signal;
-    if (!runSignal) return opts;
+    if (!runSignal || abortMode === "coarse") return opts;
     const optsSignal = (opts as { signal?: AbortSignal } | undefined)?.signal;
     const reqSignal = typeof Request !== "undefined" && rawInput instanceof Request ? rawInput.signal : undefined;
     const own = optsSignal ?? reqSignal; // ky's own precedence: options.signal ?? input.signal
-    if (!own) return { ...(opts ?? {}), signal: runSignal };
+    const runSig = iterationSignal(runSignal);
+    if (!own) return { ...(opts ?? {}), signal: runSig };
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
-      return { ...(opts ?? {}), signal: AbortSignal.any([own, runSignal]) };
+      return { ...(opts ?? {}), signal: AbortSignal.any([own, runSig]) };
     }
     return opts;
   };
@@ -1522,6 +1562,7 @@ function wrapScopedKy(instance: KyInstance, scope: ExecutionScope): GlubeanHttp 
                 : (normalizeKyOptions(opts) as never),
             ),
             scope,
+            abortMode,
           );
       }
       const value = Reflect.get(target, prop, recv);

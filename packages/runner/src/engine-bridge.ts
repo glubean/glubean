@@ -210,6 +210,10 @@ export interface EngineCoreOptions {
   emitFullTrace?: boolean;
   inferSchema?: boolean;
   truncateArrays?: boolean;
+  /** How a run-level abort signal reaches in-flight HTTP (load). "precise" (default)
+   *  cancels in-flight requests at once via a leak-free per-iteration bridge; "coarse"
+   *  skips per-request signal wiring for max throughput (abort between steps only). */
+  abortMode?: "precise" | "coarse";
 }
 
 /**
@@ -238,6 +242,7 @@ export function createEngineCore(
       emitFullTrace: opts.emitFullTrace,
       inferSchema: opts.inferSchema,
       truncateArrays: opts.truncateArrays,
+      abortMode: opts.abortMode,
     },
   };
   return new RunnerCore(services);

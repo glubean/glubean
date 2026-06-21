@@ -109,6 +109,14 @@ interface LoadRunnerCommon {
   assertions?: { onFailure?: LoadAssertionFailureMode };
   thresholds?: LoadThresholds;
   report?: LoadReportConfig;
+  /** How a run-level abort (stop / duration deadline / SIGINT) reaches in-flight
+   *  requests.
+   *  - `"precise"` (default): cancel in-flight HTTP at once. Uses a leak-free
+   *    per-iteration abort bridge — no per-request listener accumulation.
+   *  - `"coarse"`: don't wire the abort signal into each request; stop between steps
+   *    instead. A few % more throughput for high-RPS runs where requests are short,
+   *    at the cost of letting an already-sent request finish before the run stops. */
+  abort?: "precise" | "coarse";
 }
 
 /** Single-scenario load runner config. `TRow` is the `.each()` row, if any. */

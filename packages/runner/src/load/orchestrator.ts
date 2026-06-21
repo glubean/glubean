@@ -377,6 +377,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   const core = createEngineCore(sink.handleWire, {
     vars: opts.vars ?? {},
     secrets: opts.secrets ?? {},
+    abortMode: config.abort ?? "precise",
   });
 
   // Run-level abort, handed to every iteration's engine run. Fired once at finalization
