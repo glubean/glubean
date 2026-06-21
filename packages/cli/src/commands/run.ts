@@ -14,9 +14,7 @@ import { CONFIG_DEFAULTS, mergeRunOptions, toSharedRunConfig } from "../lib/conf
 import { loadProjectEnv } from "@glubean/runner";
 import { resolveEnvFileName } from "../lib/active_env.js";
 import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
-import { CLI_VERSION } from "../version.js";
-import type { UploadResultPayload } from "../lib/upload.js";
-import { redactMetadataForUpload } from "../lib/redact-metadata.js";
+import type { RunIngestMetric, RunIngestTest, UploadRunInput } from "../lib/upload.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
 import {
   buildSuffixes,
@@ -96,6 +94,13 @@ interface RunOptions {
   upload?: boolean;
   uploadReceiptJson?: string;
   project?: string;
+  /**
+   * Upload TARGET (the API/system under test the runs belong to). Resolved from
+   * the profile's `upload.targetId` (or `GLUBEAN_TARGET_ID`). When unset, the
+   * upload routes to the project's default target (resolved server-side at
+   * upload time). Runs live under a target — see auth.ts `resolveTargetId`.
+   */
+  target?: string;
   token?: string;
   /** Env var name holding this profile's upload token (from upload.tokenEnv). */
   tokenEnv?: string;
@@ -927,13 +932,23 @@ export async function runCommand(
   }
 
   // ── Preflight: verify auth before running tests when --upload is set ────
+  // The resolved upload target is hoisted so the post-run upload reuses it —
+  // resolution happens here (pre-run) so a misconfigured destination fails fast.
+  let resolvedUploadTargetId: string | undefined;
   if (options.upload) {
-    const { resolveToken, resolveProjectId, resolveApiUrl } = await import(
-      "../lib/auth.js"
-    );
+    const {
+      resolveToken,
+      resolveProjectId,
+      resolveApiUrl,
+      resolveTargetId,
+      resolveDefaultTargetId,
+      checkUploadAuth,
+      checkTargetInProject,
+    } = await import("../lib/auth.js");
     const authOpts = {
       token: options.token,
       project: options.project,
+      target: options.target,
       apiUrl: options.apiUrl,
     };
     const sources = {
@@ -953,7 +968,7 @@ export async function runCommand(
         );
       } else {
         console.error(
-          `${colors.dim}Run 'glubean login', set GLUBEAN_TOKEN, or add token to .env.secrets or package.json glubean.cloud.${colors.reset}`,
+          `${colors.dim}Create a project token (glb_…) in the dashboard (Project → Tokens), then set GLUBEAN_TOKEN / --token or add it to .env.secrets. (Legacy 'glubean login' gb_ tokens are not accepted by the platform API.)${colors.reset}`,
         );
       }
       process.exit(1);
@@ -963,40 +978,94 @@ export async function runCommand(
         `${colors.red}Error: --upload requires a project ID but none found.${colors.reset}`,
       );
       console.error(
-        `${colors.dim}Use --project, set projectId in package.json glubean.cloud, or run 'glubean login'.${colors.reset}`,
+        `${colors.dim}Use --project or set GLUBEAN_PROJECT_ID.${colors.reset}`,
       );
       process.exit(1);
     }
-    try {
-      const resp = await fetch(`${preApiUrl}/open/v1/whoami`, {
-        headers: { Authorization: `Bearer ${preToken}` },
-      });
-      if (!resp.ok) {
+    // Validate against the SAME server runs upload to. Don't pre-judge token
+    // format locally — let the server decide. A least-privilege ingest token
+    // (runs:write, no projects:read) gets 403 yet can still POST runs, so that
+    // alone proceeds; a known-bad config (401 invalid token, 404 mistyped
+    // project / wrong API URL, 5xx, unreachable) is fatal BEFORE running tests.
+    const check = await checkUploadAuth(preApiUrl, preProject, preToken);
+    if (!check.proceed) {
+      if (check.status === 401) {
+        console.error(`${colors.red}Error: authentication failed (401).${colors.reset}`);
         console.error(
-          `${colors.red}Error: authentication failed (${resp.status}).${colors.reset}`,
+          `${colors.dim}The token is invalid/expired or not a platform project token (glb_…). Create one in the dashboard (Project → Tokens); legacy 'glubean login' (gb_) tokens are not accepted by the platform API.${colors.reset}`,
         );
-        if (resp.status === 401) {
+      } else if (check.status === 404) {
+        console.error(`${colors.red}Error: project ${preProject} not found (404).${colors.reset}`);
+        console.error(
+          `${colors.dim}Check that --project / GLUBEAN_PROJECT_ID is a real project id and --api-url / GLUBEAN_API_URL points at the right server.${colors.reset}`,
+        );
+      } else if (check.status === 403) {
+        console.error(`${colors.red}Error: access to project ${preProject} is forbidden (403).${colors.reset}`);
+        console.error(
+          `${colors.dim}The token's org has no access to this project (or its membership was revoked). Use a token whose org owns the project.${colors.reset}`,
+        );
+      } else if (check.status === 0) {
+        console.error(`${colors.red}Error: cannot reach server at ${preApiUrl}.${colors.reset}`);
+      } else {
+        console.error(`${colors.red}Error: upload preflight got an unexpected response (${check.status}).${colors.reset}`);
+        console.error(
+          `${colors.dim}Check that --api-url / GLUBEAN_API_URL points at the Glubean platform API.${colors.reset}`,
+        );
+      }
+      process.exit(1);
+    }
+    if (check.unverified) {
+      // 403 — can't read the project with this token's scope, but it can write
+      // runs. Proceed; the post-run upload surfaces any genuine error.
+      console.log(
+        `${colors.dim}Skipping pre-run project check (insufficient read scope); will upload to ${preApiUrl} after the run.${colors.reset}`,
+      );
+    } else {
+      console.log(
+        `${colors.dim}Authenticated · upload to ${preApiUrl} (project ${check.projectName ?? preProject})${colors.reset}`,
+      );
+    }
+
+    // Resolve the upload TARGET here too (pre-run) so a misconfigured target
+    // fails fast instead of after the whole suite. The post-run block reuses it.
+    let preTarget = await resolveTargetId(authOpts, sources);
+    if (preTarget) {
+      // EXPLICIT target — validate it belongs to the project (a typo would
+      // otherwise 404 only on the final POST, after the suite ran).
+      const tcheck = await checkTargetInProject(preApiUrl, preProject!, preTarget, preToken!);
+      if (!tcheck.proceed) {
+        if (tcheck.status === 404) {
           console.error(
-            `${colors.dim}Token is invalid or expired. Run 'glubean login' to re-authenticate.${colors.reset}`,
+            `${colors.red}Error: target ${preTarget} not found in project ${preProject} (404).${colors.reset}`,
           );
+          console.error(
+            `${colors.dim}Check upload.targetId / GLUBEAN_TARGET_ID / --upload-target.${colors.reset}`,
+          );
+        } else if (tcheck.status === 401) {
+          console.error(`${colors.red}Error: authentication failed validating the target (401).${colors.reset}`);
+        } else if (tcheck.status === 0) {
+          console.error(`${colors.red}Error: cannot reach server at ${preApiUrl}.${colors.reset}`);
+        } else {
+          console.error(`${colors.red}Error: could not validate target ${preTarget} (${tcheck.status}).${colors.reset}`);
         }
         process.exit(1);
       }
-      const identity = await resp.json() as { kind: string; projectName?: string };
-      console.log(
-        `${colors.dim}Authenticated as ${
-          identity.kind === "project_token" ? `project token (${identity.projectName})` : "user"
-        } · upload to ${preApiUrl}${colors.reset}`,
-      );
-    } catch (err) {
-      console.error(
-        `${colors.red}Error: cannot reach server at ${preApiUrl}${colors.reset}`,
-      );
-      console.error(
-        `${colors.dim}${(err as Error).message}${colors.reset}`,
-      );
-      process.exit(1);
+      // 403 insufficient_scope (unverified) → no targets:read; can't validate, proceed.
+    } else {
+      // No explicit target → the project's default target (deterministic for a
+      // default project, else slug-validated by listing).
+      preTarget = await resolveDefaultTargetId(preApiUrl, preProject!, preToken!);
+      if (!preTarget) {
+        console.error(
+          `${colors.red}Error: could not resolve an upload target for project ${preProject}.${colors.reset}`,
+        );
+        console.error(
+          `${colors.dim}Set the target explicitly (upload.targetId in glubean.yaml, GLUBEAN_TARGET_ID, or --upload-target). Auto-resolving a non-default project's target needs a token with the targets:read scope.${colors.reset}`,
+        );
+        process.exit(1);
+      }
     }
+    resolvedUploadTargetId = preTarget;
   }
 
   // ── Bootstrap plugins BEFORE discovery ─────────────────────────────────
@@ -2428,6 +2497,7 @@ export async function runCommand(
     const authOpts = {
       token: options.token,
       project: options.project,
+      target: options.target,
       apiUrl: options.apiUrl,
     };
     const sources = {
@@ -2445,7 +2515,8 @@ export async function runCommand(
       console.error(`${colors.red}Upload failed: no project ID.${colors.reset}`);
       process.exit(1);
     } else {
-      const { compileScopes, redactEvent, BUILTIN_SCOPES } = await import("@glubean/redaction");
+      const { compileScopes, redactEvent, redactValue, BUILTIN_SCOPES } =
+        await import("@glubean/redaction");
       // Prefer the v1 plan's full redaction config when supplied
       // (Phase 4 init scaffolds `defaults.redaction` in glubean.yaml,
       // including any custom globalRules / sensitiveKeys / customPatterns).
@@ -2460,85 +2531,140 @@ export async function runCommand(
         replacementFormat: effectiveRedaction.replacementFormat,
       });
 
-      // Generate metadata for test registry
-      let metadata: UploadResultPayload['metadata'] | undefined;
-      try {
-        const { scan } = await import("@glubean/scanner");
-        const { buildMetadata } = await import("../metadata.js");
-        const scanResult = await scan(rootDir);
-        const built = await buildMetadata(scanResult, {
-          generatedBy: `@glubean/cli@${CLI_VERSION}`,
-          projectId,
-          // Upload path only: carry the lossless full CONTRACT projection for
-          // the Cloud c/f metadata snapshot. Deep-redacted below before upload;
-          // never written to the on-disk metadata.json (that path omits it).
-          // `workflows` is always present (Design Y) and redacted in the same
-          // pass below.
-          includeProjection: true,
-        });
-        metadata = built;
-      } catch {
-        // Non-critical: upload results without metadata
-      }
-
-      // Phase 5 5a — attach run-plan provenance to the upload metadata
-      // bucket. Cloud server projects this to top-level RunEntity fields
-      // (see apps/server/src/tasks/helpers/extract-run-plan.ts). Nested
-      // under `metadata` to clear the server DTO's `forbidNonWhitelisted`
-      // top-level gate. Only emitted when:
-      //   1. The run used a profile (no profile → nothing to record).
-      //   2. The scan path produced metadata.
-      // Skipping runPlan in the degraded-scan path is intentional —
-      // synthesizing a runPlan-only shell with `files: {}` would make
-      // the server's upsertTests treat all active tests as "removed"
-      // (authoritative file map = empty). Better to lose runPlan
-      // provenance on degraded scans than to corrupt the test registry.
-      if (metadata && options.profile) {
-        const runPlan: { profile: string; suites?: string[] } = {
-          profile: options.profile,
+      // The upload TARGET (the API/system under test runs belong to — ADR 0007)
+      // was resolved + validated in the preflight (pre-run, so a misconfigured
+      // destination fails fast); reuse it. The guard is defensive — the preflight
+      // exits on a null target, so this can't normally fire.
+      const targetId = resolvedUploadTargetId;
+      if (!targetId) {
+        console.error(`${colors.red}Upload failed: no upload target resolved.${colors.reset}`);
+        process.exit(1);
+      } else {
+        // ── Result blob: the full ExecutionResult, run-data ONLY (per D7 the
+        //    contract/workflow projection is a separate c/f line). Events are
+        //    scope-redacted; the rest of the payload can ALSO carry secrets, so
+        //    scrub it too: `context.command` is raw argv (e.g. `--token glb_…`,
+        //    `--input-json '{"password":…}'`) → dropped outright; `customMetadata`
+        //    is user-supplied → deep-redacted. Without this the blob would store
+        //    those verbatim in Cloud.
+        const { command: _rawCommand, ...safeContext } =
+          (runContext as Record<string, unknown>) ?? {};
+        const redactNonEvent = (v: unknown): unknown =>
+          redactValue(v, {
+            globalRules: effectiveRedaction.globalRules,
+            replacementFormat: effectiveRedaction.replacementFormat,
+            maxDepth: 64,
+          });
+        const redactedResult = {
+          ...resultPayload,
+          context: redactNonEvent(safeContext),
+          ...(resultPayload.customMetadata
+            ? { customMetadata: redactNonEvent(resultPayload.customMetadata) }
+            : {}),
+          tests: resultPayload.tests.map((t) => ({
+            ...t,
+            events: t.events.map((e) =>
+              redactEvent(e, compiledScopes, effectiveRedaction.replacementFormat),
+            ),
+          })),
         };
-        if (options.suites && options.suites.length > 0) {
-          runPlan.suites = options.suites;
+
+        // ── Analytics substrate. Server derive-on-ingest (plan D2) isn't built
+        //    yet, so the CLI sends per-test rows + metric points explicitly.
+        const testResults: RunIngestTest[] = collectedRuns.map((r) => ({
+          testId: r.testId,
+          name: r.testName,
+          // Mirror the CLI's own pass/fail/skip classification: a clean skip
+          // (success:true + a status:"skipped" event) → "skipped" (excluded from
+          // flaky denominators, plan D3). A test that FAILED then emitted skip is
+          // counted as failed (success:false), so gate skip on success first —
+          // otherwise the failure would wrongly drop out of the denominators.
+          status: r.success
+            ? r.events.some((e) => e.type === "status" && e.status === "skipped")
+              ? "skipped"
+              : "passed"
+            : "failed",
+          durationMs: r.durationMs,
+          ...(r.tags && r.tags.length ? { tags: r.tags } : {}),
+          eventCount: r.events.length,
+        }));
+
+        // Metric tags (method/path) can in rare cases embed a secret in a path
+        // segment — redact them with the same engine the projection line uses.
+        const redactTags = (
+          tags?: Record<string, string>,
+        ): Record<string, string> | undefined =>
+          tags
+            ? (redactValue(tags, {
+                globalRules: effectiveRedaction.globalRules,
+                replacementFormat: effectiveRedaction.replacementFormat,
+              }) as Record<string, string>)
+            : undefined;
+
+        const metrics: RunIngestMetric[] = [];
+        for (const r of collectedRuns) {
+          for (const e of r.events) {
+            if (e.type !== "metric") continue;
+            metrics.push({
+              name: e.name,
+              value: e.value,
+              ...(e.unit ? { unit: e.unit } : {}),
+              ...(e.tags ? { tags: redactTags(e.tags) } : {}),
+              testId: r.testId,
+            });
+          }
         }
-        metadata = { ...metadata, runPlan };
-      }
 
-      // Deep-redact the FULL contract + workflow projection before upload. Test
-      // events are redacted below via scope-based `redactEvent`, but the
-      // projection is a free-form tree that can carry secrets anywhere
-      // (examples, default headers, gRPC metadata, `extensions`/`meta`, literal
-      // compare/switch values, assertion messages). `redactMetadataForUpload`
-      // redacts ONLY the projection buckets (contractsProjection + workflows) —
-      // never `files`/`rootHash` — so the server's test registry/dedup keeps
-      // its verbatim sha256 hashes. The projection is uploaded WHOLE (branch/
-      // poll included): it is the lossless source for the server snapshot, not
-      // a run view (see the buildMetadata R14 note); the branch/poll run-view
-      // gate is a separate layer, untouched here.
-      if (metadata) {
-        metadata = await redactMetadataForUpload(metadata, effectiveRedaction);
-      }
+        const input: UploadRunInput = {
+          kind: "test",
+          schemaVersion: "glubean.test.v1",
+          // A breached metric threshold fails the run (mirrors the process exit
+          // below) even when every test passed — don't record it as "passed".
+          status:
+            failed > 0 || (thresholdSummary && !thresholdSummary.pass) ? "failed" : "passed",
+          startedAt: runStartTime,
+          completedAt: new Date(Date.parse(runStartTime) + totalDurationMs).toISOString(),
+          durationMs: totalDurationMs,
+          summary: {
+            total: passed + failed + skipped,
+            passed,
+            failed,
+            skipped,
+            durationMs: totalDurationMs,
+            // Run-plan provenance (was metadata.runPlan). The summary jsonb keeps
+            // extras (SUMMARY_SCHEMA catchall), so profile/suite facets survive
+            // for grouping even though the new run row has no dedicated columns.
+            ...(options.profile ? { profile: options.profile } : {}),
+            ...(options.suites && options.suites.length ? { suites: options.suites } : {}),
+          },
+          result: redactedResult,
+          ...(testResults.length ? { testResults } : {}),
+          ...(metrics.length ? { metrics } : {}),
+        };
 
-      const redactedPayload = {
-        ...resultPayload,
-        metadata,
-        tests: resultPayload.tests.map((t) => ({
-          ...t,
-          events: t.events.map((e) => redactEvent(e, compiledScopes, effectiveRedaction.replacementFormat)),
-        })),
-      };
-
-      const uploadReceipt = await uploadToCloud(redactedPayload, {
-        apiUrl,
-        token,
-        projectId,
-        envFile: effectiveRun.envFile,
-        rootDir,
-      });
-      if (options.uploadReceiptJson) {
-        const receiptPath = resolveOutputPath(options.uploadReceiptJson, process.cwd());
-        await mkdir(dirname(receiptPath), { recursive: true });
-        await writeFile(receiptPath, JSON.stringify(uploadReceipt, null, 2) + "\n", "utf-8");
-        console.log(`${colors.dim}Upload receipt written to: ${receiptPath}${colors.reset}`);
+        const uploadReceipt = await uploadToCloud(input, {
+          apiUrl,
+          token,
+          projectId,
+          targetId,
+          envFile: effectiveRun.envFile,
+          rootDir,
+        });
+        if (options.uploadReceiptJson) {
+          const receiptPath = resolveOutputPath(options.uploadReceiptJson, process.cwd());
+          await mkdir(dirname(receiptPath), { recursive: true });
+          await writeFile(receiptPath, JSON.stringify(uploadReceipt, null, 2) + "\n", "utf-8");
+          console.log(`${colors.dim}Upload receipt written to: ${receiptPath}${colors.reset}`);
+        }
+        // A requested --upload that didn't create a run is a failure, even on a
+        // green test run — exit non-zero so CI doesn't read false-green. (The
+        // receipt is written above first, so the failure is still recorded.)
+        if (uploadReceipt.resultUpload.status === "failed") {
+          console.error(
+            `${colors.red}Upload failed: the run was not recorded in Cloud (see the error above).${colors.reset}`,
+          );
+          process.exit(1);
+        }
       }
     }
   }

@@ -102,7 +102,11 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
       `${colors.dim}Default project: ${projectId}${colors.reset}`,
     );
   }
+  // NOTE: this saves a personal `gb_` token for the legacy API. Cloud run
+  // UPLOAD (`--upload`) targets the platform API, which accepts only `glb_`
+  // PROJECT tokens — so don't advertise `glubean run --upload` here. Create a
+  // project token in the dashboard (Project → Tokens) for uploads.
   console.log(
-    `\n${colors.dim}Run tests and upload: glubean run --upload${colors.reset}`,
+    `\n${colors.dim}To upload runs, create a project token (glb_…) in the dashboard (Project → Tokens) and set GLUBEAN_TOKEN.${colors.reset}`,
   );
 }

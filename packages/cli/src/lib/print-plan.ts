@@ -117,6 +117,10 @@ export function formatResolvedPlan(
     if (plan.upload.projectId) {
       lines.push(`  projectId: ${plan.upload.projectId}`);
     }
+    // Show the upload destination target so CI logs make a wrong-target upload
+    // diagnosable. When unset here it's still resolved at run time (a .env-file
+    // GLUBEAN_TARGET_ID / cloud config, else the project's default target).
+    lines.push(`  target: ${plan.upload.targetId ?? "(resolved at run: env/.env or default target)"}`);
     if (plan.upload.tokenEnv) {
       lines.push(`  tokenEnv: ${plan.upload.tokenEnv}`);
     }

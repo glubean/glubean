@@ -114,6 +114,7 @@ program
   .option("--upload", "Upload run results and artifacts to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt JSON after --upload")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
+  .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
   .option("--api-url <url>", "Glubean API server URL")
   .option(
@@ -411,20 +412,29 @@ async function executeRun(
           : resultJson
             ? "<default: glubean-run.result.json or <testfile>.result.json>"
             : undefined;
-      // Upload destination: when `--project <id>` is passed, the upload
-      // routes to that project id, overriding the profile's `projectId`.
-      // Reflect that override so the printed plan matches the actual
-      // destination. Same enable-bit override for `--upload`.
+      // Upload destination: when `--project <id>` is passed, the upload routes
+      // to that project id, overriding the profile's `projectId`. Reflect that
+      // (+ the enable bit and the effective TARGET) so the printed plan matches
+      // the actual destination. The target mirrors the executeRun resolution
+      // below: --upload-target wins, else the profile target UNLESS --project
+      // overrode the project (a profile target belongs to its own project), else
+      // the project's default target (resolved at run → shown as "(default)").
+      const effectiveUploadTarget =
+        (options.uploadTarget as string | undefined) ??
+        (options.project ? undefined : resolvedPlan.upload?.targetId) ??
+        process.env.GLUBEAN_TARGET_ID;
       const overrideUpload = resolvedPlan.upload
         ? {
             ...resolvedPlan.upload,
             ...(options.project ? { projectId: options.project as string } : {}),
+            targetId: effectiveUploadTarget,
             ...(options.upload === true ? { enabled: true } : {}),
           }
         : options.upload === true || options.project
           ? {
               enabled: options.upload === true,
               ...(options.project ? { projectId: options.project as string } : {}),
+              ...(effectiveUploadTarget ? { targetId: effectiveUploadTarget } : {}),
             }
           : undefined;
       const printPlan: ResolvedRunPlan = {
@@ -525,6 +535,17 @@ async function executeRun(
       // preflight doesn't exit with "no project ID found". The value may be
       // a project id or a cloud alias (resolved server-side).
       project: options.project ?? resolvedPlan?.upload?.projectId,
+      // Upload TARGET (runs live under a target — ADR 0007). CLI --upload-target
+      // wins. Otherwise inherit the profile's upload.targetId ONLY when --project
+      // didn't override the destination project — a profile target belongs to the
+      // profile's project, so pairing it with an overridden project would post to
+      // /projects/<override>/targets/<profile-target> and 404. With an override
+      // and no --upload-target, fall through to the override project's default
+      // target (resolved server-side). Env GLUBEAN_TARGET_ID still applies via
+      // resolveTargetId when nothing is passed here.
+      target:
+        (options.uploadTarget as string | undefined) ??
+        (options.project ? undefined : resolvedPlan?.upload?.targetId),
       // Per-profile token reference: which env var holds THIS profile's
       // upload token. resolveToken reads it exclusively (no GLUBEAN_TOKEN
       // fallback) so profiles can target different projects safely.
@@ -616,6 +637,7 @@ ciCmd
   .option("--upload", "Upload run results and artifacts to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt JSON after --upload")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
+  .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
   .option("--api-url <url>", "Glubean API server URL")
   .option(
@@ -660,8 +682,22 @@ program
   .command("load [target]")
   .description("Run loadRunner() performance plans (.load.ts) and write LoadArtifacts")
   .option("--env-file <name>", "Env file basename (default: active env, else .env)")
+  .option("--upload", "Upload each plan's LoadArtifact to Glubean Cloud")
+  .option("--upload-receipt-json <path>", "Write Cloud upload receipt(s) JSON after --upload")
+  .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
+  .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
+  .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
+  .option("--api-url <url>", "Glubean API server URL")
   .action(async (target, options) => {
-    await loadCommand(target, { envFile: options.envFile });
+    await loadCommand(target, {
+      envFile: options.envFile,
+      upload: options.upload,
+      uploadReceiptJson: options.uploadReceiptJson,
+      project: options.project,
+      target: options.uploadTarget,
+      token: options.token,
+      apiUrl: options.apiUrl,
+    });
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
