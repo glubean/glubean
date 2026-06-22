@@ -15,6 +15,7 @@
  * installed CLI runs against a project with its own non-deduped sdk.
  */
 import { resolve, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import { stat, readdir, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
@@ -461,6 +462,9 @@ async function uploadLoadOutcomes(
     const input: UploadRunInput = {
       kind: "load",
       schemaVersion: a.schemaVersion,
+      // One idempotency id per load outcome (each loadRunner = its own run),
+      // reused across the upload retry so a lost-response retry replaces it (P1).
+      clientRunId: randomUUID(),
       status: a.summary.pass ? "passed" : "failed",
       startedAt: a.startedAt,
       completedAt: new Date(Date.parse(a.startedAt) + a.durationMs).toISOString(),

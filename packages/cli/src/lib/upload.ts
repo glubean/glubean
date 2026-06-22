@@ -120,6 +120,13 @@ export interface UploadRunInput {
   metrics?: RunIngestMetric[];
   failureClass?: FailureClass;
   failureMessage?: string;
+  /**
+   * Stable idempotency id for this run (P1). Generated ONCE per CLI invocation
+   * and reused across the in-process upload retry, so a lost-response retry
+   * REPLACES the run server-side instead of creating a duplicate. A fresh
+   * `glubean run`/`load` is a new run (a new id).
+   */
+  clientRunId?: string;
 }
 
 /**
@@ -386,6 +393,7 @@ export async function uploadToCloud(
     ...(input.metrics && input.metrics.length ? { metrics: input.metrics } : {}),
     ...(input.failureClass ? { failureClass: input.failureClass } : {}),
     ...(input.failureMessage ? { failureMessage: input.failureMessage } : {}),
+    ...(input.clientRunId ? { clientRunId: input.clientRunId } : {}),
     // CI / provenance dimensions (filterable on the dashboard).
     trigger: ci.source,
     ...(ci.gitRef ? { gitRef: ci.gitRef } : {}),

@@ -15,6 +15,7 @@ const input: UploadRunInput = {
     runAt: "2026-05-29T00:00:00.000Z",
     tests: [{ testId: "smoke", testName: "smoke", success: true, durationMs: 12, events: [] }],
   },
+  clientRunId: "crun-fixed-1",
   testResults: [
     { testId: "smoke", name: "smoke", status: "passed", durationMs: 12, eventCount: 0 },
   ],
@@ -77,6 +78,8 @@ test("uploadToCloud posts a RunIngest to the target-scoped endpoint with a const
   expect(body.result.tests).toHaveLength(1);
   expect(body.testResults).toHaveLength(1);
   expect(body.metrics[0].name).toBe("http_duration_ms");
+  // idempotency id is sent so a lost-response retry replaces, not duplicates.
+  expect(body.clientRunId).toBe("crun-fixed-1");
 
   expect(receipt).toMatchObject({
     schemaVersion: "glubean.upload-receipt.v1",

@@ -8,6 +8,7 @@ import {
 } from "@glubean/runner";
 import type { ProjectRunnerTest } from "@glubean/runner";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { stat, readdir, readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { glob } from "node:fs/promises";
 import { CONFIG_DEFAULTS, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
@@ -2618,6 +2619,9 @@ export async function runCommand(
         const input: UploadRunInput = {
           kind: "test",
           schemaVersion: "glubean.test.v1",
+          // Stable idempotency id for this run — reused across the upload retry so
+          // a lost-response retry replaces this run instead of duplicating it (P1).
+          clientRunId: randomUUID(),
           // A breached metric threshold fails the run (mirrors the process exit
           // below) even when every test passed — don't record it as "passed".
           status:
