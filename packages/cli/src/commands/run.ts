@@ -968,7 +968,7 @@ export async function runCommand(
         );
       } else {
         console.error(
-          `${colors.dim}Create a project token (glb_…) in the dashboard (Project → Tokens), then set GLUBEAN_TOKEN / --token or add it to .env.secrets. (Legacy 'glubean login' gb_ tokens are not accepted by the platform API.)${colors.reset}`,
+          `${colors.dim}Create a project token (glb_…) in the dashboard (Project → Tokens), then run 'glubean login' to save it, set GLUBEAN_TOKEN / --token, or add it to .env.secrets.${colors.reset}`,
         );
       }
       process.exit(1);
@@ -992,7 +992,7 @@ export async function runCommand(
       if (check.status === 401) {
         console.error(`${colors.red}Error: authentication failed (401).${colors.reset}`);
         console.error(
-          `${colors.dim}The token is invalid/expired or not a platform project token (glb_…). Create one in the dashboard (Project → Tokens); legacy 'glubean login' (gb_) tokens are not accepted by the platform API.${colors.reset}`,
+          `${colors.dim}The token is invalid/expired or not a platform project token (glb_…). Create one in the dashboard (Project → Tokens) and run 'glubean login' (or set GLUBEAN_TOKEN).${colors.reset}`,
         );
       } else if (check.status === 404) {
         console.error(`${colors.red}Error: project ${preProject} not found (404).${colors.reset}`);
