@@ -11,6 +11,7 @@ import {
   checkUploadAuth,
   readCredentials,
   resolveApiUrl,
+  resolveAuthUrl,
   resolveDefaultTargetId,
   resolveProjectId,
   resolveTargetId,
@@ -26,6 +27,7 @@ const AUTH_ENV_KEYS = [
   "GLUBEAN_PROJECT_ID",
   "GLUBEAN_TARGET_ID",
   "GLUBEAN_API_URL",
+  "GLUBEAN_AUTH_URL",
 ];
 
 function saveEnv(): Map<string, string | undefined> {
@@ -297,6 +299,40 @@ test("resolveApiUrl: cloudConfig used when no flag, env, or envFileVars", async 
     const sources = { cloudConfig: { apiUrl: "https://config.api.com" } };
     const url = await resolveApiUrl({}, sources);
     expect(url).toBe("https://config.api.com");
+  });
+});
+
+// ── Auth-plane URL (server-hono / device login) ──────────────────────────────
+
+test("resolveAuthUrl: --auth-url flag wins over env and default", async () => {
+  const saved = saveEnv();
+  try {
+    process.env.GLUBEAN_AUTH_URL = "https://api.glubean.test";
+    expect(await resolveAuthUrl({ authUrl: "https://flag.example" })).toBe("https://flag.example");
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("resolveAuthUrl: GLUBEAN_AUTH_URL used when no flag", async () => {
+  const saved = saveEnv();
+  try {
+    process.env.GLUBEAN_AUTH_URL = "https://api.glubean.test";
+    expect(await resolveAuthUrl({})).toBe("https://api.glubean.test");
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("resolveAuthUrl: defaults to DEFAULT_AUTH_URL when nothing set", async () => {
+  await withTempHome(async () => {
+    const saved = saveEnv();
+    try {
+      delete process.env.GLUBEAN_AUTH_URL;
+      expect(await resolveAuthUrl({})).toBe("https://api.glubean.com");
+    } finally {
+      restoreEnv(saved);
+    }
   });
 });
 

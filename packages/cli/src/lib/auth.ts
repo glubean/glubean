@@ -11,12 +11,15 @@
 
 import { dirname, join } from "node:path";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { DEFAULT_API_URL } from "./constants.js";
+import { DEFAULT_API_URL, DEFAULT_AUTH_URL } from "./constants.js";
 
 export interface Credentials {
   token: string;
   projectId?: string;
+  /** Platform/upload API URL (`/v1/*` ingest). */
   apiUrl?: string;
+  /** Auth-plane URL (server-hono) the token was minted against. */
+  authUrl?: string;
 }
 
 export interface AuthOptions {
@@ -25,6 +28,8 @@ export interface AuthOptions {
   /** The target (API/system under test) within the project to upload runs to. */
   target?: string;
   apiUrl?: string;
+  /** Auth-plane URL (server-hono) for the `glubean login` device grant. */
+  authUrl?: string;
 }
 
 /**
@@ -253,4 +258,23 @@ export async function resolveApiUrl(
   if (sources?.cloudConfig?.apiUrl) return sources.cloudConfig.apiUrl;
   const creds = await readCredentials();
   return creds?.apiUrl ?? DEFAULT_API_URL;
+}
+
+/**
+ * Resolve the AUTH-plane URL (server-hono: `glubean login` device grant) — a
+ * SEPARATE service from the platform/upload API. Order: `--auth-url` >
+ * `GLUBEAN_AUTH_URL` (env / .env) > saved credentials > `DEFAULT_AUTH_URL`.
+ * Locally set `GLUBEAN_AUTH_URL=https://api.glubean.test`.
+ */
+export async function resolveAuthUrl(
+  options: AuthOptions,
+  sources?: ProjectAuthSources,
+): Promise<string> {
+  if (options.authUrl) return options.authUrl;
+  const env = process.env.GLUBEAN_AUTH_URL;
+  if (env) return env;
+  const fileVar = sources?.envFileVars?.["GLUBEAN_AUTH_URL"];
+  if (fileVar) return fileVar;
+  const creds = await readCredentials();
+  return creds?.authUrl ?? DEFAULT_AUTH_URL;
 }

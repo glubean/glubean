@@ -757,15 +757,20 @@ program
 // ─────────────────────────────────────────────────────────────────────────────
 program
   .command("login")
-  .description("Authenticate with Glubean Cloud")
-  .option("--token <token>", "Auth token (skip interactive prompt)")
+  .description("Authenticate with Glubean Cloud (device authorization in your browser)")
+  .option("--token <token>", "Save a project token directly (skip the browser device flow)")
   .option("--project <id>", "Default project ID")
-  .option("--api-url <url>", "API server URL")
+  .option("--api-url <url>", "Platform API URL for uploads (or GLUBEAN_API_URL)")
+  .option("--auth-url <url>", "Auth server URL for login (or GLUBEAN_AUTH_URL)")
+  .option("--no-browser", "Don't auto-open the browser; print the URL to open manually")
   .action(async (options) => {
     await loginCommand({
       token: options.token,
       project: options.project,
       apiUrl: options.apiUrl,
+      authUrl: options.authUrl,
+      // commander stores --no-browser as options.browser === false
+      noBrowser: options.browser === false,
     });
   });
 
