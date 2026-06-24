@@ -92,14 +92,24 @@ export interface ReportersConfig {
 export interface UploadConfig {
   enabled?: boolean;
   /**
-   * Cloud project THIS profile uploads to. Accepts a project id (`prj_…`)
-   * or a cloud alias (resolved server-side). Per-profile, so different
-   * profiles can target different projects. When omitted, falls back to
-   * `--project` / `GLUBEAN_PROJECT_ID`. Takes precedence over
-   * `GLUBEAN_PROJECT_ID` when both are set (and is shown in the printed
+   * Cloud project THIS profile uploads to. Must be a real project id
+   * (`proj_…` / `prj_…`) — the target-scoped platform API resolves the id
+   * directly (`/v1/projects/{projectId}/…`) and does NOT resolve cloud aliases
+   * server-side (the legacy alias behavior is dropped in the target cutover).
+   * Per-profile, so different profiles can target different projects. When
+   * omitted, falls back to `--project` / `GLUBEAN_PROJECT_ID`. Takes precedence
+   * over `GLUBEAN_PROJECT_ID` when both are set (and is shown in the printed
    * plan, so the destination isn't hidden).
    */
   projectId?: string;
+  /**
+   * Target (API/system under test) within the project that THIS profile's runs
+   * belong to (runs live under a target). Accepts a target id (`tgt_…`).
+   * Per-profile. When omitted, falls back to `--upload-target` /
+   * `GLUBEAN_TARGET_ID`, then to the project's default target (the CLI resolves
+   * a concrete id before upload — there is no null-target ingest).
+   */
+  targetId?: string;
   /**
    * Name of the env var (in `.env.secrets` / environment) holding the
    * auth token for THIS profile's upload — a *reference*, never the token
@@ -251,7 +261,7 @@ const V1_REPORTERS_KEYS = new Set([
   "inferSchema",
   "truncateArrays",
 ]);
-const V1_UPLOAD_KEYS = new Set(["enabled", "projectId", "tokenEnv", "projectAlias"]);
+const V1_UPLOAD_KEYS = new Set(["enabled", "projectId", "targetId", "tokenEnv", "projectAlias"]);
 const V1_DEFAULTS_KEYS = new Set([
   "envFile",
   "selection",
@@ -575,6 +585,11 @@ function validateUpload(
     assertType(s.projectId, "string", `${context}.projectId`, configPath);
     assertNonEmpty(s.projectId as string, `${context}.projectId`, configPath);
     out.projectId = s.projectId as string;
+  }
+  if (s.targetId !== undefined) {
+    assertType(s.targetId, "string", `${context}.targetId`, configPath);
+    assertNonEmpty(s.targetId as string, `${context}.targetId`, configPath);
+    out.targetId = s.targetId as string;
   }
   if (s.projectAlias !== undefined) {
     // Deprecated synonym for projectId (renamed because per-profile project

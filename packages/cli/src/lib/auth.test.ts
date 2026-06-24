@@ -2,11 +2,22 @@
  * Tests for credential resolution logic.
  */
 
-import { test, expect } from "vitest";
+import { afterEach, test, expect, vi } from "vitest";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { readCredentials, resolveApiUrl, resolveProjectId, resolveToken, writeCredentials } from "./auth.js";
+import {
+  checkTargetInProject,
+  checkUploadAuth,
+  readCredentials,
+  resolveApiUrl,
+  resolveAuthUrl,
+  resolveDefaultTargetId,
+  resolveProjectId,
+  resolveTargetId,
+  resolveToken,
+  writeCredentials,
+} from "./auth.js";
 import { DEFAULT_API_URL } from "./constants.js";
 
 const AUTH_ENV_KEYS = [
@@ -14,7 +25,9 @@ const AUTH_ENV_KEYS = [
   "USERPROFILE",
   "GLUBEAN_TOKEN",
   "GLUBEAN_PROJECT_ID",
+  "GLUBEAN_TARGET_ID",
   "GLUBEAN_API_URL",
+  "GLUBEAN_AUTH_URL",
 ];
 
 function saveEnv(): Map<string, string | undefined> {
@@ -52,6 +65,10 @@ async function withTempHome(
     await rm(tmpHome, { recursive: true, force: true }).catch(() => {});
   }
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 // ── writeCredentials + readCredentials roundtrip ──
 
@@ -283,4 +300,230 @@ test("resolveApiUrl: cloudConfig used when no flag, env, or envFileVars", async 
     const url = await resolveApiUrl({}, sources);
     expect(url).toBe("https://config.api.com");
   });
+});
+
+// ── Auth-plane URL (server-hono / device login) ──────────────────────────────
+
+test("resolveAuthUrl: --auth-url flag wins over env and default", async () => {
+  const saved = saveEnv();
+  try {
+    process.env.GLUBEAN_AUTH_URL = "https://api.glubean.test";
+    expect(await resolveAuthUrl({ authUrl: "https://flag.example" })).toBe("https://flag.example");
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("resolveAuthUrl: GLUBEAN_AUTH_URL used when no flag", async () => {
+  const saved = saveEnv();
+  try {
+    process.env.GLUBEAN_AUTH_URL = "https://api.glubean.test";
+    expect(await resolveAuthUrl({})).toBe("https://api.glubean.test");
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("resolveAuthUrl: defaults to DEFAULT_AUTH_URL when nothing set", async () => {
+  await withTempHome(async () => {
+    const saved = saveEnv();
+    try {
+      delete process.env.GLUBEAN_AUTH_URL;
+      expect(await resolveAuthUrl({})).toBe("https://api.glubean.com");
+    } finally {
+      restoreEnv(saved);
+    }
+  });
+});
+
+// ── Target resolution ────────────────────────────────────────────────────────
+
+test("resolveTargetId: --target flag takes priority over env/yaml", async () => {
+  const saved = saveEnv();
+  try {
+    process.env.GLUBEAN_TARGET_ID = "tgt_env";
+    const id = await resolveTargetId(
+      { target: "tgt_flag" },
+      { cloudConfig: { targetId: "tgt_yaml" } },
+    );
+    expect(id).toBe("tgt_flag");
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("resolveTargetId: returns null when unset (server default-target fallback)", async () => {
+  const saved = saveEnv();
+  try {
+    delete process.env.GLUBEAN_TARGET_ID;
+    expect(await resolveTargetId({}, {})).toBeNull();
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("resolveDefaultTargetId: derives a DEFAULT project's target with no network call (least-privilege tokens)", async () => {
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  const id = await resolveDefaultTargetId(
+    "https://api.glubean.test",
+    "proj_default_org123",
+    "gb_runs_write_only",
+  );
+  expect(id).toBe("tgt_default_org123");
+  // No `targets:read` GET — the id is deterministic for default projects.
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("resolveDefaultTargetId: lists targets for a non-default project and picks the default slug", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(
+      JSON.stringify([
+        { id: "tgt_a", slug: "api-a" },
+        { id: "tgt_def", slug: "default" },
+      ]),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const id = await resolveDefaultTargetId("https://api.glubean.test", "prj_custom", "gb");
+  expect(id).toBe("tgt_def");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test("resolveDefaultTargetId: returns null when the targets GET is forbidden (missing targets:read)", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(new Response("forbidden", { status: 403 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const id = await resolveDefaultTargetId("https://api.glubean.test", "prj_custom", "gb");
+  expect(id).toBeNull();
+});
+
+test("resolveDefaultTargetId: returns null for a multi-target project with no default slug (ambiguous)", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(JSON.stringify([{ id: "tgt_a", slug: "a" }, { id: "tgt_b", slug: "b" }]), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  expect(await resolveDefaultTargetId("https://api.glubean.test", "prj_custom", "gb")).toBeNull();
+});
+
+test("resolveDefaultTargetId: auto-picks the sole target of a single-target non-default project", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(JSON.stringify([{ id: "tgt_only", slug: "prod" }]), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  expect(await resolveDefaultTargetId("https://api.glubean.test", "prj_custom", "gb")).toBe("tgt_only");
+});
+
+// ── Pre-upload auth check ────────────────────────────────────────────────────
+
+test("checkUploadAuth: 200 verifies and returns the project name", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "proj_1", name: "Acme" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  );
+  const r = await checkUploadAuth("https://api.glubean.test", "proj_1", "glb_ok");
+  expect(r).toMatchObject({ proceed: true, status: 200, projectName: "Acme" });
+});
+
+test("checkUploadAuth: 403 insufficient_scope (least-privilege ingest token) proceeds unverified", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "insufficient_scope", required: "projects:read" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  );
+  const r = await checkUploadAuth("https://api.glubean.test", "proj_1", "glb_runs_write");
+  expect(r).toMatchObject({ proceed: true, status: 403, unverified: true });
+});
+
+test("checkUploadAuth: 403 no_membership does NOT proceed (token can't write runs either)", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "no_membership" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  );
+  const r = await checkUploadAuth("https://api.glubean.test", "proj_1", "glb_no_org");
+  expect(r).toMatchObject({ proceed: false, status: 403 });
+});
+
+test("checkUploadAuth: 401 (invalid/wrong-kind token) does not proceed", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("unauthorized", { status: 401 })));
+  const r = await checkUploadAuth("https://api.glubean.test", "proj_1", "gb_old");
+  expect(r).toMatchObject({ proceed: false, status: 401 });
+});
+
+test("checkUploadAuth: 404 (mistyped project / wrong API URL) does not proceed", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("not found", { status: 404 })));
+  const r = await checkUploadAuth("https://api.glubean.test", "proj_typo", "glb_ok");
+  expect(r).toMatchObject({ proceed: false, status: 404 });
+});
+
+test("checkUploadAuth: an unreachable server reports status 0 and does not proceed", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValueOnce(new Error("ECONNREFUSED")));
+  const r = await checkUploadAuth("https://api.glubean.test", "proj_1", "glb_ok");
+  expect(r).toMatchObject({ proceed: false, status: 0 });
+});
+
+test("checkUploadAuth: a 2xx non-project response (wrong --api-url) does not proceed", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValueOnce(
+      new Response("<html>proxy</html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+    ),
+  );
+  const r = await checkUploadAuth("https://api.glubean.test", "proj_1", "glb_ok");
+  expect(r).toMatchObject({ proceed: false, status: 200 });
+});
+
+test("checkTargetInProject: 200 verifies an existing target; GETs the target path", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(JSON.stringify({ id: "tgt_1", name: "API" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const r = await checkTargetInProject("https://api.glubean.test", "proj_1", "tgt_1", "glb_ok");
+  expect(r).toMatchObject({ proceed: true, status: 200 });
+  expect(fetchMock.mock.calls[0][0]).toBe(
+    "https://api.glubean.test/v1/projects/proj_1/targets/tgt_1",
+  );
+});
+
+test("checkTargetInProject: 404 (mistyped target) does not proceed", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("not found", { status: 404 })));
+  const r = await checkTargetInProject("https://api.glubean.test", "proj_1", "tgt_typo", "glb_ok");
+  expect(r).toMatchObject({ proceed: false, status: 404 });
+});
+
+test("checkTargetInProject: 403 insufficient_scope proceeds unverified (no targets:read)", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "insufficient_scope" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  );
+  const r = await checkTargetInProject("https://api.glubean.test", "proj_1", "tgt_1", "glb_runs_write");
+  expect(r).toMatchObject({ proceed: true, status: 403, unverified: true });
 });

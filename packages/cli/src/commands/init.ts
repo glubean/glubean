@@ -226,6 +226,18 @@ function makePackageJson(_baseUrl: string): string {
         dependencies: {
           "@glubean/sdk": SDK_VERSION,
         },
+        // Runner is the test executor. Declared as a DIRECT devDependency
+        // (not left as a transitive of the `glubean` CLI) so package managers
+        // — pnpm especially — hoist/symlink it to `node_modules/@glubean/runner`.
+        // The VSCode extension probes that path to load the PROJECT-LOCAL runner;
+        // without it, it falls back to its bundled runner, which resolves a
+        // SECOND @glubean/sdk instance and breaks configure() (AsyncLocalStorage
+        // is per-instance) — "configure() values can only be accessed during test
+        // execution". Pinned to SDK_VERSION so runner's own sdk dep collapses to
+        // the same store entry as the direct sdk dep (single instance).
+        devDependencies: {
+          "@glubean/runner": SDK_VERSION,
+        },
       },
       null,
       2,
@@ -1093,6 +1105,12 @@ const CONTRACT_FIRST_PACKAGE_JSON = (sdkVersion: string) =>
         "@glubean/sdk": sdkVersion,
         zod: "^4.0.0",
       },
+      // Direct devDependency so package managers hoist runner to a probe-able
+      // node_modules/@glubean/runner. See makePackageJson() for the full
+      // single-sdk-instance rationale.
+      devDependencies: {
+        "@glubean/runner": sdkVersion,
+      },
     },
     null,
     2,
@@ -1114,6 +1132,12 @@ const DEMO_PACKAGE_JSON = (sdkVersion: string) =>
       },
       dependencies: {
         "@glubean/sdk": sdkVersion,
+      },
+      // Direct devDependency so package managers hoist runner to a probe-able
+      // node_modules/@glubean/runner. See makePackageJson() for the full
+      // single-sdk-instance rationale.
+      devDependencies: {
+        "@glubean/runner": sdkVersion,
       },
     },
     null,

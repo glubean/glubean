@@ -15,6 +15,7 @@
  * installed CLI runs against a project with its own non-deduped sdk.
  */
 import { resolve, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import { stat, readdir, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
@@ -22,6 +23,8 @@ import { loadProjectEnv, runLoadFileInSubprocess } from "@glubean/runner";
 import type { LoadArtifact } from "@glubean/sdk/load";
 import { resolveEnvFileName } from "../lib/active_env.js";
 import { findProjectConfig } from "./run.js";
+import type { UploadReceipt, UploadRunInput } from "../lib/upload.js";
+import type { RedactionConfig } from "@glubean/redaction";
 
 const colors = {
   reset: "\x1b[0m",
@@ -264,6 +267,244 @@ export function printOutcome(o: LoadRunOutcome): void {
 export interface LoadCommandOptions {
   /** Env file basename (default: the active env, else `.env`). */
   envFile?: string;
+  /** Upload each plan's LoadArtifact to Glubean Cloud under a target (ADR 0007). */
+  upload?: boolean;
+  /** Write the upload receipt(s) JSON to this path (array — one per plan). */
+  uploadReceiptJson?: string;
+  /** Cloud project id (or GLUBEAN_PROJECT_ID). */
+  project?: string;
+  /** Upload target id (or GLUBEAN_TARGET_ID; else the project's default target). */
+  target?: string;
+  /** Auth token (or GLUBEAN_TOKEN). */
+  token?: string;
+  apiUrl?: string;
+}
+
+/**
+ * Upload each completed load plan as its own `kind: "load"` run under the target.
+ * Best-effort: auth/target resolution failures print a clear error and return
+ * (the local results are already written). The LoadArtifact is deep-redacted
+ * (samples can carry secrets in failure traces) before it becomes the run blob.
+ */
+/** Resolved upload destination + redaction — validated BEFORE plans run (no
+ *  false-green, no expensive load traffic against a misconfigured upload, and no
+ *  upload with weaker-than-declared redaction). */
+interface LoadUploadContext {
+  token: string;
+  projectId: string;
+  apiUrl: string;
+  targetId: string;
+  /** Resolved redaction config (project `defaults.redaction` ∪ baseline). */
+  redaction: RedactionConfig;
+}
+
+/**
+ * Preflight the upload destination BEFORE running any load plan: resolve +
+ * validate token / project / target. On any failure this exits non-zero so a
+ * `--upload` typo fails fast instead of after a full (expensive) load run.
+ * Token format isn't pre-judged locally — the server validates it (a non-glb_
+ * token gets a 401 on the POST, surfaced as a failed receipt → non-zero exit).
+ */
+async function resolveLoadUploadContext(
+  rootDir: string,
+  envFileVars: Record<string, string>,
+  options: LoadCommandOptions,
+): Promise<LoadUploadContext> {
+  const {
+    resolveToken,
+    resolveProjectId,
+    resolveApiUrl,
+    resolveTargetId,
+    resolveDefaultTargetId,
+    checkUploadAuth,
+    checkTargetInProject,
+  } = await import("../lib/auth.js");
+  const { resolveRedactionConfig, loadProjectConfigV1, GlubeanConfigError } =
+    await import("../lib/config.js");
+
+  const authOpts = {
+    token: options.token,
+    project: options.project,
+    target: options.target,
+    apiUrl: options.apiUrl,
+  };
+  const sources = { envFileVars };
+  const token = await resolveToken(authOpts, sources);
+  const projectId = await resolveProjectId(authOpts, sources);
+  const apiUrl = await resolveApiUrl(authOpts, sources);
+
+  if (!token) {
+    console.error(`${colors.red}Upload failed: no auth token found.${colors.reset}`);
+    console.error(`${colors.dim}Set GLUBEAN_TOKEN / --token (a glb_ project token), or add it to .env.secrets.${colors.reset}`);
+    process.exit(1);
+  }
+  if (!projectId) {
+    console.error(`${colors.red}Upload failed: no project ID.${colors.reset}`);
+    console.error(`${colors.dim}Use --project or set GLUBEAN_PROJECT_ID.${colors.reset}`);
+    process.exit(1);
+  }
+
+  // Validate auth/project FIRST (before the targets-read fallback) so an invalid
+  // token / mistyped project / unreachable server reports its real diagnostic
+  // instead of a misleading "could not resolve a target". 403 (least-privilege)
+  // proceeds; 401/404/5xx/unreachable is fatal BEFORE any load traffic.
+  const check = await checkUploadAuth(apiUrl, projectId, token);
+  if (!check.proceed) {
+    if (check.status === 401) {
+      console.error(`${colors.red}Upload failed: authentication failed (401).${colors.reset}`);
+      console.error(
+        `${colors.dim}The token is invalid/expired or not a platform project token (glb_…). Create one in the dashboard (Project → Tokens).${colors.reset}`,
+      );
+    } else if (check.status === 404) {
+      console.error(`${colors.red}Upload failed: project ${projectId} not found (404).${colors.reset}`);
+      console.error(
+        `${colors.dim}Check --project / GLUBEAN_PROJECT_ID and --api-url / GLUBEAN_API_URL.${colors.reset}`,
+      );
+    } else if (check.status === 403) {
+      console.error(`${colors.red}Upload failed: access to project ${projectId} is forbidden (403).${colors.reset}`);
+      console.error(
+        `${colors.dim}The token's org has no access to this project (or its membership was revoked).${colors.reset}`,
+      );
+    } else if (check.status === 0) {
+      console.error(`${colors.red}Upload failed: cannot reach server at ${apiUrl}.${colors.reset}`);
+    } else {
+      console.error(`${colors.red}Upload failed: unexpected preflight response (${check.status}).${colors.reset}`);
+      console.error(
+        `${colors.dim}Check that --api-url / GLUBEAN_API_URL points at the Glubean platform API.${colors.reset}`,
+      );
+    }
+    process.exit(1);
+  }
+
+  let targetId = await resolveTargetId(authOpts, sources);
+  if (targetId) {
+    // EXPLICIT target — validate it belongs to the project (a typo would
+    // otherwise 404 only on the POST, after the load plans ran).
+    const tcheck = await checkTargetInProject(apiUrl, projectId, targetId, token);
+    if (!tcheck.proceed) {
+      if (tcheck.status === 404) {
+        console.error(
+          `${colors.red}Upload failed: target ${targetId} not found in project ${projectId} (404).${colors.reset}`,
+        );
+        console.error(`${colors.dim}Check GLUBEAN_TARGET_ID / --upload-target.${colors.reset}`);
+      } else if (tcheck.status === 401) {
+        console.error(`${colors.red}Upload failed: authentication failed validating the target (401).${colors.reset}`);
+      } else if (tcheck.status === 0) {
+        console.error(`${colors.red}Upload failed: cannot reach server at ${apiUrl}.${colors.reset}`);
+      } else {
+        console.error(`${colors.red}Upload failed: could not validate target ${targetId} (${tcheck.status}).${colors.reset}`);
+      }
+      process.exit(1);
+    }
+    // 403 insufficient_scope (unverified) → no targets:read; can't validate, proceed.
+  } else {
+    targetId = await resolveDefaultTargetId(apiUrl, projectId, token);
+    if (!targetId) {
+      console.error(
+        `${colors.red}Upload failed: could not resolve a target for project ${projectId}.${colors.reset}`,
+      );
+      console.error(
+        `${colors.dim}Set the target explicitly (GLUBEAN_TARGET_ID or --upload-target). Auto-resolving a non-default project's target needs a token with the targets:read scope.${colors.reset}`,
+      );
+      process.exit(1);
+    }
+  }
+
+  // Resolve redaction up front and FAIL CLOSED: a present-but-invalid glubean.yaml
+  // is fatal for upload — load artifacts (samples / failure traces) can carry
+  // secrets only the project's custom `defaults.redaction` rules cover, so we must
+  // never silently fall back to weaker baseline-only redaction. Absent glubean.yaml
+  // → baseline is correct (no custom rules declared).
+  let redaction = resolveRedactionConfig();
+  try {
+    const { config } = await loadProjectConfigV1(rootDir);
+    redaction = resolveRedactionConfig(config.defaults?.redaction);
+  } catch (err) {
+    if (!(err instanceof GlubeanConfigError)) throw err;
+    if (!/not found/i.test(err.message)) {
+      console.error(
+        `${colors.red}Upload failed: could not load glubean.yaml redaction config (${err.message.split("\n")[0]}).${colors.reset}`,
+      );
+      console.error(
+        `${colors.dim}Fix glubean.yaml before --upload — load artifacts must not be uploaded with weaker baseline-only redaction.${colors.reset}`,
+      );
+      process.exit(1);
+    }
+  }
+
+  return { token, projectId, apiUrl, targetId, redaction };
+}
+
+async function uploadLoadOutcomes(
+  outcomes: LoadRunOutcome[],
+  ctx: {
+    context: LoadUploadContext;
+    rootDir: string;
+    envFile: string;
+    options: LoadCommandOptions;
+  },
+): Promise<void> {
+  const { options } = ctx;
+  // Destination + redaction were resolved + validated in the preflight (before
+  // plans ran) — fail-fast and fail-closed; reuse them here.
+  const { token, projectId, apiUrl, targetId, redaction } = ctx.context;
+  const { uploadToCloud } = await import("../lib/upload.js");
+  const { redactValue } = await import("@glubean/redaction");
+
+  const receipts: UploadReceipt[] = [];
+  for (const o of outcomes) {
+    const a = o.artifact;
+    const redactedResult = redactValue(a, {
+      globalRules: redaction.globalRules,
+      replacementFormat: redaction.replacementFormat,
+      maxDepth: 64,
+    });
+    const input: UploadRunInput = {
+      kind: "load",
+      schemaVersion: a.schemaVersion,
+      // One idempotency id per load outcome (each loadRunner = its own run),
+      // reused across the upload retry so a lost-response retry replaces it (P1).
+      clientRunId: randomUUID(),
+      status: a.summary.pass ? "passed" : "failed",
+      startedAt: a.startedAt,
+      completedAt: new Date(Date.parse(a.startedAt) + a.durationMs).toISOString(),
+      durationMs: a.durationMs,
+      summary: {
+        throughputPerSec: a.summary.throughputPerSec,
+        errorRate: a.summary.errorRate,
+      },
+      result: redactedResult,
+    };
+    const receipt = await uploadToCloud(input, {
+      apiUrl,
+      token,
+      projectId,
+      targetId,
+      envFile: ctx.envFile,
+      rootDir: ctx.rootDir,
+      // The LoadArtifact is the result blob; don't attach .glubean test artifacts.
+      skipArtifacts: true,
+    });
+    receipts.push(receipt);
+  }
+
+  if (options.uploadReceiptJson) {
+    const receiptPath = resolve(process.cwd(), options.uploadReceiptJson);
+    await mkdir(dirname(receiptPath), { recursive: true });
+    await writeFile(receiptPath, JSON.stringify(receipts, null, 2) + "\n", "utf-8");
+    console.log(`${colors.dim}Upload receipt(s) written to: ${receiptPath}${colors.reset}`);
+  }
+
+  // A requested --upload where a plan's run POST was rejected is a failure, even
+  // on passing load runs — exit non-zero so CI doesn't read false-green. The
+  // receipts are written above first, so the failure is still recorded.
+  const failedUploads = receipts.filter((r) => r.resultUpload.status === "failed").length;
+  if (failedUploads > 0) {
+    console.error(
+      `${colors.red}Upload failed: ${failedUploads} of ${receipts.length} load run(s) were not recorded in Cloud (see errors above).${colors.reset}`,
+    );
+    process.exit(1);
+  }
 }
 
 /**
@@ -276,6 +517,15 @@ export async function loadCommand(
   options: LoadCommandOptions = {},
 ): Promise<void> {
   console.log(`\n${colors.bold}${colors.blue}⚡ Glubean Load${colors.reset}\n`);
+
+  // --upload-receipt-json without --upload would silently write nothing — reject
+  // the combo up front (mirrors `glubean run`).
+  if (options.uploadReceiptJson && !options.upload) {
+    console.error(
+      `${colors.red}Error: --upload-receipt-json requires --upload.${colors.reset}`,
+    );
+    process.exit(1);
+  }
 
   const files = await resolveLoadFiles(target ?? process.cwd());
   if (files.length === 0) {
@@ -306,6 +556,14 @@ export async function loadCommand(
   // longer bootstraps here.
   const { vars, secrets } = await loadProjectEnv(rootDir, envFileName);
 
+  // Preflight the upload destination BEFORE running plans — a `--upload` typo
+  // (bad token/project/target) shouldn't first generate a full load run against
+  // real services and only then fail. Exits non-zero on any resolution failure.
+  let uploadContext: LoadUploadContext | undefined;
+  if (options.upload) {
+    uploadContext = await resolveLoadUploadContext(rootDir, { ...vars, ...secrets }, options);
+  }
+
   // A single file's import failure (or crash) is collected (not thrown) so
   // earlier/later files still produce + persist results. Pass the raw resolved
   // env — the child re-applies the process.env fallback (a Proxy can't cross the
@@ -332,6 +590,18 @@ export async function loadCommand(
     console.log(
       `${colors.yellow}No loadRunner() exports found in ${files.length} file(s).${colors.reset}`,
     );
+  }
+
+  // Upload completed plans (destination preflighted above). Runs upload
+  // regardless of pass/fail — a failed load run is still worth a durable
+  // performance-history record.
+  if (uploadContext && outcomes.length > 0) {
+    await uploadLoadOutcomes(outcomes, {
+      context: uploadContext,
+      rootDir,
+      envFile: envFileName,
+      options,
+    });
   }
 
   // Fail if any plan failed, any file errored, or nothing ran at all.
