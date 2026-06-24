@@ -2606,6 +2606,9 @@ export async function runCommand(
         for (const r of collectedRuns) {
           for (const e of r.events) {
             if (e.type !== "metric") continue;
+            // Skip valueless metric events: the server requires a finite numeric
+            // value, and one bad point must not reject the whole run's upload.
+            if (!Number.isFinite(e.value)) continue;
             metrics.push({
               name: e.name,
               value: e.value,
