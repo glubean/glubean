@@ -3,6 +3,7 @@ import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
+import { createServer, type Server } from "node:http";
 import { TestExecutor } from "./executor.js";
 import type { ExecutionEvent } from "./executor.js";
 
@@ -12,13 +13,43 @@ const RUNNER_ROOT = resolve(__dirname, "..");
 const TMP_DIR = join(RUNNER_ROOT, ".tmp-session-test");
 let tmpSeq = 0;
 
+// Local deterministic echo server — replaces httpbin.org, which is chronically
+// down / nondeterministic and was failing the {{KEY}}/prefixUrl template tests
+// below (blocking releases via the publish.yml test gate). /headers echoes the
+// request headers; /get echoes the resolved URL — enough for the template-
+// resolution assertions to observe what actually reached the wire.
+let echoServer: Server;
+let echoBaseUrl = "";
+
 beforeAll(async () => {
   await rm(TMP_DIR, { recursive: true, force: true }).catch(() => {});
   await mkdir(TMP_DIR, { recursive: true });
+
+  echoServer = createServer((req, res) => {
+    const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+    if (pathname === "/headers") {
+      // mirror httpbin.org/headers: { headers: { ...request headers } }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ headers: req.headers }));
+      return;
+    }
+    if (pathname === "/get") {
+      // mirror httpbin.org/get: { url: <full resolved url> }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ url: echoBaseUrl + (req.url ?? "") }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise<void>((r) => echoServer.listen(0, "127.0.0.1", () => r()));
+  const addr = echoServer.address();
+  echoBaseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
 });
 
 afterAll(async () => {
   await rm(TMP_DIR, { recursive: true, force: true }).catch(() => {});
+  await new Promise<void>((r) => echoServer.close(() => r()));
 });
 
 async function makeTempDir(): Promise<string> {
@@ -355,13 +386,13 @@ import { test, configure } from "@glubean/sdk";
 
 const { http } = configure({
   http: {
-    prefixUrl: "https://httpbin.org",
+    prefixUrl: "${echoBaseUrl}",
     headers: { Authorization: "Bearer {{AUTH_TOKEN}}" },
   },
 });
 
 export const checkHeader = test("check-header", async (ctx) => {
-  // httpbin.org/headers returns the request headers as JSON
+  // local echo server /headers returns { headers: <request headers> }
   const res = await http.get("headers").json();
   const authHeader = res.headers?.Authorization || res.headers?.authorization;
   ctx.assert(authHeader === "Bearer session-jwt-xyz", "session token resolved in header");
@@ -413,9 +444,9 @@ const { http } = configure({
 });
 
 export const checkPrefix = test("check-prefix", async (ctx) => {
-  // If prefixUrl resolved correctly, this should reach httpbin
+  // If prefixUrl resolved correctly, this reaches the local echo server's /get
   const res = await http.get("get").json();
-  ctx.assert(res.url === "https://httpbin.org/get", "prefixUrl resolved from session");
+  ctx.assert(res.url === "${echoBaseUrl}/get", "prefixUrl resolved from session");
 });
 `,
   );
@@ -425,7 +456,7 @@ export const checkPrefix = test("check-prefix", async (ctx) => {
     executor,
     pathToFileURL(testFile).href,
     "check-prefix",
-    { vars: {}, secrets: {}, session: { DYNAMIC_BASE: "https://httpbin.org" } },
+    { vars: {}, secrets: {}, session: { DYNAMIC_BASE: echoBaseUrl } },
   );
 
   const statuses = events.filter((e) => e.type === "status");
