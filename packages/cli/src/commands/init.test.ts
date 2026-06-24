@@ -59,6 +59,11 @@ test("init --no-interactive creates basic project files", async () => {
     // Verify package.json content
     const pkgJson = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
     expect(pkgJson.dependencies?.["@glubean/sdk"]).toBeDefined();
+    // Runner must be a DIRECT devDependency so package managers (pnpm
+    // especially) hoist it to a probe-able node_modules/@glubean/runner —
+    // the VSCode extension loads the project-local runner from there to keep
+    // a single @glubean/sdk instance (configure() / ALS correctness).
+    expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeDefined();
     expect(typeof pkgJson.scripts?.scan).toBe("string");
     expect(typeof pkgJson.scripts?.["validate-metadata"]).toBe("string");
 
@@ -329,6 +334,7 @@ test("init --contract-first creates contract-first project", async () => {
     expect(pkgJson.scripts?.test).toBe("glubean run --profile local");
     expect(pkgJson.scripts?.["test:ci"]).toBe("glubean ci run");
     expect(pkgJson.dependencies?.zod).toBeDefined();
+    expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeDefined();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
