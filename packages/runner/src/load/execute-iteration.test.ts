@@ -639,6 +639,36 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(out.ok).toBe(true);
     expect(reducer.finalize().summary.successfulIterations).toBe(1);
   });
+
+  it("exposes a no-op `ctx.metrics` (A1: present + safe, fold lands in A2)", async () => {
+    const { reducer, sink, core } = rig("run-metrics");
+
+    let added = false;
+    const scenario = loadScenario<{ run: number }>("with-metrics")
+      .step("browse", async (ctx) => {
+        await ctx.http.get(`${base}/items/${ctx.input.run}`).json();
+        // The advertised surface must neither throw nor record anything yet.
+        ctx.metrics.pollOk.add(true, { class: "fast" });
+        ctx.metrics.retries.add();
+        added = true;
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("with-metrics", "it-1"),
+      input: { run: 9 },
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+    });
+
+    expect(added).toBe(true);
+    expect(out.ok).toBe(true);
+    // No fold yet: the custom-metric artifact field stays absent in A1.
+    expect(reducer.finalize().summary.customMetrics).toBeUndefined();
+  });
 });
 
 describe("runLoadIteration — primaryComplete boundary (M5)", () => {

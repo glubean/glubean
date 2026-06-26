@@ -62,11 +62,23 @@ export type {
   LoadPacingConfig,
   LoadThresholds,
   LoadThresholdScope,
+  LoadCustomMetricThresholdScope,
   LoadReportConfig,
   LoadScenarioRef,
   LoadProducerSlotInfo,
   LoadIterationInfo,
 } from "./runner.js";
+
+export { rate, trend, counter } from "./metrics.js";
+
+export type {
+  LoadMetricKind,
+  LoadMetricDescriptor,
+  LoadMetricDeclarations,
+  LoadMetricTags,
+  LoadMetricHandle,
+  LoadMetricHandles,
+} from "./metrics.js";
 
 export { projectLoadPlan } from "./projection.js";
 export type { LoadProjection, LoadScenarioRefProjection } from "./projection.js";

@@ -28,9 +28,11 @@ import type {
   TestResult,
 } from "@glubean/engine";
 import type {
+  LoadAnyMetricHandle,
   LoadAssertionFailureMode,
   LoadErrorKind,
   LoadIteration,
+  LoadMetricHandles,
   LoadPrimaryCompletionReceipt,
   LoadProducerSlot,
   LoadReportSignal,
@@ -311,6 +313,19 @@ function makeIterationReport(
 }
 
 /**
+ * A1: `ctx.metrics` is exposed as a present (typed) member, but the fold +
+ * `metric:observed` emission land in A2. Until then any declared metric id
+ * returns a no-op handle, so a scenario authored against
+ * `ctx.metrics.<id>.add(...)` neither throws nor records anything yet.
+ */
+const NOOP_METRIC_HANDLE: LoadAnyMetricHandle = { add() {} };
+function makeNoopMetrics(): LoadMetricHandles {
+  return new Proxy({} as Record<string, LoadAnyMetricHandle>, {
+    get: () => NOOP_METRIC_HANDLE,
+  });
+}
+
+/**
  * The producer slot's end-state for one iteration (the M6 release lifecycle). It
  * starts `held`, the release coordinator moves it to `released` / `releasedForDrain`
  * AT MOST ONCE (mutually-exclusive code paths), and it drives the `completed`
@@ -456,6 +471,7 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
       iteration,
       now,
       report: makeIterationReport(sink, envelope, start, now, release, rejectDuplicateRelease),
+      metrics: makeNoopMetrics(),
     },
   };
 

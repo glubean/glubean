@@ -12,6 +12,7 @@
  * per-iteration runtime (via `runWithRuntime`) instead of a per-test one.
  */
 import type { TestContext } from "../types.js";
+import type { LoadMetricHandles } from "./metrics.js";
 
 /** Identity of a primary producer slot (the concurrency unit). */
 export interface LoadProducerSlot {
@@ -78,7 +79,7 @@ export type LoadOmittedContextKeys =
  *
  * Retained from `TestContext`: `vars`, `secrets`, `http`, `session`, `log`,
  * `warn`, `expect`, `assert`, `skip`, `fail`, `pollUntil`, `setTimeout`.
- * Added: `input`, `producerSlot`, `iteration`, `now()`, `report`.
+ * Added: `input`, `producerSlot`, `iteration`, `now()`, `report`, `metrics`.
  */
 export type LoadContext<Input = unknown> = Omit<
   TestContext,
@@ -94,4 +95,7 @@ export type LoadContext<Input = unknown> = Omit<
   now(): number;
   /** Bounded load report signals (checkpoint / primaryComplete). */
   report: LoadReportSignal;
+  /** Folded custom-metric handles declared on the runner (`rate`/`trend`/`counter`).
+   *  Permissively typed (declared ids aren't in scope in an independent scenario). */
+  metrics: LoadMetricHandles;
 };

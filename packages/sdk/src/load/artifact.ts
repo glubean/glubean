@@ -10,6 +10,7 @@
  *   - endpoint (which endpoint's p95/p99/errorRate degrades)
  *   - matrix (which endpoint inside which step)
  */
+import type { LoadMetricKind } from "./metrics.js";
 
 /** Latency / duration percentiles (ms). */
 export interface Percentiles {
@@ -124,9 +125,30 @@ export interface LoadEndToEndSummary {
 
 /** Result of evaluating one threshold expression against a scope/metric. */
 export interface ThresholdEvaluation {
-  scope: "transaction" | "primary" | "endToEnd" | "continuation" | "endpoint" | "step";
+  scope:
+    | "transaction"
+    | "primary"
+    | "endToEnd"
+    | "continuation"
+    | "endpoint"
+    | "step"
+    | "customMetric";
+  /** Scope target: routeKey (endpoint), stepId (step), or for a custom metric
+   *  `metricId` / `metricId:tagKey=tagVal` (a per-series gate). */
   target?: string;
-  metric: "errorRate" | "p50" | "p90" | "p95" | "p99" | "throughputPerSec" | "backlog" | "backpressureMs";
+  metric:
+    | "errorRate"
+    | "p50"
+    | "p90"
+    | "p95"
+    | "p99"
+    | "throughputPerSec"
+    | "backlog"
+    | "backpressureMs"
+    // custom-metric metrics: `rate`/`sum`/`count`; p50..p99 are reused for a `trend`.
+    | "rate"
+    | "sum"
+    | "count";
   expression: string;
   actual: number;
   pass: boolean;
@@ -350,6 +372,41 @@ export interface LoadArtifactRuntime {
   crash?: LoadCrashSummary;
 }
 
+/** One folded series of a custom metric: the aggregate for a single observed
+ *  tag combination (`{}` is the untagged total). Only the fields relevant to the
+ *  metric's `kind` are present. */
+export interface LoadCustomMetricSeries {
+  /** The tag combination this series aggregates (`{}` for the untagged total). */
+  tags: Record<string, string>;
+  /** Observations folded into this series. */
+  count: number;
+  // rate:
+  /** `rate` only: observations whose value was `true`. */
+  trueCount?: number;
+  /** `rate` only: `trueCount / count`. */
+  rate?: number;
+  // counter:
+  /** `counter` only: summed increments. */
+  sum?: number;
+  // trend:
+  /** `trend` only: distribution percentiles of the folded samples. */
+  latency?: Percentiles;
+  /** `trend` only: fixed-ladder histogram (reuses the latency bucket type). */
+  distribution?: LoadLatencyBucket[];
+}
+
+/** A declared custom metric, folded per tag-series (+ the untagged total). */
+export interface LoadCustomMetric {
+  metricId: string;
+  kind: LoadMetricKind;
+  /** Display unit for a `trend` (e.g. `"ms"`). */
+  unit?: string;
+  /** One series per observed tag combination, plus the untagged total. */
+  series: LoadCustomMetricSeries[];
+  /** True when `maxSeries` was hit and overflow was folded into the total. */
+  seriesTruncated?: boolean;
+}
+
 /** Top-level summary (compatibility end-to-end fields + phase splits + thresholds). */
 export interface LoadArtifactSummary {
   pass: boolean;
@@ -367,6 +424,9 @@ export interface LoadArtifactSummary {
   endToEnd?: LoadEndToEndSummary;
   continuation?: LoadContinuationSummary;
   thresholds: ThresholdEvaluation[];
+  /** Declared custom metrics, each folded per tag-series. Present only when the
+   *  runner declares `metrics` and at least one was observed. */
+  customMetrics?: LoadCustomMetric[];
   /** Non-fatal advisories about the run's shape (e.g. a long poll with no
    *  `primaryComplete`, so closed scheduling may under-pressure the upstream).
    *  Present only when there's something to surface. */

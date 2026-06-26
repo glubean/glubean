@@ -13,6 +13,7 @@ import type { LoadBuilder } from "./builder.js";
 import type { FeederBinding } from "./feeder.js";
 import { projectLoadPlan } from "./projection.js";
 import type { LoadProjection } from "./projection.js";
+import type { LoadMetricDeclarations } from "./metrics.js";
 import type { LoadScenario } from "./scenario.js";
 import type { LoadAssertionFailureMode } from "./step.js";
 
@@ -76,7 +77,20 @@ export interface LoadThresholdScope {
   backpressureMs?: string;
 }
 
-/** Structured thresholds. `endpoints` / `steps` are keyed by routeKey / stepId. */
+/** Threshold expressions for a custom metric. `rate`/`sum`/`count` apply to the
+ *  matching kind; `p50`..`p99` gate a `trend` distribution. */
+export interface LoadCustomMetricThresholdScope {
+  rate?: string;
+  sum?: string;
+  count?: string;
+  p50?: string;
+  p90?: string;
+  p95?: string;
+  p99?: string;
+}
+
+/** Structured thresholds. `endpoints` / `steps` are keyed by routeKey / stepId;
+ *  `customMetric` is keyed by `metricId` or `metricId:tagKey=tagVal` (per series). */
 export interface LoadThresholds {
   transaction?: LoadThresholdScope;
   primary?: LoadThresholdScope;
@@ -84,6 +98,7 @@ export interface LoadThresholds {
   continuation?: LoadThresholdScope;
   endpoints?: Record<string, LoadThresholdScope>;
   steps?: Record<string, LoadThresholdScope>;
+  customMetric?: Record<string, LoadCustomMetricThresholdScope>;
 }
 
 /** Bounded report sampling caps. */
@@ -109,6 +124,10 @@ interface LoadRunnerCommon {
   assertions?: { onFailure?: LoadAssertionFailureMode };
   thresholds?: LoadThresholds;
   report?: LoadReportConfig;
+  /** Custom metrics to fold + gate, declared up front via `rate()`/`trend()`/
+   *  `counter()`. Surfaced to steps as `ctx.metrics.<id>.add(...)` and folded
+   *  into `summary.customMetrics`. */
+  metrics?: LoadMetricDeclarations;
   /** How a run-level abort (stop / duration deadline / SIGINT) reaches in-flight
    *  requests.
    *  - `"precise"` (default): cancel in-flight HTTP at once. Uses a leak-free
