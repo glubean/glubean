@@ -599,6 +599,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       iteration,
       session: cloneSession(baseSession), // copy-on-write: each iteration gets its own (deep)
       ...(Object.keys(feederKeys).length > 0 ? { feederKeys } : {}),
+      ...(config.metrics !== undefined ? { metrics: config.metrics } : {}),
       now,
       continuation: { pool: continuationPool },
       signal: runAbort.signal,

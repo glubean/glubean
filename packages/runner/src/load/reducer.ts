@@ -20,11 +20,14 @@ import type {
   LoadAttributionQuality,
   LoadContinuationSummary,
   LoadCrashSummary,
+  LoadCustomMetric,
+  LoadCustomMetricSeries,
   LoadEndReason,
   LoadEndpointSummary,
   LoadEndToEndSummary,
   LoadEvent,
   LoadFailureSummary,
+  LoadMetricKind,
   LoadPrimaryPhaseSummary,
   LoadProgressSnapshot,
   LoadReducer,
@@ -45,7 +48,83 @@ const ZERO_PCT: Percentiles = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
 // runs' distributions line up bucket-for-bucket; a final overflow bucket carries the tail.
 const LATENCY_LADDER = [10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 2000, 5000];
 
+// Per-metric cap on distinct tag-series. Beyond it, new tag combinations are folded into
+// the untagged total only (the metric is flagged `seriesTruncated` + an advisory) — a guard
+// against a high-cardinality tag (e.g. itemId) exploding the artifact. `class` (3 values) is
+// fine; this protects the artifact, not the author's intent.
+const DEFAULT_MAX_SERIES = 50;
+
 type Phase = "primary" | "continuation";
+
+/** One folded series of a custom metric (the untagged total, or one tag combination). */
+interface CustomSeriesAgg {
+  tags: Record<string, string>;
+  count: number;
+  /** rate: observations whose value was truthy. */
+  trueCount: number;
+  /** counter: summed increments. */
+  sum: number;
+  /** trend: distribution of folded samples. */
+  hist?: LoadHistogram;
+}
+
+/** A declared custom metric, folded per tag-series plus the untagged total. */
+interface CustomMetricAgg {
+  metricId: string;
+  kind: LoadMetricKind;
+  unit?: string;
+  /** Untagged total — every observation, regardless of tags. */
+  total: CustomSeriesAgg;
+  /** One per observed tag combination, keyed by canonical tag string. */
+  series: Map<string, CustomSeriesAgg>;
+  /** True once `DEFAULT_MAX_SERIES` was hit and overflow folded into the total. */
+  truncated: boolean;
+}
+
+/** Stable key for a tag combination: keys sorted so `{a,b}` and `{b,a}` collapse. */
+function canonicalTagKey(tags: Record<string, string>): string {
+  return Object.keys(tags)
+    .sort()
+    .map((k) => `${k}=${tags[k]}`)
+    .join(SEP);
+}
+
+function newCustomSeries(tags: Record<string, string>, kind: LoadMetricKind): CustomSeriesAgg {
+  return {
+    tags,
+    count: 0,
+    trueCount: 0,
+    sum: 0,
+    ...(kind === "trend" ? { hist: new LoadHistogram() } : {}),
+  };
+}
+
+/** Fold one observed value into a series by the metric's kind. */
+function recordCustomSample(s: CustomSeriesAgg, kind: LoadMetricKind, value: number): void {
+  s.count += 1;
+  if (kind === "rate") {
+    if (value !== 0) s.trueCount += 1;
+  } else if (kind === "counter") {
+    s.sum += value;
+  } else {
+    s.hist?.record(value);
+  }
+}
+
+/** Project a folded series into its artifact shape (only the kind's fields). */
+function customSeriesSummary(s: CustomSeriesAgg, kind: LoadMetricKind): LoadCustomMetricSeries {
+  const out: LoadCustomMetricSeries = { tags: s.tags, count: s.count };
+  if (kind === "rate") {
+    out.trueCount = s.trueCount;
+    out.rate = s.count > 0 ? s.trueCount / s.count : 0;
+  } else if (kind === "counter") {
+    out.sum = s.sum;
+  } else if (s.hist) {
+    out.latency = s.count > 0 ? s.hist.percentiles() : ZERO_PCT;
+    if (s.count > 0) out.distribution = s.hist.distribution(LATENCY_LADDER);
+  }
+  return out;
+}
 
 interface ScenarioAgg {
   scenarioId: string;
@@ -150,6 +229,8 @@ export class LoadReducerImpl implements LoadReducer {
   private readonly steps = new Map<string, StepAgg>();
   private readonly endpoints = new Map<string, EndpointAgg>();
   private readonly matrix = new Map<string, MatrixAgg>();
+  // Declared custom metrics (rate/trend/counter), folded from `metric:observed`.
+  private readonly customMetrics = new Map<string, CustomMetricAgg>();
   private readonly recentFailures: LoadFailureSummary[] = [];
   // Over-time series (RPS / error-rate / latency / concurrency vs time), bucketed by the
   // event ts offset from the run start.
@@ -396,6 +477,9 @@ export class LoadReducerImpl implements LoadReducer {
         }
         break;
       }
+      case "metric:observed":
+        this.foldCustomMetric(event);
+        break;
       // assertion:observed / log:sampled / checkpoints are handled by the sink
       // (failure traces) or don't affect these aggregates.
       default:
@@ -438,6 +522,16 @@ export class LoadReducerImpl implements LoadReducer {
     const elapsedSec = durationMs / 1000;
     const endpoints = this.endpointSummaries(elapsedSec);
     const anyHeuristicEndpoint = endpoints.some((e) => e.routeKeyHeuristic);
+
+    const customMetrics = this.customMetricSummaries();
+    const truncated = customMetrics.filter((m) => m.seriesTruncated).map((m) => m.metricId);
+    const advisories =
+      truncated.length > 0
+        ? [
+            `Custom metric(s) ${truncated.join(", ")} exceeded the ${DEFAULT_MAX_SERIES}-series ` +
+              `cap; excess tag-series were folded into the untagged total. Lower the tag cardinality.`,
+          ]
+        : [];
 
     return {
       schemaVersion: "glubean.load.v1",
@@ -495,6 +589,8 @@ export class LoadReducerImpl implements LoadReducer {
         // Continuation (M6): present once producer release is attempted.
         ...(this.releaseUsed() ? { continuation: this.continuationSummary() } : {}),
         thresholds: [],
+        ...(customMetrics.length > 0 ? { customMetrics } : {}),
+        ...(advisories.length > 0 ? { advisories } : {}),
       },
       scenarios: this.scenarioSummaries(),
       steps: this.stepSummaries(),
@@ -531,6 +627,64 @@ export class LoadReducerImpl implements LoadReducer {
 
   private scenarioKey(scenarioId: string, scenarioRefId?: string): string {
     return `${scenarioId}${SEP}${scenarioRefId ?? ""}`;
+  }
+
+  // ── custom metrics (rate / trend / counter) ────────────────────────────
+
+  /** Fold one `metric:observed` into the untagged total and (if tagged) its
+   *  tag-series, enforcing the per-metric series cap. */
+  private foldCustomMetric(e: Extract<LoadEvent, { type: "metric:observed" }>): void {
+    let m = this.customMetrics.get(e.metricId);
+    if (!m) {
+      m = {
+        metricId: e.metricId,
+        kind: e.kind,
+        ...(e.unit !== undefined ? { unit: e.unit } : {}),
+        total: newCustomSeries({}, e.kind),
+        series: new Map(),
+        truncated: false,
+      };
+      this.customMetrics.set(e.metricId, m);
+    }
+    // The untagged total folds EVERY observation (so a `metricId` threshold gates the
+    // whole metric and series-cap overflow is never lost). Use the metric's recorded
+    // kind, not the event's, so a mismatched event can't fork the fold.
+    recordCustomSample(m.total, m.kind, e.value);
+
+    const tags = e.tags;
+    if (tags && Object.keys(tags).length > 0) {
+      const key = canonicalTagKey(tags);
+      let s = m.series.get(key);
+      if (!s) {
+        if (m.series.size >= DEFAULT_MAX_SERIES) {
+          // Cap hit: the observation already counted in the total; don't grow the map.
+          m.truncated = true;
+          return;
+        }
+        s = newCustomSeries({ ...tags }, m.kind);
+        m.series.set(key, s);
+      }
+      recordCustomSample(s, m.kind, e.value);
+    }
+  }
+
+  /** Build the `customMetrics` artifact rows (total series first, then each tag-series). */
+  private customMetricSummaries(): LoadCustomMetric[] {
+    const out: LoadCustomMetric[] = [];
+    for (const m of this.customMetrics.values()) {
+      const series: LoadCustomMetricSeries[] = [
+        customSeriesSummary(m.total, m.kind),
+        ...[...m.series.values()].map((s) => customSeriesSummary(s, m.kind)),
+      ];
+      out.push({
+        metricId: m.metricId,
+        kind: m.kind,
+        ...(m.unit !== undefined ? { unit: m.unit } : {}),
+        series,
+        ...(m.truncated ? { seriesTruncated: true } : {}),
+      });
+    }
+    return out;
   }
 
   private scenarioAgg(scenarioId?: string, scenarioRefId?: string): ScenarioAgg | undefined {

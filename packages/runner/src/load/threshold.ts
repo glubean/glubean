@@ -14,6 +14,9 @@
  */
 import type {
   LoadArtifact,
+  LoadCustomMetric,
+  LoadCustomMetricSeries,
+  LoadCustomMetricThresholdScope,
   LoadThresholdScope,
   LoadThresholds,
   ThresholdEvaluation,
@@ -181,6 +184,86 @@ function actualFor(metric: ThresholdMetric, data: ScopeData): number | undefined
   }
 }
 
+/** Metrics a custom-metric threshold can target (keys of `LoadCustomMetricThresholdScope`). */
+const CUSTOM_METRIC_KEYS = ["rate", "sum", "count", "p50", "p90", "p95", "p99"] as const;
+type CustomMetricKey = (typeof CUSTOM_METRIC_KEYS)[number];
+
+/** Parse a custom-metric expression by reusing the base parser under a unit-compatible
+ *  proxy metric: `rate` is a fraction (`%` ok, like errorRate), `sum`/`count` are unitless
+ *  counts (like backlog), `p50..p99` are durations (ms, like latency percentiles). */
+function parseCustomExpression(expr: string, key: CustomMetricKey): ParsedThreshold {
+  if (key === "rate") return parseThresholdExpression(expr, "errorRate");
+  if (key === "sum" || key === "count") return parseThresholdExpression(expr, "backlog");
+  return parseThresholdExpression(expr, key);
+}
+
+/** Resolve a custom-metric threshold target to its declared metric, disambiguating a
+ *  `:` in the metric ID from the `metricId:tag=val` selector: an EXACT id match wins
+ *  (so `"http:ok"` resolves to the metric named `http:ok`), else the longest declared id
+ *  that is a `${id}:` prefix of the target (the tag-selector form). Undefined → skipped. */
+function resolveCustomTarget(
+  metrics: readonly LoadCustomMetric[] | undefined,
+  targetKey: string,
+): { metric: LoadCustomMetric; suffix?: string } | undefined {
+  if (!metrics) return undefined;
+  let best: LoadCustomMetric | undefined;
+  for (const m of metrics) {
+    if (m.metricId === targetKey) return { metric: m }; // exact id → untagged total
+    if (targetKey.startsWith(`${m.metricId}:`) && (best === undefined || m.metricId.length > best.metricId.length)) {
+      best = m;
+    }
+  }
+  return best ? { metric: best, suffix: targetKey.slice(best.metricId.length + 1) } : undefined;
+}
+
+/** Parse a tag suffix (`"a=1,b=2"`) into a tag record, or `undefined` if it is malformed
+ *  (empty, or any pair lacking `=`) — so `pollOk:` / `pollOk:class` don't silently collapse
+ *  onto the untagged total. */
+function parseTagSuffix(suffix: string): Record<string, string> | undefined {
+  const tags: Record<string, string> = {};
+  for (const pair of suffix.split(",")) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) return undefined; // no `=`, or an empty key
+    tags[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return Object.keys(tags).length > 0 ? tags : undefined;
+}
+
+function tagsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ak = Object.keys(a);
+  return ak.length === Object.keys(b).length && ak.every((k) => a[k] === b[k]);
+}
+
+/** Find the series a custom-metric threshold targets: the untagged total (no suffix)
+ *  or the series whose tags exactly match the suffix. */
+function findCustomSeries(metric: LoadCustomMetric, suffix?: string): LoadCustomMetricSeries | undefined {
+  if (suffix === undefined) return metric.series.find((s) => Object.keys(s.tags).length === 0);
+  const want = parseTagSuffix(suffix);
+  if (want === undefined) return undefined; // malformed suffix → no match (skipped)
+  return metric.series.find((s) => tagsEqual(s.tags, want));
+}
+
+/** Pull the actual value for a custom-metric key from a folded series (undefined = N/A
+ *  to this metric's kind, e.g. `rate` on a counter → skipped, not failed). */
+function customActualFor(key: CustomMetricKey, series: LoadCustomMetricSeries): number | undefined {
+  switch (key) {
+    case "rate":
+      return series.rate;
+    case "sum":
+      return series.sum;
+    case "count":
+      return series.count;
+    case "p50":
+      return series.latency?.p50;
+    case "p90":
+      return series.latency?.p90;
+    case "p95":
+      return series.latency?.p95;
+    case "p99":
+      return series.latency?.p99;
+  }
+}
+
 /**
  * Evaluate every configured threshold against the artifact, returning the
  * `ThresholdEvaluation[]` and the refined run pass (crash-free AND every evaluable
@@ -264,6 +347,33 @@ export function evaluateThresholds(
         latency: s.latency,
       }));
       evalScope("step", stepId, rows.length > 0 ? combineRows(rows) : undefined, cfg);
+    }
+  }
+
+  // Custom metrics (rate / trend / counter). A target is `metricId` (the untagged
+  // total) or `metricId:tagKey=tagVal` (a per-series gate). A metric/series not present
+  // (never observed) or a key N/A to the metric's kind (`rate` on a counter) is skipped.
+  if (thresholds.customMetric) {
+    for (const [targetKey, cfg] of Object.entries(thresholds.customMetric)) {
+      const resolved = resolveCustomTarget(s.customMetrics, targetKey);
+      const series = resolved ? findCustomSeries(resolved.metric, resolved.suffix) : undefined;
+      if (!series) continue; // metric or targeted series absent / malformed → skipped
+      for (const key of CUSTOM_METRIC_KEYS) {
+        const expr = cfg[key];
+        if (expr === undefined) continue;
+        const actual = customActualFor(key, series);
+        if (actual === undefined) continue; // N/A to this metric's kind
+        const { op, value } = parseCustomExpression(expr, key);
+        out.push({
+          scope: "customMetric",
+          target: targetKey,
+          metric: key,
+          expression: expr,
+          actual,
+          pass: compare(actual, op, value),
+          source: "glubean",
+        });
+      }
     }
   }
 

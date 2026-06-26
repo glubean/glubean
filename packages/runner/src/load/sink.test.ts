@@ -42,6 +42,23 @@ describe("LoadSink — seal (M6)", () => {
 
     expect(reducer.applied).toBe(2); // unchanged — nothing forwarded after seal
   });
+
+  it("drops a metric:observed from a handle that fires after its iteration ended", () => {
+    const reducer = capturingReducer();
+    const sink = new LoadSink(reducer, "run", "runner", () => 0);
+    const env = { scenarioId: "s", producerSlotId: "p0", iterationId: "it-1" };
+
+    sink.beginIteration(env);
+    sink.emitMetricObserved(env, { metricId: "pollOk", kind: "rate", value: 1 });
+    sink.emitIterationEnd(env, { ok: true, durationMs: 1 });
+    sink.endIteration("it-1");
+    // The handle escaped the step and fires late (iteration unregistered, run not sealed):
+    sink.emitMetricObserved(env, { metricId: "pollOk", kind: "rate", value: 0 });
+
+    const metricEvents = reducer.events.filter((e) => e.type === "metric:observed");
+    expect(metricEvents).toHaveLength(1); // only the in-iteration one survived
+    expect((metricEvents[0] as { value: number }).value).toBe(1);
+  });
 });
 
 describe("LoadSink — tailPollExecuted (M6-d)", () => {

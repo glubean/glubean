@@ -28,10 +28,12 @@ import type {
   TestResult,
 } from "@glubean/engine";
 import type {
-  LoadAnyMetricHandle,
   LoadAssertionFailureMode,
   LoadErrorKind,
   LoadIteration,
+  LoadMetricDeclarations,
+  LoadMetricDescriptor,
+  LoadMetricHandle,
   LoadMetricHandles,
   LoadPrimaryCompletionReceipt,
   LoadProducerSlot,
@@ -180,6 +182,9 @@ export interface RunLoadIterationArgs<Input = unknown> {
   /** Attribution for `iteration:start` (feeder allocation lands in M3-f). */
   inputKey?: string;
   feederKeys?: Record<string, string>;
+  /** Declared custom metrics (`loadRunner({ metrics })`). Each becomes a folding
+   *  `ctx.metrics.<id>` handle; absent / empty → `ctx.metrics` is a safe no-op. */
+  metrics?: LoadMetricDeclarations;
   /** Monotonic clock for the iteration duration; defaults to `performance.now`. */
   now?: () => number;
   /** Producer-release wiring (M6). When present, `ctx.report.primaryComplete(...,
@@ -312,17 +317,77 @@ function makeIterationReport(
   };
 }
 
+// A no-op handle: an undeclared metric id (e.g. an author typo, or a runner that
+// declared no metrics) records nothing rather than throwing — under load, a bad
+// `ctx.metrics.<id>.add(...)` must never fell the iteration.
+const NOOP_METRIC_HANDLE: LoadMetricHandle = { add() {} };
+
 /**
- * A1: `ctx.metrics` is exposed as a present (typed) member, but the fold +
- * `metric:observed` emission land in A2. Until then any declared metric id
- * returns a no-op handle, so a scenario authored against
- * `ctx.metrics.<id>.add(...)` neither throws nor records anything yet.
+ * Build `ctx.metrics` from the runner's declared set. Each declared id folds via
+ * `sink.emitMetricObserved`; an undeclared id is a no-op. With no declarations,
+ * the whole surface is a no-op proxy.
  */
-const NOOP_METRIC_HANDLE: LoadAnyMetricHandle = { add() {} };
-function makeNoopMetrics(): LoadMetricHandles {
-  return new Proxy({} as Record<string, LoadAnyMetricHandle>, {
-    get: () => NOOP_METRIC_HANDLE,
+function makeIterationMetrics(
+  sink: LoadSink,
+  env: LoadIterationEnvelope,
+  declarations: LoadMetricDeclarations | undefined,
+): LoadMetricHandles {
+  const ids = declarations !== undefined ? Object.keys(declarations) : [];
+  if (ids.length === 0) {
+    return new Proxy({} as Record<string, LoadMetricHandle>, { get: () => NOOP_METRIC_HANDLE });
+  }
+  // Null-prototype so inherited names (`constructor` / `toString`) don't shadow the no-op
+  // fallback — an undeclared `ctx.metrics.<x>` must stay a no-op, never an Object.prototype member.
+  const handles = Object.create(null) as Record<string, LoadMetricHandle>;
+  for (const id of ids) handles[id] = makeMetricHandle(sink, env, id, declarations![id]);
+  return new Proxy(handles, {
+    get: (target, prop) =>
+      typeof prop === "string" ? (target[prop] ?? NOOP_METRIC_HANDLE) : undefined,
   });
+}
+
+/** One folding handle: converts the value by kind and emits a `metric:observed`. */
+function makeMetricHandle(
+  sink: LoadSink,
+  env: LoadIterationEnvelope,
+  metricId: string,
+  descriptor: LoadMetricDescriptor,
+): LoadMetricHandle {
+  const { kind, unit } = descriptor;
+  return {
+    add(value, tags) {
+      const num = toMetricValue(kind, value);
+      if (num === undefined) return; // malformed for this kind — skip, don't throw under load
+      sink.emitMetricObserved(env, {
+        metricId,
+        kind,
+        value: num,
+        ...(unit !== undefined ? { unit } : {}),
+        ...(tags !== undefined ? { tags } : {}),
+      });
+    },
+  };
+}
+
+/** Normalize an `add()` argument to the numeric the wire/reducer fold: rate → 0|1,
+ *  counter → increment (default +1), trend → the sample. `undefined` = skip. */
+function toMetricValue(
+  kind: LoadMetricDescriptor["kind"],
+  value: boolean | number | undefined,
+): number | undefined {
+  // Non-finite samples (NaN / Infinity, e.g. `Number(missingHeader)`) are dropped, not
+  // folded — else a rate would count NaN as success and a counter/trend sum would poison.
+  if (kind === "rate") {
+    if (typeof value === "boolean") return value ? 1 : 0;
+    if (typeof value === "number" && Number.isFinite(value)) return value !== 0 ? 1 : 0;
+    return undefined; // a rate needs a boolean (or finite numeric) outcome
+  }
+  if (kind === "counter") {
+    if (value === undefined) return 1; // documented default increment
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  }
+  // trend needs a finite numeric sample
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /**
@@ -471,7 +536,7 @@ export function startLoadIteration<Input>(args: RunLoadIterationArgs<Input>): Lo
       iteration,
       now,
       report: makeIterationReport(sink, envelope, start, now, release, rejectDuplicateRelease),
-      metrics: makeNoopMetrics(),
+      metrics: makeIterationMetrics(sink, envelope, args.metrics),
     },
   };
 
