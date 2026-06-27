@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { confirm, select } from "@inquirer/prompts";
+import { confirm, select, input } from "@inquirer/prompts";
 import { CLI_VERSION } from "../version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,6 +77,15 @@ async function promptYesNo(question: string, defaultYes: boolean): Promise<boole
     if (normalized === "y" || normalized === "yes") return true;
     if (normalized === "n" || normalized === "no") return false;
   }
+}
+
+async function promptText(question: string, defaultValue: string): Promise<string> {
+  if (useFancyPrompts()) {
+    return await input({ message: question, default: defaultValue });
+  }
+  const answer = await readLine(`${question} [${defaultValue}]`);
+  const trimmed = answer.trim();
+  return trimmed || defaultValue;
 }
 
 async function promptChoice(
@@ -219,23 +228,13 @@ function makePackageJson(_baseUrl: string): string {
         scripts: {
           test: "glubean run --profile local",
           "test:ci": "glubean ci run",
-          explore: "glubean run --profile explore",
-          scan: "glubean scan",
-          "validate-metadata": "glubean validate-metadata",
         },
         dependencies: {
           "@glubean/sdk": SDK_VERSION,
-        },
-        // Runner is the test executor. Declared as a DIRECT devDependency
-        // (not left as a transitive of the `glubean` CLI) so package managers
-        // — pnpm especially — hoist/symlink it to `node_modules/@glubean/runner`.
-        // The VSCode extension probes that path to load the PROJECT-LOCAL runner;
-        // without it, it falls back to its bundled runner, which resolves a
-        // SECOND @glubean/sdk instance and breaks configure() (AsyncLocalStorage
-        // is per-instance) — "configure() values can only be accessed during test
-        // execution". Pinned to SDK_VERSION so runner's own sdk dep collapses to
-        // the same store entry as the direct sdk dep (single instance).
-        devDependencies: {
+          // Runner must be a direct dep (not only transitive via the glubean CLI).
+          // pnpm does not hoist transitive deps — VSCode extension probes
+          // node_modules/@glubean/runner; missing → bundled fallback runner →
+          // second @glubean/sdk instance → configure() throws.
           "@glubean/runner": SDK_VERSION,
         },
       },
@@ -329,6 +328,115 @@ profiles:
       tags: [smoke]
 `;
 
+// Combined yaml for the default init template (tests + contracts).
+// explore/ suite is intentionally omitted — the skill creates it on demand.
+const GLUBEAN_YAML_INIT = `version: 1
+
+defaults:
+  redaction:
+    replacementFormat: simple
+
+suites:
+  tests:
+    target: ./tests
+    kinds: [test]
+  contracts:
+    target: ./contracts
+    kinds: [contract, flow]
+
+profiles:
+  local:
+    suites: [tests, contracts]
+
+  ci:
+    suites: [tests, contracts]
+    selection:
+      excludeTags: [manual, destructive]
+    execution:
+      failFast: true
+      concurrency: 2
+    reporters:
+      junit: .glubean/results/junit.xml
+      resultJson: .glubean/results/ci.result.json
+
+  contract-smoke:
+    suites: [contracts]
+    selection:
+      tags: [smoke]
+`;
+
+// Example test file — uses dummyjson.com (the default BASE_URL).
+// Users replace with paths that match their own API.
+const API_TEST_TEMPLATE = `import { configure, test } from "@glubean/sdk";
+
+const { http } = configure({
+  http: { prefixUrl: "{{BASE_URL}}" },
+});
+
+export const listUsers = test(
+  { id: "users-list", tags: ["smoke"] },
+  async ({ expect }) => {
+    const res = await http.get("users?limit=5");
+    expect(res).toHaveStatus(200);
+    const body = await res.json<{ users: unknown[]; total: number }>();
+    expect(Array.isArray(body.users)).toBe(true);
+    expect(body.total).toBeGreaterThan(0);
+  },
+);
+
+export const getUser = test(
+  { id: "users-get", tags: ["smoke"] },
+  async ({ expect }) => {
+    const res = await http.get("users/1");
+    expect(res).toHaveStatus(200);
+    const body = await res.json<{ id: number; firstName: string }>();
+    expect(typeof body.id).toBe("number");
+    expect(typeof body.firstName).toBe("string");
+  },
+);
+`;
+
+// Example contract file — uses dummyjson.com (the default BASE_URL).
+const USERS_CONTRACT_TEMPLATE = `import { contract, configure } from "@glubean/sdk";
+import { z } from "zod";
+
+const { http: api } = configure({
+  http: { prefixUrl: "{{BASE_URL}}" },
+});
+
+const usersApi = contract.http.with("users", {
+  client: api,
+  security: null,
+});
+
+const UserSchema = z.object({
+  id: z.number(),
+  firstName: z.string(),
+  lastName: z.string(),
+  email: z.string().email(),
+});
+
+// @contract
+export const getUser = usersApi("user-get", {
+  endpoint: "GET /users/:id",
+  feature: "Users",
+  description: "Fetch a single user by ID",
+  tags: ["smoke"],
+  cases: {
+    found: {
+      description: "returns the user profile when the ID exists",
+      params: { id: "1" },
+      expect: { status: 200, schema: UserSchema },
+    },
+    notFound: {
+      description: "returns 404 when the user ID does not exist",
+      params: { id: "0" },
+      expect: { status: 404 },
+    },
+  },
+});
+`;
+
 const CONTRACT_FIRST_SAMPLE_TEST = `import { test } from "@glubean/sdk";
 
 /**
@@ -350,10 +458,8 @@ BASE_URL=${baseUrl}
 `;
 }
 
-const ENV_SECRETS = `# Secrets for tests (add this file to .gitignore)
-# DummyJSON test credentials (public, safe to use)
-USERNAME=emilys
-PASSWORD=emilyspass
+const ENV_SECRETS = `# Credentials and other secrets for tests (this file is gitignored)
+# Example: API_KEY=your-secret-here
 `;
 
 const GITIGNORE = `# Secrets (all env-specific secrets files)
@@ -568,7 +674,7 @@ async function installDependencies(): Promise<void> {
 // Options
 // ---------------------------------------------------------------------------
 
-export type InitWorkflow = "try" | "test" | "contract-first";
+export type InitWorkflow = "test" | "contract-first";
 
 export interface InitOptions {
   minimal?: boolean;
@@ -618,51 +724,38 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // ── Workflow ─────────────────────────────────────────────────────────────
+  // ── Contract-first shortcut (legacy flag) ────────────────────────────────
 
-  let workflow: InitWorkflow = options.contractFirst
-    ? "contract-first"
-    : "test";
-
-  if (interactive && !options.contractFirst) {
-    console.log(
-      `${colors.dim}━━━ What kind of project? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`,
-    );
-    const choice = await promptChoice(
-      "What are you doing?",
-      [
-        {
-          key: "1",
-          label: "Try Glubean",
-          desc: "Clone cookbook — 35+ runnable examples, ready in 30 seconds",
-        },
-        {
-          key: "2",
-          label: "Test an existing API",
-          desc: "Full project — tests, CI config, types, schemas",
-        },
-        {
-          key: "3",
-          label: "Build contract-first for a new API",
-          desc: "Define behavior before implementing — contracts, tests, types",
-        },
-      ],
-      "1",
-    );
-    workflow = choice === "3" ? "contract-first" : choice === "2" ? "test" : "try";
+  if (options.contractFirst) {
+    await initContractFirst(options.overwrite ?? false);
+    return;
   }
 
+  // ── Base URL ──────────────────────────────────────────────────────────────
+
+  let baseUrl: string;
+  if (options.baseUrl) {
+    baseUrl = validateBaseUrlOrExit(options.baseUrl, "--base-url");
+  } else if (interactive) {
+    const raw = await promptText(
+      "What's your API base URL for your default test environment?",
+      DEFAULT_BASE_URL,
+    );
+    baseUrl = validateBaseUrlOrExit(raw, "prompt");
+  } else {
+    baseUrl = DEFAULT_BASE_URL;
+  }
+
+  // ── Overwrite check ───────────────────────────────────────────────────────
+
   if (interactive && !options.overwrite) {
-    const hasExisting = await fileExists("package.json") ||
-      await fileExists(".env");
+    const hasExisting =
+      (await fileExists("package.json")) || (await fileExists(".env"));
     if (hasExisting) {
       console.log(
-        `\n  ${colors.yellow}⚠${colors.reset} Existing Glubean files detected in this directory.\n`,
+        `\n  ${colors.yellow}⚠${colors.reset} Existing files detected in this directory.\n`,
       );
-      const overwrite = await promptYesNo(
-        "Overwrite existing files?",
-        false,
-      );
+      const overwrite = await promptYesNo("Overwrite existing files?", false);
       if (overwrite) {
         options.overwrite = true;
       } else {
@@ -671,31 +764,6 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
         );
       }
     }
-  }
-
-  if (workflow === "try") {
-    await initTryCookbook();
-    return;
-  }
-
-  if (workflow === "contract-first") {
-    await initContractFirst(options.overwrite ?? false);
-    return;
-  }
-
-  // ── Best Practice — API Setup (no prompt, uses default) ──────────────────
-
-  const baseUrl = options.baseUrl ? validateBaseUrlOrExit(options.baseUrl, "--base-url") : DEFAULT_BASE_URL;
-
-  // Legacy flags — still supported for backward compatibility
-  let enableHooks = options.hooks ?? false;
-  let enableActions = options.githubActions ?? false;
-  const hasGit = await fileExists(".git");
-  if (enableHooks && !hasGit) {
-    console.error(
-      "Error: --hooks requires a Git repository. Run `git init` first.",
-    );
-    process.exit(1);
   }
 
   // ── Create files ─────────────────────────────────────────────────────────
@@ -711,6 +779,11 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       description: "Package config with scripts",
     },
     {
+      path: "glubean.yaml",
+      content: GLUBEAN_YAML_INIT,
+      description: "Suites + profiles (tests, contracts, CI)",
+    },
+    {
       path: ".env",
       content: makeEnvFile(baseUrl),
       description: "Environment variables",
@@ -718,12 +791,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     {
       path: ".env.secrets",
       content: ENV_SECRETS,
-      description: "Secret variables",
-    },
-    {
-      path: "glubean.yaml",
-      content: GLUBEAN_YAML_DEFAULT,
-      description: "Canonical Glubean project config (suites + profiles)",
+      description: "Credentials (gitignored)",
     },
     {
       path: ".gitignore",
@@ -731,96 +799,31 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       description: "Git ignore rules",
     },
     {
-      path: "glubean.setup.ts",
-      content: GLUBEAN_SETUP_TEMPLATE,
-      description: "Plugin bootstrap entry (installs manifest-based plugins)",
-    },
-    {
-      path: "README.md",
-      content: () => readCliTemplate("README.md"),
-      description: "Project README",
-    },
-    {
-      path: "context/openapi.sample.json",
-      content: () => readCliTemplate("openapi.sample.json"),
-      description: "Sample OpenAPI spec (mock)",
-    },
-    {
-      path: "tests/demo.test.ts",
-      content: () => readCliTemplate("demo.test.ts.tpl"),
-      description: "Demo tests (rich output for dashboard preview)",
-    },
-    {
-      path: "tests/data-driven.test.ts",
-      content: () => readCliTemplate("data-driven.test.ts.tpl"),
-      description: "Data-driven test examples (JSON, CSV, YAML)",
-    },
-    {
-      path: "tests/pick.test.ts",
-      content: () => readCliTemplate("pick.test.ts.tpl"),
-      description: "Example selection with test.pick (inline + JSON)",
-    },
-    {
-      path: "data/users.json",
-      content: () => readCliTemplate("data/users.json"),
-      description: "Sample JSON test data",
-    },
-    {
-      path: "data/endpoints.csv",
-      content: () => readCliTemplate("data/endpoints.csv"),
-      description: "Sample CSV test data",
-    },
-    {
-      path: "data/scenarios.yaml",
-      content: () => readCliTemplate("data/scenarios.yaml"),
-      description: "Sample YAML test data",
-    },
-    {
-      path: "data/create-user.json",
-      content: () => readCliTemplate("data/create-user.json"),
-      description: "Named examples for test.pick",
-    },
-    {
-      path: "explore/api.test.ts",
-      content: () => readCliTemplate("minimal-api.test.ts.tpl"),
-      description: "Explore — GET and POST basics",
-    },
-    {
-      path: "explore/search.test.ts",
-      content: () => readCliTemplate("minimal-search.test.ts.tpl"),
-      description: "Explore — parameterized search with test.pick",
-    },
-    {
-      path: "explore/auth.test.ts",
-      content: () => readCliTemplate("minimal-auth.test.ts.tpl"),
-      description: "Explore — multi-step auth flow",
-    },
-    {
-      path: "data/search-examples.json",
-      content: () => readCliTemplate("data/search-examples.json"),
-      description: "Search examples for test.pick",
-    },
-    {
-      path: "types/README.md",
-      content: TYPES_README,
-      description: "Shared response types directory",
-    },
-    {
-      path: "types/data-driven.ts",
-      content: () => readCliTemplate("types/data-driven.ts"),
-      description: "Types for data-driven test data",
-    },
-    {
       path: "GLUBEAN.md",
       content: GLUBEAN_MD_TEMPLATE,
-      description: "Project-specific test conventions for AI skill",
+      description: "Project conventions for AI skill",
     },
     {
-      path: "local/README.md",
-      content: LOCAL_README,
-      description: "Personal explore directory (gitignored)",
+      path: "tests/api.test.ts",
+      content: API_TEST_TEMPLATE,
+      description: "Example test (replace with your API paths)",
+    },
+    {
+      path: "contracts/users.contract.ts",
+      content: USERS_CONTRACT_TEMPLATE,
+      description: "Example contract (replace with your endpoints)",
     },
   ];
+
+  const enableHooks = options.hooks ?? false;
+  const enableActions = options.githubActions ?? false;
+  const hasGit = await fileExists(".git");
+  if (enableHooks && !hasGit) {
+    console.error(
+      "Error: --hooks requires a Git repository. Run `git init` first.",
+    );
+    process.exit(1);
+  }
 
   if (enableHooks) {
     files.push(
@@ -913,21 +916,20 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   if (created > 0) {
     await installDependencies();
 
-    console.log(`${colors.bold}Next steps:${colors.reset}`);
-    console.log(`\n  Connect AI  ${colors.dim}(run once)${colors.reset}`);
-    console.log(`    ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
-    console.log(`    ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}\n`);
+    console.log(`\n${colors.bold}Next steps:${colors.reset}`);
     console.log(
-      `  1. Run ${colors.cyan}npm test${colors.reset} to run all tests in tests/`,
+      `\n  1. ${colors.cyan}npm test${colors.reset}  ${colors.dim}— runs example tests + contracts against ${baseUrl}${colors.reset}`,
     );
     console.log(
-      `  2. Run ${colors.cyan}npm run explore${colors.reset} to run explore/ tests`,
+      `  2. Edit ${colors.cyan}tests/api.test.ts${colors.reset} and ${colors.cyan}contracts/users.contract.ts${colors.reset} for your API`,
     );
     console.log(
-      `  3. Drop your OpenAPI spec in ${colors.cyan}context/${colors.reset} for AI-assisted test writing`,
+      `  3. Add your AI skill  ${colors.dim}(run once)${colors.reset}`,
     );
+    console.log(`     ${colors.bold}${colors.cyan}npx skills add glubean/skill${colors.reset}`);
+    console.log(`     ${colors.bold}${colors.cyan}npx add-mcp "npx -y @glubean/mcp@latest"${colors.reset}`);
     console.log(
-      `\n  ${colors.dim}Tip: install CLI globally for convenience:${colors.reset} ${colors.cyan}npm install -g @glubean/cli${colors.reset}\n`,
+      `\n  ${colors.dim}Want 35+ examples? git clone https://github.com/glubean/cookbook${colors.reset}\n`,
     );
   }
 }
@@ -1104,11 +1106,6 @@ const CONTRACT_FIRST_PACKAGE_JSON = (sdkVersion: string) =>
       dependencies: {
         "@glubean/sdk": sdkVersion,
         zod: "^4.0.0",
-      },
-      // Direct devDependency so package managers hoist runner to a probe-able
-      // node_modules/@glubean/runner. See makePackageJson() for the full
-      // single-sdk-instance rationale.
-      devDependencies: {
         "@glubean/runner": sdkVersion,
       },
     },
@@ -1132,11 +1129,6 @@ const DEMO_PACKAGE_JSON = (sdkVersion: string) =>
       },
       dependencies: {
         "@glubean/sdk": sdkVersion,
-      },
-      // Direct devDependency so package managers hoist runner to a probe-able
-      // node_modules/@glubean/runner. See makePackageJson() for the full
-      // single-sdk-instance rationale.
-      devDependencies: {
         "@glubean/runner": sdkVersion,
       },
     },

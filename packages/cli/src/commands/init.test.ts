@@ -35,47 +35,41 @@ test("init --no-interactive creates basic project files", async () => {
     const { code } = await runCli(["init", "--no-interactive"], { cwd: dir });
     expect(code).toBe(0);
 
-    // Check that basic files were created
+    // Check that the 8 minimal files were created
     expect(await fileExists(join(dir, "package.json"))).toBe(true);
+    expect(await fileExists(join(dir, "glubean.yaml"))).toBe(true);
     expect(await fileExists(join(dir, ".env"))).toBe(true);
     expect(await fileExists(join(dir, ".env.secrets"))).toBe(true);
     expect(await fileExists(join(dir, ".gitignore"))).toBe(true);
-    expect(await fileExists(join(dir, "glubean.setup.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "README.md"))).toBe(true);
-    expect(await fileExists(join(dir, "context/openapi.sample.json"))).toBe(true);
-    expect(await fileExists(join(dir, "tests/demo.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "tests/data-driven.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "tests/pick.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "data/create-user.json"))).toBe(true);
-    expect(await fileExists(join(dir, "data/search-examples.json"))).toBe(true);
     expect(await fileExists(join(dir, "GLUBEAN.md"))).toBe(true);
-    expect(await fileExists(join(dir, "local/README.md"))).toBe(true);
+    expect(await fileExists(join(dir, "tests/api.test.ts"))).toBe(true);
+    expect(await fileExists(join(dir, "contracts/users.contract.ts"))).toBe(true);
 
-    // Explore files
-    expect(await fileExists(join(dir, "explore/api.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "explore/search.test.ts"))).toBe(true);
-    expect(await fileExists(join(dir, "explore/auth.test.ts"))).toBe(true);
+    // Old heavy scaffold files must NOT be created
+    expect(await fileExists(join(dir, "glubean.setup.ts"))).toBe(false);
+    expect(await fileExists(join(dir, "README.md"))).toBe(false);
+    expect(await fileExists(join(dir, "context/openapi.sample.json"))).toBe(false);
+    expect(await fileExists(join(dir, "explore/api.test.ts"))).toBe(false);
 
     // Verify package.json content
     const pkgJson = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
     expect(pkgJson.dependencies?.["@glubean/sdk"]).toBeDefined();
-    // Runner must be a DIRECT devDependency so package managers (pnpm
-    // especially) hoist it to a probe-able node_modules/@glubean/runner —
-    // the VSCode extension loads the project-local runner from there to keep
-    // a single @glubean/sdk instance (configure() / ALS correctness).
-    expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeDefined();
-    expect(typeof pkgJson.scripts?.scan).toBe("string");
-    expect(typeof pkgJson.scripts?.["validate-metadata"]).toBe("string");
+    // Runner must be in dependencies (not devDependencies) so pnpm installs
+    // it under all environments including --prod, and the VSCode extension
+    // can probe node_modules/@glubean/runner for the project-local runner.
+    expect(pkgJson.dependencies?.["@glubean/runner"]).toBeDefined();
+    expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeUndefined();
+    expect(typeof pkgJson.scripts?.test).toBe("string");
+    expect(typeof pkgJson.scripts?.["test:ci"]).toBe("string");
 
     // Verify .env contains default base URL
     const envContent = await readFile(join(dir, ".env"), "utf-8");
     expect(envContent).toContain("https://dummyjson.com");
 
-    // Verify sample test uses builder API and ctx.http
-    const testContent = await readFile(join(dir, "tests/demo.test.ts"), "utf-8");
-    expect(testContent).toContain("ctx.http");
-    expect(testContent).toContain(".step(");
-    expect(testContent).not.toContain(".build()");
+    // Verify example test uses configure() + {{BASE_URL}} pattern
+    const testContent = await readFile(join(dir, "tests/api.test.ts"), "utf-8");
+    expect(testContent).toContain("configure(");
+    expect(testContent).toContain("{{BASE_URL}}");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -334,7 +328,8 @@ test("init --contract-first creates contract-first project", async () => {
     expect(pkgJson.scripts?.test).toBe("glubean run --profile local");
     expect(pkgJson.scripts?.["test:ci"]).toBe("glubean ci run");
     expect(pkgJson.dependencies?.zod).toBeDefined();
-    expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeDefined();
+    expect(pkgJson.dependencies?.["@glubean/runner"]).toBeDefined();
+    expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeUndefined();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
