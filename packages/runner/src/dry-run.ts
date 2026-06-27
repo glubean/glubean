@@ -170,12 +170,16 @@ function makeDryRunCtx() {
   };
 
   // Extract the URL/method from a ky input (string | URL | Request-like).
-  const urlOf = (input: unknown): string =>
-    typeof input === "string"
-      ? input
-      : input && typeof input === "object" && typeof (input as { url?: unknown }).url === "string"
-        ? (input as { url: string }).url
-        : "<dynamic>";
+  const urlOf = (input: unknown): string => {
+    if (typeof input === "string") return input;
+    if (input instanceof URL) return input.href;
+    if (input && typeof input === "object") {
+      const o = input as { url?: unknown; href?: unknown };
+      if (typeof o.url === "string") return o.url; // Request
+      if (typeof o.href === "string") return o.href; // URL-like
+    }
+    return "<dynamic>";
+  };
   const methodOf = (input: unknown, opts: unknown, fallback: string): string => {
     const fromOpts = (opts as { method?: unknown } | undefined)?.method;
     const fromReq = input && typeof input === "object" ? (input as { method?: unknown }).method : undefined;
@@ -248,7 +252,7 @@ function makeDryRunCtx() {
     entries: () => [] as [string, unknown][],
   };
 
-  const ctx = {
+  const ctxBase = {
     vars: accessor,
     secrets: accessor,
     session: accessor,
@@ -343,9 +347,22 @@ function makeDryRunCtx() {
         branchStack.pop();
       }
     },
-  } as unknown as TestContext;
+  } as unknown as Record<string | symbol, unknown>;
 
-  return { ctx, assertions, endpoints, http, record };
+  // Wrap so UNKNOWN properties resolve to a synthetic value instead of throwing.
+  // This covers `test.extend()` fixtures (e.g. `ctx.auth`) without replicating
+  // the harness's fixture resolution: the body runs and its shape is captured;
+  // fixture values are synthetic (projection doesn't need their real values).
+  const ctxProxy = new Proxy(ctxBase, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (prop === "then") return undefined;
+      if (typeof prop === "symbol") return undefined;
+      return makeSyntheticResponse();
+    },
+  }) as unknown as TestContext;
+
+  return { ctx: ctxProxy, assertions, endpoints, http, record };
 }
 
 /** Named-placeholder record so `configure()` var/secret reads resolve to

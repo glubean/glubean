@@ -250,6 +250,30 @@ vtest("projects env-based URLs with a named placeholder, not a numeric coercion"
   ]);
 });
 
+vtest("ctx.http accepts a URL object (projected by href)", async () => {
+  const t = glubeanTest("url-obj", async (ctx) => {
+    await ctx.http.get(new URL("https://api.test/x"));
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "https://api.test/x", branch: undefined },
+  ]);
+});
+
+vtest("unknown ctx properties (test.extend fixtures) resolve to synthetic, not throw", async () => {
+  const t = glubeanTest("fixture-ish", async (ctx) => {
+    // `ctx.auth` is not a base ctx member — a fixture would inject it. The proxy
+    // returns a synthetic value so the body projects instead of throwing.
+    const token = (ctx as unknown as { auth: { token: string } }).auth.token;
+    await ctx.http.get(`https://api.test/me?t=${token}`);
+    ctx.assert(true, "ok");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.projectionComplete).toBe(true);
+  expect(shape.assertionCount).toBe(1);
+  expect(shape.endpoints).toHaveLength(1);
+});
+
 vtest("dryRunTest captures raw global fetch and restores fetch afterwards", async () => {
   const before = globalThis.fetch;
   const t = glubeanTest("raw-direct", async (ctx) => {
