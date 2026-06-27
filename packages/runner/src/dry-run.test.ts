@@ -138,7 +138,7 @@ vtest("handles expect chaining: .not, .orFail(), and awaited async matcher", asy
   expect(shape.projectionComplete).toBe(true); // no hang (await), no throw (.orFail())
   expect(shape.assertions.map((a) => a.kind)).toEqual([
     "expect.toHaveStatus",
-    "expect.toBe",
+    "expect.not.toBe", // `.not.toBe(...)` records the negation
     "expect.toHaveJsonBody",
   ]);
 });
@@ -389,6 +389,20 @@ vtest("ctx.vars.all() destructuring resolves named placeholders", async () => {
   const shape = await dryRunTest(t, { exportName: "t" });
   expect(shape.endpoints).toEqual([
     { method: "GET", url: "<BASE_URL>/health", branch: undefined },
+  ]);
+});
+
+vtest("expect records negation and trailing labels (not the expected value)", async () => {
+  const t = glubeanTest("expect-semantics", async (ctx) => {
+    ctx.expect(500).not.toBe(500, "no server error");
+    ctx.expect("hello").toContain("ell"); // single string arg = expected, not a label
+    ctx.expect(200).toBe(200, "ok status");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.assertions).toEqual([
+    { kind: "expect.not.toBe", message: "no server error", branch: undefined },
+    { kind: "expect.toContain", message: undefined, branch: undefined },
+    { kind: "expect.toBe", message: "ok status", branch: undefined },
   ]);
 });
 

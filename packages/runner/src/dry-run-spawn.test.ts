@@ -101,6 +101,20 @@ vtest(
 );
 
 vtest(
+  "a completed projection returns promptly despite an open handle (no watchdog wait)",
+  async () => {
+    const held = resolve(testProject, "_dryrun_openhandle.fixture.ts");
+    const start = Date.now();
+    const res = await dryRunFiles([held], { cwd: testProject, timeoutMs: 8000 });
+    const elapsed = Date.now() - start;
+    expect(res.shapes.find((s) => s.testId === "open-handle")).toBeDefined();
+    // exited via process.exit(0) after projection, not killed at the 8s watchdog
+    expect(elapsed).toBeLessThan(6000);
+  },
+  20_000,
+);
+
+vtest(
   "parses the sentinel record even after user stdout without a trailing newline",
   async () => {
     const noisy = resolve(testProject, "_dryrun_noisy.fixture.ts");

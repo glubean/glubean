@@ -303,19 +303,28 @@ function makeDryRunCtx() {
   const http = makeHttp("");
 
   // ── expect: fluent recorder mirroring the real Expectation surface. ──
-  // `.not` is a getter modifier; `.orFail()` is a callable modifier (neither
-  // records). Async matchers (`await ctx.expect(res).toHaveJsonBody(...)`) work
-  // because `then` is absent — awaiting the chain yields the chain, not a hang.
+  // `.not` is a getter modifier (tracked → kind `expect.not.<matcher>`);
+  // `.orFail()` is a callable modifier. Async matchers
+  // (`await ctx.expect(res).toHaveJsonBody(...)`) work because `then` is absent.
   const makeExpect = () => {
+    let negated = false;
     const chain: any = new Proxy(function () {}, {
       get(_t, prop) {
         if (prop === "then") return undefined; // not thenable → await yields chain
         if (typeof prop === "symbol") return undefined;
-        if (prop === "not") return chain; // getter modifier: `.not.toBe(...)`
+        if (prop === "not") {
+          negated = true;
+          return chain;
+        }
         if (prop === "orFail") return () => chain; // callable modifier: `.orFail()`
-        return (..._args: unknown[]) => {
-          // matcher → record one assertion, return chain for further chaining
-          pushAssertion(`expect.${String(prop)}`);
+        return (...args: unknown[]) => {
+          // A trailing label is the LAST arg only when there's MORE than the
+          // matcher's value(s) — i.e. ≥2 args (`toBe(500, "no server error")`).
+          // A single string arg is the expected value (`toContain("ell")`).
+          const last = args[args.length - 1];
+          const message = args.length >= 2 && typeof last === "string" ? last : undefined;
+          pushAssertion(`expect.${negated ? "not." : ""}${String(prop)}`, message);
+          negated = false; // negation applies to one matcher
           return chain;
         };
       },

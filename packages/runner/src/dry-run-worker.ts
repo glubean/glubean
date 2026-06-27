@@ -129,8 +129,16 @@ const isEntry =
   !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isEntry) {
-  main().catch((err) => {
-    emit({ file: "", shapes: [], error: String(err) });
-    process.exitCode = 1;
-  });
+  main()
+    .then(() => {
+      // Exit explicitly once every record is emitted (writeSync already flushed
+      // them). Otherwise an open handle left by an imported module / setup (timer,
+      // mock server, DB pool) would keep the process alive until the parent's
+      // watchdog kills it — making a completed projection appear to hang.
+      process.exit(0);
+    })
+    .catch((err) => {
+      emit({ file: "", shapes: [], error: String(err) });
+      process.exit(1);
+    });
 }
