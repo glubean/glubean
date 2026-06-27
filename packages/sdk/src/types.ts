@@ -280,8 +280,9 @@ export interface SwitchCase {
    * short-circuiting would be lost.
    */
   when: () => boolean;
-  /** Body to run when this arm is selected. */
-  then: () => void | Promise<void>;
+  /** Body to run when this arm is selected. Return value is ignored (so concise
+   *  matcher bodies like `() => ctx.expect(res).toHaveStatus(200)` type-check). */
+  then: () => unknown;
   /**
    * Optional human label for the guard, surfaced in the dry-run projection
    * (e.g. `switch#0:case[1] (not found)`). The guard EXPRESSION itself can't be
@@ -798,8 +799,8 @@ export interface TestContext {
    */
   when(
     condition: boolean,
-    thenFn: () => void | Promise<void>,
-    elseFn?: () => void | Promise<void>,
+    thenFn: () => unknown,
+    elseFn?: () => unknown,
     describe?: string,
   ): Promise<void>;
 
@@ -834,7 +835,7 @@ export interface TestContext {
    */
   switch(
     cases: SwitchCase[],
-    defaultFn?: () => void | Promise<void>,
+    defaultFn?: () => unknown,
   ): Promise<void>;
 
   /**
@@ -870,7 +871,7 @@ export interface TestContext {
    */
   while(
     condition: () => boolean,
-    body: () => void | Promise<void>,
+    body: () => unknown,
     describe?: string,
   ): Promise<void>;
 

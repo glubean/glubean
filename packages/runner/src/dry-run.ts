@@ -124,9 +124,9 @@ function makeDryRunCtx() {
   const curBranch = (): string | undefined =>
     branchStack.length ? branchStack.join(">") : undefined;
 
-  const record = (method: string, url: unknown) => {
+  const record = (method: string, url: string) => {
     if (++reqCount > REQUEST_BUDGET) throw new DryRunBudgetExceeded();
-    endpoints.push({ method, url: typeof url === "string" ? url : "<dynamic>", branch: curBranch() });
+    endpoints.push({ method, url, branch: curBranch() });
     return responsePromise();
   };
 
@@ -134,15 +134,30 @@ function makeDryRunCtx() {
     assertions.push({ kind, message, branch: curBranch() });
   };
 
-  // ── http: callable (ky shorthand) + method shortcuts + extend ──
-  const http: any = (url: unknown) => record("GET", url);
-  http.get = (url: unknown) => record("GET", url);
-  http.post = (url: unknown) => record("POST", url);
-  http.put = (url: unknown) => record("PUT", url);
-  http.patch = (url: unknown) => record("PATCH", url);
-  http.delete = (url: unknown) => record("DELETE", url);
-  http.head = (url: unknown) => record("HEAD", url);
-  http.extend = () => http;
+  // Join a configured/extended prefixUrl with a request path the way ky does:
+  // prepend the prefix unless the path is already absolute. Keeps projected
+  // endpoints accurate for `configure({ http: { prefixUrl } })` / `.extend(...)`.
+  const joinUrl = (prefix: string, url: unknown): string => {
+    const u = typeof url === "string" ? url : "<dynamic>";
+    if (!prefix || /^[a-z][a-z0-9+.-]*:\/\//i.test(u)) return u;
+    return `${prefix.replace(/\/+$/, "")}/${u.replace(/^\/+/, "")}`;
+  };
+
+  // ── http: callable (ky shorthand) + method shortcuts + prefix-aware extend ──
+  const makeHttp = (prefix: string): any => {
+    const rec = (method: string, url: unknown) => record(method, joinUrl(prefix, url));
+    const h: any = (url: unknown) => rec("GET", url);
+    h.get = (url: unknown) => rec("GET", url);
+    h.post = (url: unknown) => rec("POST", url);
+    h.put = (url: unknown) => rec("PUT", url);
+    h.patch = (url: unknown) => rec("PATCH", url);
+    h.delete = (url: unknown) => rec("DELETE", url);
+    h.head = (url: unknown) => rec("HEAD", url);
+    h.extend = (opts?: { prefixUrl?: unknown }) =>
+      makeHttp(typeof opts?.prefixUrl === "string" ? opts.prefixUrl : prefix);
+    return h;
+  };
+  const http = makeHttp("");
 
   // ── expect: fluent recorder mirroring the real Expectation surface. ──
   // `.not` is a getter modifier; `.orFail()` is a callable modifier (neither

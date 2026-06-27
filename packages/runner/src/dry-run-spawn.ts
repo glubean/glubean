@@ -119,6 +119,7 @@ export async function dryRunFiles(
     const shapes: DryRunFilesResult["shapes"] = [];
     const errors: DryRunFilesResult["errors"] = [];
     const reported = new Set<string>();
+    let sawRecord = false;
 
     for (const raw of stdout.split("\n")) {
       if (!raw.startsWith(DRY_RUN_SENTINEL)) continue;
@@ -128,6 +129,7 @@ export async function dryRunFiles(
       } catch {
         continue; // ignore a truncated line (e.g. killed mid-write)
       }
+      sawRecord = true;
       if (rec.file) reported.add(rec.file);
       if (rec.shapes?.length) shapes.push(...rec.shapes);
       if (rec.error) errors.push({ file: rec.file, message: rec.error });
@@ -146,7 +148,10 @@ export async function dryRunFiles(
       if (errors.length === 0) {
         errors.push({ file: "", message: `dry-run timed out after ${timeoutMs}ms` });
       }
-    } else if (shapes.length === 0 && errors.length === 0) {
+    } else if (!sawRecord) {
+      // No sentinel line at all → the worker truly produced nothing (e.g. it
+      // crashed before its first emit). A file with only builder tests reports
+      // an empty-shapes record, which is a valid (non-error) result.
       errors.push({ file: "", message: "dry-run worker produced no output" });
     }
 

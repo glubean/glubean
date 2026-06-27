@@ -36,3 +36,14 @@ vtest(
   },
   20_000,
 );
+
+vtest(
+  "a builder-only file yields an empty projection, not a worker error",
+  async () => {
+    const builderOnly = resolve(testProject, "_dryrun_builder_only.fixture.ts");
+    const res = await dryRunFiles([builderOnly], { cwd: testProject });
+    expect(res.shapes).toEqual([]);
+    expect(res.errors).toEqual([]);
+  },
+  20_000,
+);

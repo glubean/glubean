@@ -210,18 +210,33 @@ vtest("describe annotates when/switch branch tags", async () => {
   ]);
 });
 
-vtest("projects tests that use configure({ http }) without throwing", async () => {
+vtest("projects configure({ http: { prefixUrl } }) with the resolved URL", async () => {
   const api = configure({ http: { prefixUrl: "https://api.test" } });
   const t = glubeanTest("configured", async (ctx) => {
     const res = await api.http.get("users");
     ctx.assert((res as { ok: boolean }).ok, "ok");
   });
   const shape = await dryRunTest(t, { exportName: "t" });
-  // The synthetic runtime carrier means configure() does NOT throw
-  // "can only be accessed during test execution".
+  // No "can only be accessed during test execution" throw, and the configured
+  // prefixUrl is resolved into the projected endpoint.
   expect(shape.projectionComplete).toBe(true);
-  expect(shape.endpoints.length).toBeGreaterThanOrEqual(1);
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "https://api.test/users", branch: undefined },
+  ]);
   expect(shape.assertionCount).toBe(1);
+});
+
+vtest("ctx.http.extend({ prefixUrl }) is reflected in projected endpoints", async () => {
+  const t = glubeanTest("extended", async (ctx) => {
+    const api = ctx.http.extend({ prefixUrl: "https://svc.test" });
+    await api.get("/health");
+    // concise matcher body — return value ignored, must still type-check
+    await ctx.when(true, () => ctx.expect(api).toBeDefined());
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "https://svc.test/health", branch: undefined },
+  ]);
 });
 
 vtest("projects env-based URLs with a named placeholder, not a numeric coercion", async () => {
