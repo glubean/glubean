@@ -21,8 +21,9 @@ glubean init                    # interactive wizard
 glubean run                     # run all tests in testDir
 glubean run path/to/file.test.ts
 glubean run --filter checkout --tag smoke
-glubean ci run --upload         # CI profile + push results to Cloud
-glubean migrate                 # preview v0.1.x -> v10 contract changes
+glubean run --profile ci --upload   # CI profile + push results to Cloud
+glubean load                    # discover and run *.load.ts plans
+glubean login                   # authenticate with Glubean Cloud
 ```
 
 See the full project README at the [repo root](../../README.md) for the broader Glubean story (SDK, MCP, agent workflow).
@@ -113,13 +114,44 @@ Verify that a previously generated `metadata.json` still matches the local files
 glubean validate-metadata metadata.json
 ```
 
+### `load [target]`
+
+Discover and run load plans (`*.load.ts`) in a project. Writes structured artifacts with latency histograms, over-time timelines, per-endpoint breakdowns, threshold evaluation, and failure/slow-transaction samples.
+
+```bash
+glubean load                        # discover all *.load.ts in the project
+glubean load tests/shop.load.ts     # run a specific load plan
+glubean load --upload               # run and push results to Cloud
+```
+
+Load plans are authored with `@glubean/sdk/load`:
+
+```ts
+// shop.load.ts
+import { loadRunner, loadScenario } from "@glubean/sdk/load";
+
+export default loadRunner({
+  scenarios: [
+    loadScenario("browse", { weight: 70, vus: 50, duration: "30s", fn: async (ctx) => {
+      await ctx.http.get("products").json();
+    }}),
+    loadScenario("checkout", { weight: 30, vus: 20, duration: "30s", fn: async (ctx) => {
+      await ctx.http.post("orders", { json: { item: "A" } }).json();
+    }}),
+  ],
+  thresholds: { "p95 < 500": true },
+});
+```
+
 ### `login`
 
-Authenticate with Glubean Cloud. Stores a token under `~/.glubean/`.
+Authenticate with Glubean Cloud via browser device authorization (RFC 8628). Opens your browser, polls for token confirmation, and stores the token under `~/.glubean/`.
 
 ```bash
 glubean login
 ```
+
+Alternatively, set `GLUBEAN_TOKEN` in your environment to skip the interactive flow (useful in CI).
 
 ### `patch <spec>`
 

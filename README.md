@@ -1,6 +1,6 @@
 # Glubean
 
-The verification layer between intent and implementation. Write tests in TypeScript, run locally or in CI, let AI agents write and repair them.
+API quality layer: functional correctness tests and load performance tests in the same TypeScript project, with AI agents that write, run, and repair them.
 
 [![npm version](https://img.shields.io/npm/v/@glubean/sdk)](https://www.npmjs.com/package/@glubean/sdk)
 [![CI](https://github.com/glubean/glubean/actions/workflows/publish.yml/badge.svg)](https://github.com/glubean/glubean/actions/workflows/publish.yml)
@@ -15,21 +15,24 @@ npx skills add glubean/skill   # AI agent learns Glubean patterns
 "write a smoke test for /users"
 "migrate our Postman collection"
 "design the billing API contracts before I build it"
+"run a load test and show me p95 latency per endpoint"
 ```
 
 The agent writes the test, runs it via MCP, reads the structured failure, fixes it, and reruns — in one conversation.
 
 ## Two ways to use it
 
-**API already exists?** Point the agent at your API. It writes tests that run, break, get repaired, and graduate from `explore/` to `tests/` to CI.
+**API already exists?** Point the agent at your API. It writes tests that run, break, get repaired, and graduate from `explore/` to `tests/` to CI. Add a load plan alongside to track performance over time.
 
-**API doesn't exist yet?** Describe what it should do. The agent writes executable contracts in `contracts/` — the implementation must satisfy them. After you build the API, the same contracts become your regression tests.
+**API doesn't exist yet?** Describe what it should do. The agent writes executable contracts in `contracts/` — the implementation must satisfy them. After you build the API, the same contracts become your regression tests and can seed load scenarios.
 
 ## Quick start
 
 ```bash
 npx glubean init      # interactive wizard: try, test existing API, or contract-first
 npx glubean run       # run tests
+npx glubean load      # run load plans (discover *.load.ts, write structured artifacts)
+npx glubean login     # authenticate with Glubean Cloud (browser device flow)
 ```
 
 Or with AI:
@@ -59,8 +62,10 @@ Same TypeScript file works as both API collection entry and CI regression test. 
 | Package | What it does |
 |---------|-------------|
 | [@glubean/sdk](packages/sdk) | Author tests — `test()`, `configure()`, assertions, builder flows |
-| [@glubean/cli](packages/cli) | Run tests, manage environments, init projects |
-| [@glubean/runner](packages/runner) | Test executor engine |
+| [@glubean/sdk/load](packages/sdk) | Author load plans — `loadScenario()`, `loadRunner()`, traffic-mix, feeders |
+| [@glubean/cli](packages/cli) | Run tests and load plans, manage environments, init projects |
+| [@glubean/engine](packages/engine) | Environment-agnostic run-loop core (Node runner + browser host) |
+| [@glubean/runner](packages/runner) | Test and load executor |
 | [@glubean/scanner](packages/scanner) | Static analysis for IDE integration |
 | [@glubean/mcp](packages/mcp) | MCP server — agents run and inspect tests |
 | [@glubean/redaction](packages/redaction) | Sensitive data redaction |
@@ -69,10 +74,11 @@ Same TypeScript file works as both API collection entry and CI regression test. 
 
 | Plugin | Protocol |
 |--------|----------|
-| [@glubean/auth](packages/auth) | Bearer, API key, OAuth |
+| [@glubean/auth](packages/auth) | Bearer, API key, OAuth 2.0 |
 | [@glubean/browser](packages/browser) | Browser automation (Puppeteer) |
 | [@glubean/graphql](packages/graphql) | GraphQL queries and mutations |
-| [@glubean/grpc](packages/grpc) | gRPC (coming soon) |
+| [@glubean/grpc](packages/grpc) | gRPC unary calls |
+| [@glubean/oauth-code](packages/oauth-code) | OAuth Authorization Code flow for explore mode |
 
 ## Links
 

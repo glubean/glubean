@@ -8,7 +8,7 @@
 ## Version Policy — LOCKSTEP
 All 13 published packages (core + plugins + the `glubean` meta CLI) share **ONE version**
 and are bumped **together** on every release — even packages that didn't change (currently
-`0.7.0`). Intra-repo deps stay `workspace:*`; **never hand-edit version ranges** (`pnpm
+`0.8.1`). Intra-repo deps stay `workspace:*`; **never hand-edit version ranges** (`pnpm
 publish` rewrites them). Publish is tag-gated (`v*`); pushing to `main` does NOT publish.
 
 > **Canonical policy + release steps + gotchas (NPM_TOKEN must be publish-capable, the
