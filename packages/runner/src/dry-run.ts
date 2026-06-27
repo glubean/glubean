@@ -134,7 +134,10 @@ export function installDryRunGlobals(): void {
         : input && typeof input === "object" && "url" in input
           ? String((input as { url: unknown }).url)
           : "<dynamic>";
-    const method = (init?.method ?? "GET").toUpperCase();
+    const rawMethod =
+      init?.method ??
+      (input && typeof input === "object" ? (input as { method?: unknown }).method : undefined);
+    const method = (typeof rawMethod === "string" ? rawMethod : "GET").toUpperCase();
     return (async () => {
       // May throw DryRunBudgetExceeded → rejects, breaking a raw-fetch loop.
       activeRawRecord?.(method, url);
@@ -166,25 +169,41 @@ function makeDryRunCtx() {
     assertions.push({ kind, message, branch: curBranch() });
   };
 
+  // Extract the URL/method from a ky input (string | URL | Request-like).
+  const urlOf = (input: unknown): string =>
+    typeof input === "string"
+      ? input
+      : input && typeof input === "object" && typeof (input as { url?: unknown }).url === "string"
+        ? (input as { url: string }).url
+        : "<dynamic>";
+  const methodOf = (input: unknown, opts: unknown, fallback: string): string => {
+    const fromOpts = (opts as { method?: unknown } | undefined)?.method;
+    const fromReq = input && typeof input === "object" ? (input as { method?: unknown }).method : undefined;
+    const m = typeof fromOpts === "string" ? fromOpts : typeof fromReq === "string" ? fromReq : undefined;
+    return m ? m.toUpperCase() : fallback;
+  };
+
   // Join a configured/extended prefixUrl with a request path the way ky does:
   // prepend the prefix unless the path is already absolute. Keeps projected
   // endpoints accurate for `configure({ http: { prefixUrl } })` / `.extend(...)`.
-  const joinUrl = (prefix: string, url: unknown): string => {
-    const u = typeof url === "string" ? url : "<dynamic>";
-    if (!prefix || /^[a-z][a-z0-9+.-]*:\/\//i.test(u)) return u;
-    return `${prefix.replace(/\/+$/, "")}/${u.replace(/^\/+/, "")}`;
+  const joinUrl = (prefix: string, url: string): string => {
+    if (!prefix || /^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return url;
+    return `${prefix.replace(/\/+$/, "")}/${url.replace(/^\/+/, "")}`;
   };
 
   // ── http: callable (ky shorthand) + method shortcuts + prefix-aware extend ──
   const makeHttp = (prefix: string): any => {
-    const rec = (method: string, url: unknown) => record(method, joinUrl(prefix, url));
-    const h: any = (url: unknown) => rec("GET", url);
-    h.get = (url: unknown) => rec("GET", url);
-    h.post = (url: unknown) => rec("POST", url);
-    h.put = (url: unknown) => rec("PUT", url);
-    h.patch = (url: unknown) => rec("PATCH", url);
-    h.delete = (url: unknown) => rec("DELETE", url);
-    h.head = (url: unknown) => rec("HEAD", url);
+    // method0 === null → derive from opts.method / Request.method (callable form);
+    // a fixed string → method shortcut (get/post/...).
+    const call = (method0: string | null, input: unknown, opts?: unknown) =>
+      record(method0 ?? methodOf(input, opts, "GET"), joinUrl(prefix, urlOf(input)));
+    const h: any = (input: unknown, opts?: unknown) => call(null, input, opts);
+    h.get = (input: unknown, opts?: unknown) => call("GET", input, opts);
+    h.post = (input: unknown, opts?: unknown) => call("POST", input, opts);
+    h.put = (input: unknown, opts?: unknown) => call("PUT", input, opts);
+    h.patch = (input: unknown, opts?: unknown) => call("PATCH", input, opts);
+    h.delete = (input: unknown, opts?: unknown) => call("DELETE", input, opts);
+    h.head = (input: unknown, opts?: unknown) => call("HEAD", input, opts);
     h.extend = (opts?: { prefixUrl?: unknown }) =>
       makeHttp(typeof opts?.prefixUrl === "string" ? opts.prefixUrl : prefix);
     return h;

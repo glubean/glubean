@@ -34,6 +34,8 @@ const __dirname = dirname(__filename);
 interface NodeRun {
   stdout: string;
   timedOut: boolean;
+  code: number | null;
+  signal: NodeJS.Signals | null;
 }
 
 /** Run a node subprocess, killing it if it exceeds `timeoutMs`. */
@@ -69,9 +71,9 @@ function runNode(
       clearTimeout(watchdog);
       reject(err);
     });
-    child.on("close", () => {
+    child.on("close", (code, signal) => {
       clearTimeout(watchdog);
-      resolveOut({ stdout, timedOut });
+      resolveOut({ stdout, timedOut, code, signal });
     });
   });
 }
@@ -114,7 +116,12 @@ export async function dryRunFiles(
   const zp = prepareZeroProject(cwd, distDir, pkgRoot);
   try {
     const args = [resolveTsxPath(), ...zp.tsxArgs, workerPath, ...files];
-    const { stdout, timedOut } = await runNode(args, cwd, { ...process.env, ...zp.env }, timeoutMs);
+    const { stdout, timedOut, code, signal } = await runNode(
+      args,
+      cwd,
+      { ...process.env, ...zp.env },
+      timeoutMs,
+    );
 
     const shapes: DryRunFilesResult["shapes"] = [];
     const errors: DryRunFilesResult["errors"] = [];
@@ -153,6 +160,20 @@ export async function dryRunFiles(
       // crashed before its first emit). A file with only builder tests reports
       // an empty-shapes record, which is a valid (non-error) result.
       errors.push({ file: "", message: "dry-run worker produced no output" });
+    } else if (signal || (code !== 0 && code !== null)) {
+      // Abnormal exit AFTER partial output (e.g. a module called process.exit()
+      // or the worker aborted). Don't silently drop the files it never reached.
+      const how = signal ? `signal ${signal}` : `code ${code}`;
+      let flagged = false;
+      for (const f of files) {
+        if (!reported.has(f)) {
+          errors.push({ file: f, message: `dry-run worker exited abnormally (${how}) before projecting this file` });
+          flagged = true;
+        }
+      }
+      if (!flagged) {
+        errors.push({ file: "", message: `dry-run worker exited abnormally (${how})` });
+      }
     }
 
     return { shapes, errors };

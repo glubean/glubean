@@ -49,6 +49,19 @@ vtest(
 );
 
 vtest(
+  "an abnormal worker exit after partial output flags the unreached file",
+  async () => {
+    const good = resolve(testProject, "hello.test.ts");
+    const boom = resolve(testProject, "_dryrun_exit.fixture.ts");
+    // `good` first so it streams before `boom` calls process.exit(1).
+    const res = await dryRunFiles([good, boom], { cwd: testProject, timeoutMs: 8000 });
+    // The unreached file is surfaced as an abnormal-exit error, not dropped.
+    expect(res.errors.some((e) => e.file === boom && /exited abnormally/.test(e.message))).toBe(true);
+  },
+  20_000,
+);
+
+vtest(
   "raw global fetch() is captured and hits no network (stubbed in the worker)",
   async () => {
     const rawFetch = resolve(testProject, "_dryrun_rawfetch.fixture.ts");

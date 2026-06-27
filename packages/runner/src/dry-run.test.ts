@@ -250,6 +250,18 @@ vtest("projects env-based URLs with a named placeholder, not a numeric coercion"
   ]);
 });
 
+vtest("ctx.http callable form honors the method option (not always GET)", async () => {
+  const t = glubeanTest("callable-post", async (ctx) => {
+    await ctx.http("https://api.test/users", { method: "POST" });
+    await ctx.http.get("https://api.test/users");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.endpoints).toEqual([
+    { method: "POST", url: "https://api.test/users", branch: undefined },
+    { method: "GET", url: "https://api.test/users", branch: undefined },
+  ]);
+});
+
 vtest("ctx.vars.all() destructuring resolves named placeholders", async () => {
   const t = glubeanTest("vars-all", async (ctx) => {
     const { BASE_URL } = ctx.vars.all() as { BASE_URL: string };
