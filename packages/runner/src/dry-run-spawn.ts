@@ -55,7 +55,7 @@ function collectProjectAliases(root: string, cap = 2000): string[] {
       if (scanned >= cap) return;
       if (e.isDirectory()) {
         if (!ALIAS_SKIP_DIRS.has(e.name) && !e.name.startsWith(".")) walk(resolve(dir, e.name));
-      } else if (e.isFile() && /\.(ts|tsx|mts|cts)$/.test(e.name) && !e.name.endsWith(".d.ts")) {
+      } else if (e.isFile() && /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(e.name) && !e.name.endsWith(".d.ts")) {
         scanned++;
         try {
           for (const a of extractAliasesFromSource(readFileSync(resolve(dir, e.name), "utf8"))) aliases.add(a);

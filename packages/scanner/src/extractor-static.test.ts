@@ -264,6 +264,25 @@ export const b = test("ternary-value", async (ctx) => {
   expect(extractFromSource(valueTernary)[0].bareBranchCount).toBeUndefined();
 });
 
+test("flags short-circuit assertion branches (||/&&) but not pure logical values (P2 dry-run)", () => {
+  const shortCircuit = `
+export const a = test("short-circuit", async (ctx) => {
+  const res = await ctx.http.get("/x");
+  res.ok || ctx.fail("bad");
+  res.status === 200 && ctx.assert(true, "ok");
+});
+`;
+  const valueLogical = `
+export const b = test("value-logical", async (ctx) => {
+  const res = await ctx.http.get("/x");
+  const name = res.body.name || "anon";
+  ctx.assert(!!name, "named");
+});
+`;
+  expect(extractFromSource(shortCircuit)[0].bareBranchCount).toBe(2); // || + &&
+  expect(extractFromSource(valueLogical)[0].bareBranchCount).toBeUndefined();
+});
+
 // =============================================================================
 // Builder pattern — string ID + .meta() + .step()
 // =============================================================================

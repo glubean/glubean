@@ -188,6 +188,14 @@ function countBareBranches(head: AnyNode): number {
       if (subtreeHasCall(node.consequent as AnyNode) || subtreeHasCall(node.alternate as AnyNode)) {
         count++;
       }
+    } else if (node.type === "LogicalExpression") {
+      // Short-circuit branch: `res.ok || ctx.fail(...)` / `cond && ctx.assert(...)`
+      // — the RIGHT side runs conditionally, so an action there is a branch the
+      // projector follows only one side of. A pure `a || b` (no call) is not.
+      const op = (node as { operator?: string }).operator;
+      if ((op === "&&" || op === "||" || op === "??") && subtreeHasCall(node.right as AnyNode)) {
+        count++;
+      }
     }
   });
   return count;
