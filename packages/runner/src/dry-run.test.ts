@@ -123,7 +123,24 @@ vtest("survives deep property access + for-of over a response", async () => {
   });
   const shape = await dryRunTest(t, { exportName: "t" });
   expect(shape.projectionComplete).toBe(true);
-  expect(shape.assertionCount).toBe(1); // for-of body never runs (empty synthetic iterator)
+  // for-of yields one representative item → body runs once: "deep ok" + "item id".
+  expect(shape.assertionCount).toBe(2);
+});
+
+vtest("handles expect chaining: .not, .orFail(), and awaited async matcher", async () => {
+  const t = glubeanTest("expect-chain", async (ctx) => {
+    const res = await ctx.http.get("https://api.test/x");
+    ctx.expect(res).toHaveStatus(200).orFail();
+    ctx.expect(res.status).not.toBe(500);
+    await ctx.expect(res).toHaveJsonBody({ ok: true });
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.projectionComplete).toBe(true); // no hang (await), no throw (.orFail())
+  expect(shape.assertions.map((a) => a.kind)).toEqual([
+    "expect.toHaveStatus",
+    "expect.toBe",
+    "expect.toHaveJsonBody",
+  ]);
 });
 
 vtest("folds scanner bareBranchCount into projectionComplete", async () => {

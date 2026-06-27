@@ -71,8 +71,17 @@ function makeSyntheticResponse(): any {
     get(_t, prop) {
       if (prop === "then") return undefined; // not thenable → await yields the proxy
       if (prop === Symbol.toPrimitive) return () => 0;
-      if (prop === Symbol.iterator) return function* () {};
-      if (prop === Symbol.asyncIterator) return async function* () {};
+      // Yield ONE representative item so `for (const x of body.items) { ... }`
+      // runs its body once and the in-loop assertions/endpoints are captured
+      // (not silently dropped). Single item keeps it finite.
+      if (prop === Symbol.iterator)
+        return function* () {
+          yield makeSyntheticResponse();
+        };
+      if (prop === Symbol.asyncIterator)
+        return async function* () {
+          yield makeSyntheticResponse();
+        };
       if (prop === "status") return 200;
       if (prop === "ok") return true;
       if (prop === "statusText") return "OK";
@@ -133,21 +142,27 @@ function makeDryRunCtx() {
   http.head = (url: unknown) => record("HEAD", url);
   http.extend = () => http;
 
-  // ── expect: fluent recorder. `.not`/`.orFail` are modifiers (no record). ──
+  // ── expect: fluent recorder mirroring the real Expectation surface. ──
+  // `.not` is a getter modifier; `.orFail()` is a callable modifier (neither
+  // records). Async matchers (`await ctx.expect(res).toHaveJsonBody(...)`) work
+  // because `then` is absent — awaiting the chain yields the chain, not a hang.
   const makeExpect = () => {
-    const chain: any = new Proxy(
-      {},
-      {
-        get(_t, prop) {
-          if (prop === "not" || prop === "orFail" || prop === "soft") return chain;
-          if (typeof prop === "symbol") return undefined;
-          return (..._args: unknown[]) => {
-            pushAssertion(`expect.${String(prop)}`);
-            return chain;
-          };
-        },
+    const chain: any = new Proxy(function () {}, {
+      get(_t, prop) {
+        if (prop === "then") return undefined; // not thenable → await yields chain
+        if (typeof prop === "symbol") return undefined;
+        if (prop === "not") return chain; // getter modifier: `.not.toBe(...)`
+        if (prop === "orFail") return () => chain; // callable modifier: `.orFail()`
+        return (..._args: unknown[]) => {
+          // matcher → record one assertion, return chain for further chaining
+          pushAssertion(`expect.${String(prop)}`);
+          return chain;
+        };
       },
-    );
+      apply() {
+        return chain;
+      },
+    });
     return chain;
   };
 
