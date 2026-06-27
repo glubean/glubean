@@ -14,6 +14,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { extractFromSource } from "@glubean/scanner";
+import { bootstrap } from "./bootstrap.js";
 import { dryRunTest, type TestShape } from "./dry-run.js";
 
 export const DRY_RUN_SENTINEL = "__GLUBEAN_DRYRUN__";
@@ -38,6 +39,16 @@ function emit(rec: DryRunFileResult): void {
 
 async function main(): Promise<void> {
   const files = process.argv.slice(2);
+
+  // Run project setup (glubean.setup.ts) first so plugin/matcher registrations
+  // are installed before user modules import — same as the harness/load paths.
+  // A setup failure is surfaced but doesn't abort: per-file imports still run
+  // (and will report their own errors if they depend on the missing setup).
+  try {
+    await bootstrap(process.cwd());
+  } catch (err) {
+    emit({ file: "", shapes: [], error: `setup (glubean.setup.ts) failed: ${(err as Error)?.message ?? String(err)}` });
+  }
 
   for (const file of files) {
     const shapes: DryRunFileResult["shapes"] = [];
