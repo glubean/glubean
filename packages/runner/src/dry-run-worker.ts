@@ -46,6 +46,23 @@ async function main(): Promise<void> {
   // even import-time or non-ctx I/O performs no real network call.
   installDryRunGlobals();
 
+  // Collect test.extend() aliases across ALL input files (union) up front, so an
+  // alias declared in one input file and used by another is still recognized
+  // when folding bareBranchCount. (Aliases imported from files OUTSIDE the input
+  // set are still covered by the CLI's full-project scan + fold.)
+  const srcByFile = new Map<string, string>();
+  const aliasSet = new Set<string>();
+  for (const f of files) {
+    try {
+      const s = readFileSync(f, "utf8");
+      srcByFile.set(f, s);
+      for (const a of extractAliasesFromSource(s)) aliasSet.add(a);
+    } catch {
+      /* unreadable file → its import below will report the error */
+    }
+  }
+  const aliases = [...aliasSet];
+
   // Run project setup (glubean.setup.ts) first so plugin/matcher registrations
   // are installed before user modules import — same as the harness/load paths.
   // A setup failure is surfaced but doesn't abort: per-file imports still run
@@ -64,10 +81,10 @@ async function main(): Promise<void> {
       // only when the CLI patches shapes after a separate scan().
       const bareByExport = new Map<string, number>();
       try {
-        const src = readFileSync(file, "utf8");
-        // Pass custom test.extend() aliases (as the scanner does) so aliased
-        // tests still get a bareBranchCount; extractFromSource merges BASE_FNS.
-        const aliases = extractAliasesFromSource(src);
+        const src = srcByFile.get(file) ?? readFileSync(file, "utf8");
+        // Pass the union of test.extend() aliases (as the scanner does) so
+        // aliased tests still get a bareBranchCount; extractFromSource merges
+        // BASE_FNS.
         for (const m of extractFromSource(src, aliases)) {
           if (m.bareBranchCount) bareByExport.set(m.exportName, m.bareBranchCount);
         }

@@ -167,7 +167,7 @@ let savedFetch: typeof fetch | undefined;
  * to route I/O through `ctx`.)
  */
 export function installDryRunGlobals(): () => void {
-  const g = globalThis as { fetch: typeof fetch; Response: typeof Response };
+  const g = globalThis as { fetch: typeof fetch };
   if (patchRefCount === 0) {
     savedFetch = g.fetch;
     g.fetch = ((input: unknown, init?: { method?: string }) => {
@@ -188,7 +188,9 @@ export function installDryRunGlobals(): () => void {
       return (async () => {
         // May throw DryRunBudgetExceeded → rejects, breaking a raw-fetch loop.
         rawRecordALS.getStore()?.(method, url);
-        return new g.Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        // Return the SAME deep synthetic as ctx.http so `await fetch(url).json()`
+        // and downstream `body.items.forEach(...)` / `body.user.id` project too.
+        return makeSyntheticResponse();
       })();
     }) as typeof fetch;
   }

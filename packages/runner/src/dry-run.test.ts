@@ -265,6 +265,20 @@ vtest("array helper callbacks (forEach/map) run once and capture assertions", as
   expect(shape.assertionCount).toBe(2);
 });
 
+vtest("raw fetch().json() body inspection projects (deep synthetic response)", async () => {
+  const before = globalThis.fetch;
+  const t = glubeanTest("raw-body", async (ctx) => {
+    const res = await fetch("https://api.test/list");
+    const body = (await res.json()) as { items: unknown[]; user: { id: string } };
+    body.items.forEach((item: any) => ctx.assert(item.id, "item id"));
+    ctx.assert(body.user.id, "user id"); // deep access must not throw
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.projectionComplete).toBe(true);
+  expect(shape.assertionCount).toBe(2);
+  expect(globalThis.fetch).toBe(before);
+});
+
 vtest("concurrent dryRunTest raw-fetch recording stays isolated (ALS)", async () => {
   const mk = (id: string, url: string) =>
     glubeanTest(id, async () => {
