@@ -289,6 +289,18 @@ vtest("ctx.http accepts a URL object (projected by href)", async () => {
   ]);
 });
 
+vtest("projects ky searchParams and per-request prefixUrl into the endpoint", async () => {
+  const t = glubeanTest("search-params", async (ctx) => {
+    await ctx.http.get("/users", { searchParams: { page: 1, q: "ab" } });
+    await ctx.http.get("items", { prefixUrl: "https://svc.test" });
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "/users?page=1&q=ab", branch: undefined },
+    { method: "GET", url: "https://svc.test/items", branch: undefined },
+  ]);
+});
+
 vtest("chainable .blob() projects without throwing", async () => {
   const t = glubeanTest("blob-chain", async (ctx) => {
     await ctx.http.get("https://api.test/file").blob();

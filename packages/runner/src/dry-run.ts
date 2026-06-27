@@ -254,12 +254,34 @@ function makeDryRunCtx() {
     return `${prefix.replace(/\/+$/, "")}/${url.replace(/^\/+/, "")}`;
   };
 
+  // Append ky `searchParams` (object | array | string | URLSearchParams) so the
+  // projected endpoint reflects the real query, like the runner's trace.
+  const applySearchParams = (url: string, sp: unknown): string => {
+    if (sp == null) return url;
+    let qs = "";
+    if (typeof sp === "string") qs = sp.replace(/^\?/, "");
+    else if (sp instanceof URLSearchParams) qs = sp.toString();
+    else if (typeof sp === "object") {
+      const pairs = Array.isArray(sp)
+        ? (sp as [unknown, unknown][]).map(([k, v]) => [String(k), String(v)] as [string, string])
+        : Object.entries(sp as Record<string, unknown>).map(([k, v]) => [k, String(v)] as [string, string]);
+      qs = new URLSearchParams(pairs).toString();
+    }
+    if (!qs) return url;
+    return url + (url.includes("?") ? "&" : "?") + qs;
+  };
+
   // ── http: callable (ky shorthand) + method shortcuts + prefix-aware extend ──
   const makeHttp = (prefix: string): any => {
     // method0 === null → derive from opts.method / Request.method (callable form);
     // a fixed string → method shortcut (get/post/...).
-    const call = (method0: string | null, input: unknown, opts?: unknown) =>
-      record(method0 ?? methodOf(input, opts, "GET"), joinUrl(prefix, urlOf(input)));
+    const call = (method0: string | null, input: unknown, opts?: unknown) => {
+      const o = opts as { method?: unknown; prefixUrl?: unknown; searchParams?: unknown } | undefined;
+      // A per-request prefixUrl overrides the client's prefix (ky semantics).
+      const effPrefix = typeof o?.prefixUrl === "string" ? o.prefixUrl : prefix;
+      const url = applySearchParams(joinUrl(effPrefix, urlOf(input)), o?.searchParams);
+      return record(method0 ?? methodOf(input, opts, "GET"), url);
+    };
     const h: any = (input: unknown, opts?: unknown) => call(null, input, opts);
     h.get = (input: unknown, opts?: unknown) => call("GET", input, opts);
     h.post = (input: unknown, opts?: unknown) => call("POST", input, opts);
