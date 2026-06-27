@@ -103,7 +103,8 @@ export async function dryRunFiles(
   let distDir = resolved.distDir;
   let pkgRoot = resolved.pkgRoot;
   let workerPath = resolve(distDir, "dry-run-worker.js");
-  if (!existsSync(workerPath)) {
+  const oldProjectRunner = resolved.source === "project" && !existsSync(workerPath);
+  if (oldProjectRunner) {
     // The resolved project runner predates dry-run support (has harness.js but
     // no dry-run-worker.js). Fall back to the bundled worker — mirrors the
     // load-harness fallback.
@@ -114,14 +115,18 @@ export async function dryRunFiles(
 
   const zp = prepareZeroProject(cwd, distDir, pkgRoot);
 
-  // Split-SDK guard: the worker (and its runWithRuntime carrier) runs from the
-  // BUNDLED runner+sdk whenever distDir is the bundled dir — either because we
-  // fell back above, OR because resolveRunnerRoot found no usable project runner.
-  // If the project ALSO ships its own @glubean/sdk (empty tsxArgs ⟺ no vendored
-  // redirect), user modules import the PROJECT sdk while the worker installs the
-  // carrier on the BUNDLED sdk, so configure()/carrier helpers throw. Fail with
-  // an upgrade hint instead of projecting incorrectly.
-  if (distDir === bundledDistDir && zp.tsxArgs.length === 0) {
+  // Split-SDK guard: the worker (+ its runWithRuntime carrier) runs from the
+  // BUNDLED runner — and thus the bundled @glubean/sdk — whenever resolveRunnerRoot
+  // had no usable PROJECT runner (`source === "bundled"`) or we fell back from an
+  // old project runner. If the project ALSO ships its own @glubean/sdk (empty
+  // tsxArgs ⟺ no vendored redirect), user modules import the PROJECT sdk while the
+  // worker installs the carrier on the BUNDLED sdk, so configure()/carrier helpers
+  // throw. Fail with an upgrade hint instead of projecting incorrectly. (A normal
+  // install where resolveRunnerRoot finds the project's own runner is `source ===
+  // "project"` and is NOT flagged, even if that runner is physically the bundled
+  // package.)
+  const workerFromBundled = resolved.source === "bundled" || oldProjectRunner;
+  if (workerFromBundled && zp.tsxArgs.length === 0) {
     zp.cleanup();
     return {
       shapes: [],

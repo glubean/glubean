@@ -325,7 +325,14 @@ function makeDryRunCtx() {
     action: () => {},
     event: () => {},
     metric: () => {},
-    skip: (_reason?: string): never => {
+    skip: (reason?: string): never => {
+      // A skip INSIDE a when/switch/while arm is branch-local: record it and
+      // continue so sibling arms still project (ctx.when is advertised as
+      // exhaustive). A top-level skip aborts the whole test as skipped.
+      if (branchStack.length > 0) {
+        pushAssertion("skip", reason);
+        return undefined as never;
+      }
       throw new DryRunSkip();
     },
     fail: (message?: string): never => {

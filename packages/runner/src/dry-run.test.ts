@@ -363,3 +363,20 @@ vtest("ctx.skip marks the shape skipped, not failed", async () => {
   expect(shape.skipped).toBe(true);
   expect(shape.projectionComplete).toBe(true);
 });
+
+vtest("ctx.skip inside a when arm is branch-local — sibling arm still projects", async () => {
+  const t = glubeanTest("branch-skip", async (ctx) => {
+    const res = await ctx.http.get("https://api.test/x");
+    await ctx.when(
+      res.status === 200,
+      () => ctx.skip("n/a in success"),
+      () => ctx.assert(true, "failure asserted"),
+    );
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.skipped).toBeUndefined(); // not a whole-test skip
+  expect(shape.assertions.map((a) => ({ kind: a.kind, branch: a.branch }))).toEqual([
+    { kind: "skip", branch: "when#0:then" },
+    { kind: "assert", branch: "when#0:else" },
+  ]);
+});
