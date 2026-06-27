@@ -841,7 +841,8 @@ const ctx = {
     defaultFn?: () => void | Promise<void>,
   ): Promise<void> => {
     for (const arm of cases) {
-      if (arm.when) {
+      // Lazy guard: first match wins and short-circuits — later guards never run.
+      if (arm.when()) {
         await arm.then();
         return;
       }

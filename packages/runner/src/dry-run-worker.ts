@@ -34,8 +34,13 @@ async function main(): Promise<void> {
     try {
       const mod = await import(pathToFileURL(file).href);
       for (const [exportName, val] of Object.entries(mod)) {
-        if (!isSimpleTest(val)) continue;
-        const shape = await dryRunTest(val as Parameters<typeof dryRunTest>[0], { exportName });
+        // `test.each(...)` / `test.pick(...)` export an ARRAY of simple Tests.
+        // Every row shares one fn body, so they share one shape — project the
+        // first row as the representative (avoids N duplicate shapes for large
+        // datasets) rather than dropping the export entirely.
+        const candidate = Array.isArray(val) ? val.find(isSimpleTest) : val;
+        if (!isSimpleTest(candidate)) continue;
+        const shape = await dryRunTest(candidate as Parameters<typeof dryRunTest>[0], { exportName });
         out.shapes.push({ file, ...shape });
       }
     } catch (err) {

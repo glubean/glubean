@@ -269,12 +269,17 @@ export interface SessionDefinition {
  */
 export interface SwitchCase {
   /**
-   * Guard expression. At runtime, arms are evaluated top-to-bottom and the
-   * first truthy `when` wins (others are skipped). Under cloud dry-run
-   * projection, the guard is NOT evaluated — every arm's `then` is recorded so
-   * reviewers see what each branch verifies.
+   * Guard, evaluated lazily. At runtime, arms are checked top-to-bottom and the
+   * first guard returning truthy wins — later guards are NOT called, preserving
+   * the short-circuit semantics of an `if/else if` chain (so a guard with side
+   * effects or that throws for another status never runs once an earlier arm
+   * matches). Under cloud dry-run projection, guards are NOT called at all —
+   * every arm's `then` is recorded so reviewers see what each branch verifies.
+   *
+   * It MUST be a function (`() => res.status === 200`), not a bare boolean, or
+   * short-circuiting would be lost.
    */
-  when: boolean;
+  when: () => boolean;
   /** Body to run when this arm is selected. */
   then: () => void | Promise<void>;
 }
@@ -806,9 +811,9 @@ export interface TestContext {
    * const res = await ctx.http.get(`${base}/orders/${id}`);
    * await ctx.switch(
    *   [
-   *     { when: res.status === 200, then: () => ctx.expect(res).toHaveStatus(200) },
-   *     { when: res.status === 404, then: () => ctx.expect(res).toHaveStatus(404) },
-   *     { when: res.status === 403, then: () => ctx.expect(res).toHaveStatus(403) },
+   *     { when: () => res.status === 200, then: () => ctx.expect(res).toHaveStatus(200) },
+   *     { when: () => res.status === 404, then: () => ctx.expect(res).toHaveStatus(404) },
+   *     { when: () => res.status === 403, then: () => ctx.expect(res).toHaveStatus(403) },
    *   ],
    *   () => ctx.fail(`unexpected status ${res.status}`),
    * );

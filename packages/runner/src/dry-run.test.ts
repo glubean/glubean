@@ -79,9 +79,9 @@ vtest("ctx.switch runs every case + default, tagged", async () => {
     const status = (res as { status: number }).status;
     await ctx.switch(
       [
-        { when: status === 200, then: () => ctx.assert(true, "ok") },
-        { when: status === 404, then: () => ctx.assert(true, "missing") },
-        { when: status === 403, then: () => ctx.assert(true, "forbidden") },
+        { when: () => status === 200, then: () => ctx.assert(true, "ok") },
+        { when: () => status === 404, then: () => ctx.assert(true, "missing") },
+        { when: () => status === 403, then: () => ctx.assert(true, "forbidden") },
       ],
       () => ctx.fail("unexpected"),
     );
@@ -142,6 +142,17 @@ vtest("marks builder tests as unsupported (simple tests only)", async () => {
   });
   expect(shape.projectionComplete).toBe(false);
   expect(shape.incompleteReason).toContain("simple test");
+});
+
+vtest("records ctx.validate as a schema assertion", async () => {
+  const t = glubeanTest("validates", async (ctx) => {
+    const res = await ctx.http.get("https://api.test/user");
+    const body = await res.json();
+    ctx.validate(body, {} as never, "user schema");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.assertionCount).toBe(1);
+  expect(shape.assertions[0]).toMatchObject({ kind: "validate", message: "user schema" });
 });
 
 vtest("ctx.skip marks the shape skipped, not failed", async () => {

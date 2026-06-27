@@ -8,6 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareZeroProject, resolveRunnerRoot, resolveTsxPath } from "./runner-resolve.js";
@@ -53,9 +54,20 @@ export async function dryRunFiles(
   const bundledDistDir = __dirname;
   const bundledPkgRoot = resolve(__dirname, "..");
   const resolved = resolveRunnerRoot(cwd, bundledDistDir, bundledPkgRoot);
-  const workerPath = resolve(resolved.distDir, "dry-run-worker.js");
+  let distDir = resolved.distDir;
+  let pkgRoot = resolved.pkgRoot;
+  let workerPath = resolve(distDir, "dry-run-worker.js");
+  if (!existsSync(workerPath)) {
+    // The resolved project runner predates dry-run support (has harness.js but
+    // no dry-run-worker.js). Fall back to the bundled worker so dry-run still
+    // works — mirrors the load-harness fallback. Upgrading the project's
+    // @glubean/runner restores shared module identity.
+    distDir = bundledDistDir;
+    pkgRoot = bundledPkgRoot;
+    workerPath = resolve(bundledDistDir, "dry-run-worker.js");
+  }
 
-  const zp = prepareZeroProject(cwd, resolved.distDir, resolved.pkgRoot);
+  const zp = prepareZeroProject(cwd, distDir, pkgRoot);
   try {
     const args = [resolveTsxPath(), ...zp.tsxArgs, workerPath, ...files];
     const stdout = await runNode(args, cwd, { ...process.env, ...zp.env });

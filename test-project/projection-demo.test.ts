@@ -28,8 +28,8 @@ export const order = test(
     const status = res.status;
     await ctx.switch(
       [
-        { when: status === 200, then: () => ctx.assert(true, "ok") },
-        { when: status === 404, then: () => ctx.assert(true, "missing") },
+        { when: () => status === 200, then: () => ctx.assert(true, "ok") },
+        { when: () => status === 404, then: () => ctx.assert(true, "missing") },
       ],
       () => ctx.fail("unexpected"),
     );
@@ -51,3 +51,13 @@ export const legacy = test(
     }
   },
 );
+
+// Data-driven export — `test.each` yields an array of simple Tests sharing one
+// fn body; dry-run projects the first row as the representative shape.
+export const byRegion = test.each([
+  { region: "us", base: "https://us.api.test" },
+  { region: "eu", base: "https://eu.api.test" },
+])({ id: "region-$region", description: "Health check per region." }, async (ctx, row) => {
+  const res = await ctx.http.get(`${row.base}/health`);
+  ctx.assert(res.ok, "healthy");
+});

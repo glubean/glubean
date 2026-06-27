@@ -168,7 +168,12 @@ function makeDryRunCtx() {
     warn: () => {},
     assert: (_cond: unknown, message?: string) => pushAssertion("assert", message),
     expect: () => makeExpect(),
-    validate: (data: unknown) => data,
+    validate: (data: unknown, _schema?: unknown, label?: unknown) => {
+      // Schema validation IS a verification — record it so schema-only tests
+      // don't project as having zero assertions.
+      pushAssertion("validate", typeof label === "string" ? label : undefined);
+      return data;
+    },
     trace: () => {},
     action: () => {},
     event: () => {},
