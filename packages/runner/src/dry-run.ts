@@ -16,6 +16,7 @@
  * partial when bare branches remain.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Test, TestContext, SwitchCase } from "@glubean/sdk";
 import { runWithRuntime, type InternalRuntime } from "@glubean/sdk/internal";
 
@@ -60,11 +61,26 @@ const REQUEST_BUDGET = 50;
 class DryRunBudgetExceeded extends Error {}
 class DryRunSkip extends Error {}
 
+/** Array helpers whose callback should run once (with a representative item)
+ *  so in-callback assertions/requests are captured, like the for-of path. */
+const ARRAY_CALLBACK_HELPERS = new Set([
+  "forEach",
+  "map",
+  "filter",
+  "some",
+  "every",
+  "find",
+  "findIndex",
+  "flatMap",
+  "reduce",
+  "reduceRight",
+]);
+
 /**
  * A value that survives arbitrary property access, calls, await, and iteration
  * so a test body can run to completion against it without throwing. Numeric/
- * string coercion yields 0/""; iteration yields nothing; `then` is absent so
- * awaiting it returns the proxy itself (not a hang).
+ * string coercion yields 0/""; iteration yields one representative item; `then`
+ * is absent so awaiting it returns the proxy itself (not a hang).
  */
 function makeSyntheticResponse(): any {
   const target = function () {};
@@ -90,6 +106,26 @@ function makeSyntheticResponse(): any {
       if (prop === "json" || prop === "text" || prop === "arrayBuffer" || prop === "blob") {
         return () => Promise.resolve(makeSyntheticResponse());
       }
+      // Array iteration helpers: invoke the callback ONCE with a representative
+      // item so assertions/requests inside `body.items.forEach(...)` / `.map(...)`
+      // are captured (mirrors the for-of path). Returns synthetic for chaining.
+      if (ARRAY_CALLBACK_HELPERS.has(prop as string)) {
+        return (cb: unknown, ..._rest: unknown[]) => {
+          if (typeof cb === "function") {
+            if (prop === "reduce" || prop === "reduceRight") {
+              (cb as (...a: unknown[]) => unknown)(
+                makeSyntheticResponse(),
+                makeSyntheticResponse(),
+                0,
+                makeSyntheticResponse(),
+              );
+            } else {
+              (cb as (...a: unknown[]) => unknown)(makeSyntheticResponse(), 0, makeSyntheticResponse());
+            }
+          }
+          return makeSyntheticResponse();
+        };
+      }
       return makeSyntheticResponse();
     },
     apply() {
@@ -111,39 +147,57 @@ function responsePromise(): any {
   return p;
 }
 
-// Sink for raw global `fetch()` calls (outside ctx.http). Set by dryRunTest to
-// the active test's endpoint recorder so a test that bypasses ctx.http still
-// (a) does NOT hit the network and (b) is captured + budget-bounded.
-let activeRawRecord: ((method: string, url: string) => void) | null = null;
+// Per-projection sink for raw global `fetch()` calls (outside ctx.http), carried
+// through AsyncLocalStorage so CONCURRENT dryRunTest() calls each record into
+// their own shape instead of a shared module slot.
+const rawRecordALS = new AsyncLocalStorage<(method: string, url: string) => void>();
+// Ref-count the global patch so concurrent/nested installs share one stub and
+// the real fetch is restored only when the last holder releases.
+let patchRefCount = 0;
+let savedFetch: typeof fetch | undefined;
 
 /**
  * Patch I/O globals so a dry-run never performs real network I/O even when a
- * test body bypasses `ctx.http` (e.g. raw `fetch`). Call once per worker before
- * importing user modules. Idempotent. (fs/db clients a test imports directly
- * can't be generically stubbed — authoring guidance is to route I/O through
- * `ctx`.)
+ * test body bypasses `ctx.http` (e.g. raw `fetch`). Raw fetches route into the
+ * ALS-carried recorder of the active projection. Returns a release function;
+ * the stub is removed when the last holder releases (ref-counted). The worker
+ * installs once before imports and never releases (process-wide). (fs/db clients
+ * a test imports directly can't be generically stubbed — authoring guidance is
+ * to route I/O through `ctx`.)
  */
-export function installDryRunGlobals(): void {
-  const g = globalThis as { __glubeanDryRunPatched?: boolean; fetch: typeof fetch; Response: typeof Response };
-  if (g.__glubeanDryRunPatched) return;
-  g.__glubeanDryRunPatched = true;
-  g.fetch = ((input: unknown, init?: { method?: string }) => {
-    const url =
-      typeof input === "string"
-        ? input
-        : input && typeof input === "object" && "url" in input
-          ? String((input as { url: unknown }).url)
-          : "<dynamic>";
-    const rawMethod =
-      init?.method ??
-      (input && typeof input === "object" ? (input as { method?: unknown }).method : undefined);
-    const method = (typeof rawMethod === "string" ? rawMethod : "GET").toUpperCase();
-    return (async () => {
-      // May throw DryRunBudgetExceeded → rejects, breaking a raw-fetch loop.
-      activeRawRecord?.(method, url);
-      return new g.Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-    })();
-  }) as typeof fetch;
+export function installDryRunGlobals(): () => void {
+  const g = globalThis as { fetch: typeof fetch; Response: typeof Response };
+  if (patchRefCount === 0) {
+    savedFetch = g.fetch;
+    g.fetch = ((input: unknown, init?: { method?: string }) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input && typeof input === "object" && "url" in input
+            ? String((input as { url: unknown }).url)
+            : "<dynamic>";
+      const rawMethod =
+        init?.method ??
+        (input && typeof input === "object" ? (input as { method?: unknown }).method : undefined);
+      const method = (typeof rawMethod === "string" ? rawMethod : "GET").toUpperCase();
+      return (async () => {
+        // May throw DryRunBudgetExceeded → rejects, breaking a raw-fetch loop.
+        rawRecordALS.getStore()?.(method, url);
+        return new g.Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      })();
+    }) as typeof fetch;
+  }
+  patchRefCount++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    patchRefCount--;
+    if (patchRefCount === 0 && savedFetch) {
+      g.fetch = savedFetch;
+      savedFetch = undefined;
+    }
+  };
 }
 
 /** Builds a recording TestContext plus a collector for what it recorded. */
@@ -425,23 +479,24 @@ export async function dryRunTest(
   } as unknown as InternalRuntime;
 
   // Install the raw-fetch stub for the direct dryRunTest() API too (the worker
-  // installs it permanently before imports; here we install around the body and
-  // restore after if WE were the one to install it, so a library consumer's
-  // global fetch isn't left patched). If already patched (worker path), leave it.
-  const g = globalThis as { fetch: typeof fetch; __glubeanDryRunPatched?: boolean };
-  const hadStub = g.__glubeanDryRunPatched === true;
-  const prevFetch = g.fetch;
-  installDryRunGlobals();
+  // installs it permanently before imports). Ref-counted: released in finally,
+  // restoring the real global fetch when no projection is still using it.
+  const releaseGlobals = installDryRunGlobals();
 
-  // Route raw global fetch() (if a body bypasses ctx.http) into this test's
-  // recorder while it runs — captured, budget-bounded, and never real network.
-  activeRawRecord = (method, url) => {
-    record(method, url);
-  };
+  // Route raw global fetch() (if a body bypasses ctx.http) into THIS test's
+  // recorder via ALS — captured, budget-bounded, never real network, and
+  // isolated from any concurrent projection.
   try {
-    await runWithRuntime(runtime, async () => {
-      await (test as unknown as { fn: (c: TestContext) => unknown }).fn(ctx);
-    });
+    await rawRecordALS.run(
+      (method, url) => {
+        record(method, url);
+      },
+      async () => {
+        await runWithRuntime(runtime, async () => {
+          await (test as unknown as { fn: (c: TestContext) => unknown }).fn(ctx);
+        });
+      },
+    );
   } catch (err) {
     if (err instanceof DryRunSkip) {
       skipped = true;
@@ -453,11 +508,7 @@ export async function dryRunTest(
       reason = `threw during projection: ${(err as Error)?.message ?? String(err)}`;
     }
   } finally {
-    activeRawRecord = null;
-    if (!hadStub) {
-      g.fetch = prevFetch;
-      g.__glubeanDryRunPatched = false;
-    }
+    releaseGlobals();
   }
 
   // Fold in the static signal: bare branches mean only one arm was followed.

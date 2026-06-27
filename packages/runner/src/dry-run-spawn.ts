@@ -180,19 +180,17 @@ export async function dryRunFiles(
       // crashed before its first emit). A file with only builder tests reports
       // an empty-shapes record, which is a valid (non-error) result.
       errors.push({ file: "", message: "dry-run worker produced no output" });
-    } else if (signal || (code !== 0 && code !== null)) {
-      // Abnormal exit AFTER partial output (e.g. a module called process.exit()
-      // or the worker aborted). Don't silently drop the files it never reached.
-      const how = signal ? `signal ${signal}` : `code ${code}`;
-      let flagged = false;
+    } else {
+      // The worker exited after partial output. ANY file it never reported is
+      // missing from the projection — flag it, regardless of the exit code. A
+      // clean early exit (a module calling process.exit(0)) is just as lossy as
+      // an abnormal one, since dry-run executes user modules.
+      const abnormal = signal ? `signal ${signal}` : code !== 0 && code !== null ? `code ${code}` : null;
+      const suffix = abnormal ? ` (worker exited with ${abnormal})` : " (worker exited early — a module likely called process.exit())";
       for (const f of files) {
         if (!reported.has(f)) {
-          errors.push({ file: f, message: `dry-run worker exited abnormally (${how}) before projecting this file` });
-          flagged = true;
+          errors.push({ file: f, message: `not projected${suffix}` });
         }
-      }
-      if (!flagged) {
-        errors.push({ file: "", message: `dry-run worker exited abnormally (${how})` });
       }
     }
 

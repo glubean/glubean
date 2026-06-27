@@ -250,6 +250,35 @@ vtest("projects env-based URLs with a named placeholder, not a numeric coercion"
   ]);
 });
 
+vtest("array helper callbacks (forEach/map) run once and capture assertions", async () => {
+  const t = glubeanTest("array-helpers", async (ctx) => {
+    const res = await ctx.http.get("https://api.test/list");
+    const body = (await res.json()) as { items: unknown[]; tags: unknown[] };
+    body.items.forEach((item: any) => {
+      ctx.assert(item.id, "item id");
+    });
+    body.tags.map((tag: unknown) => ctx.expect(tag).toBeDefined());
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.projectionComplete).toBe(true);
+  // forEach cb ran once (1 assert) + map cb ran once (1 expect)
+  expect(shape.assertionCount).toBe(2);
+});
+
+vtest("concurrent dryRunTest raw-fetch recording stays isolated (ALS)", async () => {
+  const mk = (id: string, url: string) =>
+    glubeanTest(id, async () => {
+      await fetch(url);
+    });
+  const [a, b] = await Promise.all([
+    dryRunTest(mk("a", "https://a.test/x"), { exportName: "a" }),
+    dryRunTest(mk("b", "https://b.test/y"), { exportName: "b" }),
+  ]);
+  expect(a.endpoints).toEqual([{ method: "GET", url: "https://a.test/x", branch: undefined }]);
+  expect(b.endpoints).toEqual([{ method: "GET", url: "https://b.test/y", branch: undefined }]);
+  expect(globalThis.fetch).toBeDefined(); // restored after both released
+});
+
 vtest("ctx.http accepts a URL object (projected by href)", async () => {
   const t = glubeanTest("url-obj", async (ctx) => {
     await ctx.http.get(new URL("https://api.test/x"));

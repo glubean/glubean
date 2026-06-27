@@ -49,16 +49,20 @@ vtest(
 );
 
 vtest(
-  "an abnormal worker exit after partial output flags the unreached file",
+  "a worker exit after partial output flags the unreached file (abnormal & clean)",
   async () => {
     const good = resolve(testProject, "hello.test.ts");
-    const boom = resolve(testProject, "_dryrun_exit.fixture.ts");
-    // `good` first so it streams before `boom` calls process.exit(1).
-    const res = await dryRunFiles([good, boom], { cwd: testProject, timeoutMs: 8000 });
-    // The unreached file is surfaced as an abnormal-exit error, not dropped.
-    expect(res.errors.some((e) => e.file === boom && /exited abnormally/.test(e.message))).toBe(true);
+    const boom = resolve(testProject, "_dryrun_exit.fixture.ts"); // process.exit(1)
+    const boom0 = resolve(testProject, "_dryrun_exit0.fixture.ts"); // process.exit(0)
+
+    const r1 = await dryRunFiles([good, boom], { cwd: testProject, timeoutMs: 8000 });
+    expect(r1.errors.some((e) => e.file === boom && /not projected/.test(e.message))).toBe(true);
+
+    // A CLEAN early exit (code 0) is just as lossy and must still be flagged.
+    const r2 = await dryRunFiles([good, boom0], { cwd: testProject, timeoutMs: 8000 });
+    expect(r2.errors.some((e) => e.file === boom0 && /not projected/.test(e.message))).toBe(true);
   },
-  20_000,
+  30_000,
 );
 
 vtest(

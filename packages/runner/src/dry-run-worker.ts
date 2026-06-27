@@ -11,7 +11,7 @@
  * isolates our payload from any `console.log` a test module emits at import.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { extractFromSource } from "@glubean/scanner";
 import { bootstrap } from "./bootstrap.js";
@@ -34,7 +34,9 @@ function isSimpleTest(v: unknown): boolean {
 }
 
 function emit(rec: DryRunFileResult): void {
-  process.stdout.write(DRY_RUN_SENTINEL + JSON.stringify(rec) + "\n");
+  // Synchronous write to fd 1 so a streamed line is flushed to the pipe even if
+  // a later file's body calls process.exit() before async stdout would drain.
+  writeSync(1, DRY_RUN_SENTINEL + JSON.stringify(rec) + "\n");
 }
 
 async function main(): Promise<void> {
