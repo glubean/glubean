@@ -129,15 +129,19 @@ function builderMeta(init: AnyNode): MetaFields {
 }
 
 /** Native control-flow node types the dry-run projector cannot fully capture:
- *  branches (only one arm is followed) and unbounded loops (spin to the request
- *  budget). `for…of` / `for…in` are EXCLUDED — the projector handles them by
- *  yielding one representative item. Authors should use ctx.when/switch/while. */
+ *  branches (only one arm is followed) and loops (spin to the request budget, or
+ *  enumerate nothing). `for…of` is EXCLUDED — the projector handles it by
+ *  yielding one representative item via Symbol.iterator. `for…in` IS counted:
+ *  it enumerates object KEYS (not the iterator), and the synthetic response has
+ *  no enumerable keys, so its body never runs. Authors should use
+ *  ctx.when/switch/while. */
 const BARE_CONTROL_FLOW = new Set([
   "IfStatement",
   "SwitchStatement",
   "WhileStatement",
   "DoWhileStatement",
   "ForStatement",
+  "ForInStatement",
 ]);
 
 /** True if `node`'s subtree contains a call expression. Used to flag a ternary

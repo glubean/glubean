@@ -227,6 +227,12 @@ export const c = test("for-of", async (ctx) => {
   for (const item of r.body.items) { ctx.assert(item.id, "id"); }
 });
 `;
+  const forIn = `
+export const e = test("for-in", async (ctx) => {
+  const r = await ctx.http.get("/p");
+  for (const k in r.body.items) { ctx.assert(k, "key"); }
+});
+`;
   const ctxWhile = `
 export const d = test("ctx-while", async (ctx) => {
   let more = true;
@@ -236,6 +242,7 @@ export const d = test("ctx-while", async (ctx) => {
   expect(extractFromSource(bareWhile)[0].bareBranchCount).toBe(1);
   expect(extractFromSource(bareFor)[0].bareBranchCount).toBe(1);
   expect(extractFromSource(forOf)[0].bareBranchCount).toBeUndefined(); // for-of handled by representative item
+  expect(extractFromSource(forIn)[0].bareBranchCount).toBe(1); // for-in enumerates keys → synthetic has none
   expect(extractFromSource(ctxWhile)[0].bareBranchCount).toBeUndefined(); // ctx.while is a call, not a loop node
 });
 
