@@ -23,3 +23,16 @@ vtest(
   },
   20_000,
 );
+
+vtest(
+  "public dryRunFiles folds bare branches into projectionComplete (no CLI patch)",
+  async () => {
+    const demo = resolve(testProject, "projection-demo.test.ts");
+    const res = await dryRunFiles([demo], { cwd: testProject });
+    const bare = res.shapes.find((s) => s.testId === "legacy-bare-if");
+    expect(bare).toBeDefined();
+    expect(bare!.projectionComplete).toBe(false);
+    expect(bare!.incompleteReason).toMatch(/bare branch\/loop/);
+  },
+  20_000,
+);

@@ -11,7 +11,9 @@
  * isolates our payload from any `console.log` a test module emits at import.
  */
 
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { extractFromSource } from "@glubean/scanner";
 import { dryRunTest, type TestShape } from "./dry-run.js";
 
 export const DRY_RUN_SENTINEL = "__GLUBEAN_DRYRUN__";
@@ -40,6 +42,18 @@ async function main(): Promise<void> {
   for (const file of files) {
     const shapes: DryRunFileResult["shapes"] = [];
     try {
+      // Static bare-branch counts per export (AST, no execution) so the public
+      // dryRunFiles() API folds them into projectionComplete on its own — not
+      // only when the CLI patches shapes after a separate scan().
+      const bareByExport = new Map<string, number>();
+      try {
+        for (const m of extractFromSource(readFileSync(file, "utf8"))) {
+          if (m.bareBranchCount) bareByExport.set(m.exportName, m.bareBranchCount);
+        }
+      } catch {
+        /* best-effort: a parse failure just means no static signal */
+      }
+
       const mod = await import(pathToFileURL(file).href);
       for (const [exportName, val] of Object.entries(mod)) {
         // `test.each(...)` / `test.pick(...)` export an ARRAY of simple Tests.
@@ -48,7 +62,10 @@ async function main(): Promise<void> {
         // datasets) rather than dropping the export entirely.
         const candidate = Array.isArray(val) ? val.find(isSimpleTest) : val;
         if (!isSimpleTest(candidate)) continue;
-        const shape = await dryRunTest(candidate as Parameters<typeof dryRunTest>[0], { exportName });
+        const shape = await dryRunTest(candidate as Parameters<typeof dryRunTest>[0], {
+          exportName,
+          bareBranchCount: bareByExport.get(exportName),
+        });
         shapes.push({ file, ...shape });
       }
       emit({ file, shapes });

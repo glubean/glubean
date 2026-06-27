@@ -210,6 +210,17 @@ vtest("describe annotates when/switch branch tags", async () => {
   ]);
 });
 
+vtest("projects env-based URLs with a named placeholder, not a numeric coercion", async () => {
+  const t = glubeanTest("env-url", async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    await ctx.http.get(`${base}/health`);
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "<BASE_URL>/health", branch: undefined },
+  ]);
+});
+
 vtest("records ctx.validate as a schema assertion", async () => {
   const t = glubeanTest("validates", async (ctx) => {
     const res = await ctx.http.get("https://api.test/user");

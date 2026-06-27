@@ -167,9 +167,13 @@ function makeDryRunCtx() {
     return chain;
   };
 
+  // vars/secrets/session are strings at runtime. Return a NAMED string
+  // placeholder so `${ctx.vars.require("BASE_URL")}/health` projects as
+  // `<BASE_URL>/health` (showing which env is used) instead of the numeric
+  // coercion of a synthetic proxy (`0/health`).
   const accessor = {
-    get: () => undefined,
-    require: () => makeSyntheticResponse(),
+    get: (key: string) => `<${key}>`,
+    require: (key: string) => `<${key}>`,
     all: () => ({}),
     set: () => {},
     entries: () => [] as [string, unknown][],
