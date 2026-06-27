@@ -11,9 +11,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { extractAliasesFromSource } from "@glubean/scanner";
 import { prepareZeroProject, resolveRunnerRoot, resolveTsxPath } from "./runner-resolve.js";
 import { DRY_RUN_SENTINEL, type DryRunFileResult } from "./dry-run-worker.js";
 import type { TestShape } from "./dry-run.js";
@@ -30,6 +31,43 @@ const KILL_GRACE_MS = 2_000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+const ALIAS_SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage", ".turbo"]);
+
+/**
+ * Collect test.extend() aliases across the whole project so the worker can fold
+ * bareBranchCount even for tests that import an alias from a helper file NOT in
+ * the dry-run input set. Bounded (skips heavy dirs, caps files) — alias scanning
+ * is a cheap regex, never executes user code.
+ */
+function collectProjectAliases(root: string, cap = 2000): string[] {
+  const aliases = new Set<string>();
+  let scanned = 0;
+  const walk = (dir: string): void => {
+    if (scanned >= cap) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (scanned >= cap) return;
+      if (e.isDirectory()) {
+        if (!ALIAS_SKIP_DIRS.has(e.name) && !e.name.startsWith(".")) walk(resolve(dir, e.name));
+      } else if (e.isFile() && /\.(ts|tsx|mts|cts)$/.test(e.name) && !e.name.endsWith(".d.ts")) {
+        scanned++;
+        try {
+          for (const a of extractAliasesFromSource(readFileSync(resolve(dir, e.name), "utf8"))) aliases.add(a);
+        } catch {
+          /* unreadable file → skip */
+        }
+      }
+    }
+  };
+  walk(root);
+  return [...aliases];
+}
 
 interface NodeRun {
   stdout: string;
@@ -142,12 +180,14 @@ export async function dryRunFiles(
 
   try {
     const args = [resolveTsxPath(), ...zp.tsxArgs, workerPath, ...files];
-    const { stdout, timedOut, code, signal } = await runNode(
-      args,
-      cwd,
-      { ...process.env, ...zp.env },
-      timeoutMs,
-    );
+    const env = {
+      ...process.env,
+      ...zp.env,
+      // Project-wide test.extend() aliases so the worker folds bareBranchCount
+      // even for aliases imported from helper files outside the input set.
+      GLUBEAN_DRYRUN_ALIASES: JSON.stringify(collectProjectAliases(cwd)),
+    };
+    const { stdout, timedOut, code, signal } = await runNode(args, cwd, env, timeoutMs);
 
     const shapes: DryRunFilesResult["shapes"] = [];
     const errors: DryRunFilesResult["errors"] = [];

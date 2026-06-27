@@ -52,6 +52,15 @@ async function main(): Promise<void> {
   // set are still covered by the CLI's full-project scan + fold.)
   const srcByFile = new Map<string, string>();
   const aliasSet = new Set<string>();
+  // Project-wide aliases collected by the spawn parent (covers helper files
+  // outside the input set), unioned with the input files' own aliases.
+  try {
+    for (const a of JSON.parse(process.env.GLUBEAN_DRYRUN_ALIASES ?? "[]") as string[]) {
+      if (typeof a === "string") aliasSet.add(a);
+    }
+  } catch {
+    /* malformed env → fall back to input-file aliases only */
+  }
   for (const f of files) {
     try {
       const s = readFileSync(f, "utf8");

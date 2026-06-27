@@ -86,6 +86,21 @@ vtest(
 );
 
 vtest(
+  "bareBranchCount folds for an alias IMPORTED from a helper outside the input set",
+  async () => {
+    const usesAlias = resolve(testProject, "_dryrun_uses_alias.fixture.ts");
+    // Only this file is passed — the helper defining `helperApi` is NOT. The
+    // project-wide alias scan must still pick it up.
+    const res = await dryRunFiles([usesAlias], { cwd: testProject, timeoutMs: 8000 });
+    const shape = res.shapes.find((s) => s.testId === "uses-alias");
+    expect(shape).toBeDefined();
+    expect(shape!.projectionComplete).toBe(false);
+    expect(shape!.incompleteReason).toMatch(/bare branch\/loop/);
+  },
+  20_000,
+);
+
+vtest(
   "raw global fetch() is captured and hits no network (stubbed in the worker)",
   async () => {
     const rawFetch = resolve(testProject, "_dryrun_rawfetch.fixture.ts");
