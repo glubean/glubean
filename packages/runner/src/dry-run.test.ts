@@ -250,6 +250,23 @@ vtest("projects env-based URLs with a named placeholder, not a numeric coercion"
   ]);
 });
 
+vtest("dryRunTest captures raw global fetch and restores fetch afterwards", async () => {
+  const before = globalThis.fetch;
+  const t = glubeanTest("raw-direct", async (ctx) => {
+    await fetch("https://api.test/raw");
+    ctx.assert(true, "fetched");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  // raw fetch captured (no real network — api.test is not a real host)
+  expect(shape.endpoints).toContainEqual({
+    method: "GET",
+    url: "https://api.test/raw",
+    branch: undefined,
+  });
+  // global fetch restored — the direct API doesn't leave the process patched
+  expect(globalThis.fetch).toBe(before);
+});
+
 vtest("ctx.http callable form honors the method option (not always GET)", async () => {
   const t = glubeanTest("callable-post", async (ctx) => {
     await ctx.http("https://api.test/users", { method: "POST" });

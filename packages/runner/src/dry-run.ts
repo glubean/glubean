@@ -407,6 +407,15 @@ export async function dryRunTest(
     log: () => {},
   } as unknown as InternalRuntime;
 
+  // Install the raw-fetch stub for the direct dryRunTest() API too (the worker
+  // installs it permanently before imports; here we install around the body and
+  // restore after if WE were the one to install it, so a library consumer's
+  // global fetch isn't left patched). If already patched (worker path), leave it.
+  const g = globalThis as { fetch: typeof fetch; __glubeanDryRunPatched?: boolean };
+  const hadStub = g.__glubeanDryRunPatched === true;
+  const prevFetch = g.fetch;
+  installDryRunGlobals();
+
   // Route raw global fetch() (if a body bypasses ctx.http) into this test's
   // recorder while it runs — captured, budget-bounded, and never real network.
   activeRawRecord = (method, url) => {
@@ -428,6 +437,10 @@ export async function dryRunTest(
     }
   } finally {
     activeRawRecord = null;
+    if (!hadStub) {
+      g.fetch = prevFetch;
+      g.__glubeanDryRunPatched = false;
+    }
   }
 
   // Fold in the static signal: bare branches mean only one arm was followed.

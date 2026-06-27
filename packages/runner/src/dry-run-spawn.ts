@@ -103,17 +103,37 @@ export async function dryRunFiles(
   let distDir = resolved.distDir;
   let pkgRoot = resolved.pkgRoot;
   let workerPath = resolve(distDir, "dry-run-worker.js");
-  if (!existsSync(workerPath)) {
+  const usedFallback = !existsSync(workerPath);
+  if (usedFallback) {
     // The resolved project runner predates dry-run support (has harness.js but
-    // no dry-run-worker.js). Fall back to the bundled worker so dry-run still
-    // works — mirrors the load-harness fallback. Upgrading the project's
-    // @glubean/runner restores shared module identity.
+    // no dry-run-worker.js). Fall back to the bundled worker — mirrors the
+    // load-harness fallback.
     distDir = bundledDistDir;
     pkgRoot = bundledPkgRoot;
     workerPath = resolve(bundledDistDir, "dry-run-worker.js");
   }
 
   const zp = prepareZeroProject(cwd, distDir, pkgRoot);
+
+  // Empty tsxArgs ⟺ the project ships its own @glubean/sdk (no vendored
+  // redirect). Combined with the bundled-worker fallback, that splits SDK
+  // runtime identity: user modules import the PROJECT sdk while the bundled
+  // worker's runWithRuntime uses the BUNDLED sdk carrier, so configure()/
+  // carrier helpers would throw. Fail with an upgrade hint instead.
+  if (usedFallback && zp.tsxArgs.length === 0) {
+    zp.cleanup();
+    return {
+      shapes: [],
+      errors: [
+        {
+          file: "",
+          message:
+            "dry-run needs @glubean/runner with dry-run support, but the project's installed @glubean/runner predates `glubean dry-run`. Upgrade @glubean/runner in this project.",
+        },
+      ],
+    };
+  }
+
   try {
     const args = [resolveTsxPath(), ...zp.tsxArgs, workerPath, ...files];
     const { stdout, timedOut, code, signal } = await runNode(
