@@ -61,8 +61,14 @@ vtest(
     // A CLEAN early exit (code 0) is just as lossy and must still be flagged.
     const r2 = await dryRunFiles([good, boom0], { cwd: testProject, timeoutMs: 8000 });
     expect(r2.errors.some((e) => e.file === boom0 && /not projected/.test(e.message))).toBe(true);
+
+    // A FIRST/only file that exits before any output is attributed by name,
+    // never a blank path.
+    const r3 = await dryRunFiles([boom], { cwd: testProject, timeoutMs: 8000 });
+    expect(r3.errors.some((e) => e.file === boom && /not projected/.test(e.message))).toBe(true);
+    expect(r3.errors.every((e) => e.file !== "")).toBe(true);
   },
-  30_000,
+  40_000,
 );
 
 vtest(

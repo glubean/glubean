@@ -103,8 +103,7 @@ export async function dryRunFiles(
   let distDir = resolved.distDir;
   let pkgRoot = resolved.pkgRoot;
   let workerPath = resolve(distDir, "dry-run-worker.js");
-  const usedFallback = !existsSync(workerPath);
-  if (usedFallback) {
+  if (!existsSync(workerPath)) {
     // The resolved project runner predates dry-run support (has harness.js but
     // no dry-run-worker.js). Fall back to the bundled worker — mirrors the
     // load-harness fallback.
@@ -115,12 +114,14 @@ export async function dryRunFiles(
 
   const zp = prepareZeroProject(cwd, distDir, pkgRoot);
 
-  // Empty tsxArgs ⟺ the project ships its own @glubean/sdk (no vendored
-  // redirect). Combined with the bundled-worker fallback, that splits SDK
-  // runtime identity: user modules import the PROJECT sdk while the bundled
-  // worker's runWithRuntime uses the BUNDLED sdk carrier, so configure()/
-  // carrier helpers would throw. Fail with an upgrade hint instead.
-  if (usedFallback && zp.tsxArgs.length === 0) {
+  // Split-SDK guard: the worker (and its runWithRuntime carrier) runs from the
+  // BUNDLED runner+sdk whenever distDir is the bundled dir — either because we
+  // fell back above, OR because resolveRunnerRoot found no usable project runner.
+  // If the project ALSO ships its own @glubean/sdk (empty tsxArgs ⟺ no vendored
+  // redirect), user modules import the PROJECT sdk while the worker installs the
+  // carrier on the BUNDLED sdk, so configure()/carrier helpers throw. Fail with
+  // an upgrade hint instead of projecting incorrectly.
+  if (distDir === bundledDistDir && zp.tsxArgs.length === 0) {
     zp.cleanup();
     return {
       shapes: [],
@@ -162,35 +163,25 @@ export async function dryRunFiles(
       if (rec.error) errors.push({ file: rec.file, message: rec.error });
     }
 
-    if (timedOut) {
-      // Any file that never reported is the (or a) culprit of the hang.
-      for (const f of files) {
-        if (!reported.has(f)) {
-          errors.push({
-            file: f,
-            message: `projection timed out after ${timeoutMs}ms (possible infinite loop or unintercepted async wait)`,
-          });
-        }
+    // Attribute every UNREPORTED file to a per-file error (never a blank path),
+    // so callers always know which projections are missing. A reported file —
+    // including a builder-only file that emits an empty-shapes record — is a
+    // valid result and is not flagged.
+    const unreported = files.filter((f) => !reported.has(f));
+    if (unreported.length > 0) {
+      let why: string;
+      if (timedOut) {
+        why = `projection timed out after ${timeoutMs}ms (possible infinite loop or unintercepted async wait)`;
+      } else {
+        const abnormal = signal ? `signal ${signal}` : code !== 0 && code !== null ? `code ${code}` : null;
+        why = abnormal
+          ? `worker exited with ${abnormal}`
+          : !sawRecord
+            ? "worker produced no output"
+            : "worker exited early (a module likely called process.exit())";
       }
-      if (errors.length === 0) {
-        errors.push({ file: "", message: `dry-run timed out after ${timeoutMs}ms` });
-      }
-    } else if (!sawRecord) {
-      // No sentinel line at all → the worker truly produced nothing (e.g. it
-      // crashed before its first emit). A file with only builder tests reports
-      // an empty-shapes record, which is a valid (non-error) result.
-      errors.push({ file: "", message: "dry-run worker produced no output" });
-    } else {
-      // The worker exited after partial output. ANY file it never reported is
-      // missing from the projection — flag it, regardless of the exit code. A
-      // clean early exit (a module calling process.exit(0)) is just as lossy as
-      // an abnormal one, since dry-run executes user modules.
-      const abnormal = signal ? `signal ${signal}` : code !== 0 && code !== null ? `code ${code}` : null;
-      const suffix = abnormal ? ` (worker exited with ${abnormal})` : " (worker exited early — a module likely called process.exit())";
-      for (const f of files) {
-        if (!reported.has(f)) {
-          errors.push({ file: f, message: `not projected${suffix}` });
-        }
+      for (const f of unreported) {
+        errors.push({ file: f, message: `not projected (${why})` });
       }
     }
 
