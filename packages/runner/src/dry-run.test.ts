@@ -149,7 +149,7 @@ vtest("folds scanner bareBranchCount into projectionComplete", async () => {
   });
   const shape = await dryRunTest(t, { exportName: "t", bareBranchCount: 2 });
   expect(shape.projectionComplete).toBe(false);
-  expect(shape.incompleteReason).toContain("bare if/switch");
+  expect(shape.incompleteReason).toContain("bare branch/loop");
 });
 
 vtest("marks builder tests as unsupported (simple tests only)", async () => {
@@ -159,6 +159,55 @@ vtest("marks builder tests as unsupported (simple tests only)", async () => {
   });
   expect(shape.projectionComplete).toBe(false);
   expect(shape.incompleteReason).toContain("simple test");
+});
+
+vtest("ctx.while projects the body once (representative iteration)", async () => {
+  const t = glubeanTest("paginate", async (ctx) => {
+    let more = true;
+    await ctx.while(
+      () => more,
+      async () => {
+        const res = await ctx.http.get("https://api.test/page");
+        const body = (await res.json()) as { hasMore: boolean };
+        ctx.assert(true, "page fetched");
+        more = body.hasMore;
+      },
+      "paginate",
+    );
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.projectionComplete).toBe(true); // body once, no budget spin
+  // exactly one GET + one assertion, both tagged with the described loop
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "https://api.test/page", branch: "while#0 (paginate)" },
+  ]);
+  expect(shape.assertions).toEqual([
+    { kind: "assert", message: "page fetched", branch: "while#0 (paginate)" },
+  ]);
+});
+
+vtest("describe annotates when/switch branch tags", async () => {
+  const t = glubeanTest("described", async (ctx) => {
+    const res = await ctx.http.get("https://api.test/x");
+    const status = res.status;
+    await ctx.when(
+      status === 200,
+      () => ctx.assert(true, "ok"),
+      () => ctx.assert(true, "bad"),
+      "request succeeds",
+    );
+    await ctx.switch([
+      { when: () => status === 404, then: () => ctx.assert(true, "nf"), describe: "not found" },
+      { when: () => status === 403, then: () => ctx.assert(true, "fb"), describe: "forbidden" },
+    ]);
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.assertions.map((a) => a.branch)).toEqual([
+    "when#0 (request succeeds):then",
+    "when#0 (request succeeds):else",
+    "switch#0:case[0] (not found)",
+    "switch#0:case[1] (forbidden)",
+  ]);
 });
 
 vtest("records ctx.validate as a schema assertion", async () => {

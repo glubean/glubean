@@ -282,6 +282,13 @@ export interface SwitchCase {
   when: () => boolean;
   /** Body to run when this arm is selected. */
   then: () => void | Promise<void>;
+  /**
+   * Optional human label for the guard, surfaced in the dry-run projection
+   * (e.g. `switch#0:case[1] (not found)`). The guard EXPRESSION itself can't be
+   * projected, so this is how reviewers learn what an arm represents. Ignored at
+   * runtime.
+   */
+  describe?: string;
 }
 
 /**
@@ -773,6 +780,10 @@ export interface TestContext {
    * @param condition Branch guard (evaluated normally at runtime).
    * @param thenFn Runs when `condition` is truthy.
    * @param elseFn Runs when `condition` is falsy (optional).
+   * @param describe Optional human label for the condition, surfaced in the
+   *   dry-run projection (the guard expression itself can't be projected). To
+   *   pass it without an else arm, use `undefined` for `elseFn`. Ignored at
+   *   runtime.
    *
    * @example Assert different shapes per outcome
    * ```ts
@@ -781,6 +792,7 @@ export interface TestContext {
    *   res.status === 200,
    *   async () => ctx.expect(await res.json()).toMatchObject({ token: expect.any(String) }),
    *   () => ctx.expect(res).toHaveStatus(401),
+   *   "login succeeds",
    * );
    * ```
    */
@@ -788,6 +800,7 @@ export interface TestContext {
     condition: boolean,
     thenFn: () => void | Promise<void>,
     elseFn?: () => void | Promise<void>,
+    describe?: string,
   ): Promise<void>;
 
   /**
@@ -822,6 +835,43 @@ export interface TestContext {
   switch(
     cases: SwitchCase[],
     defaultFn?: () => void | Promise<void>,
+  ): Promise<void>;
+
+  /**
+   * Declarative loop — at runtime exactly `while (condition()) await body();`.
+   * The guard is lazy (a function) so it is re-checked before each iteration.
+   *
+   * **Prefer `ctx.while()` over a bare `while`/`for` when the loop body makes
+   * assertions or requests** (e.g. pagination, "fetch until exhausted"). The
+   * cloud dry-run projector runs the body ONCE — a representative iteration —
+   * instead of spinning against the perpetually-truthy synthetic response, so
+   * reviewers see what each iteration verifies and the projection never stalls.
+   * Bare loops, by contrast, run to the projector's request budget and yield a
+   * partial projection full of duplicate endpoints.
+   *
+   * @param condition Re-checked before each iteration; the loop ends when falsy.
+   * @param body Runs once per iteration.
+   * @param describe Optional human label for the loop, surfaced in the dry-run
+   *   projection (e.g. `while#0 (paginate)`). Ignored at runtime.
+   *
+   * @example Paginate until exhausted
+   * ```ts
+   * let page = await ctx.http.get(`${base}/items`).json();
+   * const all = [...page.items];
+   * await ctx.while(
+   *   () => page.hasMore,
+   *   async () => {
+   *     page = await ctx.http.get(`${base}/items?cursor=${page.cursor}`).json();
+   *     all.push(...page.items);
+   *   },
+   *   "paginate items",
+   * );
+   * ```
+   */
+  while(
+    condition: () => boolean,
+    body: () => void | Promise<void>,
+    describe?: string,
   ): Promise<void>;
 
   /**

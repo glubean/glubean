@@ -128,15 +128,27 @@ function builderMeta(init: AnyNode): MetaFields {
   return obj ? parseMetaObject(obj) : {};
 }
 
+/** Native control-flow node types the dry-run projector cannot fully capture:
+ *  branches (only one arm is followed) and unbounded loops (spin to the request
+ *  budget). `for…of` / `for…in` are EXCLUDED — the projector handles them by
+ *  yielding one representative item. Authors should use ctx.when/switch/while. */
+const BARE_CONTROL_FLOW = new Set([
+  "IfStatement",
+  "SwitchStatement",
+  "WhileStatement",
+  "DoWhileStatement",
+  "ForStatement",
+]);
+
 /**
- * Count bare `if`/`switch` statements anywhere in a simple test's function
- * body. These are branches the cloud dry-run projector cannot fully capture
- * (it follows only one arm), so authors should prefer `ctx.when()` /
- * `ctx.switch()` — which the projector runs exhaustively. A body that branches
- * exclusively through `ctx.when`/`ctx.switch` has zero `IfStatement` /
- * `SwitchStatement` nodes and so counts 0 (fully projectable). The fn body is
- * the LAST argument of the head call (`test("id", fn)` / `test.each(d)(meta,
- * fn)`); a builder head (`test("id")`) has no fn arg and counts 0.
+ * Count bare control-flow statements (if/switch/while/do/for) anywhere in a
+ * simple test's function body. These can't be fully projected by cloud dry-run
+ * — branches follow only one arm; loops spin to the request budget — so authors
+ * should prefer `ctx.when()` / `ctx.switch()` / `ctx.while()`, which the
+ * projector handles exhaustively. A body that uses only those helpers has zero
+ * such nodes and counts 0 (fully projectable). The fn body is the LAST argument
+ * of the head call (`test("id", fn)` / `test.each(d)(meta, fn)`); a builder head
+ * (`test("id")`) has no fn arg and counts 0.
  */
 function countBareBranches(head: AnyNode): number {
   const args = (head.arguments as AnyNode[] | undefined) ?? [];
@@ -148,7 +160,7 @@ function countBareBranches(head: AnyNode): number {
   if (!body) return 0;
   let count = 0;
   walk(body, (node) => {
-    if (node.type === "IfStatement" || node.type === "SwitchStatement") count++;
+    if (BARE_CONTROL_FLOW.has(node.type as string)) count++;
   });
   return count;
 }

@@ -851,6 +851,19 @@ const ctx = {
   },
 
   /**
+   * Declarative loop — `while (condition()) await body();` (node parity). The
+   * cloud dry-run projector overrides this to run the body once.
+   */
+  while: async (
+    condition: () => boolean,
+    body: () => void | Promise<void>,
+  ): Promise<void> => {
+    while (condition()) {
+      await body();
+    }
+  },
+
+  /**
    * Set a custom timeout for the current test.
    * Note: This sends a timeout_update event to the runner.
    * The runner is responsible for enforcing the timeout.

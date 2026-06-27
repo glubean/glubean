@@ -4,8 +4,10 @@
  * resolve). Spawned by `dryRunFiles()` in dry-run-spawn.ts.
  *
  * argv: absolute test-file paths.
- * stdout: one line `__GLUBEAN_DRYRUN__<json>` with `{ shapes, errors }`, where
- * each shape carries its source `file` + `exportName`. The sentinel prefix
+ * stdout: ONE line per file `__GLUBEAN_DRYRUN__<json>` with
+ * `{ file, shapes, error? }`, streamed as each file completes. The streaming is
+ * deliberate: if a later file's body hangs and the parent's watchdog kills this
+ * process, the already-emitted files' projections survive. The sentinel prefix
  * isolates our payload from any `console.log` a test module emits at import.
  */
 
@@ -14,9 +16,11 @@ import { dryRunTest, type TestShape } from "./dry-run.js";
 
 export const DRY_RUN_SENTINEL = "__GLUBEAN_DRYRUN__";
 
-interface WorkerOutput {
+/** One streamed line: the projection of a single file. */
+export interface DryRunFileResult {
+  file: string;
   shapes: Array<TestShape & { file: string }>;
-  errors: Array<{ file: string; message: string }>;
+  error?: string;
 }
 
 /** Duck-type a simple Test object (`{ meta:{id}, type:"simple", fn }`). */
@@ -26,11 +30,15 @@ function isSimpleTest(v: unknown): boolean {
   return t.type === "simple" && typeof t.fn === "function" && typeof t.meta?.id === "string";
 }
 
+function emit(rec: DryRunFileResult): void {
+  process.stdout.write(DRY_RUN_SENTINEL + JSON.stringify(rec) + "\n");
+}
+
 async function main(): Promise<void> {
   const files = process.argv.slice(2);
-  const out: WorkerOutput = { shapes: [], errors: [] };
 
   for (const file of files) {
+    const shapes: DryRunFileResult["shapes"] = [];
     try {
       const mod = await import(pathToFileURL(file).href);
       for (const [exportName, val] of Object.entries(mod)) {
@@ -41,14 +49,13 @@ async function main(): Promise<void> {
         const candidate = Array.isArray(val) ? val.find(isSimpleTest) : val;
         if (!isSimpleTest(candidate)) continue;
         const shape = await dryRunTest(candidate as Parameters<typeof dryRunTest>[0], { exportName });
-        out.shapes.push({ file, ...shape });
+        shapes.push({ file, ...shape });
       }
+      emit({ file, shapes });
     } catch (err) {
-      out.errors.push({ file, message: (err as Error)?.message ?? String(err) });
+      emit({ file, shapes, error: (err as Error)?.message ?? String(err) });
     }
   }
-
-  process.stdout.write(DRY_RUN_SENTINEL + JSON.stringify(out) + "\n");
 }
 
 // Only run when invoked directly as the spawned entry — NOT when imported (e.g.
@@ -59,8 +66,7 @@ const isEntry =
 
 if (isEntry) {
   main().catch((err) => {
-    const out: WorkerOutput = { shapes: [], errors: [{ file: "", message: String(err) }] };
-    process.stdout.write(DRY_RUN_SENTINEL + JSON.stringify(out) + "\n");
+    emit({ file: "", shapes: [], error: String(err) });
     process.exitCode = 1;
   });
 }

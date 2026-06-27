@@ -86,7 +86,7 @@ export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise
     // was followed, so the shape is partial even if execution succeeded.
     if (projectionComplete && meta.bareBranchCount && meta.bareBranchCount > 0) {
       projectionComplete = false;
-      incompleteReason = `${meta.bareBranchCount} bare if/switch branch(es) — use ctx.when()/ctx.switch() for full projection`;
+      incompleteReason = `${meta.bareBranchCount} bare branch/loop(s) — use ctx.when()/ctx.switch()/ctx.while() for full projection`;
     }
     return {
       testId: s.testId,

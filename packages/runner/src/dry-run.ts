@@ -117,6 +117,7 @@ function makeDryRunCtx() {
   let reqCount = 0;
   let whenCounter = 0;
   let switchCounter = 0;
+  let whileCounter = 0;
   const branchStack: string[] = [];
 
   const curBranch = (): string | undefined =>
@@ -215,16 +216,18 @@ function makeDryRunCtx() {
       _condition: boolean,
       thenFn: () => void | Promise<void>,
       elseFn?: () => void | Promise<void>,
+      describe?: string,
     ): Promise<void> => {
-      const idx = whenCounter++;
-      branchStack.push(`when#${idx}:then`);
+      // describe (optional) annotates the opaque condition for reviewers.
+      const base = describe ? `when#${whenCounter++} (${describe})` : `when#${whenCounter++}`;
+      branchStack.push(`${base}:then`);
       try {
         await thenFn();
       } finally {
         branchStack.pop();
       }
       if (elseFn) {
-        branchStack.push(`when#${idx}:else`);
+        branchStack.push(`${base}:else`);
         try {
           await elseFn();
         } finally {
@@ -235,7 +238,8 @@ function makeDryRunCtx() {
     switch: async (cases: SwitchCase[], defaultFn?: () => void | Promise<void>): Promise<void> => {
       const idx = switchCounter++;
       for (let i = 0; i < cases.length; i++) {
-        branchStack.push(`switch#${idx}:case[${i}]`);
+        const d = cases[i].describe;
+        branchStack.push(`switch#${idx}:case[${i}]${d ? ` (${d})` : ""}`);
         try {
           await cases[i].then();
         } finally {
@@ -249,6 +253,21 @@ function makeDryRunCtx() {
         } finally {
           branchStack.pop();
         }
+      }
+    },
+    while: async (
+      _condition: () => boolean,
+      body: () => void | Promise<void>,
+      describe?: string,
+    ): Promise<void> => {
+      // Run the body ONCE — a representative iteration — instead of looping
+      // against the synthetic guard (which would spin to the request budget).
+      const idx = whileCounter++;
+      branchStack.push(describe ? `while#${idx} (${describe})` : `while#${idx}`);
+      try {
+        await body();
+      } finally {
+        branchStack.pop();
       }
     },
   } as unknown as TestContext;
@@ -309,7 +328,7 @@ export async function dryRunTest(
   // Fold in the static signal: bare branches mean only one arm was followed.
   if (complete && opts.bareBranchCount && opts.bareBranchCount > 0) {
     complete = false;
-    reason = `${opts.bareBranchCount} bare if/switch branch(es) — use ctx.when()/ctx.switch() for full projection`;
+    reason = `${opts.bareBranchCount} bare branch/loop(s) — use ctx.when()/ctx.switch()/ctx.while() for full projection`;
   }
 
   return {

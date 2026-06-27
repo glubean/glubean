@@ -17,6 +17,24 @@ export const login = test(
         ctx.expect(res).toBeDefined();
       },
       () => ctx.assert(true, "unauthorized"),
+      "login succeeds",
+    );
+  },
+);
+
+export const pages = test(
+  { id: "paginate-while", description: "Fetch all pages with ctx.while." },
+  async (ctx) => {
+    let more = true;
+    await ctx.while(
+      () => more,
+      async () => {
+        const res = await ctx.http.get("https://api.test/items");
+        const body = await res.json();
+        ctx.assert(Array.isArray(body.items), "page has items");
+        more = body.hasMore;
+      },
+      "until exhausted",
     );
   },
 );

@@ -169,6 +169,31 @@ describe("node parity — engine + real NodeHost over a local server", () => {
     expect(calls).toEqual(["g0"]);
   });
 
+  it("ctx.while: loops until the lazy guard is falsy (native while parity)", async () => {
+    const host = createNodeHost();
+    const engine = new RunnerCore(host.services);
+    const ns = {
+      t: test("while", async (ctx) => {
+        let n = 0;
+        await ctx.while(
+          () => n < 3,
+          async () => {
+            await ctx.http.get(`${base}/ping`);
+            n += 1;
+          },
+          "fetch thrice",
+        );
+        ctx.expect(n).toBe(3);
+      }),
+    };
+    const [def] = engine.resolve(ns);
+    const res = await engine.run(def!);
+    expect(res.status).toBe("ok");
+    expect(res.assertions).toEqual({ total: 1, passed: 1 });
+    // Body ran exactly three times (one trace per iteration).
+    expect(traceEvents(host.events)).toHaveLength(3);
+  });
+
   it("configure().http prefixUrl resolves against the server (prefixUrl→prefix)", async () => {
     const host = createNodeHost();
     const engine = new RunnerCore(host.services);

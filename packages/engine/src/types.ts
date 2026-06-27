@@ -331,6 +331,9 @@ export interface EngineContext {
   /** Multi-way branch — first truthy lazy guard wins and short-circuits, else `defaultFn`
    *  (node parity: harness ctx.switch). */
   switch(cases: SwitchCase[], defaultFn?: () => void | Promise<void>): Promise<void>;
+  /** Declarative loop — `while (condition()) await body();` (node parity: harness
+   *  ctx.while). The cloud dry-run projector runs the body once. */
+  while(condition: () => boolean, body: () => void | Promise<void>): Promise<void>;
   /** Skip the current test with an optional reason (node parity: throws a SkipError
    *  the run-loop turns into a `skipped` verdict; a step/branch-predicate skip skips
    *  the whole test unless a failure was already recorded). */

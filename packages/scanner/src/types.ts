@@ -73,13 +73,15 @@ export interface ExportMeta {
   /** Whether this test's .each() group allows parallel execution */
   parallel?: boolean;
   /**
-   * Count of bare `if`/`switch` statements in a simple test's function body.
-   * Bare branches can't be fully captured by cloud dry-run projection — the
-   * projector can only follow one arm of a native branch, so the other arm's
-   * assertions are invisible to reviewers. Authors should use
-   * `ctx.when()` / `ctx.switch()` so every arm projects. Absent/0 means the
-   * body has no native branching (fully projectable). Conservative: defensive
-   * guards count too — better to flag a partial projection than hide it.
+   * Count of bare control-flow statements (`if`/`switch`/`while`/`do`/`for`) in
+   * a simple test's function body. These can't be fully captured by cloud
+   * dry-run projection — branches follow only one arm; loops spin to the request
+   * budget — so the projection may be partial. Authors should use
+   * `ctx.when()` / `ctx.switch()` / `ctx.while()` so every arm/iteration
+   * projects. Absent/0 means the body has no native branching/looping (fully
+   * projectable). `for…of` / `for…in` are NOT counted (handled by a
+   * representative item). Conservative: defensive guards count too — better to
+   * flag a partial projection than hide it.
    */
   bareBranchCount?: number;
 }

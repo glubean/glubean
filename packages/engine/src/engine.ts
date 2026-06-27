@@ -1355,6 +1355,13 @@ export class RunnerCore {
         }
         if (defaultFn) await defaultFn();
       },
+      // ctx.while(cond, body) — `while (cond()) await body();` (node parity: harness
+      // ctx.while). The cloud dry-run projector overrides this to run body once.
+      while: async (condition: () => boolean, body: () => void | Promise<void>): Promise<void> => {
+        while (condition()) {
+          await body();
+        }
+      },
       // ctx.skip(reason?) — throws; the run-loop turns it into a `skipped` verdict.
       skip: (reason?: string): never => {
         throw new SkipError(reason);

@@ -209,6 +209,36 @@ export const c = test("declarative", async (ctx) => {
   expect(extractFromSource(declarative)[0].bareBranchCount).toBeUndefined();
 });
 
+test("flags bare loops (while/for) but not for-of or ctx.while (P2 dry-run)", () => {
+  const bareWhile = `
+export const a = test("bare-while", async (ctx) => {
+  let more = true;
+  while (more) { const r = await ctx.http.get("/p"); more = r.body.hasMore; }
+});
+`;
+  const bareFor = `
+export const b = test("bare-for", async (ctx) => {
+  for (let i = 0; i < 3; i++) { await ctx.http.get("/p"); }
+});
+`;
+  const forOf = `
+export const c = test("for-of", async (ctx) => {
+  const r = await ctx.http.get("/p");
+  for (const item of r.body.items) { ctx.assert(item.id, "id"); }
+});
+`;
+  const ctxWhile = `
+export const d = test("ctx-while", async (ctx) => {
+  let more = true;
+  await ctx.while(() => more, async () => { const r = await ctx.http.get("/p"); more = r.body.hasMore; });
+});
+`;
+  expect(extractFromSource(bareWhile)[0].bareBranchCount).toBe(1);
+  expect(extractFromSource(bareFor)[0].bareBranchCount).toBe(1);
+  expect(extractFromSource(forOf)[0].bareBranchCount).toBeUndefined(); // for-of handled by representative item
+  expect(extractFromSource(ctxWhile)[0].bareBranchCount).toBeUndefined(); // ctx.while is a call, not a loop node
+});
+
 // =============================================================================
 // Builder pattern — string ID + .meta() + .step()
 // =============================================================================
