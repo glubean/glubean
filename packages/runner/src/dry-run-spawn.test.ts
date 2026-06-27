@@ -101,6 +101,18 @@ vtest(
 );
 
 vtest(
+  "parses the sentinel record even after user stdout without a trailing newline",
+  async () => {
+    const noisy = resolve(testProject, "_dryrun_noisy.fixture.ts");
+    const res = await dryRunFiles([noisy], { cwd: testProject, timeoutMs: 8000 });
+    const shape = res.shapes.find((s) => s.testId === "noisy");
+    expect(shape).toBeDefined();
+    expect(shape!.assertionCount).toBe(1);
+  },
+  20_000,
+);
+
+vtest(
   "raw global fetch() is captured and hits no network (stubbed in the worker)",
   async () => {
     const rawFetch = resolve(testProject, "_dryrun_rawfetch.fixture.ts");

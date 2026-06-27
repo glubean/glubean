@@ -239,6 +239,24 @@ export const d = test("ctx-while", async (ctx) => {
   expect(extractFromSource(ctxWhile)[0].bareBranchCount).toBeUndefined(); // ctx.while is a call, not a loop node
 });
 
+test("flags a ternary whose arms assert, but not a pure value ternary (P2 dry-run)", () => {
+  const assertingTernary = `
+export const a = test("ternary-assert", async (ctx) => {
+  const res = await ctx.http.get("/x");
+  res.status === 200 ? ctx.assert(true, "ok") : ctx.assert(true, "no");
+});
+`;
+  const valueTernary = `
+export const b = test("ternary-value", async (ctx) => {
+  const res = await ctx.http.get("/x");
+  const label = res.status === 200 ? "ok" : "no";
+  ctx.assert(!!label, "labelled");
+});
+`;
+  expect(extractFromSource(assertingTernary)[0].bareBranchCount).toBe(1);
+  expect(extractFromSource(valueTernary)[0].bareBranchCount).toBeUndefined();
+});
+
 // =============================================================================
 // Builder pattern — string ID + .meta() + .step()
 // =============================================================================

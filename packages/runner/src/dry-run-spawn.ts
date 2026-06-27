@@ -194,13 +194,18 @@ export async function dryRunFiles(
     const reported = new Set<string>();
     let sawRecord = false;
 
-    for (const raw of stdout.split("\n")) {
-      if (!raw.startsWith(DRY_RUN_SENTINEL)) continue;
+    // Split on the sentinel rather than by line, so a record still parses when a
+    // user module wrote to stdout WITHOUT a trailing newline before it (the
+    // sentinel then sits mid-line). Each record is `SENTINEL{json}\n`.
+    const parts = stdout.split(DRY_RUN_SENTINEL);
+    for (let i = 1; i < parts.length; i++) {
+      const nl = parts[i].indexOf("\n");
+      const jsonStr = nl >= 0 ? parts[i].slice(0, nl) : parts[i];
       let rec: DryRunFileResult;
       try {
-        rec = JSON.parse(raw.slice(DRY_RUN_SENTINEL.length)) as DryRunFileResult;
+        rec = JSON.parse(jsonStr) as DryRunFileResult;
       } catch {
-        continue; // ignore a truncated line (e.g. killed mid-write)
+        continue; // truncated (e.g. killed mid-write) — skip
       }
       sawRecord = true;
       if (rec.file) reported.add(rec.file);

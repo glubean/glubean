@@ -140,6 +140,22 @@ const BARE_CONTROL_FLOW = new Set([
   "ForStatement",
 ]);
 
+/** True if `node`'s subtree contains a call expression. Used to flag a ternary
+ *  whose arms DO something (assert/request/etc.) — those branch the projection —
+ *  while ignoring pure value ternaries (`a ? 1 : 2`), which don't. */
+function subtreeHasCall(node: AnyNode | undefined): boolean {
+  if (!node) return false;
+  let found = false;
+  walk(node, (n) => {
+    if (found) return false; // prune once found
+    if (n.type === "CallExpression") {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+}
+
 /**
  * Count bare control-flow statements (if/switch/while/do/for) anywhere in a
  * simple test's function body. These can't be fully projected by cloud dry-run
@@ -160,7 +176,15 @@ function countBareBranches(head: AnyNode): number {
   if (!body) return 0;
   let count = 0;
   walk(body, (node) => {
-    if (BARE_CONTROL_FLOW.has(node.type as string)) count++;
+    if (BARE_CONTROL_FLOW.has(node.type as string)) {
+      count++;
+    } else if (node.type === "ConditionalExpression") {
+      // Ternary that DOES something in its arms (assert/request) branches the
+      // projection; a pure value ternary (`a ? 1 : 2`) does not.
+      if (subtreeHasCall(node.consequent as AnyNode) || subtreeHasCall(node.alternate as AnyNode)) {
+        count++;
+      }
+    }
   });
   return count;
 }
