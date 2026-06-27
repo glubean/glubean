@@ -111,6 +111,38 @@ function responsePromise(): any {
   return p;
 }
 
+// Sink for raw global `fetch()` calls (outside ctx.http). Set by dryRunTest to
+// the active test's endpoint recorder so a test that bypasses ctx.http still
+// (a) does NOT hit the network and (b) is captured + budget-bounded.
+let activeRawRecord: ((method: string, url: string) => void) | null = null;
+
+/**
+ * Patch I/O globals so a dry-run never performs real network I/O even when a
+ * test body bypasses `ctx.http` (e.g. raw `fetch`). Call once per worker before
+ * importing user modules. Idempotent. (fs/db clients a test imports directly
+ * can't be generically stubbed — authoring guidance is to route I/O through
+ * `ctx`.)
+ */
+export function installDryRunGlobals(): void {
+  const g = globalThis as { __glubeanDryRunPatched?: boolean; fetch: typeof fetch; Response: typeof Response };
+  if (g.__glubeanDryRunPatched) return;
+  g.__glubeanDryRunPatched = true;
+  g.fetch = ((input: unknown, init?: { method?: string }) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input && typeof input === "object" && "url" in input
+          ? String((input as { url: unknown }).url)
+          : "<dynamic>";
+    const method = (init?.method ?? "GET").toUpperCase();
+    return (async () => {
+      // May throw DryRunBudgetExceeded → rejects, breaking a raw-fetch loop.
+      activeRawRecord?.(method, url);
+      return new g.Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    })();
+  }) as typeof fetch;
+}
+
 /** Builds a recording TestContext plus a collector for what it recorded. */
 function makeDryRunCtx() {
   const assertions: ProjAssertion[] = [];
@@ -190,7 +222,9 @@ function makeDryRunCtx() {
   const accessor = {
     get: (key: string) => `<${key}>`,
     require: (key: string) => `<${key}>`,
-    all: () => ({}),
+    // Return the placeholder proxy so `const { BASE_URL } = ctx.vars.all()`
+    // resolves to `<BASE_URL>`, consistent with get()/require().
+    all: () => placeholderRecord(),
     set: () => {},
     entries: () => [] as [string, unknown][],
   };
@@ -292,7 +326,7 @@ function makeDryRunCtx() {
     },
   } as unknown as TestContext;
 
-  return { ctx, assertions, endpoints, http };
+  return { ctx, assertions, endpoints, http, record };
 }
 
 /** Named-placeholder record so `configure()` var/secret reads resolve to
@@ -334,7 +368,7 @@ export async function dryRunTest(
     };
   }
 
-  const { ctx, assertions, endpoints, http } = makeDryRunCtx();
+  const { ctx, assertions, endpoints, http, record } = makeDryRunCtx();
   let complete = true;
   let reason: string | undefined;
   let skipped = false;
@@ -354,6 +388,11 @@ export async function dryRunTest(
     log: () => {},
   } as unknown as InternalRuntime;
 
+  // Route raw global fetch() (if a body bypasses ctx.http) into this test's
+  // recorder while it runs — captured, budget-bounded, and never real network.
+  activeRawRecord = (method, url) => {
+    record(method, url);
+  };
   try {
     await runWithRuntime(runtime, async () => {
       await (test as unknown as { fn: (c: TestContext) => unknown }).fn(ctx);
@@ -368,6 +407,8 @@ export async function dryRunTest(
       complete = false;
       reason = `threw during projection: ${(err as Error)?.message ?? String(err)}`;
     }
+  } finally {
+    activeRawRecord = null;
   }
 
   // Fold in the static signal: bare branches mean only one arm was followed.

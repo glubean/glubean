@@ -250,6 +250,17 @@ vtest("projects env-based URLs with a named placeholder, not a numeric coercion"
   ]);
 });
 
+vtest("ctx.vars.all() destructuring resolves named placeholders", async () => {
+  const t = glubeanTest("vars-all", async (ctx) => {
+    const { BASE_URL } = ctx.vars.all() as { BASE_URL: string };
+    await ctx.http.get(`${BASE_URL}/health`);
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "<BASE_URL>/health", branch: undefined },
+  ]);
+});
+
 vtest("records ctx.validate as a schema assertion", async () => {
   const t = glubeanTest("validates", async (ctx) => {
     const res = await ctx.http.get("https://api.test/user");

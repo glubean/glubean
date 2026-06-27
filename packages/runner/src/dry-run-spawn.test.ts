@@ -47,3 +47,21 @@ vtest(
   },
   20_000,
 );
+
+vtest(
+  "raw global fetch() is captured and hits no network (stubbed in the worker)",
+  async () => {
+    const rawFetch = resolve(testProject, "_dryrun_rawfetch.fixture.ts");
+    // api.test is not a real host; if the stub failed this would error/hang.
+    const res = await dryRunFiles([rawFetch], { cwd: testProject, timeoutMs: 8000 });
+    const shape = res.shapes.find((s) => s.testId === "raw-fetch");
+    expect(shape).toBeDefined();
+    expect(shape!.projectionComplete).toBe(true);
+    expect(shape!.endpoints).toContainEqual({
+      method: "GET",
+      url: "https://api.test/raw",
+      branch: undefined,
+    });
+  },
+  20_000,
+);

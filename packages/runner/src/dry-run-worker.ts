@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { extractFromSource } from "@glubean/scanner";
 import { bootstrap } from "./bootstrap.js";
-import { dryRunTest, type TestShape } from "./dry-run.js";
+import { dryRunTest, installDryRunGlobals, type TestShape } from "./dry-run.js";
 
 export const DRY_RUN_SENTINEL = "__GLUBEAN_DRYRUN__";
 
@@ -39,6 +39,10 @@ function emit(rec: DryRunFileResult): void {
 
 async function main(): Promise<void> {
   const files = process.argv.slice(2);
+
+  // Neutralize raw I/O globals (e.g. fetch) BEFORE importing user modules, so
+  // even import-time or non-ctx I/O performs no real network call.
+  installDryRunGlobals();
 
   // Run project setup (glubean.setup.ts) first so plugin/matcher registrations
   // are installed before user modules import — same as the harness/load paths.
