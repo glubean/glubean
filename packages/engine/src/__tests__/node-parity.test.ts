@@ -113,6 +113,62 @@ describe("node parity — engine + real NodeHost over a local server", () => {
     expect(res.assertions).toEqual({ total: 1, passed: 0 });
   });
 
+  it("ctx.when: only the taken arm runs (if/else parity)", async () => {
+    const host = createNodeHost();
+    const engine = new RunnerCore(host.services);
+    const ns = {
+      t: test("when", async (ctx) => {
+        const r = (await ctx.http.get(`${base}/ping`).json()) as { path: string };
+        await ctx.when(
+          r.path === "/ping",
+          () => ctx.expect(r.path).toBe("/ping"),
+          () => ctx.expect(r.path).toBe("/never"),
+        );
+      }),
+    };
+    const [def] = engine.resolve(ns);
+    const res = await engine.run(def!);
+    expect(res.status).toBe("ok");
+    // Only the then-arm ran → exactly one (passing) assertion.
+    expect(res.assertions).toEqual({ total: 1, passed: 1 });
+  });
+
+  it("ctx.switch: first truthy lazy guard wins and short-circuits", async () => {
+    const host = createNodeHost();
+    const engine = new RunnerCore(host.services);
+    const calls: string[] = [];
+    const ns = {
+      t: test("switch", async (ctx) => {
+        const r = (await ctx.http.get(`${base}/ping`).json()) as { path: string };
+        await ctx.switch(
+          [
+            {
+              when: () => {
+                calls.push("g0");
+                return r.path === "/ping";
+              },
+              then: () => ctx.expect(r.path).toBe("/ping"),
+            },
+            {
+              when: () => {
+                calls.push("g1");
+                return true;
+              },
+              then: () => ctx.expect(r.path).toBe("/never"),
+            },
+          ],
+          () => ctx.expect(r.path).toBe("/default"),
+        );
+      }),
+    };
+    const [def] = engine.resolve(ns);
+    const res = await engine.run(def!);
+    expect(res.status).toBe("ok");
+    expect(res.assertions).toEqual({ total: 1, passed: 1 });
+    // Short-circuit: the second guard was never evaluated.
+    expect(calls).toEqual(["g0"]);
+  });
+
   it("configure().http prefixUrl resolves against the server (prefixUrl→prefix)", async () => {
     const host = createNodeHost();
     const engine = new RunnerCore(host.services);

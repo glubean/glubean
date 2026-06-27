@@ -18,7 +18,7 @@
  */
 import type { KyInstance, Options } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
-import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaIssue, SchemaLike, SwitchCase, Trace, ValidateOptions } from "@glubean/sdk";
 
 /** ky request options plus Glubean's retained public `prefixUrl` (the engine maps
  *  it to ky 2's `prefix` at the boundary) and the `schema` option for automatic
@@ -325,6 +325,12 @@ export interface EngineContext {
   /** Poll `fn` until it returns truthy or `timeoutMs` elapses; on timeout call
    *  `onTimeout` (silent) or throw (node parity: harness ctx.pollUntil). */
   pollUntil(options: PollUntilOptions, fn: () => Promise<boolean | unknown>): Promise<void>;
+  /** Two-way branch — only the taken arm runs (node parity: harness ctx.when). The
+   *  cloud dry-run projector overrides this to run both arms. */
+  when(condition: boolean, thenFn: () => void | Promise<void>, elseFn?: () => void | Promise<void>): Promise<void>;
+  /** Multi-way branch — first truthy lazy guard wins and short-circuits, else `defaultFn`
+   *  (node parity: harness ctx.switch). */
+  switch(cases: SwitchCase[], defaultFn?: () => void | Promise<void>): Promise<void>;
   /** Skip the current test with an optional reason (node parity: throws a SkipError
    *  the run-loop turns into a `skipped` verdict; a step/branch-predicate skip skips
    *  the whole test unless a failure was already recorded). */

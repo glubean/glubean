@@ -18,7 +18,7 @@
 import ky, { type KyInstance } from "ky";
 import { captureRequestBody, inferJsonSchema, truncateBody, truncateDeep } from "./http-trace.js";
 import { Expectation } from "@glubean/sdk";
-import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaEntry, SchemaIssue, SchemaLike, Trace, ValidateOptions } from "@glubean/sdk";
+import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaEntry, SchemaIssue, SchemaLike, SwitchCase, Trace, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
@@ -1328,6 +1328,32 @@ export class RunnerCore {
           return;
         }
         throw new Error(`pollUntil timed out after ${timeoutMs}ms${lastError ? `: ${lastError.message}` : ""}`);
+      },
+      // ctx.when(cond, thenFn, elseFn?) — two-way branch; only the taken arm runs
+      // (node parity: harness.ts). The cloud dry-run projector overrides this to
+      // run both arms; here it is exactly an if/else.
+      when: async (
+        condition: boolean,
+        thenFn: () => void | Promise<void>,
+        elseFn?: () => void | Promise<void>,
+      ): Promise<void> => {
+        if (condition) {
+          await thenFn();
+        } else if (elseFn) {
+          await elseFn();
+        }
+      },
+      // ctx.switch(cases, defaultFn?) — multi-way branch; first truthy lazy guard
+      // wins and short-circuits (later guards never run), else defaultFn. Equivalent
+      // to an if/else if chain (node parity: harness.ts).
+      switch: async (cases: SwitchCase[], defaultFn?: () => void | Promise<void>): Promise<void> => {
+        for (const arm of cases) {
+          if (arm.when()) {
+            await arm.then();
+            return;
+          }
+        }
+        if (defaultFn) await defaultFn();
       },
       // ctx.skip(reason?) — throws; the run-loop turns it into a `skipped` verdict.
       skip: (reason?: string): never => {
