@@ -144,6 +144,7 @@ function responsePromise(): any {
   p.json = () => Promise.resolve(makeSyntheticResponse());
   p.text = () => Promise.resolve(makeSyntheticResponse());
   p.arrayBuffer = () => Promise.resolve(makeSyntheticResponse());
+  p.blob = () => Promise.resolve(makeSyntheticResponse());
   return p;
 }
 
@@ -173,9 +174,13 @@ export function installDryRunGlobals(): () => void {
       const url =
         typeof input === "string"
           ? input
-          : input && typeof input === "object" && "url" in input
-            ? String((input as { url: unknown }).url)
-            : "<dynamic>";
+          : input instanceof URL
+            ? input.href
+            : input && typeof input === "object" && typeof (input as { url?: unknown }).url === "string"
+              ? (input as { url: string }).url
+              : input && typeof input === "object" && typeof (input as { href?: unknown }).href === "string"
+                ? (input as { href: string }).href
+                : "<dynamic>";
       const rawMethod =
         init?.method ??
         (input && typeof input === "object" ? (input as { method?: unknown }).method : undefined);

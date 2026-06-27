@@ -289,6 +289,18 @@ vtest("ctx.http accepts a URL object (projected by href)", async () => {
   ]);
 });
 
+vtest("chainable .blob() projects without throwing", async () => {
+  const t = glubeanTest("blob-chain", async (ctx) => {
+    await ctx.http.get("https://api.test/file").blob();
+    ctx.assert(true, "downloaded");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.projectionComplete).toBe(true);
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "https://api.test/file", branch: undefined },
+  ]);
+});
+
 vtest("unknown ctx properties (test.extend fixtures) resolve to synthetic, not throw", async () => {
   const t = glubeanTest("fixture-ish", async (ctx) => {
     // `ctx.auth` is not a base ctx member — a fixture would inject it. The proxy
