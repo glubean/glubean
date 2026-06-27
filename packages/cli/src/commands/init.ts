@@ -489,21 +489,35 @@ node_modules/
 
 const GLUBEAN_MD_TEMPLATE = `# Project Test Conventions
 
-<!-- This file is read by the Glubean AI skill before generating tests. -->
-<!-- Customize it to teach the AI your project's specific patterns. -->
-<!-- Run \`npx skills add glubean/skill\` to install/update the AI skill. -->
+<!-- This file is read by the Glubean AI skill before generating tests.    -->
+<!-- Fill in the sections below. The more context you add, the better the  -->
+<!-- generated tests will be — especially Business Rules and API Reference. -->
 
 ## Auth
-<!-- How should tests authenticate? e.g. "Use OAuth2 client credentials via configure()" -->
+<!-- How tests should authenticate. e.g.:
+     "Bearer token — put API_KEY in .env.secrets, use configure({ http: { headers: { Authorization: 'Bearer {{API_KEY}}' } } })"
+     "No auth — public API"
+     "Session cookie — use session-auth pattern, see patterns/session-auth.md" -->
+
+## API Reference
+<!-- Where the API surface is defined. Pick one or more:
+     - OpenAPI spec: "context/openapi.json — run \`glubean spec split\` to index it"
+     - Route handlers: "view ../src/routes/" or specific files like "view ../src/routes/users.ts"
+     - Markdown docs: "context/api-reference.md"
+     Leave empty if you have no docs yet — the agent will discover by running a trace. -->
+
+## Business Rules
+<!-- The rules and invariants tests should verify. e.g.:
+     - Only admins can create or delete users. Non-admin returns 403.
+     - Email must be unique. Duplicate returns 409.
+     - Soft-delete only: GET /users/:id still works after DELETE, but list excludes them.
+     Leave empty if none yet — add rules here as you discover them. -->
 
 ## Naming
-<!-- e.g. "All test IDs start with the service name: user-xxx, order-xxx" -->
+<!-- e.g. "Test IDs: {resource}-{action}, e.g. user-create, order-list" -->
 
 ## Tags
-<!-- e.g. "Always include team tag: team:payments" -->
-
-## Structure
-<!-- e.g. "Shared clients go in config/, tests in tests/{service}/" -->
+<!-- e.g. "Always tag with team: team:payments" -->
 
 ## Notes
 <!-- Any other conventions the AI should follow -->
