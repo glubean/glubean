@@ -427,6 +427,32 @@ vtest("ctx.skip marks the shape skipped, not failed", async () => {
   expect(shape.projectionComplete).toBe(true);
 });
 
+vtest("ctx.fail aborts the rest of its arm but sibling arms still project", async () => {
+  const t = glubeanTest("fail-abort", async (ctx) => {
+    const res = await ctx.http.get("https://api.test/x");
+    await ctx.switch(
+      [
+        { when: () => res.status === 200, then: () => ctx.assert(true, "ok") },
+      ],
+      () => {
+        ctx.fail("unexpected");
+        // real runner aborts at fail — this must NOT be projected
+        ctx.http.get("https://api.test/never");
+        ctx.assert(true, "never");
+      },
+    );
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  // case[0] assert + default fail recorded; the post-fail get/assert are NOT
+  expect(shape.assertions.map((a) => ({ kind: a.kind, branch: a.branch }))).toEqual([
+    { kind: "assert", branch: "switch#0:case[0]" },
+    { kind: "fail", branch: "switch#0:default" },
+  ]);
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "https://api.test/x", branch: undefined },
+  ]);
+});
+
 vtest("ctx.skip inside a when arm is branch-local — sibling arm still projects", async () => {
   const t = glubeanTest("branch-skip", async (ctx) => {
     const res = await ctx.http.get("https://api.test/x");

@@ -60,6 +60,10 @@ const REQUEST_BUDGET = 50;
 
 class DryRunBudgetExceeded extends Error {}
 class DryRunSkip extends Error {}
+/** Branch-local abort thrown by ctx.skip/ctx.fail inside an arm: stops the
+ *  current arm's remaining code (which the real runner would never reach) but is
+ *  caught by the when/switch/while arm wrapper so sibling arms still project. */
+class AbortArm extends Error {}
 
 /** Array helpers whose callback should run once (with a representative item)
  *  so in-callback assertions/requests are captured, like the for-of path. */
@@ -349,6 +353,20 @@ function makeDryRunCtx() {
     entries: () => [] as [string, unknown][],
   };
 
+  // Run one branch arm under its label: an AbortArm (from ctx.skip/ctx.fail)
+  // stops THIS arm but is swallowed here so sibling arms still project; budget/
+  // skip/real errors propagate.
+  const runArm = async (label: string, fn: () => unknown): Promise<void> => {
+    branchStack.push(label);
+    try {
+      await fn();
+    } catch (e) {
+      if (!(e instanceof AbortArm)) throw e;
+    } finally {
+      branchStack.pop();
+    }
+  };
+
   const ctxBase = {
     vars: accessor,
     secrets: accessor,
@@ -369,20 +387,21 @@ function makeDryRunCtx() {
     event: () => {},
     metric: () => {},
     skip: (reason?: string): never => {
-      // A skip INSIDE a when/switch/while arm is branch-local: record it and
-      // continue so sibling arms still project (ctx.when is advertised as
-      // exhaustive). A top-level skip aborts the whole test as skipped.
+      // Inside a when/switch/while arm: record + abort THIS arm (so code after
+      // skip, which the real runner never reaches, isn't projected) while
+      // sibling arms still project. Top-level: skip the whole test.
       if (branchStack.length > 0) {
         pushAssertion("skip", reason);
-        return undefined as never;
+        throw new AbortArm();
       }
       throw new DryRunSkip();
     },
     fail: (message?: string): never => {
-      // Record the failure intent but DON'T throw — sibling branch arms must
-      // still project. Real ctx.fail throws; dry-run only records the shape.
+      // Record + abort the current path: the real runner throws here, so
+      // subsequent code in this arm/body never runs. The arm wrapper catches
+      // AbortArm so sibling arms still project; at top level it ends the body.
       pushAssertion("fail", message);
-      return undefined as never;
+      throw new AbortArm();
     },
     pollUntil: async (_options: unknown, fn: () => Promise<unknown>) => {
       // Run the predicate once to capture endpoints; ignore its result.
@@ -395,61 +414,28 @@ function makeDryRunCtx() {
     // ── projection core: run ALL arms, branch-tagged ──
     when: async (
       _condition: boolean,
-      thenFn: () => void | Promise<void>,
-      elseFn?: () => void | Promise<void>,
+      thenFn: () => unknown,
+      elseFn?: () => unknown,
       describe?: string,
     ): Promise<void> => {
       // describe (optional) annotates the opaque condition for reviewers.
       const base = describe ? `when#${whenCounter++} (${describe})` : `when#${whenCounter++}`;
-      branchStack.push(`${base}:then`);
-      try {
-        await thenFn();
-      } finally {
-        branchStack.pop();
-      }
-      if (elseFn) {
-        branchStack.push(`${base}:else`);
-        try {
-          await elseFn();
-        } finally {
-          branchStack.pop();
-        }
-      }
+      await runArm(`${base}:then`, thenFn);
+      if (elseFn) await runArm(`${base}:else`, elseFn);
     },
-    switch: async (cases: SwitchCase[], defaultFn?: () => void | Promise<void>): Promise<void> => {
+    switch: async (cases: SwitchCase[], defaultFn?: () => unknown): Promise<void> => {
       const idx = switchCounter++;
       for (let i = 0; i < cases.length; i++) {
         const d = cases[i].describe;
-        branchStack.push(`switch#${idx}:case[${i}]${d ? ` (${d})` : ""}`);
-        try {
-          await cases[i].then();
-        } finally {
-          branchStack.pop();
-        }
+        await runArm(`switch#${idx}:case[${i}]${d ? ` (${d})` : ""}`, () => cases[i].then());
       }
-      if (defaultFn) {
-        branchStack.push(`switch#${idx}:default`);
-        try {
-          await defaultFn();
-        } finally {
-          branchStack.pop();
-        }
-      }
+      if (defaultFn) await runArm(`switch#${idx}:default`, defaultFn);
     },
-    while: async (
-      _condition: () => boolean,
-      body: () => void | Promise<void>,
-      describe?: string,
-    ): Promise<void> => {
+    while: async (_condition: () => boolean, body: () => unknown, describe?: string): Promise<void> => {
       // Run the body ONCE — a representative iteration — instead of looping
       // against the synthetic guard (which would spin to the request budget).
       const idx = whileCounter++;
-      branchStack.push(describe ? `while#${idx} (${describe})` : `while#${idx}`);
-      try {
-        await body();
-      } finally {
-        branchStack.pop();
-      }
+      await runArm(describe ? `while#${idx} (${describe})` : `while#${idx}`, body);
     },
   } as unknown as Record<string | symbol, unknown>;
 
@@ -550,6 +536,9 @@ export async function dryRunTest(
   } catch (err) {
     if (err instanceof DryRunSkip) {
       skipped = true;
+    } else if (err instanceof AbortArm) {
+      // A top-level ctx.fail() aborted the body — the real runner stops here too,
+      // so the captured shape (up to the fail) is complete, not a failure.
     } else if (err instanceof DryRunBudgetExceeded) {
       complete = false;
       reason = `request budget (${REQUEST_BUDGET}) exceeded — likely a data-dependent loop`;
