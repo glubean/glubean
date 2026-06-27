@@ -17,6 +17,7 @@
  */
 
 import type { Test, TestContext, SwitchCase } from "@glubean/sdk";
+import { runWithRuntime, type InternalRuntime } from "@glubean/sdk/internal";
 
 /** A single recorded assertion intent. */
 export interface ProjAssertion {
@@ -276,7 +277,15 @@ function makeDryRunCtx() {
     },
   } as unknown as TestContext;
 
-  return { ctx, assertions, endpoints };
+  return { ctx, assertions, endpoints, http };
+}
+
+/** Named-placeholder record so `configure()` var/secret reads resolve to
+ *  `<KEY>` (a non-empty string) instead of throwing "missing" or coercing to 0. */
+function placeholderRecord(): Record<string, string> {
+  return new Proxy({} as Record<string, string>, {
+    get: (_t, key) => (typeof key === "string" ? `<${key}>` : undefined),
+  });
 }
 
 /**
@@ -310,13 +319,30 @@ export async function dryRunTest(
     };
   }
 
-  const { ctx, assertions, endpoints } = makeDryRunCtx();
+  const { ctx, assertions, endpoints, http } = makeDryRunCtx();
   let complete = true;
   let reason: string | undefined;
   let skipped = false;
 
+  // Install a synthetic runtime carrier so `configure({ http })`, configured
+  // vars/secrets, and session reads work during projection instead of throwing
+  // "can only be accessed during test execution". The configured http is the
+  // SAME recording client as ctx.http, so configured requests are captured too.
+  const runtime = {
+    vars: placeholderRecord(),
+    secrets: placeholderRecord(),
+    session: placeholderRecord(),
+    http,
+    trace: () => {},
+    action: () => {},
+    event: () => {},
+    log: () => {},
+  } as unknown as InternalRuntime;
+
   try {
-    await (test as unknown as { fn: (c: TestContext) => unknown }).fn(ctx);
+    await runWithRuntime(runtime, async () => {
+      await (test as unknown as { fn: (c: TestContext) => unknown }).fn(ctx);
+    });
   } catch (err) {
     if (err instanceof DryRunSkip) {
       skipped = true;

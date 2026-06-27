@@ -1,5 +1,5 @@
 import { test as vtest, expect } from "vitest";
-import { test as glubeanTest } from "@glubean/sdk";
+import { test as glubeanTest, configure } from "@glubean/sdk";
 import { dryRunTest, type TestShape } from "./dry-run.js";
 
 // Drive dryRunTest with REAL SDK test() objects (the same shape the CLI imports
@@ -208,6 +208,20 @@ vtest("describe annotates when/switch branch tags", async () => {
     "switch#0:case[0] (not found)",
     "switch#0:case[1] (forbidden)",
   ]);
+});
+
+vtest("projects tests that use configure({ http }) without throwing", async () => {
+  const api = configure({ http: { prefixUrl: "https://api.test" } });
+  const t = glubeanTest("configured", async (ctx) => {
+    const res = await api.http.get("users");
+    ctx.assert((res as { ok: boolean }).ok, "ok");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  // The synthetic runtime carrier means configure() does NOT throw
+  // "can only be accessed during test execution".
+  expect(shape.projectionComplete).toBe(true);
+  expect(shape.endpoints.length).toBeGreaterThanOrEqual(1);
+  expect(shape.assertionCount).toBe(1);
 });
 
 vtest("projects env-based URLs with a named placeholder, not a numeric coercion", async () => {
