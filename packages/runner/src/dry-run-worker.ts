@@ -13,7 +13,7 @@
 
 import { readFileSync, writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { extractFromSource } from "@glubean/scanner";
+import { extractAliasesFromSource, extractFromSource } from "@glubean/scanner";
 import { bootstrap } from "./bootstrap.js";
 import { dryRunTest, installDryRunGlobals, type TestShape } from "./dry-run.js";
 
@@ -64,7 +64,11 @@ async function main(): Promise<void> {
       // only when the CLI patches shapes after a separate scan().
       const bareByExport = new Map<string, number>();
       try {
-        for (const m of extractFromSource(readFileSync(file, "utf8"))) {
+        const src = readFileSync(file, "utf8");
+        // Pass custom test.extend() aliases (as the scanner does) so aliased
+        // tests still get a bareBranchCount; extractFromSource merges BASE_FNS.
+        const aliases = extractAliasesFromSource(src);
+        for (const m of extractFromSource(src, aliases)) {
           if (m.bareBranchCount) bareByExport.set(m.exportName, m.bareBranchCount);
         }
       } catch {

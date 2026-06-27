@@ -271,15 +271,17 @@ function makeDryRunCtx() {
     return url + (url.includes("?") ? "&" : "?") + qs;
   };
 
-  // ── http: callable (ky shorthand) + method shortcuts + prefix-aware extend ──
-  const makeHttp = (prefix: string): any => {
+  // ── http: callable (ky shorthand) + method shortcuts + prefix/searchParams-aware extend ──
+  const makeHttp = (prefix: string, defaultSp?: unknown): any => {
     // method0 === null → derive from opts.method / Request.method (callable form);
     // a fixed string → method shortcut (get/post/...).
     const call = (method0: string | null, input: unknown, opts?: unknown) => {
       const o = opts as { method?: unknown; prefixUrl?: unknown; searchParams?: unknown } | undefined;
       // A per-request prefixUrl overrides the client's prefix (ky semantics).
       const effPrefix = typeof o?.prefixUrl === "string" ? o.prefixUrl : prefix;
-      const url = applySearchParams(joinUrl(effPrefix, urlOf(input)), o?.searchParams);
+      let url = joinUrl(effPrefix, urlOf(input));
+      url = applySearchParams(url, defaultSp); // client-level defaults (configure/extend)
+      url = applySearchParams(url, o?.searchParams); // per-request
       return record(method0 ?? methodOf(input, opts, "GET"), url);
     };
     const h: any = (input: unknown, opts?: unknown) => call(null, input, opts);
@@ -289,8 +291,11 @@ function makeDryRunCtx() {
     h.patch = (input: unknown, opts?: unknown) => call("PATCH", input, opts);
     h.delete = (input: unknown, opts?: unknown) => call("DELETE", input, opts);
     h.head = (input: unknown, opts?: unknown) => call("HEAD", input, opts);
-    h.extend = (opts?: { prefixUrl?: unknown }) =>
-      makeHttp(typeof opts?.prefixUrl === "string" ? opts.prefixUrl : prefix);
+    h.extend = (opts?: { prefixUrl?: unknown; searchParams?: unknown }) =>
+      makeHttp(
+        typeof opts?.prefixUrl === "string" ? opts.prefixUrl : prefix,
+        opts?.searchParams ?? defaultSp,
+      );
     return h;
   };
   const http = makeHttp("");

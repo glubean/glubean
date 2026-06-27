@@ -72,6 +72,20 @@ vtest(
 );
 
 vtest(
+  "aliased test.extend tests still get bareBranchCount (alias-aware extraction)",
+  async () => {
+    const aliased = resolve(testProject, "_dryrun_aliased.fixture.ts");
+    const res = await dryRunFiles([aliased], { cwd: testProject, timeoutMs: 8000 });
+    const shape = res.shapes.find((s) => s.testId === "aliased-bare");
+    expect(shape).toBeDefined();
+    // bare `if` → partial; only true if the worker forwarded extend aliases.
+    expect(shape!.projectionComplete).toBe(false);
+    expect(shape!.incompleteReason).toMatch(/bare branch\/loop/);
+  },
+  20_000,
+);
+
+vtest(
   "raw global fetch() is captured and hits no network (stubbed in the worker)",
   async () => {
     const rawFetch = resolve(testProject, "_dryrun_rawfetch.fixture.ts");

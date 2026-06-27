@@ -301,6 +301,17 @@ vtest("projects ky searchParams and per-request prefixUrl into the endpoint", as
   ]);
 });
 
+vtest("client-level searchParams (extend) are merged into projected endpoints", async () => {
+  const t = glubeanTest("default-sp", async (ctx) => {
+    const api = ctx.http.extend({ prefixUrl: "https://api.test", searchParams: { v: "1" } });
+    await api.get("users", { searchParams: { page: 2 } });
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.endpoints).toEqual([
+    { method: "GET", url: "https://api.test/users?v=1&page=2", branch: undefined },
+  ]);
+});
+
 vtest("chainable .blob() projects without throwing", async () => {
   const t = glubeanTest("blob-chain", async (ctx) => {
     await ctx.http.get("https://api.test/file").blob();
