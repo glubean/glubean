@@ -165,3 +165,15 @@ export type {
   LoadSubprocessError,
   LoadHarnessMessage,
 } from "./load/subprocess.js";
+
+/**
+ * Dry-run shape projection (C2 / P2) — execute a simple test's body against a
+ * synthetic context to capture what it verifies (assertions) and touches
+ * (endpoints) without real I/O. `dryRunTest` projects a single in-memory Test;
+ * `dryRunFiles` spawns a tsx worker to project every simple test in a set of
+ * `.test.ts` files. Powers `glubean dry-run` → cloud team-review view.
+ */
+export { dryRunTest } from "./dry-run.js";
+export type { TestShape, ProjAssertion, ProjEndpoint } from "./dry-run.js";
+export { dryRunFiles } from "./dry-run-spawn.js";
+export type { DryRunFilesResult } from "./dry-run-spawn.js";

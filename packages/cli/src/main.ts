@@ -22,6 +22,7 @@ import { formatResolvedPlan } from "./lib/print-plan.js";
 import { initCommand } from "./commands/init.js";
 import { runCommand, resolveTestFilesForSuite } from "./commands/run.js";
 import { scanCommand } from "./commands/scan.js";
+import { dryRunCommand } from "./commands/dry-run.js";
 import { loadCommand } from "./commands/load.js";
 import { validateMetadataCommand } from "./commands/validate_metadata.js";
 import { loginCommand } from "./commands/login.js";
@@ -672,6 +673,23 @@ program
     await scanCommand({
       dir: options.dir,
       output: options.out,
+    });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dry-run command — project test SHAPE (assertions/endpoints) without running
+// ─────────────────────────────────────────────────────────────────────────────
+program
+  .command("dry-run")
+  .description("Project each simple test's shape (assertions, endpoints) without running it")
+  .option("-d, --dir <path>", "Directory to scan", ".")
+  .option("--json", "Output as JSON")
+  .option("--out <path>", "Write the projection JSON to a file")
+  .action(async (options) => {
+    await dryRunCommand({
+      dir: options.dir,
+      json: options.json,
+      out: options.out,
     });
   });
 

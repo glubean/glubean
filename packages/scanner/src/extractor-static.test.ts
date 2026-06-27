@@ -151,6 +151,64 @@ export const withTimeout = test(
   expect(result[0].timeout).toBe(1200);
 });
 
+test("extracts description + deprecated from TestMeta object (P1 team review)", () => {
+  const content = `
+export const legacyLogin = test(
+  {
+    id: "legacy-login",
+    description: "Authenticates against the v1 login endpoint.",
+    deprecated: "Use auth-token-exchange; v1 retires 2026-09.",
+  },
+  async (ctx) => {}
+);
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  expect(result[0].id).toBe("legacy-login");
+  expect(result[0].description).toBe("Authenticates against the v1 login endpoint.");
+  expect(result[0].deprecated).toBe("Use auth-token-exchange; v1 retires 2026-09.");
+});
+
+test("extracts description from builder .meta() chain (P1 team review)", () => {
+  const content = `
+export const checkout = test("checkout")
+  .meta({ description: "End-to-end checkout flow." })
+  .step("pay", async (ctx) => {});
+`;
+  const result = extractFromSource(content);
+  expect(result.length).toBe(1);
+  expect(result[0].id).toBe("checkout");
+  expect(result[0].description).toBe("End-to-end checkout flow.");
+  expect(result[0].deprecated).toBeUndefined();
+});
+
+test("flags bare if/switch branches; ctx.when/ctx.switch count as 0 (P2 dry-run)", () => {
+  const bareIf = `
+export const a = test("bare-if", async (ctx) => {
+  const res = await ctx.http.get("/x");
+  if (res.status === 200) { ctx.assert(res.ok, "ok"); }
+  else { ctx.assert(res.status === 401, "unauth"); }
+});
+`;
+  const bareSwitch = `
+export const b = test("bare-switch", async (ctx) => {
+  const res = await ctx.http.get("/x");
+  switch (res.status) { case 200: ctx.assert(true, "ok"); break; default: ctx.fail("no"); }
+});
+`;
+  const declarative = `
+export const c = test("declarative", async (ctx) => {
+  const res = await ctx.http.get("/x");
+  await ctx.when(res.status === 200,
+    () => ctx.assert(res.ok, "ok"),
+    () => ctx.assert(res.status === 401, "unauth"));
+});
+`;
+  expect(extractFromSource(bareIf)[0].bareBranchCount).toBe(1);
+  expect(extractFromSource(bareSwitch)[0].bareBranchCount).toBe(1);
+  expect(extractFromSource(declarative)[0].bareBranchCount).toBeUndefined();
+});
+
 // =============================================================================
 // Builder pattern — string ID + .meta() + .step()
 // =============================================================================

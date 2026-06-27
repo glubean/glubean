@@ -46,6 +46,7 @@ import type {
   SchemaIssue,
   SchemaLike,
   StepDefinition,
+  SwitchCase,
   Test,
   TestBranchData,
   TestContext,
@@ -811,6 +812,41 @@ const ctx = {
 
     const suffix = lastError ? `: ${lastError.message}` : "";
     throw new Error(`pollUntil timed out after ${timeoutMs}ms${suffix}`);
+  },
+
+  /**
+   * Two-way branch. At runtime, only the taken arm runs — exactly equivalent to
+   * `if (condition) thenFn(); else elseFn();`. (The cloud dry-run projector
+   * overrides this to run both arms; see packages/runner/src/dry-run.ts.)
+   */
+  when: async (
+    condition: boolean,
+    thenFn: () => void | Promise<void>,
+    elseFn?: () => void | Promise<void>,
+  ): Promise<void> => {
+    if (condition) {
+      await thenFn();
+    } else if (elseFn) {
+      await elseFn();
+    }
+  },
+
+  /**
+   * Multi-way branch — first truthy `when` wins (first-match-wins); `defaultFn`
+   * runs if none match. Equivalent to an `if/else if/.../else` chain. (The
+   * cloud dry-run projector overrides this to run every arm + default.)
+   */
+  switch: async (
+    cases: SwitchCase[],
+    defaultFn?: () => void | Promise<void>,
+  ): Promise<void> => {
+    for (const arm of cases) {
+      if (arm.when) {
+        await arm.then();
+        return;
+      }
+    }
+    if (defaultFn) await defaultFn();
   },
 
   /**

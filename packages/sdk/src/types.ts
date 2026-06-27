@@ -264,6 +264,22 @@ export interface SessionDefinition {
 }
 
 /**
+ * One arm of {@link TestContext.switch} — a guard plus the body to run when it
+ * is selected.
+ */
+export interface SwitchCase {
+  /**
+   * Guard expression. At runtime, arms are evaluated top-to-bottom and the
+   * first truthy `when` wins (others are skipped). Under cloud dry-run
+   * projection, the guard is NOT evaluated — every arm's `then` is recorded so
+   * reviewers see what each branch verifies.
+   */
+  when: boolean;
+  /** Body to run when this arm is selected. */
+  then: () => void | Promise<void>;
+}
+
+/**
  * The context passed to every test function.
  * Provides access to environment variables, secrets, logging, assertions, API tracing,
  * and a pre-configured HTTP client.
@@ -730,6 +746,77 @@ export interface TestContext {
   pollUntil(
     options: PollUntilOptions,
     fn: () => Promise<boolean | unknown>,
+  ): Promise<void>;
+
+  /**
+   * Declarative two-way branch. At runtime this is exactly equivalent to
+   * `if (condition) thenFn(); else elseFn();` — only the taken arm runs, zero
+   * extra overhead.
+   *
+   * **Prefer `ctx.when()` over a bare `if/else` for assertions that differ by
+   * branch.** The cloud dry-run projection (team review) runs the test body
+   * with a synthetic context and records the shape — assertions made, endpoints
+   * hit. A native `if/else` only reveals the arm the synthetic response happens
+   * to take, so the other arm's assertions are invisible to reviewers. With
+   * `ctx.when()` the projector runs BOTH arms and tags each assertion with its
+   * branch, so a reviewer sees what the test verifies on success AND failure
+   * without reading the code.
+   *
+   * Defensive guards unrelated to verification (`if (!res) return;`) don't need
+   * `ctx.when()`.
+   *
+   * @param condition Branch guard (evaluated normally at runtime).
+   * @param thenFn Runs when `condition` is truthy.
+   * @param elseFn Runs when `condition` is falsy (optional).
+   *
+   * @example Assert different shapes per outcome
+   * ```ts
+   * const res = await ctx.http.post(`${base}/login`, { json: creds });
+   * await ctx.when(
+   *   res.status === 200,
+   *   async () => ctx.expect(await res.json()).toMatchObject({ token: expect.any(String) }),
+   *   () => ctx.expect(res).toHaveStatus(401),
+   * );
+   * ```
+   */
+  when(
+    condition: boolean,
+    thenFn: () => void | Promise<void>,
+    elseFn?: () => void | Promise<void>,
+  ): Promise<void>;
+
+  /**
+   * Declarative multi-way branch — the imperative companion to the builder's
+   * `.switchCond(...)`. At runtime, arms are evaluated top-to-bottom and the
+   * first truthy `when` wins (first-match-wins); if none match, `defaultFn`
+   * runs. Exactly equivalent to an `if/else if/.../else` chain.
+   *
+   * **Prefer `ctx.switch()` over a chain of `if/else if` (or nested
+   * `ctx.when()`) when a response fans out into 3+ outcomes** (e.g. by status
+   * code or role). The cloud dry-run projection runs EVERY arm plus the default
+   * and tags each assertion with its arm, so a reviewer sees a flat list of
+   * what the test verifies for 200 / 401 / 403 / … — far clearer than the deep
+   * nesting `ctx.when()` would produce.
+   *
+   * @param cases Ordered guard/body arms.
+   * @param defaultFn Runs when no arm matches (optional).
+   *
+   * @example Assert per status outcome
+   * ```ts
+   * const res = await ctx.http.get(`${base}/orders/${id}`);
+   * await ctx.switch(
+   *   [
+   *     { when: res.status === 200, then: () => ctx.expect(res).toHaveStatus(200) },
+   *     { when: res.status === 404, then: () => ctx.expect(res).toHaveStatus(404) },
+   *     { when: res.status === 403, then: () => ctx.expect(res).toHaveStatus(403) },
+   *   ],
+   *   () => ctx.fail(`unexpected status ${res.status}`),
+   * );
+   * ```
+   */
+  switch(
+    cases: SwitchCase[],
+    defaultFn?: () => void | Promise<void>,
   ): Promise<void>;
 
   /**

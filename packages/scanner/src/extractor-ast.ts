@@ -47,12 +47,15 @@ function isTestFnName(name: string, customFns?: Set<string>): boolean {
 interface MetaFields {
   id?: string;
   name?: string;
+  description?: string;
   tags?: string[];
   timeout?: number;
   requires?: "headless" | "browser" | "out-of-band";
   defaultRun?: "always" | "opt-in";
   /** A STRING `skip: "reason"` (WorkflowMeta.skip) — maps to deferred. */
   deferred?: string;
+  /** Deprecation reason (TestMeta.deprecated, a string). */
+  deprecated?: string;
 }
 
 /** Parse `{ id, name, tags, timeout, requires, defaultRun }` from a TestMeta object literal. */
@@ -62,6 +65,11 @@ function parseMetaObject(obj: AnyNode): MetaFields {
   if (id !== undefined) out.id = id;
   const name = stringProperty(obj, "name");
   if (name !== undefined) out.name = name;
+  const description = stringProperty(obj, "description");
+  if (description !== undefined) out.description = description;
+  // TestMeta.deprecated is a string reason — surfaced for team review (P1).
+  const deprecated = stringProperty(obj, "deprecated");
+  if (deprecated !== undefined) out.deprecated = deprecated;
   // WorkflowMeta.skip is a string reason (TestMeta.skip is boolean — a string
   // here only ever comes from a workflow). Carried as `deferred` so the
   // upload gate can exclude skipped workflows (codex S2.6 R13 P2).
@@ -118,6 +126,31 @@ function builderMeta(init: AnyNode): MetaFields {
   const args = (metaCall.arguments as AnyNode[] | undefined) ?? [];
   const obj = objectFromExpression(args[0]);
   return obj ? parseMetaObject(obj) : {};
+}
+
+/**
+ * Count bare `if`/`switch` statements anywhere in a simple test's function
+ * body. These are branches the cloud dry-run projector cannot fully capture
+ * (it follows only one arm), so authors should prefer `ctx.when()` /
+ * `ctx.switch()` — which the projector runs exhaustively. A body that branches
+ * exclusively through `ctx.when`/`ctx.switch` has zero `IfStatement` /
+ * `SwitchStatement` nodes and so counts 0 (fully projectable). The fn body is
+ * the LAST argument of the head call (`test("id", fn)` / `test.each(d)(meta,
+ * fn)`); a builder head (`test("id")`) has no fn arg and counts 0.
+ */
+function countBareBranches(head: AnyNode): number {
+  const args = (head.arguments as AnyNode[] | undefined) ?? [];
+  const fn = unwrapExpression(args[args.length - 1]);
+  if (!fn || (fn.type !== "ArrowFunctionExpression" && fn.type !== "FunctionExpression")) {
+    return 0;
+  }
+  const body = fn.body as AnyNode | undefined;
+  if (!body) return 0;
+  let count = 0;
+  walk(body, (node) => {
+    if (node.type === "IfStatement" || node.type === "SwitchStatement") count++;
+  });
+  return count;
 }
 
 /** Flat list of `.step("name", ...)` leaf names in source order (matches the regex baseline). */
@@ -836,6 +869,10 @@ function parseTestDeclaration(
   // Builder `.meta({...})` fills any gaps (positional/inline wins).
   const bMeta = builderMeta(init);
   if (fields.name === undefined && bMeta.name !== undefined) fields.name = bMeta.name;
+  if (fields.description === undefined && bMeta.description !== undefined)
+    fields.description = bMeta.description;
+  if (fields.deprecated === undefined && bMeta.deprecated !== undefined)
+    fields.deprecated = bMeta.deprecated;
   if (fields.tags === undefined && bMeta.tags !== undefined) fields.tags = bMeta.tags;
   if (fields.timeout === undefined && bMeta.timeout !== undefined) fields.timeout = bMeta.timeout;
   if (fields.requires === undefined && bMeta.requires !== undefined) fields.requires = bMeta.requires;
@@ -866,6 +903,8 @@ function parseTestDeclaration(
     location: { line: lineOf(statement), col: 1 },
   };
   if (fields.name !== undefined) result.name = fields.name;
+  if (fields.description !== undefined) result.description = fields.description;
+  if (fields.deprecated !== undefined) result.deprecated = fields.deprecated;
   if (fields.tags && fields.tags.length > 0) result.tags = fields.tags;
   if (fields.timeout !== undefined) result.timeout = fields.timeout;
   if (fields.requires !== undefined) result.requires = fields.requires;
@@ -873,6 +912,10 @@ function parseTestDeclaration(
   if (variant) result.variant = variant;
   if (steps.length > 0) result.steps = steps;
   if (parallel) result.parallel = true;
+  // Flag native branching so the dry-run projector / reviewer knows the shape
+  // may be partial (only one arm of each bare branch is followed).
+  const bareBranches = countBareBranches(head);
+  if (bareBranches > 0) result.bareBranchCount = bareBranches;
 
   // vNext workflow exports get a static marker so downstream consumers can
   // classify them as graph orchestrators ("flow"-kind runnables) without

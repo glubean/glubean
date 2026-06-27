@@ -12,6 +12,8 @@ export interface ExportMeta {
   id: string;
   /** Human-readable name */
   name?: string;
+  /** Detailed description (mirrors TestMeta.description) — surfaced for team review. */
+  description?: string;
   /** Tags for filtering */
   tags?: string[];
   /** Physical capability the test requires (mirrors TestMeta.requires). */
@@ -56,6 +58,12 @@ export interface ExportMeta {
    * from the --upload branch/poll gate like deferred flows.
    */
   deferred?: string;
+  /**
+   * Deprecation reason (mirrors TestMeta.deprecated). Present iff the test is
+   * marked deprecated — surfaced for team review so reviewers can spot stale
+   * coverage without reading the file. Distinct from `deferred` (not-yet-built).
+   */
+  deprecated?: string;
   /** JavaScript export name (e.g., "myTest" or "default") */
   exportName: string;
   /** Source location */
@@ -64,6 +72,16 @@ export interface ExportMeta {
   steps?: { name: string; group?: string }[];
   /** Whether this test's .each() group allows parallel execution */
   parallel?: boolean;
+  /**
+   * Count of bare `if`/`switch` statements in a simple test's function body.
+   * Bare branches can't be fully captured by cloud dry-run projection — the
+   * projector can only follow one arm of a native branch, so the other arm's
+   * assertions are invisible to reviewers. Authors should use
+   * `ctx.when()` / `ctx.switch()` so every arm projects. Absent/0 means the
+   * body has no native branching (fully projectable). Conservative: defensive
+   * guards count too — better to flag a partial projection than hide it.
+   */
+  bareBranchCount?: number;
 }
 
 /** File metadata in scan result */
