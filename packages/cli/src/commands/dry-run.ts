@@ -28,6 +28,7 @@ export interface ProjectedTest {
   deprecated?: string;
   requires?: string;
   defaultRun?: string;
+  tags?: string[];
   assertions: Array<{ kind: string; message?: string; branch?: string }>;
   endpoints: Array<{ method: string; url: string; branch?: string }>;
   assertionCount: number;
@@ -66,6 +67,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
       deprecated?: string;
       requires?: string;
       defaultRun?: string;
+      tags?: string[];
       bareBranchCount?: number;
     }
   >();
@@ -81,6 +83,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
         deprecated: exp.deprecated,
         requires: exp.requires,
         defaultRun: exp.defaultRun,
+        tags: exp.tags,
         bareBranchCount: exp.bareBranchCount,
       });
     }
@@ -107,6 +110,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
       deprecated: meta.deprecated,
       requires: meta.requires,
       defaultRun: meta.defaultRun,
+      ...(meta.tags && meta.tags.length ? { tags: meta.tags } : {}),
       assertions: s.assertions,
       endpoints: s.endpoints,
       assertionCount: s.assertionCount,

@@ -1,29 +1,39 @@
 import { test } from "@glubean/sdk";
 
-// Fixture for `glubean dry-run` integration — exercises ctx.when / ctx.switch /
-// a bare if so the projected shapes and projectionComplete flags are visible.
+// Fixture for `glubean dry-run` / `glubean sync`. Exercises ctx.when / ctx.switch
+// / ctx.while / a bare if so the projected shapes + projectionComplete flags are
+// visible — AND models the review surface: the test DESCRIPTION (headline intent)
+// plus each assertion MESSAGE state the design a reviewer reads WITHOUT running
+// anything. `ctx.expect(...).matcher(expected, "message")` is preferred over a
+// bare `assert` because the matcher itself carries semantic shape (see GLUBEAN.md).
 
 export const login = test(
   {
     id: "login-when",
-    description: "Authenticate and assert per-outcome shape via ctx.when.",
+    description:
+      "Authenticate; verify the session contract on success and the rejection contract on failure.",
+    tags: ["auth", "smoke"],
   },
   async (ctx) => {
     const res = await ctx.http.post("https://api.test/login");
     await ctx.when(
       res.status === 200,
       () => {
-        ctx.assert(true, "has token");
-        ctx.expect(res).toBeDefined();
+        ctx.expect(res.status).toBe(200, "the success response is 200 OK");
+        ctx.assert(true, "a valid session token is returned in the body");
       },
-      () => ctx.assert(true, "unauthorized"),
-      "login succeeds",
+      () => ctx.assert(true, "invalid credentials are rejected with 401 and no token"),
+      "credentials are valid",
     );
   },
 );
 
 export const pages = test(
-  { id: "paginate-while", description: "Fetch all pages with ctx.while." },
+  {
+    id: "paginate-while",
+    description: "Walk every page and check the collection contract holds across the whole set.",
+    tags: ["pagination"],
+  },
   async (ctx) => {
     let more = true;
     await ctx.while(
@@ -31,25 +41,36 @@ export const pages = test(
       async () => {
         const res = await ctx.http.get("https://api.test/items");
         const body = await res.json();
-        ctx.assert(Array.isArray(body.items), "page has items");
+        ctx.expect(body).toHaveProperty("items", "every page returns an `items` array, never null");
         more = body.hasMore;
       },
-      "until exhausted",
+      "there are more pages",
     );
   },
 );
 
 export const order = test(
-  { id: "order-switch", description: "Branch per status with ctx.switch." },
+  {
+    id: "order-switch",
+    description:
+      "Branch on order status so each documented outcome is verified and the undocumented one fails loudly.",
+    tags: ["orders"],
+  },
   async (ctx) => {
     const res = await ctx.http.get("https://api.test/orders/1");
     const status = res.status;
     await ctx.switch(
       [
-        { when: () => status === 200, then: () => ctx.assert(true, "ok") },
-        { when: () => status === 404, then: () => ctx.assert(true, "missing") },
+        {
+          when: () => status === 200,
+          then: () => ctx.expect(res.status).toBe(200, "an existing order returns 200 with its full details"),
+        },
+        {
+          when: () => status === 404,
+          then: () => ctx.expect(res.status).toBe(404, "a missing order returns 404, not a 500"),
+        },
       ],
-      () => ctx.fail("unexpected"),
+      () => ctx.fail("any other status is an unhandled contract violation"),
     );
   },
 );
@@ -57,25 +78,33 @@ export const order = test(
 export const legacy = test(
   {
     id: "legacy-bare-if",
-    description: "Uses a bare if — projection should flag it partial.",
+    description: "Legacy endpoint kept for back-compat — uses a bare if, so the projection is flagged partial.",
     deprecated: "Use login-when instead.",
+    tags: ["legacy"],
   },
   async (ctx) => {
     const res = await ctx.http.get("https://api.test/legacy");
     if (res.status === 200) {
-      ctx.assert(true, "ok");
+      ctx.assert(true, "known ids still resolve on the legacy path");
     } else {
-      ctx.assert(true, "not ok");
+      ctx.assert(true, "unknown ids degrade gracefully instead of erroring");
     }
   },
 );
 
-// Data-driven export — `test.each` yields an array of simple Tests sharing one
-// fn body; dry-run projects the first row as the representative shape.
+// Data-driven export — `test.each` yields an array of simple Tests, each with its
+// own bound row data; dry-run projects every generated row.
 export const byRegion = test.each([
   { region: "us", base: "https://us.api.test" },
   { region: "eu", base: "https://eu.api.test" },
-])({ id: "region-$region", description: "Health check per region." }, async (ctx, row) => {
-  const res = await ctx.http.get(`${row.base}/health`);
-  ctx.assert(res.ok, "healthy");
-});
+])(
+  {
+    id: "region-$region",
+    description: "Each region's health endpoint is reachable and reports healthy.",
+    tags: ["health", "multi-region"],
+  },
+  async (ctx, row) => {
+    const res = await ctx.http.get(`${row.base}/health`);
+    ctx.expect(res.status).toBe(200, "the region's health endpoint responds 200 OK");
+  },
+);

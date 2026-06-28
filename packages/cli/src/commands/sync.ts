@@ -156,6 +156,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     deprecated: p.deprecated ?? null,
     requires: p.requires ?? null,
     defaultRun: p.defaultRun ?? null,
+    tags: p.tags ?? [],
     assertions: p.assertions,
     endpoints: p.endpoints.map((e) => ({ ...e, url: sanitizeUrl(e.url) })),
     assertionCount: p.assertionCount,
