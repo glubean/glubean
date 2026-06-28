@@ -85,6 +85,30 @@ export function importsGlubeanSdk(content: string): boolean {
   return SDK_MODULE_PATTERNS.some((p) => p.test(content));
 }
 
+/**
+ * Does the source look like a genuine Glubean test file — for the purpose of
+ * deciding whether a ZERO-export `*.test.ts` is a Glubean file that failed to
+ * parse (flag it) vs. an unrelated Vitest/Jest test in a mixed repo (ignore it)?
+ *
+ * True when EITHER:
+ *  1. it directly imports `@glubean/sdk` (`importsGlubeanSdk`), OR
+ *  2. it imports one of the PROJECT'S COLLECTED `test.extend()` aliases — the
+ *     wrapper factories discovery itself relies on (e.g. `browserTest`,
+ *     `scenario`). These are project-specific names, so unlike `isGlubeanFile`'s
+ *     convention layer they do NOT match `import { test } from "vitest"`.
+ *
+ * Deliberately stricter than `isGlubeanFile`: it never falls back to the base
+ * `test`/`task`/`workflow` convention, which collides with foreign test runners.
+ */
+export function importsGlubeanTest(content: string, aliases: string[]): boolean {
+  if (importsGlubeanSdk(content)) return true;
+  // Only the project's custom wrapper aliases — never the ambiguous base names.
+  const custom = aliases.filter((a) => !BASE_FNS.includes(a));
+  if (custom.length === 0) return false;
+  const alt = custom.map(escapeRegExp).join("|");
+  return new RegExp(`import\\s+.*\\{[^}]*\\b(${alt})\\b[^}]*\\}`).test(content);
+}
+
 // ---------------------------------------------------------------------------
 // Comment stripping
 // ---------------------------------------------------------------------------

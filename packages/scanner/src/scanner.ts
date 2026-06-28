@@ -7,7 +7,7 @@
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
 import { extractContractCases } from "./extractor-ast.js";
-import { extractAliasesFromSource, importsGlubeanSdk } from "./extractor-static.js";
+import { extractAliasesFromSource, importsGlubeanTest } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedContractMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
@@ -270,13 +270,14 @@ export class Scanner {
             }
           }
         } else {
-          // Named like a test file but yielded nothing. Only flag it if it
-          // DIRECTLY imports the Glubean SDK — a genuine Glubean test whose body
-          // the parser recovered from (syntax error). An unrelated Vitest/Jest
-          // `*.test.ts` in a mixed repo also yields zero Glubean exports, but it
-          // has no `@glubean/sdk` import and must NOT block a full-snapshot sync.
+          // Named like a test file but yielded nothing. Only flag it if it looks
+          // like a genuine Glubean test — a direct `@glubean/sdk` import OR one of
+          // the project's collected `test.extend()` wrapper aliases (browserTest,
+          // scenario, …) — i.e. a Glubean file whose body the parser recovered
+          // from. An unrelated Vitest/Jest `*.test.ts` in a mixed repo also yields
+          // zero exports but matches neither, and must NOT block a full snapshot.
           try {
-            if (importsGlubeanSdk(await this.fs.readText(filePath))) {
+            if (importsGlubeanTest(await this.fs.readText(filePath), aliases ?? [])) {
               emptyTestFiles.push(this.fs.relative(dir, filePath));
             }
           } catch {
