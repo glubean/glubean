@@ -294,6 +294,16 @@ export class Scanner {
           // it's mid-edit/broken or its tests were removed). A foreign
           // `*.test.{ts,js}` in a mixed repo (Vitest/Jest/Playwright) matches
           // neither and must NOT block sync, broken or not.
+          //
+          // KNOWN LIMITATION (accepted — see proposals/test-definition-review.md
+          // "Known limitations"): provenance is by alias NAME, not resolved module,
+          // and is NOT propagated through wrapper CHAINS. So in a mixed repo where a
+          // Glubean wrapper and a foreign one share a name, classification can be
+          // off by one in either direction. The blast radius is small and
+          // self-healing: an over-flag aborts sync with a clear message (re-run);
+          // an under-flag lets a broken file's prior projection be dropped, which
+          // the NEXT good sync restores. Resolving it fully needs an import-graph
+          // layer the scanner intentionally doesn't have.
           try {
             if (isGlubeanTestSource(await this.fs.readText(filePath), glubeanAliases)) {
               emptyTestFiles.push(this.fs.relative(dir, filePath));
