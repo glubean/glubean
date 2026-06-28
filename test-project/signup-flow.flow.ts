@@ -33,12 +33,46 @@ function s<T>(): SchemaLike<T> {
   return {} as SchemaLike<T>;
 }
 
+// A real SchemaLike (toJSONSchema) for the wire request — unlike `s<T>()` (a pure
+// type-level placeholder), this is what projects into the OpenAPI requestBody.
+const schemaLike = (toJSONSchema: () => Record<string, unknown>): SchemaLike<unknown> => ({
+  safeParse: (data: unknown) => ({ success: true as const, data }),
+  toJSONSchema,
+});
+
 export const createUser = api("create-user", {
   endpoint: "POST /users",
   description: "Register a new user",
+  // Contract-level request shape — body + headers apply to every case and are the
+  // source of the OpenAPI requestBody + header parameters.
+  request: {
+    contentType: "application/json",
+    body: schemaLike(() => ({
+      type: "object",
+      description: "New-user registration payload.",
+      properties: {
+        email: { type: "string", format: "email", maxLength: 254, description: "Login email; must be unique." },
+        name: { type: "string", minLength: 1, maxLength: 100, description: "Display name." },
+        role: { type: "string", enum: ["admin", "member", "viewer"], description: "Initial access level." },
+      },
+      required: ["email"],
+      additionalProperties: false,
+    })),
+    headers: schemaLike(() => ({
+      type: "object",
+      properties: {
+        "idempotency-key": {
+          type: "string",
+          format: "uuid",
+          description: "Unique key so a retried POST never creates a duplicate user.",
+        },
+      },
+      required: ["idempotency-key"],
+    })),
+  },
   cases: {
     ok: {
-      description: "Happy path — returns 201 with user id",
+      description: "Happy path — returns 201 with the created user id",
       needs: s<{ email: string }>(),
       // Explicit parameter annotation. Phase 2c Step B+C removed v9's `S`
       // (setup state) from ContractCase and threaded `Needs`, but TS can't
@@ -49,10 +83,27 @@ export const createUser = api("create-user", {
       // `defineCase<T>({ needs, body })` factory could eliminate it.
       body: ({ email }: { email: string }) => ({
         role: "member",
-        source: "test-project",
         email,
       }),
-      expect: { status: 201 },
+      expect: {
+        status: 201,
+        schema: schemaLike(() => ({
+          type: "object",
+          description: "The created user.",
+          properties: {
+            id: { type: "string", format: "uuid", description: "Server-assigned id." },
+            email: { type: "string", format: "email" },
+            role: { type: "string", enum: ["admin", "member", "viewer"] },
+          },
+          required: ["id", "email", "role"],
+        })),
+        headers: schemaLike(() => ({
+          type: "object",
+          properties: {
+            location: { type: "string", description: "URL of the newly created user (e.g. /users/{id})." },
+          },
+        })),
+      },
     },
   },
 });

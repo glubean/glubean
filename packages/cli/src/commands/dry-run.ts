@@ -1,7 +1,12 @@
-import { resolve } from "node:path";
+import { resolve, basename } from "node:path";
 import { writeFile } from "node:fs/promises";
-import { scan } from "@glubean/scanner";
-import { dryRunFiles } from "@glubean/runner";
+import { scan, extractContractsFromProject } from "@glubean/scanner";
+import { dryRunFiles, bootstrap } from "@glubean/runner";
+import {
+  renderArtifact,
+  openapiArtifact,
+  type ExtractedContractProjection,
+} from "@glubean/sdk";
 
 const colors = {
   reset: "\x1b[0m",
@@ -81,6 +86,15 @@ export interface ProjectionResult {
   contracts: ProjectedContract[];
   /** Statically-projected workflows (declarative — no dry-run). */
   workflows: ProjectedWorkflow[];
+  /** OpenAPI 3.1 doc rendered from the project's HTTP contracts, for the Cloud
+   *  api-reference view (endpoints/schemas with constraints/formats/enums). `null`
+   *  when the project has no HTTP endpoints (a full sync then clears any stale doc).
+   *  See `openapiFailed` for the render-error case. */
+  openapi?: Record<string, unknown> | null;
+  /** True when OpenAPI rendering THREW (bootstrap/extract/render). Distinct from a
+   *  `null` doc: sync SKIPS the openapi upload on failure, so a transient error never
+   *  wipes the project's previously-synced API reference. */
+  openapiFailed?: boolean;
 }
 
 /**
@@ -90,6 +104,19 @@ export interface ProjectionResult {
  * (upload).
  */
 export async function buildProjections(dir: string): Promise<ProjectionResult> {
+  // Bootstrap the project's SDK runtime/plugins BEFORE any contract/flow module is
+  // imported — both `scan` (below) and `extractContractsFromProject` (for the OpenAPI
+  // render) import them. A project that relies on `glubean.setup.*` to make its
+  // contracts importable would otherwise cache a FAILED ESM evaluation from scan's
+  // first import, breaking every later extraction (the OpenAPI render would silently
+  // go null). Best-effort: a bootstrap failure must NOT break scan / dry-run for
+  // projects that don't need setup.
+  try {
+    await bootstrap(dir);
+  } catch {
+    // ignore — scan/dry-run may still work; the OpenAPI extract fail-softs below
+  }
+
   const scanResult = await scan(dir);
 
   // Build a lookup of static metadata keyed by absolute file + export name.
@@ -195,6 +222,44 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
   contracts.sort((a, b) => a.contractId.localeCompare(b.contractId));
   workflows.sort((a, b) => a.workflowId.localeCompare(b.workflowId));
 
+  // Render an OpenAPI 3.1 doc from the SAME contracts, so Cloud can show
+  // endpoints/schemas with the published api-reference view. This needs the
+  // RUNTIME extraction (real schema objects → JSON Schema); the static scan's
+  // `contractsProjection` can't produce it. Same-process ESM import is cached,
+  // so this doesn't re-run contract module side effects. Best-effort — a failure
+  // here never blocks the test/contract/workflow projection.
+  // Three DISTINCT states, because sync treats them differently:
+  //   • a real doc (has HTTP paths)   → upload it
+  //   • no HTTP endpoints (null)      → upload null, clearing any stale doc
+  //   • render FAILED (openapiFailed) → sync SKIPS the upload, preserving the prior doc
+  // (so a transient bootstrap/extract/render error never wipes the API reference).
+  let openapi: Record<string, unknown> | null = null;
+  let openapiFailed = false;
+  try {
+    // bootstrap already ran at the top of buildProjections (before scan imported the
+    // contract modules), so the runtime extraction below resolves cleanly.
+    const { contracts: rawContracts, errors: extractErrors } = await extractContractsFromProject(dir);
+    if (extractErrors && extractErrors.length > 0) {
+      // Per-file import/synthesis failures are REPORTED here (not thrown). A partial
+      // extraction must not publish a half-doc or clear the prior one — skip + preserve.
+      openapiFailed = true;
+    } else if (rawContracts.length > 0) {
+      const doc = renderArtifact(
+        openapiArtifact,
+        rawContracts as unknown as ExtractedContractProjection<unknown, unknown>[],
+        { title: basename(dir) || "API Specification" },
+      ) as Record<string, unknown>;
+      // An empty fallback (non-HTTP / inbound-only contracts) carries no paths — that's
+      // "no API reference" (null → clear), NOT a real doc.
+      const paths = doc?.paths as Record<string, unknown> | undefined;
+      openapi = paths && Object.keys(paths).length > 0 ? doc : null;
+    }
+  } catch {
+    // Render threw — keep `openapi` null but flag the failure so sync skips the upload
+    // instead of clearing a previously-synced doc.
+    openapiFailed = true;
+  }
+
   return {
     projected,
     files,
@@ -203,6 +268,8 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
     emptyTestFiles: scanResult.emptyTestFiles,
     contracts,
     workflows,
+    openapi,
+    openapiFailed,
   };
 }
 
@@ -214,7 +281,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
  */
 export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise<void> {
   const dir = options.dir ? resolve(options.dir) : process.cwd();
-  const { projected, files, errors, warnings, emptyTestFiles } = await buildProjections(dir);
+  const { projected, files, errors, warnings, emptyTestFiles, openapi } = await buildProjections(dir);
   // Files that contribute NO projection though they look like tests — a sync
   // would silently drop them (see syncCommand).
   const dropped = [
@@ -225,11 +292,11 @@ export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise
   ];
 
   if (options.out) {
-    await writeFile(resolve(options.out), JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles }, null, 2));
+    await writeFile(resolve(options.out), JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles, openapi }, null, 2));
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles }, null, 2));
+    console.log(JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles, openapi }, null, 2));
     return;
   }
 

@@ -19,7 +19,24 @@ export const onboardFlow = workflow({
   .branch("needs-seed", {
     whenRuntime: (_ctx, s) => !Array.isArray(s.users) || s.users.length === 0,
     message: "the user list is empty, so onboarding must seed a first user",
-    then: (b) => b.compute("mark-seed", (s) => ({ ...s, seed: true })),
-    else: (b) => b.compute("mark-ready", (s) => ({ ...s, seed: false })),
+    // A compute is OPAQUE (its transform logic can't be statically shaped), so its
+    // `description` is the ONLY thing a reviewer can read to understand the step —
+    // never leave an opaque node as a bare two-word name.
+    then: (b) =>
+      b.compute(
+        {
+          id: "mark-seed",
+          description: "Mark the run as needing a seed user (sets state.seed = true) so a later step provisions the first account.",
+        },
+        (s) => ({ ...s, seed: true }),
+      ),
+    else: (b) =>
+      b.compute(
+        {
+          id: "mark-ready",
+          description: "Mark the run as ready (sets state.seed = false) — users already exist, so onboarding skips seeding.",
+        },
+        (s) => ({ ...s, seed: false }),
+      ),
   })
   .build();

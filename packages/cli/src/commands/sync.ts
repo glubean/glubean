@@ -79,7 +79,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // ALWAYS project the WHOLE project (rootDir), never just --dir: the upload is a
   // complete snapshot the server replaces, so scanning a subdirectory would make
   // the server delete every test outside it. --dir only locates the project root.
-  const { projected, errors, warnings, emptyTestFiles, contracts, workflows } =
+  const { projected, errors, warnings, emptyTestFiles, contracts, workflows, openapi, openapiFailed } =
     await buildProjections(rootDir);
 
   // A file that failed to import / timed out has NO projection. Since sync is a
@@ -267,11 +267,21 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     projectionComplete: w.projectionComplete,
     incompleteReason: w.incompleteReason ?? null,
   }));
+  // The OpenAPI doc is purely structural (paths + schemas). Redact it pattern-ONLY
+  // (same as the normalized projection): mask secret-LOOKING example/default values
+  // but PRESERVE schema field names — masking a `password`/`token` field name (a
+  // type, not a secret) would corrupt the schema. `null` when there are no HTTP
+  // contracts, so a full-replace clears any stale doc.
+  const safeOpenapi = openapi ? (redactStructure(openapi) as Record<string, unknown>) : null;
 
   const base = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/projections`;
   // Each kind is its OWN full-snapshot replace (an empty kind clears that kind's
   // stale projections). POST all three; a failure on any aborts.
-  const post = async (kind: string, body: unknown): Promise<{ upserted?: number; deleted?: number }> => {
+  const post = async (
+    kind: string,
+    body: unknown,
+    opts?: { tolerateMissingRoute?: boolean },
+  ): Promise<{ upserted?: number; deleted?: number; skipped?: boolean }> => {
     let res: Response;
     try {
       res = await fetch(`${base}/${kind}`, {
@@ -284,6 +294,10 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       process.exit(1);
     }
     if (!res.ok) {
+      // A server that predates this projection kind answers 404 — tolerate it (skip
+      // this kind) instead of failing a sync that already replaced the OTHER kinds, so
+      // a newer CLI keeps working against a not-yet-upgraded / self-hosted server.
+      if (opts?.tolerateMissingRoute && res.status === 404) return { skipped: true };
       const text = await res.text().catch(() => "");
       console.error(`${colors.red}Sync failed (${kind}): ${res.status} ${text}${colors.reset}`);
       if (res.status === 401 || res.status === 403) {
@@ -293,19 +307,33 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       }
       process.exit(1);
     }
-    return (await res.json().catch(() => ({}))) as { upserted?: number; deleted?: number };
+    return (await res.json().catch(() => ({}))) as { upserted?: number; deleted?: number; skipped?: boolean };
   };
 
   const testRes = await post("test", { tests: safeTests });
   const contractRes = await post("contract", { contracts: safeContracts });
   const workflowRes = await post("workflow", { workflows: safeWorkflows });
+  // The OpenAPI doc is a project-level single snapshot (not a per-id replace) — one
+  // doc rendered from all HTTP contracts. POST it last; `null` clears a stale doc. Two
+  // ways it skips (best-effort, never aborts the whole sync): render FAILED (don't wipe
+  // a prior doc on a transient error), or the server predates the route (404 tolerated,
+  // so a newer CLI doesn't break sync against a not-yet-upgraded server).
+  const openapiRes = openapiFailed
+    ? { skipped: true as const }
+    : await post("openapi", { openapi: safeOpenapi }, { tolerateMissingRoute: true });
 
   const line = (label: string, r: { upserted?: number; deleted?: number }, n: number) => {
     const removed = r.deleted ? `${colors.dim} (${r.deleted} removed)${colors.reset}` : "";
     return `${colors.green}✓ ${r.upserted ?? n} ${label}${colors.reset}${removed}`;
   };
+  const pathCount = safeOpenapi ? Object.keys((safeOpenapi.paths as Record<string, unknown>) ?? {}).length : 0;
+  const openapiLine = openapiFailed
+    ? `${colors.yellow}⚠ openapi skipped (render failed; kept previous)${colors.reset}`
+    : openapiRes?.skipped
+      ? `${colors.dim}· openapi not supported by this server (skipped)${colors.reset}`
+      : `${colors.green}✓ openapi${colors.reset}${colors.dim} (${pathCount} path${pathCount === 1 ? "" : "s"})${colors.reset}`;
   console.log(
-    `${line("test", testRes, safeTests.length)}  ${line("contract", contractRes, safeContracts.length)}  ${line("workflow", workflowRes, safeWorkflows.length)} ${colors.dim}→ project ${projectId}${colors.reset}`,
+    `${line("test", testRes, safeTests.length)}  ${line("contract", contractRes, safeContracts.length)}  ${line("workflow", workflowRes, safeWorkflows.length)}  ${openapiLine} ${colors.dim}→ project ${projectId}${colors.reset}`,
   );
   const partial =
     projected.filter((p) => !p.projectionComplete).length +

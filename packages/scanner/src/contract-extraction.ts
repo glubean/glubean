@@ -829,7 +829,11 @@ function findContractAndFlowFiles(dir: string): string[] {
   const walk = (d: string) => {
     for (const entry of readdirSync(d)) {
       const full = resolve(d, entry);
-      if (entry === "node_modules" || entry.startsWith(".")) continue;
+      // Match scan()'s default skipDirs (node_modules/.git/dist/build) so the runtime
+      // contract extraction sees the SAME file set as the projection scan — never
+      // import GENERATED dist/build output (`*.contract.js`/`*.flow.js`), which would
+      // make the OpenAPI doc diverge from the test/contract/workflow projections.
+      if (entry === "node_modules" || entry === "dist" || entry === "build" || entry.startsWith(".")) continue;
       if (statSync(full).isDirectory()) walk(full);
       else {
         const base = basename(entry);
