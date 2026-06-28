@@ -37,6 +37,35 @@ export interface ProjectedTest {
   skipped?: boolean;
 }
 
+/** One projected contract (C1) — the scanner's static normalized contract, plus
+ *  derived head fields, for upload to /projections/contract. */
+export interface ProjectedContract {
+  contractId: string;
+  protocol: string;
+  target?: string;
+  description?: string;
+  deprecated?: string;
+  tags?: string[];
+  caseCount: number;
+  /** Full normalized contract (cases + schemas). */
+  projection: unknown;
+  projectionComplete: boolean;
+  incompleteReason?: string;
+}
+
+/** One projected workflow (C1) — the scanner's static normalized workflow. */
+export interface ProjectedWorkflow {
+  workflowId: string;
+  name?: string;
+  description?: string;
+  tags?: string[];
+  nodeCount: number;
+  /** Full normalized workflow (node tree + phases). */
+  projection: unknown;
+  projectionComplete: boolean;
+  incompleteReason?: string;
+}
+
 export interface ProjectionResult {
   projected: ProjectedTest[];
   files: string[];
@@ -48,6 +77,10 @@ export interface ProjectionResult {
   /** Test-named files that yielded ZERO exports (parser recovered from a syntax
    *  error, or a misnamed module) — silently dropped, so also fatal for sync. */
   emptyTestFiles: string[];
+  /** Statically-projected contracts (declarative — no dry-run). */
+  contracts: ProjectedContract[];
+  /** Statically-projected workflows (declarative — no dry-run). */
+  workflows: ProjectedWorkflow[];
 }
 
 /**
@@ -125,12 +158,51 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
   });
 
   projected.sort((a, b) => a.testId.localeCompare(b.testId));
+
+  // Contracts + workflows are DECLARATIVE — the scanner already produced their full
+  // normalized projection statically (no dry-run). Map to the upload shape; the
+  // normalized blob is the reviewable body, the head fields derive from it.
+  const contracts: ProjectedContract[] = (scanResult.contractsProjection ?? []).map((c) => ({
+    contractId: c.id,
+    protocol: c.protocol,
+    target: c.target,
+    description: c.description,
+    deprecated: c.deprecated,
+    tags: c.tags,
+    caseCount: c.cases?.length ?? 0,
+    projection: c,
+    projectionComplete: !(c.unprojectableSchemas && c.unprojectableSchemas.length > 0),
+    ...(c.unprojectableSchemas && c.unprojectableSchemas.length > 0
+      ? { incompleteReason: `${c.unprojectableSchemas.length} declared schema(s) couldn't be projected` }
+      : {}),
+  }));
+  const workflows: ProjectedWorkflow[] = (scanResult.workflows ?? []).map((w) => {
+    const g = w.gradeSummary ?? { full: 0, partial: 0, opaque: 0 };
+    const nodeCount = (g.full ?? 0) + (g.partial ?? 0) + (g.opaque ?? 0);
+    return {
+      workflowId: w.id,
+      name: w.name,
+      description: w.description,
+      tags: w.tags,
+      nodeCount,
+      projection: w,
+      projectionComplete: (g.opaque ?? 0) === 0,
+      ...((g.opaque ?? 0) > 0
+        ? { incompleteReason: `${g.opaque} node(s) projected opaque — not fully statically shaped` }
+        : {}),
+    };
+  });
+  contracts.sort((a, b) => a.contractId.localeCompare(b.contractId));
+  workflows.sort((a, b) => a.workflowId.localeCompare(b.workflowId));
+
   return {
     projected,
     files,
     errors,
     warnings: scanResult.warnings,
     emptyTestFiles: scanResult.emptyTestFiles,
+    contracts,
+    workflows,
   };
 }
 

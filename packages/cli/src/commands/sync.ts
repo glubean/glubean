@@ -79,7 +79,8 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // ALWAYS project the WHOLE project (rootDir), never just --dir: the upload is a
   // complete snapshot the server replaces, so scanning a subdirectory would make
   // the server delete every test outside it. --dir only locates the project root.
-  const { projected, errors, warnings, emptyTestFiles } = await buildProjections(rootDir);
+  const { projected, errors, warnings, emptyTestFiles, contracts, workflows } =
+    await buildProjections(rootDir);
 
   // A file that failed to import / timed out has NO projection. Since sync is a
   // full-snapshot replace, publishing now would DELETE the broken file's tests'
@@ -116,9 +117,10 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
 
   // Empty snapshot would CLEAR the project's projections — guard against an
   // accidental run in the wrong/empty dir; require --allow-empty to actually wipe.
-  if (projected.length === 0 && !options.allowEmpty) {
+  // "Empty" means NO specs of ANY kind (test + contract + workflow).
+  if (projected.length === 0 && contracts.length === 0 && workflows.length === 0 && !options.allowEmpty) {
     console.log(
-      `${colors.yellow}No simple tests found.${colors.reset} ${colors.dim}Pass --allow-empty to clear the project's projections, or check the directory.${colors.reset}\n`,
+      `${colors.yellow}No tests, contracts, or workflows found.${colors.reset} ${colors.dim}Pass --allow-empty to clear the project's projections, or check the directory.${colors.reset}\n`,
     );
     return;
   }
@@ -201,51 +203,86 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // join key with run evidence; redacting an id that matches a built-in pattern
   // would break correlation and collapse distinct ids) or structural fields
   // (requires/defaultRun/counts/flags).
-  const safeBody = {
-    tests: tests.map((t) => ({
-      ...t,
-      description: t.description == null ? t.description : (redactField(t.description) as string),
-      deprecated: t.deprecated == null ? t.deprecated : (redactField(t.deprecated) as string),
-      incompleteReason:
-        t.incompleteReason == null ? t.incompleteReason : (redactField(t.incompleteReason) as string),
-      assertions: redactField(t.assertions),
-      endpoints: redactField(t.endpoints),
-    })),
+  const safeTests = tests.map((t) => ({
+    ...t,
+    description: t.description == null ? t.description : (redactField(t.description) as string),
+    deprecated: t.deprecated == null ? t.deprecated : (redactField(t.deprecated) as string),
+    incompleteReason:
+      t.incompleteReason == null ? t.incompleteReason : (redactField(t.incompleteReason) as string),
+    assertions: redactField(t.assertions),
+    endpoints: redactField(t.endpoints),
+  }));
+  // Contracts/workflows: redact the free-text + the normalized `projection` body
+  // (schemas/descriptions/notes), preserve identity/structural fields.
+  const safeContracts = contracts.map((c) => ({
+    contractId: c.contractId,
+    protocol: c.protocol,
+    target: c.target ?? null,
+    description: c.description == null ? null : (redactField(c.description) as string),
+    deprecated: c.deprecated == null ? null : (redactField(c.deprecated) as string),
+    tags: c.tags ?? [],
+    caseCount: c.caseCount,
+    projection: redactField(c.projection),
+    projectionComplete: c.projectionComplete,
+    incompleteReason: c.incompleteReason ?? null,
+  }));
+  const safeWorkflows = workflows.map((w) => ({
+    workflowId: w.workflowId,
+    name: w.name ?? null,
+    description: w.description == null ? null : (redactField(w.description) as string),
+    tags: w.tags ?? [],
+    nodeCount: w.nodeCount,
+    projection: redactField(w.projection),
+    projectionComplete: w.projectionComplete,
+    incompleteReason: w.incompleteReason ?? null,
+  }));
+
+  const base = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/projections`;
+  // Each kind is its OWN full-snapshot replace (an empty kind clears that kind's
+  // stale projections). POST all three; a failure on any aborts.
+  const post = async (kind: string, body: unknown): Promise<{ upserted?: number; deleted?: number }> => {
+    let res: Response;
+    try {
+      res = await fetch(`${base}/${kind}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      console.error(`${colors.red}Sync failed (${kind}): ${(err as Error)?.message ?? String(err)}${colors.reset}`);
+      process.exit(1);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`${colors.red}Sync failed (${kind}): ${res.status} ${text}${colors.reset}`);
+      if (res.status === 401 || res.status === 403) {
+        console.error(
+          `${colors.dim}The token is invalid/expired or lacks runs:write. Create a project token in the dashboard and 'glubean login' (or set GLUBEAN_TOKEN).${colors.reset}`,
+        );
+      }
+      process.exit(1);
+    }
+    return (await res.json().catch(() => ({}))) as { upserted?: number; deleted?: number };
   };
 
-  const url = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/projections/test`;
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify(safeBody),
-    });
-  } catch (err) {
-    console.error(`${colors.red}Sync failed: ${(err as Error)?.message ?? String(err)}${colors.reset}`);
-    process.exit(1);
-  }
+  const testRes = await post("test", { tests: safeTests });
+  const contractRes = await post("contract", { contracts: safeContracts });
+  const workflowRes = await post("workflow", { workflows: safeWorkflows });
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    console.error(`${colors.red}Sync failed: ${res.status} ${body}${colors.reset}`);
-    if (res.status === 401 || res.status === 403) {
-      console.error(
-        `${colors.dim}The token is invalid/expired or lacks runs:write. Create a project token in the dashboard and 'glubean login' (or set GLUBEAN_TOKEN).${colors.reset}`,
-      );
-    }
-    process.exit(1);
-  }
-
-  const result = (await res.json().catch(() => ({}))) as { upserted?: number; deleted?: number };
-  const partial = projected.filter((p) => !p.projectionComplete).length;
-  const deletedNote = result.deleted ? `${colors.dim} (${result.deleted} removed)${colors.reset}` : "";
+  const line = (label: string, r: { upserted?: number; deleted?: number }, n: number) => {
+    const removed = r.deleted ? `${colors.dim} (${r.deleted} removed)${colors.reset}` : "";
+    return `${colors.green}✓ ${r.upserted ?? n} ${label}${colors.reset}${removed}`;
+  };
   console.log(
-    `${colors.green}✓ Synced ${result.upserted ?? tests.length} test projection(s)${colors.reset}${deletedNote} ${colors.dim}to project ${projectId}${colors.reset}`,
+    `${line("test", testRes, safeTests.length)}  ${line("contract", contractRes, safeContracts.length)}  ${line("workflow", workflowRes, safeWorkflows.length)} ${colors.dim}→ project ${projectId}${colors.reset}`,
   );
+  const partial =
+    projected.filter((p) => !p.projectionComplete).length +
+    contracts.filter((c) => !c.projectionComplete).length +
+    workflows.filter((w) => !w.projectionComplete).length;
   if (partial > 0) {
     console.log(
-      `${colors.yellow}  ◐ ${partial} partial (bare branch/loop — use ctx.when()/ctx.switch()/ctx.while() for full projection)${colors.reset}`,
+      `${colors.yellow}  ◐ ${partial} partial — use ctx.when()/switch()/while() (tests) or resolve opaque nodes/unprojectable schemas (workflows/contracts) for full projection${colors.reset}`,
     );
   }
   console.log();
