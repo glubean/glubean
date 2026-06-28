@@ -20,7 +20,7 @@ export interface DryRunCommandOptions {
 }
 
 /** One projected test, merged from static scan metadata + dynamic dry-run shape. */
-interface ProjectedTest {
+export interface ProjectedTest {
   testId: string;
   exportName: string;
   file: string;
@@ -36,15 +36,19 @@ interface ProjectedTest {
   skipped?: boolean;
 }
 
-/**
- * `glubean dry-run` — project the SHAPE of every simple test (assertions made,
- * endpoints hit) without running them, for cloud team review. Combines static
- * scan metadata (description/deprecated/bareBranchCount) with the dynamic
- * dry-run projection.
- */
-export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise<void> {
-  const dir = options.dir ? resolve(options.dir) : process.cwd();
+export interface ProjectionResult {
+  projected: ProjectedTest[];
+  files: string[];
+  errors: Array<{ file: string; message: string }>;
+}
 
+/**
+ * Scan + dry-run a directory and merge static scan metadata
+ * (description/deprecated/requires/defaultRun/bareBranchCount) with each test's
+ * dynamic dry-run shape. Shared by `glubean dry-run` (print) and `glubean sync`
+ * (upload).
+ */
+export async function buildProjections(dir: string): Promise<ProjectionResult> {
   const scanResult = await scan(dir);
 
   // Build a lookup of static metadata keyed by absolute file + export name.
@@ -106,6 +110,18 @@ export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise
   });
 
   projected.sort((a, b) => a.testId.localeCompare(b.testId));
+  return { projected, files, errors };
+}
+
+/**
+ * `glubean dry-run` — project the SHAPE of every simple test (assertions made,
+ * endpoints hit) without running them, for cloud team review. Combines static
+ * scan metadata (description/deprecated/bareBranchCount) with the dynamic
+ * dry-run projection.
+ */
+export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise<void> {
+  const dir = options.dir ? resolve(options.dir) : process.cwd();
+  const { projected, files, errors } = await buildProjections(dir);
 
   if (options.out) {
     await writeFile(resolve(options.out), JSON.stringify({ tests: projected, errors }, null, 2));

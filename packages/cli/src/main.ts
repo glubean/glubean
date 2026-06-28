@@ -23,6 +23,7 @@ import { initCommand } from "./commands/init.js";
 import { runCommand, resolveTestFilesForSuite } from "./commands/run.js";
 import { scanCommand } from "./commands/scan.js";
 import { dryRunCommand } from "./commands/dry-run.js";
+import { syncCommand } from "./commands/sync.js";
 import { loadCommand } from "./commands/load.js";
 import { validateMetadataCommand } from "./commands/validate_metadata.js";
 import { loginCommand } from "./commands/login.js";
@@ -690,6 +691,29 @@ program
       dir: options.dir,
       json: options.json,
       out: options.out,
+    });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sync command — sync test-definition projections (specs) to Glubean Cloud
+// ─────────────────────────────────────────────────────────────────────────────
+program
+  .command("sync")
+  .description("Sync the repo's test-definition projections (metadata + dry-run shape) to Glubean Cloud for team review")
+  .option("-d, --dir <path>", "Directory to scan", ".")
+  .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
+  .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
+  .option("--token-env <name>", "Read the token from this env var instead of GLUBEAN_TOKEN")
+  .option("--api-url <url>", "Glubean API server URL (or GLUBEAN_API_URL env)")
+  .option("--env-file <name>", "Env file basename to load (default: .env)")
+  .action(async (options) => {
+    await syncCommand({
+      dir: options.dir,
+      project: options.project,
+      token: options.token,
+      tokenEnv: options.tokenEnv,
+      apiUrl: options.apiUrl,
+      envFile: options.envFile,
     });
   });
 
