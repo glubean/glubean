@@ -67,6 +67,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
       deprecated?: string;
       requires?: string;
       defaultRun?: string;
+      tags?: string[];
       bareBranchCount?: number;
     }
   >();
@@ -82,6 +83,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
         deprecated: exp.deprecated,
         requires: exp.requires,
         defaultRun: exp.defaultRun,
+        tags: exp.tags,
         bareBranchCount: exp.bareBranchCount,
       });
     }
@@ -108,9 +110,11 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
       deprecated: meta.deprecated,
       requires: meta.requires,
       defaultRun: meta.defaultRun,
-      // Tags come from the RUNTIME shape (test.meta.tags), so data-driven
-      // `tagFields` row tags survive — not the static scan (keyed by exportName).
-      ...(s.tags && s.tags.length ? { tags: s.tags } : {}),
+      // Prefer the RUNTIME shape's tags (test.meta.tags) so data-driven `tagFields`
+      // row tags survive; fall back to the static scan tags when the project's
+      // runner predates shape tags (version skew), so statically-tagged tests
+      // aren't published with empty tags.
+      ...((s.tags ?? meta.tags)?.length ? { tags: s.tags ?? meta.tags } : {}),
       assertions: s.assertions,
       endpoints: s.endpoints,
       assertionCount: s.assertionCount,
