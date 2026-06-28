@@ -3,7 +3,9 @@ import { stat } from "node:fs/promises";
 import { loadProjectEnv } from "@glubean/runner";
 
 import { buildProjections } from "./dry-run.js";
+import { findProjectConfig } from "./run.js";
 import { resolveToken, resolveProjectId, resolveApiUrl } from "../lib/auth.js";
+import { resolveEnvFileName } from "../lib/active_env.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -38,57 +40,68 @@ export interface SyncCommandOptions {
   apiUrl?: string;
   tokenEnv?: string;
   envFile?: string;
+  /** Allow clearing the project's projections when the repo has 0 tests. */
+  allowEmpty?: boolean;
 }
 
 /**
  * `glubean sync` — sync the repo's test-definition projections (declared
  * metadata + dry-run shape) to Glubean Cloud for team review. PROJECT-scoped:
  * the projection is generated from SOURCE CODE, so it's one set per codebase
- * regardless of how many targets it runs against (latest-wins upsert). Distinct
- * from `glubean run --upload`, which uploads a target's run EVIDENCE.
+ * regardless of how many targets it runs against. The upload is the COMPLETE
+ * source snapshot — the server replaces the project's projections with it
+ * (removed tests are deleted). Distinct from `glubean run --upload` (run
+ * evidence).
  */
 export async function syncCommand(options: SyncCommandOptions = {}): Promise<void> {
   const dir = options.dir ? resolve(options.dir) : process.cwd();
+  // Resolve auth/env from the PROJECT ROOT (so root .env.* / .glubean/active-env
+  // are honored even when --dir points at a nested scan dir) — parity with run.
+  const { rootDir } = await findProjectConfig(dir);
 
   console.log(`\n${colors.bold}${colors.blue}🔄 Glubean Sync (test-definition projection)${colors.reset}\n`);
 
   // Validate an EXPLICIT --env-file FIRST — before the (expensive, user-code-
   // running) projection — so a typo fails fast. A missing explicit env file
   // would otherwise load empty and let global/process credentials upload to the
-  // WRONG project (parity with run/load).
+  // WRONG project (parity with run/load). Default: the active env (or .env).
   const userSpecifiedEnvFile = !!options.envFile;
-  const envFileName = options.envFile ?? ".env";
+  const envFileName = options.envFile ?? (await resolveEnvFileName(rootDir));
   if (userSpecifiedEnvFile) {
     try {
-      await stat(resolve(dir, envFileName));
+      await stat(resolve(rootDir, envFileName));
     } catch {
-      console.error(`${colors.red}Sync failed: env file '${envFileName}' not found in ${dir}${colors.reset}`);
+      console.error(`${colors.red}Sync failed: env file '${envFileName}' not found in ${rootDir}${colors.reset}`);
       process.exit(1);
     }
   }
 
   const { projected, errors } = await buildProjections(dir);
 
-  // A file that failed to import / timed out has NO projection. Since the upload
-  // is a per-testId upsert (not a target-level replace), skipping it would leave
-  // its stale projection in the cloud — so abort rather than publish a partial,
-  // inconsistent set. Fix the file(s) and re-sync.
+  // A file that failed to import / timed out has NO projection. Since sync is a
+  // full-snapshot replace, publishing now would DELETE the broken file's tests'
+  // projections (treating them as removed) — so abort and let the user fix +
+  // re-sync the complete set.
   if (errors.length) {
     console.error(`${colors.red}Sync aborted: ${errors.length} file(s) failed to project.${colors.reset}`);
     for (const e of errors) console.error(`  ${colors.red}✗ ${e.file}: ${e.message}${colors.reset}`);
     console.error(
-      `${colors.dim}Fix these files and re-run — uploading now would leave their tests' projections stale.${colors.reset}`,
+      `${colors.dim}Fix these files and re-run — syncing now would drop their tests' projections.${colors.reset}`,
     );
     process.exit(1);
   }
 
-  if (projected.length === 0) {
-    console.log(`${colors.yellow}No simple tests found to sync.${colors.reset}\n`);
+  // Empty snapshot would CLEAR the project's projections — guard against an
+  // accidental run in the wrong/empty dir; require --allow-empty to actually wipe.
+  if (projected.length === 0 && !options.allowEmpty) {
+    console.log(
+      `${colors.yellow}No simple tests found.${colors.reset} ${colors.dim}Pass --allow-empty to clear the project's projections, or check the directory.${colors.reset}\n`,
+    );
     return;
   }
 
   // Resolve cloud auth — PROJECT-scoped (no target: the projection is repo-level).
-  const { vars, secrets } = await loadProjectEnv(dir, envFileName);
+  const { vars, secrets } = await loadProjectEnv(rootDir, envFileName);
   const authOpts = { token: options.token, project: options.project, apiUrl: options.apiUrl };
   const sources = { envFileVars: { ...vars, ...secrets } };
   const token = await resolveToken(authOpts, sources, options.tokenEnv);
@@ -167,10 +180,11 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     process.exit(1);
   }
 
-  const result = (await res.json().catch(() => ({}))) as { upserted?: number };
+  const result = (await res.json().catch(() => ({}))) as { upserted?: number; deleted?: number };
   const partial = projected.filter((p) => !p.projectionComplete).length;
+  const deletedNote = result.deleted ? `${colors.dim} (${result.deleted} removed)${colors.reset}` : "";
   console.log(
-    `${colors.green}✓ Synced ${result.upserted ?? tests.length} test projection(s)${colors.reset} ${colors.dim}to project ${projectId}${colors.reset}`,
+    `${colors.green}✓ Synced ${result.upserted ?? tests.length} test projection(s)${colors.reset}${deletedNote} ${colors.dim}to project ${projectId}${colors.reset}`,
   );
   if (partial > 0) {
     console.log(

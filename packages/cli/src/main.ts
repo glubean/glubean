@@ -705,7 +705,8 @@ program
   .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
   .option("--token-env <name>", "Read the token from this env var instead of GLUBEAN_TOKEN")
   .option("--api-url <url>", "Glubean API server URL (or GLUBEAN_API_URL env)")
-  .option("--env-file <name>", "Env file basename to load (default: .env)")
+  .option("--env-file <name>", "Env file basename to load (default: active env, else .env)")
+  .option("--allow-empty", "Allow clearing the project's projections when no tests are found")
   .action(async (options) => {
     await syncCommand({
       dir: options.dir,
@@ -714,6 +715,7 @@ program
       tokenEnv: options.tokenEnv,
       apiUrl: options.apiUrl,
       envFile: options.envFile,
+      allowEmpty: options.allowEmpty,
     });
   });
 
