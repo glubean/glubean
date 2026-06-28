@@ -41,7 +41,7 @@ export const pages = test(
       async () => {
         const res = await ctx.http.get("https://api.test/items");
         const body = await res.json();
-        ctx.expect(body).toHaveProperty("items", "every page returns an `items` array, never null");
+        ctx.expect(Array.isArray(body.items)).toBe(true, "every page returns an `items` array, never null");
         more = body.hasMore;
       },
       "there are more pages",
@@ -102,6 +102,8 @@ export const byRegion = test.each([
     id: "region-$region",
     description: "Each region's health endpoint is reachable and reports healthy.",
     tags: ["health", "multi-region"],
+    // Per-row tag (region:us / region:eu) — resolved at runtime, must survive sync.
+    tagFields: "region",
   },
   async (ctx, row) => {
     const res = await ctx.http.get(`${row.base}/health`);

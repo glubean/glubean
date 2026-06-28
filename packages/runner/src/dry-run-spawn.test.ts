@@ -86,6 +86,10 @@ vtest(
     const eu = res.shapes.find((s) => s.testId === "region-eu")!;
     expect(us.endpoints[0]!.url).toBe("https://us.api.test/health");
     expect(eu.endpoints[0]!.url).toBe("https://eu.api.test/health");
+    // Tags come from RUNTIME meta — static tags + per-row `tagFields` (region:us /
+    // region:eu), so data-driven row tags survive the projection (not the static scan).
+    expect(us.tags).toEqual(["health", "multi-region", "region:us"]);
+    expect(eu.tags).toEqual(["health", "multi-region", "region:eu"]);
   },
   20_000,
 );

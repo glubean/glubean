@@ -40,6 +40,10 @@ export interface ProjEndpoint {
 export interface TestShape {
   testId: string;
   exportName: string;
+  /** Resolved declared tags (static + `test.each` `tagFields`, per generated row).
+   *  Taken from the RUNTIME `test.meta.tags`, not the static scan, so data-driven
+   *  row tags (e.g. `country:JP`) match what `glubean run --tag` sees. */
+  tags?: string[];
   assertions: ProjAssertion[];
   endpoints: ProjEndpoint[];
   assertionCount: number;
@@ -476,9 +480,11 @@ export async function dryRunTest(
   opts: { exportName: string; bareBranchCount?: number },
 ): Promise<TestShape> {
   const testId = test.meta.id;
+  const metaTags = (test.meta as { tags?: string[] }).tags;
   const base: Omit<TestShape, "projectionComplete"> = {
     testId,
     exportName: opts.exportName,
+    ...(metaTags && metaTags.length ? { tags: metaTags } : {}),
     assertions: [],
     endpoints: [],
     assertionCount: 0,
