@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
 import { loadProjectEnv } from "@glubean/runner";
 
 import { buildProjections } from "./dry-run.js";
@@ -48,7 +49,19 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   }
 
   // Resolve cloud auth — PROJECT-scoped (no target: the projection is repo-level).
+  // An EXPLICIT --env-file must exist: a typo'd file would otherwise load empty
+  // and let global/process credentials upload to the WRONG project (parity with
+  // run/load).
+  const userSpecifiedEnvFile = !!options.envFile;
   const envFileName = options.envFile ?? ".env";
+  if (userSpecifiedEnvFile) {
+    try {
+      await stat(resolve(dir, envFileName));
+    } catch {
+      console.error(`${colors.red}Sync failed: env file '${envFileName}' not found in ${dir}${colors.reset}`);
+      process.exit(1);
+    }
+  }
   const { vars, secrets } = await loadProjectEnv(dir, envFileName);
   const authOpts = { token: options.token, project: options.project, apiUrl: options.apiUrl };
   const sources = { envFileVars: { ...vars, ...secrets } };
