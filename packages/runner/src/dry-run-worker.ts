@@ -103,17 +103,22 @@ async function main(): Promise<void> {
 
       const mod = await import(pathToFileURL(file).href);
       for (const [exportName, val] of Object.entries(mod)) {
-        // `test.each(...)` / `test.pick(...)` export an ARRAY of simple Tests.
-        // Every row shares one fn body, so they share one shape — project the
-        // first row as the representative (avoids N duplicate shapes for large
-        // datasets) rather than dropping the export entirely.
-        const candidate = Array.isArray(val) ? val.find(isSimpleTest) : val;
-        if (!isSimpleTest(candidate)) continue;
-        const shape = await dryRunTest(candidate as Parameters<typeof dryRunTest>[0], {
+        // `test.each(...)` / `test.pick(...)` export an ARRAY of simple Tests
+        // (one per generated row, each with its OWN testId). All rows share one
+        // fn body → one shape. Project ONCE from the first row (cheap; avoids
+        // re-projecting N times), then emit one entry per testId so a
+        // full-snapshot sync covers EVERY generated row (replace would otherwise
+        // delete the omitted rows' projections).
+        const candidates = Array.isArray(val) ? val.filter(isSimpleTest) : isSimpleTest(val) ? [val] : [];
+        if (candidates.length === 0) continue;
+        const repShape = await dryRunTest(candidates[0] as Parameters<typeof dryRunTest>[0], {
           exportName,
           bareBranchCount: bareByExport.get(exportName),
         });
-        shapes.push({ file, ...shape });
+        for (const c of candidates) {
+          const testId = (c as { meta: { id: string } }).meta.id;
+          shapes.push({ file, ...repShape, testId });
+        }
       }
       emit({ file, shapes });
     } catch (err) {

@@ -72,6 +72,24 @@ vtest(
 );
 
 vtest(
+  "data-driven test.each emits one projection per generated testId (not just the first)",
+  async () => {
+    const demo = resolve(testProject, "projection-demo.test.ts");
+    const res = await dryRunFiles([demo], { cwd: testProject });
+    const ids = res.shapes.map((s) => s.testId);
+    // byRegion = test.each([{region:"us"},{region:"eu"}]) → both rows present.
+    expect(ids).toContain("region-us");
+    expect(ids).toContain("region-eu");
+    // Shared shape: both carry the same single assertion.
+    const us = res.shapes.find((s) => s.testId === "region-us")!;
+    const eu = res.shapes.find((s) => s.testId === "region-eu")!;
+    expect(us.assertionCount).toBe(1);
+    expect(eu.assertions).toEqual(us.assertions);
+  },
+  20_000,
+);
+
+vtest(
   "aliased test.extend tests still get bareBranchCount (alias-aware extraction)",
   async () => {
     const aliased = resolve(testProject, "_dryrun_aliased.fixture.ts");
