@@ -95,13 +95,20 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     process.exit(1);
   }
 
-  // A file the SCANNER couldn't turn into tests is dropped BEFORE the dry-run (so
-  // it never shows in `errors`), yet its tests would vanish from this full
-  // snapshot and be deleted on replace. Two cases, both fatal: extraction THREW
-  // (warning), or it yielded ZERO exports — a recovered syntax error / misnamed
-  // module (emptyTestFiles).
+  // A file the SCANNER couldn't turn into a projection is dropped BEFORE upload
+  // (it never shows in `errors`), yet its tests/contracts/workflows would vanish
+  // from this full snapshot and be DELETED on replace. All fatal: test extraction
+  // THREW ("Failed to extract metadata from"), a test file yielded ZERO exports
+  // (emptyTestFiles), or a contract/workflow file failed to import ("Contract
+  // import failed" / "Flow import failed" — leaves contractsProjection/workflows
+  // missing that file, so a full-replace would wipe its prior Cloud projection).
   const dropped = [
-    ...warnings.filter((w) => w.startsWith("Failed to extract metadata from")),
+    ...warnings.filter(
+      (w) =>
+        w.startsWith("Failed to extract metadata from") ||
+        w.startsWith("Contract import failed") ||
+        w.startsWith("Flow import failed"),
+    ),
     ...emptyTestFiles.map(
       (f) => `${f} — a Glubean test file with no extractable tests (syntax error, or tests removed/unrecognized?)`,
     ),
@@ -110,7 +117,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     console.error(`${colors.red}Sync aborted: ${dropped.length} file(s) would be dropped from the snapshot.${colors.reset}`);
     for (const w of dropped) console.error(`  ${colors.red}✗ ${w}${colors.reset}`);
     console.error(
-      `${colors.dim}Fix these files and re-run — syncing now would delete their tests' projections.${colors.reset}`,
+      `${colors.dim}Fix these files and re-run — syncing now would delete their projections from Cloud.${colors.reset}`,
     );
     process.exit(1);
   }
@@ -172,7 +179,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // query/userinfo/fragment is already stripped above). Honor the PROJECT's
   // redaction rules (glubean.yaml `defaults.redaction` — custom sensitiveKeys /
   // customPatterns), not just the built-in defaults; FAIL CLOSED on invalid config.
-  const { redactValue } = await import("@glubean/redaction");
+  const { redactValue, BUILTIN_SCOPES } = await import("@glubean/redaction");
   const { loadProjectConfigV1, resolveRedactionConfig } = await import("../lib/config.js");
   let redaction = resolveRedactionConfig(undefined); // built-in defaults
   let hasConfig = false;
@@ -193,9 +200,19 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       process.exit(1);
     }
   }
+  // The projection is a static blob with NO request/response scope to bind to, so
+  // fold the builtin SCOPE sensitive keys (cookie / set-cookie / authorization /
+  // token / …) into the global keys — otherwise header/query examples carried in a
+  // contract/workflow projection would upload in cleartext (run/load apply these
+  // per-scope; here there's no scope, so apply them everywhere).
+  const scopeKeys = [...new Set(BUILTIN_SCOPES.flatMap((s) => s.rules?.sensitiveKeys ?? []))];
+  const globalRules = {
+    ...redaction.globalRules,
+    sensitiveKeys: [...new Set([...(redaction.globalRules.sensitiveKeys ?? []), ...scopeKeys])],
+  };
   const redactField = (v: unknown): unknown =>
     redactValue(v, {
-      globalRules: redaction.globalRules,
+      globalRules,
       replacementFormat: redaction.replacementFormat,
       maxDepth: 64,
     });
