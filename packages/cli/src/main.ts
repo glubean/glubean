@@ -700,7 +700,7 @@ program
 program
   .command("sync")
   .description("Sync the repo's test-definition projections (metadata + dry-run shape) to Glubean Cloud for team review")
-  .option("-d, --dir <path>", "Directory to scan", ".")
+  .option("-d, --dir <path>", "Locate the project from this directory (the WHOLE project is always synced)", ".")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
   .option("--token-env <name>", "Read the token from this env var instead of GLUBEAN_TOKEN")

@@ -76,7 +76,10 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     }
   }
 
-  const { projected, errors } = await buildProjections(dir);
+  // ALWAYS project the WHOLE project (rootDir), never just --dir: the upload is a
+  // complete snapshot the server replaces, so scanning a subdirectory would make
+  // the server delete every test outside it. --dir only locates the project root.
+  const { projected, errors } = await buildProjections(rootDir);
 
   // A file that failed to import / timed out has NO projection. Since sync is a
   // full-snapshot replace, publishing now would DELETE the broken file's tests'
@@ -167,14 +170,27 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       process.exit(1);
     }
   }
-  const safeBody = redactValue(
-    { tests },
-    {
+  const redactField = (v: unknown): unknown =>
+    redactValue(v, {
       globalRules: redaction.globalRules,
       replacementFormat: redaction.replacementFormat,
       maxDepth: 64,
-    },
-  );
+    });
+  // Redact ONLY the secret-bearing/free-text fields — NEVER `testId` (the stable
+  // join key with run evidence; redacting an id that matches a built-in pattern
+  // would break correlation and collapse distinct ids) or structural fields
+  // (requires/defaultRun/counts/flags).
+  const safeBody = {
+    tests: tests.map((t) => ({
+      ...t,
+      description: t.description == null ? t.description : (redactField(t.description) as string),
+      deprecated: t.deprecated == null ? t.deprecated : (redactField(t.deprecated) as string),
+      incompleteReason:
+        t.incompleteReason == null ? t.incompleteReason : (redactField(t.incompleteReason) as string),
+      assertions: redactField(t.assertions),
+      endpoints: redactField(t.endpoints),
+    })),
+  };
 
   const url = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/test-projection`;
   let res: Response;
