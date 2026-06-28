@@ -15,6 +15,22 @@ const colors = {
   red: "\x1b[31m",
 };
 
+/** Strip credential-bearing URL parts (query / fragment / userinfo) before a URL
+ *  leaves the machine — mirrors the cloud's server-side sanitizer (defense in
+ *  depth: the dry-run projector already placeholders ctx.secrets to `<KEY>`). */
+function sanitizeUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return url.split("#")[0]!.split("?")[0]!.replace(/(\/\/)[^/@]*@/, "$1");
+  }
+}
+
 export interface SyncCommandOptions {
   dir?: string;
   token?: string;
@@ -105,12 +121,27 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     requires: p.requires ?? null,
     defaultRun: p.defaultRun ?? null,
     assertions: p.assertions,
-    endpoints: p.endpoints,
+    endpoints: p.endpoints.map((e) => ({ ...e, url: sanitizeUrl(e.url) })),
     assertionCount: p.assertionCount,
     projectionComplete: p.projectionComplete,
     incompleteReason: p.incompleteReason ?? null,
     skipped: p.skipped ?? false,
   }));
+
+  // Redact outbound data before it leaves the machine (parity with run/load):
+  // a hardcoded credential in an assertion message / endpoint is masked by the
+  // default rules (URL query/userinfo/fragment is already stripped above).
+  const { redactValue } = await import("@glubean/redaction");
+  const { CONFIG_DEFAULTS } = await import("../lib/config.js");
+  const redaction = CONFIG_DEFAULTS.redaction;
+  const safeBody = redactValue(
+    { tests },
+    {
+      globalRules: redaction.globalRules,
+      replacementFormat: redaction.replacementFormat,
+      maxDepth: 64,
+    },
+  );
 
   const url = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/test-projection`;
   let res: Response;
@@ -118,7 +149,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ tests }),
+      body: JSON.stringify(safeBody),
     });
   } catch (err) {
     console.error(`${colors.red}Sync failed: ${(err as Error)?.message ?? String(err)}${colors.reset}`);
