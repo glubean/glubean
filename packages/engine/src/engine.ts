@@ -1504,6 +1504,10 @@ function wrapScopedKy(
   // divergence; "fixing" it engine-only would break byte-parity. Any real fix must
   // land in both legs (post-cutover), so the engine intentionally mirrors legacy here.
   const wrapResponse = (promise: KyResp, opts: Record<string, unknown> | undefined): KyResp => {
+    // `.track("GET /users/:id")` — author-declared canonical endpoint for review.
+    // Consumed by the dry-run projector; at run time a chainable no-op (parity with
+    // the node harness). Attached unconditionally so `.track()` never throws here.
+    (promise as unknown as { track: (pattern: string) => KyResp }).track = () => promise;
     const schemaOpts = opts?.schema as HttpSchemaOptions | undefined;
     if (!schemaOpts?.response) return promise;
     const entry = schemaOpts.response;
