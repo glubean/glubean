@@ -139,7 +139,9 @@ export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise
   // would silently drop them (see syncCommand).
   const dropped = [
     ...warnings.filter((w) => w.startsWith("Failed to extract metadata from")),
-    ...emptyTestFiles.map((f) => `No tests extracted from ${f} (parse error or not a test module?)`),
+    ...emptyTestFiles.map(
+      (f) => `${f} — a Glubean test file with no extractable tests (syntax error, or tests removed/unrecognized?)`,
+    ),
   ];
 
   if (options.out) {

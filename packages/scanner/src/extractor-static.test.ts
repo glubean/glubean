@@ -1,5 +1,10 @@
 import { test, expect } from "vitest";
-import { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
+import {
+  extractAliasesFromSource,
+  isGlubeanFile,
+  importsGlubeanSdk,
+  isGlubeanTestSource,
+} from "./extractor-static.js";
 // P1/P2/P1-pick: extractFromSource + extractContractCases + extractPickExamples are
 // now AST-based (@babel/parser). The existing suites run unchanged against them as
 // the conformance contract.
@@ -638,6 +643,35 @@ test("isGlubeanFile detects JSR import without version", () => {
 test("isGlubeanFile detects bare specifier import", () => {
   const content = `import { test } from "@glubean/sdk";`;
   expect(isGlubeanFile(content)).toBe(true);
+});
+
+// =============================================================================
+// importsGlubeanSdk / isGlubeanTestSource — gate for the empty-test-file flag
+// =============================================================================
+
+test("importsGlubeanSdk matches a direct SDK import but NOT a foreign test import", () => {
+  expect(importsGlubeanSdk(`import { test } from "@glubean/sdk";`)).toBe(true);
+  expect(importsGlubeanSdk(`import { test } from "jsr:@glubean/sdk@0.10.0";`)).toBe(true);
+  expect(importsGlubeanSdk(`import { test, expect } from "vitest";`)).toBe(false);
+});
+
+test("isGlubeanTestSource: direct SDK import qualifies (even with zero exports)", () => {
+  expect(isGlubeanTestSource(`import { test } from "@glubean/sdk";\n// no tests`, [])).toBe(true);
+});
+
+test("isGlubeanTestSource: a provenance-verified wrapper alias qualifies", () => {
+  // browserTest was collected ONLY from an SDK-importing file → it's in glubeanAliases.
+  const content = `import { browserTest } from "./fixtures";\nexport const t = browserTest("x", async () => {});`;
+  expect(isGlubeanTestSource(content, ["browserTest"])).toBe(true);
+});
+
+test("isGlubeanTestSource: a foreign file does NOT qualify, even with a same-named alias", () => {
+  // The repo's `browserTest` came from a non-SDK (Playwright) fixture, so it's
+  // NOT in glubeanAliases — passing it here simulates that exclusion.
+  const foreign = `import { test, expect } from "vitest";\ntest("x", () => expect(1).toBe(1));`;
+  expect(isGlubeanTestSource(foreign, [])).toBe(false);
+  // And a base name is never treated as a custom wrapper alias.
+  expect(isGlubeanTestSource(foreign, ["test"])).toBe(false);
 });
 
 test("isGlubeanFile detects subpath import", () => {

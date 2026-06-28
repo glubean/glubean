@@ -103,25 +103,6 @@ export function parseSource(content: string, filePath = "input.ts"): SourceFile 
 }
 
 /**
- * Does the source fail to parse as TS/TSX (a real SYNTAX error)?
- *
- * `parseSource` throws on a genuine syntax error (no error-recovery). This is the
- * collision-free way to tell a Glubean test file the parser choked on apart from
- * a perfectly valid foreign `*.test.ts` (Vitest/Playwright) in a mixed repo:
- * the foreign file PARSES (it just declares no Glubean tests), the broken one
- * does not. Filename-, import-name-, and alias-based heuristics all collide
- * across test runners; "did it actually parse?" does not.
- */
-export function hasSyntaxErrors(content: string, filePath?: string): boolean {
-  try {
-    parseSource(content, filePath);
-    return false;
-  } catch {
-    return true;
-  }
-}
-
-/**
  * Iterate over every `export const` declaration at the top level. Calls `cb`
  * once per declarator (`export const a = 1, b = 2` → two calls).
  *

@@ -7,8 +7,7 @@
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
 import { extractContractCases } from "./extractor-ast.js";
-import { extractAliasesFromSource } from "./extractor-static.js";
-import { hasSyntaxErrors } from "./ast.js";
+import { extractAliasesFromSource, importsGlubeanSdk, isGlubeanTestSource } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedContractMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
@@ -101,25 +100,36 @@ export class Scanner {
 
   /**
    * Collect custom function names from `.extend()` calls across all .ts files.
-   * Returns an array of alias names (e.g. ["browserTest", "screenshotTest"]).
+   *
+   * Returns two sets:
+   *  - `all`: every alias (e.g. ["browserTest", "screenshotTest"]) — passed to the
+   *    extractor so wrapper-based tests are recognized (unchanged behavior).
+   *  - `glubean`: only aliases whose DEFINING FILE imports `@glubean/sdk` —
+   *    provenance for telling a Glubean wrapper from a same-named Playwright/Vitest
+   *    `base.extend` wrapper in a mixed repo. Used by the empty-test-file gate.
    */
   private async collectAliases(
     dir: string,
     skipDirs: string[] = DEFAULT_SKIP_DIRS,
     extensions: string[] = DEFAULT_EXTENSIONS,
-  ): Promise<string[] | undefined> {
-    const aliases = new Set<string>();
+  ): Promise<{ all: string[]; glubean: string[] }> {
+    const all = new Set<string>();
+    const glubean = new Set<string>();
     try {
       for await (const filePath of this.fs.walk(dir, { extensions, skipDirs })) {
         const content = await this.fs.readText(filePath);
-        for (const alias of extractAliasesFromSource(content)) {
-          aliases.add(alias);
+        const found = extractAliasesFromSource(content);
+        if (found.length === 0) continue;
+        const fromGlubeanFile = importsGlubeanSdk(content);
+        for (const alias of found) {
+          all.add(alias);
+          if (fromGlubeanFile) glubean.add(alias);
         }
       }
     } catch {
       // Non-fatal — continue without aliases
     }
-    return aliases.size > 0 ? [...aliases] : undefined;
+    return { all: [...all], glubean: [...glubean] };
   }
 
   /**
@@ -238,8 +248,14 @@ export class Scanner {
       );
     }
 
-    // Phase 1: collect .extend() aliases from all .ts files
-    const aliases = await this.collectAliases(dir, skipDirs, extensions);
+    // Phase 1: collect .extend() aliases from all .ts files. `all` feeds the
+    // extractor; `glubean` (provenance-verified) gates the empty-test-file check.
+    const { all: aliases, glubean: glubeanAliases } = await this.collectAliases(
+      dir,
+      skipDirs,
+      extensions,
+    );
+    const aliasesForExtractor = aliases.length > 0 ? aliases : undefined;
 
     // Phase 2: collect test, contract, and flow files
     const testFiles: string[] = [];
@@ -255,7 +271,7 @@ export class Scanner {
     const emptyTestFiles: string[] = [];
     for (const filePath of testFiles) {
       try {
-        const exports = await this.extractor(filePath, aliases);
+        const exports = await this.extractor(filePath, aliasesForExtractor);
 
         if (exports.length > 0) {
           const relativePath = this.fs.relative(dir, filePath);
@@ -271,15 +287,15 @@ export class Scanner {
             }
           }
         } else {
-          // Named like a test file but yielded nothing. Flag it ONLY if the
-          // source genuinely fails to PARSE — a Glubean test the extractor choked
-          // on, whose projection a full-snapshot sync would silently drop. A valid
-          // foreign `*.test.ts` (Vitest/Playwright) in a mixed repo also yields
-          // zero Glubean exports but PARSES fine, so it isn't flagged. (Parse-state
-          // is the one signal that doesn't collide across test runners — unlike
-          // filename / `test` import name / `.extend()` alias heuristics.)
+          // Named like a test file but yielded nothing. Flag it ONLY if it's a
+          // GENUINE Glubean file — a direct `@glubean/sdk` import, or an import of
+          // a provenance-verified Glubean `test.extend` wrapper alias — i.e. a
+          // Glubean test whose projection a full-snapshot sync would drop (whether
+          // it's mid-edit/broken or its tests were removed). A foreign
+          // `*.test.{ts,js}` in a mixed repo (Vitest/Jest/Playwright) matches
+          // neither and must NOT block sync, broken or not.
           try {
-            if (hasSyntaxErrors(await this.fs.readText(filePath), filePath)) {
+            if (isGlubeanTestSource(await this.fs.readText(filePath), glubeanAliases)) {
               emptyTestFiles.push(this.fs.relative(dir, filePath));
             }
           } catch {

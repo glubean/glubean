@@ -74,6 +74,40 @@ export function isGlubeanFile(content: string, customFns?: string[]): boolean {
   return importPattern.test(content);
 }
 
+/**
+ * Does the source DIRECTLY import the Glubean SDK module
+ * (`@glubean/sdk` / `jsr:@glubean/sdk`)? Layer 1 of `isGlubeanFile` ONLY — it
+ * does NOT match a bare `import { test } from "vitest"`.
+ */
+export function importsGlubeanSdk(content: string): boolean {
+  return SDK_MODULE_PATTERNS.some((p) => p.test(content));
+}
+
+/**
+ * Is this source a GENUINE Glubean test file — used to decide whether a
+ * zero-export `*.test.ts` is a Glubean file whose projection a full-snapshot
+ * sync would drop (flag it) vs. an unrelated test in a mixed repo (ignore it)?
+ *
+ * True when EITHER:
+ *  1. it directly imports `@glubean/sdk`, OR
+ *  2. it imports one of `glubeanAliases` — `test.extend()` wrapper names whose
+ *     PROVENANCE the caller has already verified (collected only from files that
+ *     themselves import the SDK). A Playwright/Vitest `base.extend` wrapper of the
+ *     same name is therefore NOT in `glubeanAliases` and won't match.
+ *
+ * Unlike `isGlubeanFile`, it never falls back to the base `test`/`task`/`workflow`
+ * convention (which collides with foreign runners) and is provenance-gated, so it
+ * neither false-positives on foreign files nor depends on whether the file parses.
+ */
+export function isGlubeanTestSource(content: string, glubeanAliases: string[]): boolean {
+  if (importsGlubeanSdk(content)) return true;
+  // Defensive: never let a base name slip in as a "custom" wrapper alias.
+  const custom = glubeanAliases.filter((a) => !BASE_FNS.includes(a));
+  if (custom.length === 0) return false;
+  const alt = custom.map(escapeRegExp).join("|");
+  return new RegExp(`import\\s+.*\\{[^}]*\\b(${alt})\\b[^}]*\\}`).test(content);
+}
+
 
 // ---------------------------------------------------------------------------
 // Comment stripping

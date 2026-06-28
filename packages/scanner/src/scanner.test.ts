@@ -81,11 +81,10 @@ test("Scanner.validate returns warnings for missing package.json", async () => {
   ).toBe(true);
 });
 
-test("Scanner.scan flags a test file that FAILS TO PARSE in emptyTestFiles", async () => {
-  // A *.test.ts the extractor returns [] for because the SOURCE has a syntax error
-  // (extractFromSource catches the parse throw → []). It must surface in
-  // emptyTestFiles (NOT warnings) so a full-snapshot sync fails closed instead of
-  // silently dropping its tests on replace.
+test("Scanner.scan flags a zero-export GLUBEAN *.test.ts in emptyTestFiles", async () => {
+  // A *.test.ts that imports @glubean/sdk but yields no exports — broken mid-edit
+  // OR all tests removed. Either way a full-snapshot sync would drop its
+  // projection, so it must surface in emptyTestFiles (NOT warnings) to fail closed.
   const mockFs = {
     ...nodeFs,
     exists: (path: string) => Promise.resolve(path.endsWith("package.json")),
@@ -93,8 +92,7 @@ test("Scanner.scan flags a test file that FAILS TO PARSE in emptyTestFiles", asy
       Promise.resolve(
         path.endsWith("package.json")
           ? JSON.stringify({ dependencies: {} })
-          : // Unterminated arrow body → genuine syntax error.
-            'import { test } from "@glubean/sdk";\nexport const broken = test("broken", async (ctx) => { this @@@',
+          : 'import { test } from "@glubean/sdk";\n// tests removed / mid-edit',
       ),
     walk: async function* () {
       yield "/fake/dir/broken.test.ts";
@@ -108,10 +106,11 @@ test("Scanner.scan flags a test file that FAILS TO PARSE in emptyTestFiles", asy
   expect(result.warnings.some((w) => w.startsWith("Failed to extract metadata"))).toBe(false);
 });
 
-test("Scanner.scan does NOT flag a VALID foreign *.test.ts in a mixed repo", async () => {
-  // A perfectly valid Vitest/Playwright test: it PARSES, just declares no Glubean
-  // tests. Not a dropped projection → must stay OUT of emptyTestFiles (else sync
-  // breaks in mixed repos), even though its `test`/`.extend` names look familiar.
+test("Scanner.scan does NOT flag a foreign *.test.ts in a mixed repo (no SDK / provenance)", async () => {
+  // A Vitest/Playwright test: imports `test` from vitest + a `base.extend` wrapper.
+  // It has no @glubean/sdk import, and its `browserTest` alias is defined in a
+  // NON-SDK file, so it's neither a Glubean file nor a Glubean wrapper. Must stay
+  // OUT of emptyTestFiles even though its `test`/`.extend` names look familiar.
   const mockFs = {
     ...nodeFs,
     exists: (path: string) => Promise.resolve(path.endsWith("package.json")),
@@ -119,7 +118,7 @@ test("Scanner.scan does NOT flag a VALID foreign *.test.ts in a mixed repo", asy
       Promise.resolve(
         path.endsWith("package.json")
           ? JSON.stringify({ dependencies: {} })
-          : 'import { test, expect } from "vitest";\nconst browserTest = test.extend({});\nbrowserTest("foreign", () => expect(1).toBe(1));',
+          : 'import { test, expect } from "vitest";\nexport const browserTest = test.extend({});\nbrowserTest("foreign", () => expect(1).toBe(1));',
       ),
     walk: async function* () {
       yield "/fake/dir/foreign.test.ts";

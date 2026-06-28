@@ -101,7 +101,9 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // module (emptyTestFiles).
   const dropped = [
     ...warnings.filter((w) => w.startsWith("Failed to extract metadata from")),
-    ...emptyTestFiles.map((f) => `${f} — parsed but produced no tests (syntax error or not a test module?)`),
+    ...emptyTestFiles.map(
+      (f) => `${f} — a Glubean test file with no extractable tests (syntax error, or tests removed/unrecognized?)`,
+    ),
   ];
   if (dropped.length) {
     console.error(`${colors.red}Sync aborted: ${dropped.length} file(s) would be dropped from the snapshot.${colors.reset}`);
