@@ -108,6 +108,29 @@ test("Scanner.scan records a test-named file that yields zero exports in emptyTe
   expect(result.warnings.some((w) => w.startsWith("Failed to extract metadata"))).toBe(false);
 });
 
+test("Scanner.scan does NOT flag an unrelated Vitest *.test.ts (mixed repo)", async () => {
+  // `import { test } from "vitest"` has no @glubean/sdk import: it's not a dropped
+  // Glubean projection, so it must stay OUT of emptyTestFiles (else sync breaks in
+  // mixed repos).
+  const mockFs = {
+    ...nodeFs,
+    exists: (path: string) => Promise.resolve(path.endsWith("package.json")),
+    readText: (path: string) =>
+      Promise.resolve(
+        path.endsWith("package.json")
+          ? JSON.stringify({ dependencies: {} })
+          : 'import { test, expect } from "vitest";\ntest("foreign", () => expect(1).toBe(1));',
+      ),
+    walk: async function* () {
+      yield "/fake/dir/foreign.test.ts";
+    },
+  };
+  const scanner = new Scanner(mockFs, nodeHasher, SPEC_VERSION, emptyExtractor);
+  const result = await scanner.scan("/fake/dir");
+
+  expect(result.emptyTestFiles).toEqual([]);
+});
+
 test("Scanner.validate succeeds when .test.ts exists", async () => {
   const mockFs = {
     ...nodeFs,

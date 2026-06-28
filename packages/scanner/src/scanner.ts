@@ -7,7 +7,7 @@
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
 import { extractContractCases } from "./extractor-ast.js";
-import { extractAliasesFromSource } from "./extractor-static.js";
+import { extractAliasesFromSource, importsGlubeanSdk } from "./extractor-static.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedContractMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
@@ -270,10 +270,18 @@ export class Scanner {
             }
           }
         } else {
-          // Named like a test file but yielded nothing — the parser likely
-          // recovered from a syntax error, or it's a misnamed module. Surface it
-          // so a full-snapshot consumer doesn't silently drop its tests.
-          emptyTestFiles.push(this.fs.relative(dir, filePath));
+          // Named like a test file but yielded nothing. Only flag it if it
+          // DIRECTLY imports the Glubean SDK — a genuine Glubean test whose body
+          // the parser recovered from (syntax error). An unrelated Vitest/Jest
+          // `*.test.ts` in a mixed repo also yields zero Glubean exports, but it
+          // has no `@glubean/sdk` import and must NOT block a full-snapshot sync.
+          try {
+            if (importsGlubeanSdk(await this.fs.readText(filePath))) {
+              emptyTestFiles.push(this.fs.relative(dir, filePath));
+            }
+          } catch {
+            /* unreadable → its own import error below covers it */
+          }
         }
       } catch (err) {
         warnings.push(`Failed to extract metadata from ${filePath}: ${err}`);

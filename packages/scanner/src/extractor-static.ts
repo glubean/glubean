@@ -74,6 +74,17 @@ export function isGlubeanFile(content: string, customFns?: string[]): boolean {
   return importPattern.test(content);
 }
 
+/**
+ * Strict check: does the source DIRECTLY import the Glubean SDK module
+ * (`@glubean/sdk` / `jsr:@glubean/sdk`)? Layer 1 of `isGlubeanFile` ONLY — it
+ * does NOT match a bare `import { test } from "vitest"` (whose `test` name trips
+ * `isGlubeanFile`'s Layer 2). Use this to tell a genuine Glubean file that failed
+ * to parse apart from an unrelated Vitest/Jest `*.test.ts` in a mixed repo.
+ */
+export function importsGlubeanSdk(content: string): boolean {
+  return SDK_MODULE_PATTERNS.some((p) => p.test(content));
+}
+
 // ---------------------------------------------------------------------------
 // Comment stripping
 // ---------------------------------------------------------------------------
