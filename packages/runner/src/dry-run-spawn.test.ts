@@ -77,14 +77,15 @@ vtest(
     const demo = resolve(testProject, "projection-demo.test.ts");
     const res = await dryRunFiles([demo], { cwd: testProject });
     const ids = res.shapes.map((s) => s.testId);
-    // byRegion = test.each([{region:"us"},{region:"eu"}]) → both rows present.
+    // byRegion = test.each([{region:"us",...},{region:"eu",...}]) → both present.
     expect(ids).toContain("region-us");
     expect(ids).toContain("region-eu");
-    // Shared shape: both carry the same single assertion.
+    // Each row is projected from ITS OWN bound data (row.base differs), not a
+    // clone of the first row's shape.
     const us = res.shapes.find((s) => s.testId === "region-us")!;
     const eu = res.shapes.find((s) => s.testId === "region-eu")!;
-    expect(us.assertionCount).toBe(1);
-    expect(eu.assertions).toEqual(us.assertions);
+    expect(us.endpoints[0]!.url).toBe("https://us.api.test/health");
+    expect(eu.endpoints[0]!.url).toBe("https://eu.api.test/health");
   },
   20_000,
 );

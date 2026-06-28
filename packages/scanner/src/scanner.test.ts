@@ -81,6 +81,33 @@ test("Scanner.validate returns warnings for missing package.json", async () => {
   ).toBe(true);
 });
 
+test("Scanner.scan records a test-named file that yields zero exports in emptyTestFiles", async () => {
+  // A file the parser recovered from (syntax error) or a misnamed module: matches
+  // isTestFile but the extractor returns [] without throwing. It must surface in
+  // emptyTestFiles (NOT warnings — those are for thrown failures) so a
+  // full-snapshot sync can fail closed instead of silently dropping its tests.
+  const mockFs = {
+    ...nodeFs,
+    exists: (path: string) => Promise.resolve(path.endsWith("package.json")),
+    readText: (path: string) =>
+      Promise.resolve(
+        path.endsWith("package.json")
+          ? JSON.stringify({ dependencies: {} })
+          : 'import { test } from "@glubean/sdk";',
+      ),
+    walk: async function* () {
+      yield "/fake/dir/broken.test.ts";
+    },
+  };
+  const scanner = new Scanner(mockFs, nodeHasher, SPEC_VERSION, emptyExtractor);
+  const result = await scanner.scan("/fake/dir");
+
+  expect(result.emptyTestFiles).toContain("broken.test.ts");
+  expect(result.fileCount).toBe(0);
+  // Not a thrown failure → no "Failed to extract metadata" warning for it.
+  expect(result.warnings.some((w) => w.startsWith("Failed to extract metadata"))).toBe(false);
+});
+
 test("Scanner.validate succeeds when .test.ts exists", async () => {
   const mockFs = {
     ...nodeFs,

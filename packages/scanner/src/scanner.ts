@@ -251,6 +251,7 @@ export class Scanner {
     }
 
     // Phase 3: Extract test metadata from each test file
+    const emptyTestFiles: string[] = [];
     for (const filePath of testFiles) {
       try {
         const exports = await this.extractor(filePath, aliases);
@@ -268,6 +269,11 @@ export class Scanner {
               exp.tags.forEach((tag) => allTags.add(tag));
             }
           }
+        } else {
+          // Named like a test file but yielded nothing — the parser likely
+          // recovered from a syntax error, or it's a misnamed module. Surface it
+          // so a full-snapshot consumer doesn't silently drop its tests.
+          emptyTestFiles.push(this.fs.relative(dir, filePath));
         }
       } catch (err) {
         warnings.push(`Failed to extract metadata from ${filePath}: ${err}`);
@@ -418,6 +424,7 @@ export class Scanner {
       fileCount: Object.keys(files).length,
       tags: Array.from(allTags),
       warnings,
+      emptyTestFiles,
       contracts,
       ...(contractsProjection.length > 0 ? { contractsProjection } : {}),
       ...(workflows.length > 0 ? { workflows } : {}),

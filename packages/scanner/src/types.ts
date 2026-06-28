@@ -167,6 +167,14 @@ export interface ScanResult {
   /** Diagnostic warnings (non-fatal issues) */
   warnings: string[];
   /**
+   * Test files (matched `isTestFile`) that produced ZERO test exports without
+   * throwing — typically a syntax error the parser recovered from, or a misnamed
+   * non-test module. Distinct from a thrown extraction failure (which lands in
+   * `warnings`). A full-snapshot consumer (`glubean sync`) must treat these as
+   * fatal, since the file's tests would silently vanish from the snapshot.
+   */
+  emptyTestFiles: string[];
+  /**
    * Contract metadata extracted from .contract.ts files.
    * Independent from test exports — consumed by projection/coverage tools.
    */

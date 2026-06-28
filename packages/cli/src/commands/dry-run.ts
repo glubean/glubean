@@ -40,6 +40,13 @@ export interface ProjectionResult {
   projected: ProjectedTest[];
   files: string[];
   errors: Array<{ file: string; message: string }>;
+  /** Scanner warnings (e.g. "Failed to extract metadata from <file>: …") — a
+   *  file whose metadata couldn't be extracted is omitted from `files`/`projected`
+   *  entirely, so a full-snapshot sync must treat these as fatal. */
+  warnings: string[];
+  /** Test-named files that yielded ZERO exports (parser recovered from a syntax
+   *  error, or a misnamed module) — silently dropped, so also fatal for sync. */
+  emptyTestFiles: string[];
 }
 
 /**
@@ -110,7 +117,13 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
   });
 
   projected.sort((a, b) => a.testId.localeCompare(b.testId));
-  return { projected, files, errors };
+  return {
+    projected,
+    files,
+    errors,
+    warnings: scanResult.warnings,
+    emptyTestFiles: scanResult.emptyTestFiles,
+  };
 }
 
 /**
@@ -121,14 +134,20 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
  */
 export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise<void> {
   const dir = options.dir ? resolve(options.dir) : process.cwd();
-  const { projected, files, errors } = await buildProjections(dir);
+  const { projected, files, errors, warnings, emptyTestFiles } = await buildProjections(dir);
+  // Files that contribute NO projection though they look like tests — a sync
+  // would silently drop them (see syncCommand).
+  const dropped = [
+    ...warnings.filter((w) => w.startsWith("Failed to extract metadata from")),
+    ...emptyTestFiles.map((f) => `No tests extracted from ${f} (parse error or not a test module?)`),
+  ];
 
   if (options.out) {
-    await writeFile(resolve(options.out), JSON.stringify({ tests: projected, errors }, null, 2));
+    await writeFile(resolve(options.out), JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles }, null, 2));
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ tests: projected, errors }, null, 2));
+    console.log(JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles }, null, 2));
     return;
   }
 
@@ -165,6 +184,12 @@ export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise
   if (errors.length) {
     console.log(`${colors.red}Import errors:${colors.reset}`);
     for (const e of errors) console.log(`  ${colors.red}✗ ${e.file}: ${e.message}${colors.reset}`);
+    console.log();
+  }
+
+  if (dropped.length) {
+    console.log(`${colors.red}Dropped files (their tests are omitted — sync would delete them):${colors.reset}`);
+    for (const w of dropped) console.log(`  ${colors.red}✗ ${w}${colors.reset}`);
     console.log();
   }
 }

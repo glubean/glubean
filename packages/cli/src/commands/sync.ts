@@ -79,7 +79,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // ALWAYS project the WHOLE project (rootDir), never just --dir: the upload is a
   // complete snapshot the server replaces, so scanning a subdirectory would make
   // the server delete every test outside it. --dir only locates the project root.
-  const { projected, errors } = await buildProjections(rootDir);
+  const { projected, errors, warnings, emptyTestFiles } = await buildProjections(rootDir);
 
   // A file that failed to import / timed out has NO projection. Since sync is a
   // full-snapshot replace, publishing now would DELETE the broken file's tests'
@@ -90,6 +90,24 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     for (const e of errors) console.error(`  ${colors.red}✗ ${e.file}: ${e.message}${colors.reset}`);
     console.error(
       `${colors.dim}Fix these files and re-run — syncing now would drop their tests' projections.${colors.reset}`,
+    );
+    process.exit(1);
+  }
+
+  // A file the SCANNER couldn't turn into tests is dropped BEFORE the dry-run (so
+  // it never shows in `errors`), yet its tests would vanish from this full
+  // snapshot and be deleted on replace. Two cases, both fatal: extraction THREW
+  // (warning), or it yielded ZERO exports — a recovered syntax error / misnamed
+  // module (emptyTestFiles).
+  const dropped = [
+    ...warnings.filter((w) => w.startsWith("Failed to extract metadata from")),
+    ...emptyTestFiles.map((f) => `${f} — parsed but produced no tests (syntax error or not a test module?)`),
+  ];
+  if (dropped.length) {
+    console.error(`${colors.red}Sync aborted: ${dropped.length} file(s) would be dropped from the snapshot.${colors.reset}`);
+    for (const w of dropped) console.error(`  ${colors.red}✗ ${w}${colors.reset}`);
+    console.error(
+      `${colors.dim}Fix these files and re-run — syncing now would delete their tests' projections.${colors.reset}`,
     );
     process.exit(1);
   }
