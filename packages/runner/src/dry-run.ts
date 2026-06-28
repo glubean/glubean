@@ -34,6 +34,9 @@ export interface ProjEndpoint {
   method: string;
   url: string;
   branch?: string;
+  /** Author-declared canonical endpoint pattern via `.track("GET /users/:id")` —
+   *  the exact key for endpoint-coverage linking (collapses concrete URLs). */
+  pattern?: string;
 }
 
 /** The projected shape of one test — what it verifies and what it touches. */
@@ -147,12 +150,18 @@ function makeSyntheticResponse(): any {
 }
 
 /** A ky-like ResponsePromise: awaitable AND chainable with `.json()`/`.text()`. */
-function responsePromise(): any {
+function responsePromise(ep?: ProjEndpoint): any {
   const p: any = Promise.resolve(makeSyntheticResponse());
   p.json = () => Promise.resolve(makeSyntheticResponse());
   p.text = () => Promise.resolve(makeSyntheticResponse());
   p.arrayBuffer = () => Promise.resolve(makeSyntheticResponse());
   p.blob = () => Promise.resolve(makeSyntheticResponse());
+  // `.track(pattern)` — author declares the canonical endpoint this request maps
+  // to; record it on the captured endpoint so projection coverage links exactly.
+  p.track = (pattern: string) => {
+    if (ep && typeof pattern === "string") ep.pattern = pattern;
+    return p;
+  };
   return p;
 }
 
@@ -230,8 +239,12 @@ function makeDryRunCtx() {
 
   const record = (method: string, url: string) => {
     if (++reqCount > REQUEST_BUDGET) throw new DryRunBudgetExceeded();
-    endpoints.push({ method, url, branch: curBranch() });
-    return responsePromise();
+    const ep: ProjEndpoint = { method, url, branch: curBranch() };
+    endpoints.push(ep);
+    // Pass the just-recorded endpoint so a chained `.track(pattern)` can tag it
+    // with the author-declared canonical endpoint (collapsing concrete URLs like
+    // /users/123 onto /users/:id, exact for endpoint-coverage linking).
+    return responsePromise(ep);
   };
 
   const pushAssertion = (kind: string, message?: string) => {

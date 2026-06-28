@@ -31,6 +31,20 @@ vtest("captures endpoint + assertions from an http test", async () => {
   expect(shape.assertionCount).toBe(2);
 });
 
+vtest(".track() pins a raw http call to its canonical endpoint (collapses the literal URL)", async () => {
+  const t = glubeanTest("track", async (ctx) => {
+    await ctx.http.get("https://api.test/users").track("GET /users");
+    const id = 42;
+    await ctx.http.get(`https://api.test/users/${id}`).track("GET /users/:id");
+    ctx.assert(true, "ok");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  // Literal URL is still recorded, but `pattern` carries the author-declared
+  // canonical endpoint — so /users/42 collapses onto "GET /users/:id".
+  expect(shape.endpoints.map((e) => e.pattern)).toEqual(["GET /users", "GET /users/:id"]);
+  expect(shape.endpoints[1]!.url).toBe("https://api.test/users/42");
+});
+
 vtest("ctx.when captures BOTH arms, branch-tagged", async () => {
   const t = glubeanTest("ctx-when", async (ctx) => {
     const res = await ctx.http.post("https://api.test/login");

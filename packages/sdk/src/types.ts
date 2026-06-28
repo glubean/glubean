@@ -1462,6 +1462,16 @@ export interface HttpResponsePromise extends Promise<HttpResponse> {
   blob(): Promise<Blob>;
   /** Parse response body as ArrayBuffer */
   arrayBuffer(): Promise<ArrayBuffer>;
+  /**
+   * Declare the CANONICAL endpoint this request maps to, for endpoint-centric
+   * review/coverage — e.g. `ctx.http.get(`/users/${id}`).track("GET /users/:id")`.
+   * A raw `ctx.http` call's literal URL (`/users/123`) otherwise fragments the
+   * coverage index away from the contract's `GET /users/:id`; `.track()` pins it
+   * to the contract's endpoint so a reviewer/agent sees one entry, exactly linked.
+   * Tests that run a CONTRACT case don't need it (the case implies the endpoint).
+   * @example const u = await ctx.http.get(`/users/${id}`).track("GET /users/:id");
+   */
+  track(pattern: string): HttpResponsePromise;
 }
 
 /**

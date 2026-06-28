@@ -50,7 +50,7 @@ const usersResponseSchema = {
  * SHAPE the contract guarantees (the most important part to review).
  */
 export const usersContract = usersApi("users-shape", {
-  endpoint: "GET /api/users",
+  endpoint: "GET /users",
   feature: "Users API",
   description: "The users endpoint keeps its documented user-list shape and status contract.",
   tags: ["api", "users"],

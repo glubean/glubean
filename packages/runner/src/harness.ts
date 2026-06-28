@@ -1297,7 +1297,13 @@ function wrapKy(instance: KyInstance, label = "base"): Record<string, unknown> {
       process.stderr.write(`[glubean:debug] ky.call [${label}] url=${String(input)} per-call-options=${JSON.stringify(kyOptions ?? null)}\n`);
     }
     const responsePromise = kyFn(normalizeUrl(input), kyOptions);
-    return wrapResponseWithSchema(responsePromise, normalized?.schema);
+    const wrapped = wrapResponseWithSchema(responsePromise, normalized?.schema);
+    // `.track("GET /users/:id")` — the author-declared canonical endpoint. The
+    // dry-run projector consumes it for exact endpoint-coverage linking; at run
+    // time it's a chainable no-op for now (tagging run evidence by the same
+    // pattern is a follow-up). Always present so `.track()` is safe in real runs.
+    (wrapped as unknown as { track: (pattern: string) => typeof wrapped }).track = () => wrapped;
+    return wrapped;
   }
 
   // The callable + methods wrapper
