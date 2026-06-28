@@ -212,7 +212,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     })),
   };
 
-  const url = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/test-projection`;
+  const url = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/projections/test`;
   let res: Response;
   try {
     res = await fetch(url, {
