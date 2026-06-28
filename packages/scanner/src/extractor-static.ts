@@ -75,12 +75,25 @@ export function isGlubeanFile(content: string, customFns?: string[]): boolean {
 }
 
 /**
+ * Direct `from "@glubean/sdk"` clause patterns. Anchored on the FROM clause (not
+ * the whole `import { … }`) so a multi-line named import still matches — the
+ * `from "…"` part is always contiguous even when the brace list spans lines.
+ */
+const SDK_FROM_PATTERNS = [
+  /\bfrom\s+["']jsr:@glubean\/sdk(?:@[^"']*)?["']/,
+  /\bfrom\s+["']@glubean\/sdk(?:\/[^"']*)?["']/,
+];
+
+/**
  * Does the source DIRECTLY import the Glubean SDK module
- * (`@glubean/sdk` / `jsr:@glubean/sdk`)? Layer 1 of `isGlubeanFile` ONLY — it
- * does NOT match a bare `import { test } from "vitest"`.
+ * (`@glubean/sdk` / `jsr:@glubean/sdk`)? Comment-stripped (a commented-out import
+ * example is NOT a real import) and multi-line-safe. Does NOT match a bare
+ * `import { test } from "vitest"`. Regex-based (no parse) so it still works on a
+ * mid-edit file with a syntax error.
  */
 export function importsGlubeanSdk(content: string): boolean {
-  return SDK_MODULE_PATTERNS.some((p) => p.test(content));
+  const stripped = stripComments(content);
+  return SDK_FROM_PATTERNS.some((p) => p.test(stripped));
 }
 
 /**

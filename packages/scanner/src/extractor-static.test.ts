@@ -652,7 +652,16 @@ test("isGlubeanFile detects bare specifier import", () => {
 test("importsGlubeanSdk matches a direct SDK import but NOT a foreign test import", () => {
   expect(importsGlubeanSdk(`import { test } from "@glubean/sdk";`)).toBe(true);
   expect(importsGlubeanSdk(`import { test } from "jsr:@glubean/sdk@0.10.0";`)).toBe(true);
+  expect(importsGlubeanSdk(`import { test } from "@glubean/sdk/contract";`)).toBe(true);
   expect(importsGlubeanSdk(`import { test, expect } from "vitest";`)).toBe(false);
+});
+
+test("importsGlubeanSdk is multi-line-safe and ignores commented-out imports", () => {
+  // Multi-line named import: the `from` clause is still contiguous.
+  expect(importsGlubeanSdk(`import {\n  test,\n  contract,\n} from "@glubean/sdk";`)).toBe(true);
+  // A commented example is NOT a real import.
+  expect(importsGlubeanSdk(`// import { test } from "@glubean/sdk";\nimport { test } from "vitest";`)).toBe(false);
+  expect(importsGlubeanSdk(`/* import { test } from "@glubean/sdk"; */\nconst x = 1;`)).toBe(false);
 });
 
 test("isGlubeanTestSource: direct SDK import qualifies (even with zero exports)", () => {
