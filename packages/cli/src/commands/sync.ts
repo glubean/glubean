@@ -142,11 +142,31 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   }));
 
   // Redact outbound data before it leaves the machine (parity with run/load):
-  // a hardcoded credential in an assertion message / endpoint is masked by the
-  // default rules (URL query/userinfo/fragment is already stripped above).
+  // a hardcoded credential in an assertion message / endpoint is masked (URL
+  // query/userinfo/fragment is already stripped above). Honor the PROJECT's
+  // redaction rules (glubean.yaml `defaults.redaction` — custom sensitiveKeys /
+  // customPatterns), not just the built-in defaults; FAIL CLOSED on invalid config.
   const { redactValue } = await import("@glubean/redaction");
-  const { CONFIG_DEFAULTS } = await import("../lib/config.js");
-  const redaction = CONFIG_DEFAULTS.redaction;
+  const { loadProjectConfigV1, resolveRedactionConfig } = await import("../lib/config.js");
+  let redaction = resolveRedactionConfig(undefined); // built-in defaults
+  let hasConfig = false;
+  try {
+    await stat(resolve(rootDir, "glubean.yaml"));
+    hasConfig = true;
+  } catch {
+    /* no glubean.yaml → built-in default redaction */
+  }
+  if (hasConfig) {
+    try {
+      const { config } = await loadProjectConfigV1(rootDir);
+      redaction = resolveRedactionConfig(config.defaults?.redaction);
+    } catch (err) {
+      console.error(
+        `${colors.red}Sync failed: invalid glubean.yaml redaction config — ${(err as Error)?.message ?? String(err)}${colors.reset}`,
+      );
+      process.exit(1);
+    }
+  }
   const safeBody = redactValue(
     { tests },
     {
