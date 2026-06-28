@@ -7,7 +7,8 @@
 
 import { isSpecVersionSupported, SPEC_VERSION, SUPPORTED_SPEC_VERSIONS } from "./spec.js";
 import { extractContractCases } from "./extractor-ast.js";
-import { extractAliasesFromSource, importsGlubeanTest } from "./extractor-static.js";
+import { extractAliasesFromSource } from "./extractor-static.js";
+import { hasSyntaxErrors } from "./ast.js";
 import type { ContractStaticMeta } from "./extractor-static.js";
 import { extractContractFromFile } from "./contract-extraction.js";
 import type { NormalizedContractMeta, NormalizedWorkflowMeta } from "./contract-extraction.js";
@@ -270,14 +271,15 @@ export class Scanner {
             }
           }
         } else {
-          // Named like a test file but yielded nothing. Only flag it if it looks
-          // like a genuine Glubean test — a direct `@glubean/sdk` import OR one of
-          // the project's collected `test.extend()` wrapper aliases (browserTest,
-          // scenario, …) — i.e. a Glubean file whose body the parser recovered
-          // from. An unrelated Vitest/Jest `*.test.ts` in a mixed repo also yields
-          // zero exports but matches neither, and must NOT block a full snapshot.
+          // Named like a test file but yielded nothing. Flag it ONLY if the
+          // source genuinely fails to PARSE — a Glubean test the extractor choked
+          // on, whose projection a full-snapshot sync would silently drop. A valid
+          // foreign `*.test.ts` (Vitest/Playwright) in a mixed repo also yields
+          // zero Glubean exports but PARSES fine, so it isn't flagged. (Parse-state
+          // is the one signal that doesn't collide across test runners — unlike
+          // filename / `test` import name / `.extend()` alias heuristics.)
           try {
-            if (importsGlubeanTest(await this.fs.readText(filePath), aliases ?? [])) {
+            if (hasSyntaxErrors(await this.fs.readText(filePath), filePath)) {
               emptyTestFiles.push(this.fs.relative(dir, filePath));
             }
           } catch {

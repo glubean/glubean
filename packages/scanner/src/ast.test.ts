@@ -1,6 +1,7 @@
 import { test, expect } from "vitest";
 import {
   parseSource,
+  hasSyntaxErrors,
   forEachExportedConst,
   hasLeadingMarker,
   propertyNameText,
@@ -160,6 +161,22 @@ export const t = test("id").meta({ name: "n" }).step("s1", async () => { helper.
   expect(findPropertyCall(init!, "step")).toBeTruthy();
   expect(findPropertyCall(init!, "inner")).toBeUndefined(); // inside a callback body
   expect(findPropertyCall(init!, "nope")).toBeUndefined();
+});
+
+test("hasSyntaxErrors: true for a genuine syntax error, false for valid TS/foreign tests", () => {
+  // The discriminator used to tell a broken Glubean test from a valid foreign one.
+  expect(hasSyntaxErrors('export const broken = test("b", async (ctx) => { this @@@')).toBe(true);
+  expect(hasSyntaxErrors("const x = ;")).toBe(true);
+  // Valid TS — including a foreign vitest/playwright file that simply has no
+  // Glubean tests — must NOT be reported as a syntax error.
+  expect(hasSyntaxErrors('import { test } from "@glubean/sdk";\nexport const ok = test("ok", async () => {});')).toBe(
+    false,
+  );
+  expect(
+    hasSyntaxErrors('import { test, expect } from "vitest";\nconst b = test.extend({});\nb("x", () => expect(1).toBe(1));'),
+  ).toBe(false);
+  // .tsx parses with the jsx plugin when the path says so.
+  expect(hasSyntaxErrors("export const El = () => <div className=\"x\">hi</div>;", "Comp.test.tsx")).toBe(false);
 });
 
 test("walk visits descendants; lineOf is 1-based; hasExportModifier detects the export", () => {

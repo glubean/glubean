@@ -1,10 +1,5 @@
 import { test, expect } from "vitest";
-import {
-  extractAliasesFromSource,
-  isGlubeanFile,
-  importsGlubeanSdk,
-  importsGlubeanTest,
-} from "./extractor-static.js";
+import { extractAliasesFromSource, isGlubeanFile } from "./extractor-static.js";
 // P1/P2/P1-pick: extractFromSource + extractContractCases + extractPickExamples are
 // now AST-based (@babel/parser). The existing suites run unchanged against them as
 // the conformance contract.
@@ -643,34 +638,6 @@ test("isGlubeanFile detects JSR import without version", () => {
 test("isGlubeanFile detects bare specifier import", () => {
   const content = `import { test } from "@glubean/sdk";`;
   expect(isGlubeanFile(content)).toBe(true);
-});
-
-// =============================================================================
-// importsGlubeanSdk / importsGlubeanTest — strict gate for empty-test-file flag
-// =============================================================================
-
-test("importsGlubeanSdk matches a direct SDK import but NOT a vitest test import", () => {
-  expect(importsGlubeanSdk(`import { test } from "@glubean/sdk";`)).toBe(true);
-  expect(importsGlubeanSdk(`import { test } from "jsr:@glubean/sdk@0.10.0";`)).toBe(true);
-  // The whole point: a foreign runner's `test` import is NOT an SDK import.
-  expect(importsGlubeanSdk(`import { test, expect } from "vitest";`)).toBe(false);
-});
-
-test("importsGlubeanTest flags a direct-SDK file", () => {
-  expect(importsGlubeanTest(`import { test } from "@glubean/sdk";`, [])).toBe(true);
-});
-
-test("importsGlubeanTest flags a wrapper-alias file (test.extend factory from a fixture)", () => {
-  // browserTest is a collected `test.extend()` alias — a malformed wrapper-based
-  // Glubean test must still be caught even with no direct @glubean/sdk import.
-  const content = `import { browserTest } from "./fixtures";\nexport const t = browserTest("x", async () => {});`;
-  expect(importsGlubeanTest(content, ["browserTest"])).toBe(true);
-});
-
-test("importsGlubeanTest does NOT flag a vitest file even alongside known aliases", () => {
-  const content = `import { test, expect } from "vitest";\ntest("foreign", () => expect(1).toBe(1));`;
-  // `test` is a base name, never treated as a custom alias → no false positive.
-  expect(importsGlubeanTest(content, ["browserTest", "test"])).toBe(false);
 });
 
 test("isGlubeanFile detects subpath import", () => {
