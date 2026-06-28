@@ -216,6 +216,20 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       replacementFormat: redaction.replacementFormat,
       maxDepth: 64,
     });
+  // The normalized contract/workflow `projection` is a TYPE/STRUCTURE blob (JSON
+  // schemas, node trees) — its object KEYS are field names (e.g. a schema property
+  // literally named `password`/`token`), NOT secrets. Key-based redaction would
+  // MASK those field names and destroy the schema projection — the most important
+  // part of a contract. So redact the projection with PATTERN rules ONLY (still
+  // catches secret-LOOKING literal values, e.g. a hardcoded `sk-…` default), never
+  // sensitiveKeys.
+  const structureRules = { ...redaction.globalRules, sensitiveKeys: [] };
+  const redactStructure = (v: unknown): unknown =>
+    redactValue(v, {
+      globalRules: structureRules,
+      replacementFormat: redaction.replacementFormat,
+      maxDepth: 64,
+    });
   // Redact ONLY the secret-bearing/free-text fields — NEVER `testId` (the stable
   // join key with run evidence; redacting an id that matches a built-in pattern
   // would break correlation and collapse distinct ids) or structural fields
@@ -239,7 +253,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     deprecated: c.deprecated == null ? null : (redactField(c.deprecated) as string),
     tags: c.tags ?? [],
     caseCount: c.caseCount,
-    projection: redactField(c.projection),
+    projection: redactStructure(c.projection),
     projectionComplete: c.projectionComplete,
     incompleteReason: c.incompleteReason ?? null,
   }));
@@ -249,7 +263,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     description: w.description == null ? null : (redactField(w.description) as string),
     tags: w.tags ?? [],
     nodeCount: w.nodeCount,
-    projection: redactField(w.projection),
+    projection: redactStructure(w.projection),
     projectionComplete: w.projectionComplete,
     incompleteReason: w.incompleteReason ?? null,
   }));
