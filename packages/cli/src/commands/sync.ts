@@ -35,23 +35,11 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   const dir = options.dir ? resolve(options.dir) : process.cwd();
 
   console.log(`\n${colors.bold}${colors.blue}🔄 Glubean Sync (test-definition projection)${colors.reset}\n`);
-  const { projected, errors } = await buildProjections(dir);
 
-  if (errors.length) {
-    console.log(`${colors.yellow}Import errors (these tests were skipped):${colors.reset}`);
-    for (const e of errors) console.log(`  ${colors.yellow}✗ ${e.file}: ${e.message}${colors.reset}`);
-    console.log();
-  }
-
-  if (projected.length === 0) {
-    console.log(`${colors.yellow}No simple tests found to sync.${colors.reset}\n`);
-    return;
-  }
-
-  // Resolve cloud auth — PROJECT-scoped (no target: the projection is repo-level).
-  // An EXPLICIT --env-file must exist: a typo'd file would otherwise load empty
-  // and let global/process credentials upload to the WRONG project (parity with
-  // run/load).
+  // Validate an EXPLICIT --env-file FIRST — before the (expensive, user-code-
+  // running) projection — so a typo fails fast. A missing explicit env file
+  // would otherwise load empty and let global/process credentials upload to the
+  // WRONG project (parity with run/load).
   const userSpecifiedEnvFile = !!options.envFile;
   const envFileName = options.envFile ?? ".env";
   if (userSpecifiedEnvFile) {
@@ -62,6 +50,28 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       process.exit(1);
     }
   }
+
+  const { projected, errors } = await buildProjections(dir);
+
+  // A file that failed to import / timed out has NO projection. Since the upload
+  // is a per-testId upsert (not a target-level replace), skipping it would leave
+  // its stale projection in the cloud — so abort rather than publish a partial,
+  // inconsistent set. Fix the file(s) and re-sync.
+  if (errors.length) {
+    console.error(`${colors.red}Sync aborted: ${errors.length} file(s) failed to project.${colors.reset}`);
+    for (const e of errors) console.error(`  ${colors.red}✗ ${e.file}: ${e.message}${colors.reset}`);
+    console.error(
+      `${colors.dim}Fix these files and re-run — uploading now would leave their tests' projections stale.${colors.reset}`,
+    );
+    process.exit(1);
+  }
+
+  if (projected.length === 0) {
+    console.log(`${colors.yellow}No simple tests found to sync.${colors.reset}\n`);
+    return;
+  }
+
+  // Resolve cloud auth — PROJECT-scoped (no target: the projection is repo-level).
   const { vars, secrets } = await loadProjectEnv(dir, envFileName);
   const authOpts = { token: options.token, project: options.project, apiUrl: options.apiUrl };
   const sources = { envFileVars: { ...vars, ...secrets } };
