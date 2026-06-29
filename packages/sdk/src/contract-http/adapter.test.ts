@@ -506,6 +506,39 @@ test("no unprojectableSchemas when schemas are absent or project cleanly", () =>
   expect((c2._extracted.cases[0].schemas as any)?.response?.body).toEqual({ type: "object" });
 });
 
+test("a schema-lib instance that carries a `type` field (zod v4 shape) projects to JSON Schema, not raw", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  // A real zod v4 instance exposes a `type` getter (e.g. "object"), which used
+  // to trip the `"type" in schema` shortcut and leak the raw object (def/checks/
+  // shape/format:null). The mock reproduces that shape: `type` + `toJSONSchema`.
+  const zodLike = {
+    type: "object",
+    _zod: {},
+    safeParse: (input: unknown) => ({ success: true as const, data: input }),
+    toJSONSchema: () => ({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { email: { type: "string", format: "email" } },
+      required: ["email"],
+      additionalProperties: false,
+    }),
+  };
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: zodLike as any } },
+    },
+  });
+
+  const body = (c._extracted.cases[0].schemas as any)?.response?.body;
+  expect(body.properties.email.format).toBe("email"); // converted, not the raw instance
+  expect(body).not.toHaveProperty("$schema"); // dialect noise stripped
+  expect(body).not.toHaveProperty("safeParse"); // not the raw zod object
+  expect(body).not.toHaveProperty("_zod");
+  expect(c._extracted.unprojectableSchemas).toBeUndefined();
+});
+
 // --- readJsonBody: ky 2-safe body read (codex ky2 P2-6) ---------------------
 function fakeRes(status: number, opts: { contentLength?: string; body?: unknown } = {}) {
   return {

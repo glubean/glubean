@@ -235,19 +235,33 @@ export function schemaToJsonSchema(schema: unknown): unknown | null {
   if (schema == null) return null;
   if (typeof schema !== "object") return schema;
 
-  // Already plain JSON Schema-ish
-  if ("type" in (schema as Record<string, unknown>) || "$ref" in (schema as Record<string, unknown>)) {
-    return schema;
-  }
-
-  // Zod v4 instance method
+  // Schema libraries (Zod v4, …) expose a `toJSONSchema()` instance method.
+  // This MUST run before the plain-JSON-Schema shortcut below: a zod v4 instance
+  // carries a `type` getter (e.g. "object"), so `"type" in schema` would
+  // misclassify it as already-plain and emit the RAW zod object
+  // (def/checks/shape/format:null) into the OpenAPI. See regression test.
   const toJSONSchema = (schema as { toJSONSchema?: () => unknown }).toJSONSchema;
   if (typeof toJSONSchema === "function") {
     try {
-      return toJSONSchema.call(schema);
+      const out = toJSONSchema.call(schema) as Record<string, unknown> | null;
+      // OpenAPI 3.1 pins the 2020-12 dialect at the document level; drop the
+      // per-document $schema that zod emits.
+      if (out && typeof out === "object" && "$schema" in out) delete out.$schema;
+      return out;
     } catch {
+      // Unrepresentable schema (z.date(), z.bigint(), maps, transforms) → zod's
+      // default `toJSONSchema()` throws. Returning null keeps it out of the doc
+      // AND preserves the `unprojectableSchemas` completeness signal. Do NOT pass
+      // `{ unrepresentable: "any" }`: it would silently emit a permissive `{}`
+      // and mark the projection complete, hiding the hole from dry-run/sync.
       return null;
     }
+  }
+
+  // Already plain JSON Schema (authored directly — the demos use this). A real
+  // JSON Schema object has no toJSONSchema method, so it lands here.
+  if ("type" in (schema as Record<string, unknown>) || "$ref" in (schema as Record<string, unknown>)) {
+    return schema;
   }
 
   return null;
