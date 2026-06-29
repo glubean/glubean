@@ -9,7 +9,7 @@
  * - `selectPickExamples` — picks examples from a named map (respects `GLUBEAN_PICK` env)
  * - `globToRegExp` — converts `*` glob patterns to RegExp (used by selectPickExamples)
  */
-import type { TestMeta } from "../types.js";
+import type { EachRowMeta, TestMeta } from "../types.js";
 
 /**
  * Interpolate `$key` placeholders in a template string with data values.
@@ -27,6 +27,63 @@ export function interpolateTemplate(
     result = result.replaceAll(`$${key}`, String(value));
   }
   return result;
+}
+
+/**
+ * True when an id/name template references the positional `$index` placeholder.
+ * `$index` makes the interpolated id reorder-unstable; this is the SDK's
+ * authoritative check (it owns interpolation, where `$index` is substituted
+ * before — and so shadows — a data field literally named `index`).
+ *
+ * @internal
+ */
+export function templateUsesIndex(template: string): boolean {
+  return template.includes("$index");
+}
+
+/**
+ * Build the reorder-stable per-row key: `interpolateTemplate` with the data
+ * fields ONLY, leaving the positional `$index` placeholder literal so an
+ * `$index`-based template stays detectable downstream. Mirrors
+ * `interpolateTemplate`'s data-field substitution (a data field named `index`
+ * is shadowed by the reserved `$index` placeholder), minus the index step.
+ *
+ * @internal
+ */
+export function interpolateRowKey(
+  template: string,
+  data: Record<string, unknown>,
+): string {
+  let result = template;
+  for (const [key, value] of Object.entries(data)) {
+    // `$index` is the reserved positional placeholder, never a data field.
+    if (key === "index") continue;
+    result = result.replaceAll(`$${key}`, String(value));
+  }
+  return result;
+}
+
+/**
+ * Build the data-driven row provenance (`EachRowMeta`) for one generated
+ * per-row test — `idTemplate` + a reorder-stable `rowKey` + the `$index`
+ * stability flag — so Cloud derive can resolve a stable cross-run identity
+ * instead of only the final interpolated id. Shared by `test.each`,
+ * `test.pick`, and `EachBuilder`. `index` MUST be the same row index passed to
+ * `interpolateTemplate` for this row (i.e. the index into the filtered table).
+ *
+ * @internal
+ */
+export function buildEachRowMeta(
+  idTemplate: string,
+  data: Record<string, unknown>,
+  index: number,
+): EachRowMeta {
+  return {
+    idTemplate,
+    index,
+    rowKey: interpolateRowKey(idTemplate, data),
+    stable: !templateUsesIndex(idTemplate),
+  };
 }
 
 /**

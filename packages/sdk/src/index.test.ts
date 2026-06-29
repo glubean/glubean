@@ -1,6 +1,7 @@
 import { test, expect } from "vitest";
 import { EachBuilder, SPEC_VERSION, test as glubeanTest, TestBuilder } from "./index.js";
 import { clearRegistry, getRegistry } from "./internal.js";
+import { buildEachRowMeta, interpolateRowKey, templateUsesIndex } from "./test/utils.js";
 import { Expectation } from "./expect.js";
 import type { SecretsAccessor, TestContext, ValidatorFn, VarsAccessor } from "./types.js";
 
@@ -517,6 +518,122 @@ test("test.each - returns Test[] array (not single Test)", () => {
   expect(result[0].meta.id).toBe("t-1");
 });
 
+// ==================== test.each row-key metadata (B3 T1) ====================
+
+test("test.each - registry + runnable Test row meta: stable template", () => {
+  clearRegistry();
+  const tests = glubeanTest.each([{ userId: 1 }, { userId: 2 }])(
+    "user-$userId",
+    async (_ctx, _data) => {},
+  );
+
+  const registry = getRegistry();
+  expect(registry[0].each).toEqual({
+    idTemplate: "user-$userId",
+    index: 0,
+    rowKey: "user-1",
+    stable: true,
+  });
+  expect(registry[1].each).toEqual({
+    idTemplate: "user-$userId",
+    index: 1,
+    rowKey: "user-2",
+    stable: true,
+  });
+  // For a stable template the per-row key equals the interpolated id.
+  expect(registry[0].each!.rowKey).toBe(registry[0].id);
+  // The runnable Test object (run-path source) carries the same provenance.
+  expect(tests[0].each).toEqual(registry[0].each);
+  expect(tests[1].each).toEqual(registry[1].each);
+});
+
+test("test.each - registry row meta: $index template flagged unstable", () => {
+  clearRegistry();
+  glubeanTest.each([{ name: "a" }, { name: "b" }])(
+    "item-$index-$name",
+    async (_ctx, _data) => {},
+  );
+
+  const registry = getRegistry();
+  // idTemplate is the RAW template (uninterpolated) so derive can see $index.
+  expect(registry[0].each!.idTemplate).toBe("item-$index-$name");
+  expect(registry[0].each!.stable).toBe(false);
+  // rowKey keeps the literal $index token (only data fields are substituted),
+  // so it is NOT unique across rows — derive falls back to `index`.
+  expect(registry[0].each!.rowKey).toBe("item-$index-a");
+  expect(registry[0].each!.index).toBe(0);
+  expect(registry[1].each!.rowKey).toBe("item-$index-b");
+  expect(registry[1].each!.index).toBe(1);
+});
+
+test("test.each - registry row meta: filter offsets index to filtered table", () => {
+  clearRegistry();
+  glubeanTest.each([{ keep: false }, { keep: true }, { keep: true }])(
+    { id: "row-$index", filter: (row) => row.keep === true },
+    async (_ctx, _data) => {},
+  );
+
+  const registry = getRegistry();
+  expect(registry.length).toBe(2);
+  // Indices are 0,1 over the FILTERED table (matching id interpolation).
+  expect(registry[0].id).toBe("row-0");
+  expect(registry[0].each!.index).toBe(0);
+  expect(registry[1].id).toBe("row-1");
+  expect(registry[1].each!.index).toBe(1);
+});
+
+test("test.pick - registry row meta carries $_pick rowKey (stable)", () => {
+  clearRegistry();
+  glubeanTest.pick(
+    { normal: { age: 25 }, admin: { age: 99 } },
+    2,
+  )("create-$_pick", async (_ctx, _data) => {});
+
+  const registry = getRegistry();
+  expect(registry.length).toBe(2);
+  for (const entry of registry) {
+    expect(entry.each!.idTemplate).toBe("create-$_pick");
+    expect(entry.each!.stable).toBe(true);
+    expect(entry.each!.rowKey).toBe(entry.id);
+  }
+});
+
+test("plain test() has no `each` row metadata", () => {
+  clearRegistry();
+  glubeanTest("plain-test", async () => {});
+  expect(getRegistry()[0].each).toBeUndefined();
+});
+
+test("row-key helpers - templateUsesIndex detects the positional placeholder", () => {
+  expect(templateUsesIndex("user-$userId")).toBe(false);
+  expect(templateUsesIndex("case-$index")).toBe(true);
+  expect(templateUsesIndex("u-$userId-$index")).toBe(true);
+});
+
+test("row-key helpers - interpolateRowKey substitutes data, keeps $index literal", () => {
+  expect(interpolateRowKey("user-$userId", { userId: 7 })).toBe("user-7");
+  expect(interpolateRowKey("case-$index", { x: 1 })).toBe("case-$index");
+  expect(interpolateRowKey("u-$userId-$index", { userId: 7 })).toBe("u-7-$index");
+  // A data field literally named `index` is shadowed by the reserved
+  // positional `$index` placeholder (mirrors interpolateTemplate).
+  expect(interpolateRowKey("k-$index", { index: 99 })).toBe("k-$index");
+});
+
+test("row-key helpers - buildEachRowMeta composes the full provenance", () => {
+  expect(buildEachRowMeta("user-$userId", { userId: 3 }, 0)).toEqual({
+    idTemplate: "user-$userId",
+    index: 0,
+    rowKey: "user-3",
+    stable: true,
+  });
+  expect(buildEachRowMeta("case-$index", { x: 1 }, 2)).toEqual({
+    idTemplate: "case-$index",
+    index: 2,
+    rowKey: "case-$index",
+    stable: false,
+  });
+});
+
 // ==================== test.each Builder Mode Tests ====================
 
 test(
@@ -547,6 +664,14 @@ test("test.each builder - build() produces Test[] with steps", () => {
   expect(tests[0].steps?.length).toBe(2);
   expect(tests[0].steps?.[0].meta.name).toBe("fetch user");
   expect(tests[0].steps?.[1].meta.name).toBe("verify posts");
+  // Builder-mode runnable Test objects carry row provenance too (B3 T1).
+  expect(tests[0].each).toEqual({
+    idTemplate: "user-flow-$userId",
+    index: 0,
+    rowKey: "user-flow-1",
+    stable: true,
+  });
+  expect(tests[1].each!.rowKey).toBe("user-flow-2");
 });
 
 test(
@@ -580,6 +705,42 @@ test(
     ]);
   },
 );
+
+test("test.each builder - registers row meta (B3 T1)", () => {
+  clearRegistry();
+  glubeanTest
+    .each([{ userId: 1 }, { userId: 2 }])("user-flow-$userId")
+    .step("fetch", async () => {})
+    .build();
+
+  const registry = getRegistry();
+  expect(registry[0].each).toEqual({
+    idTemplate: "user-flow-$userId",
+    index: 0,
+    rowKey: "user-flow-1",
+    stable: true,
+  });
+  expect(registry[1].each).toEqual({
+    idTemplate: "user-flow-$userId",
+    index: 1,
+    rowKey: "user-flow-2",
+    stable: true,
+  });
+});
+
+test("test.each builder - $index template flagged unstable in row meta", () => {
+  clearRegistry();
+  glubeanTest
+    .each([{ x: "a" }, { x: "b" }])("case-$index")
+    .step("run", async () => {})
+    .build();
+
+  const registry = getRegistry();
+  expect(registry[0].each!.idTemplate).toBe("case-$index");
+  expect(registry[0].each!.stable).toBe(false);
+  expect(registry[0].each!.index).toBe(0);
+  expect(registry[1].each!.index).toBe(1);
+});
 
 test("test.each builder - setup receives data row", async () => {
   clearRegistry();

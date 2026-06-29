@@ -12,7 +12,7 @@ import { TestBuilder } from "./test/builder.js";
 import { EachBuilder } from "./test/each-builder.js";
 import { createExtendedTest } from "./test/extend.js";
 import type { ExtendedTest } from "./test/extend.js";
-import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, selectPickExamples } from "./test/utils.js";
+import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, buildEachRowMeta, selectPickExamples } from "./test/utils.js";
 
 /**
  * Glubean SDK spec version.
@@ -224,10 +224,13 @@ export namespace test {
           rowIndex: index,
         };
 
+        const eachMeta = buildEachRowMeta(baseMeta.id, row, index);
+
         const testDef: Test = {
           meta,
           type: "simple",
           fn: async (ctx) => await fn(ctx, row),
+          each: eachMeta,
         };
 
         registerTest({
@@ -237,6 +240,7 @@ export namespace test {
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
           rowIndex: index,
+          each: eachMeta,
           ...(hasGroup ? { groupId: baseMeta.id } : {}),
           ...(parallel ? { parallel: true } : {}),
         });
