@@ -126,6 +126,14 @@ export { evaluateThresholds, MetricCollector } from "./thresholds.js";
 export { resolveModuleTests } from "./resolve.js";
 
 /**
+ * The `{id, rowIndex}` "only" selector protocol (B2 M3). Shared shape + matching
+ * with the cloud-vendored harness; the CLI builds selectors and the harness
+ * consumes them via GLUBEAN_RUNNER_ONLY_SELECTORS.
+ */
+export { normalizeSelectors, matchOnly, collectFailedSelectors } from "./selector.js";
+export type { OnlySelector } from "./selector.js";
+
+/**
  * Workflow executor entry. A built `workflow()` is a DEF the host runs (plan 0007
  * invocation inversion); `runWorkflow(ir, ctx)` drives the graph and returns the
  * verdict. The harness uses it internally; it's exported here so adapter packages

@@ -2248,6 +2248,12 @@ export interface TestMeta {
   skip?: boolean;
 
   /**
+   * 0-based index of this row within a `.each` expansion (post-filter);
+   * undefined for non-each tests.
+   */
+  rowIndex?: number;
+
+  /**
    * Physical capability required by this test.
    * Set automatically by `contract.http()` and `contract.flow()`.
    *
@@ -2778,6 +2784,12 @@ export interface RegisteredTestMeta {
    * Actual concurrency level is controlled externally (e.g. `--concurrency` CLI flag).
    */
   parallel?: boolean;
+
+  /**
+   * 0-based index of this row within a `.each` expansion (post-filter);
+   * undefined for non-each tests.
+   */
+  rowIndex?: number;
 
   /** Physical capability required by this test. */
   requires?: "headless" | "browser" | "out-of-band";

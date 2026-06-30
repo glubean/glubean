@@ -66,6 +66,20 @@ test("resolveModuleTests — simple test (id === exportName)", () => {
   expect(health!.type).toBe("simple");
 });
 
+test("resolveModuleTests — surfaces rowIndex for .each rows (B2 M3)", () => {
+  const tests = resolveModuleTests(mod);
+  // `items` = test.each([{id:1},{id:2}])("item-$id", ...) → item-1, item-2.
+  const row0 = tests.find((t) => t.id === "item-1");
+  const row1 = tests.find((t) => t.id === "item-2");
+  expect(row0?.rowIndex).toBe(0);
+  expect(row1?.rowIndex).toBe(1);
+  // Builder-mode .each (`items2`) carries rowIndex too.
+  expect(tests.find((t) => t.id === "item2-1")?.rowIndex).toBe(0);
+  expect(tests.find((t) => t.id === "item2-2")?.rowIndex).toBe(1);
+  // Non-each simple test has no rowIndex.
+  expect(tests.find((t) => t.id === "health")?.rowIndex).toBeUndefined();
+});
+
 test("resolveModuleTests — simple test (id !== exportName)", () => {
   const tests = resolveModuleTests(mod);
   const lu = tests.find((t) => t.exportName === "listUsers");

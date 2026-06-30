@@ -78,6 +78,8 @@ export type ExecutionEvent = { testId?: string } & (
     suiteId?: string;
     suiteName?: string;
     retryCount?: number;
+    /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
+    rowIndex?: number;
   }
   | { type: "log"; message: string; data?: unknown; stepIndex?: number }
   | {
@@ -279,6 +281,8 @@ export interface ExecutionResult {
   success: boolean;
   testId: string;
   testName?: string;
+  /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
+  rowIndex?: number;
   suiteId?: string;
   suiteName?: string;
   events: TimelineEvent[];

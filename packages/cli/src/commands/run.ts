@@ -6,7 +6,8 @@ import {
   ProjectRunner,
   buildRunContext,
 } from "@glubean/runner";
-import type { ProjectRunnerTest } from "@glubean/runner";
+import type { OnlySelector, ProjectRunnerTest } from "@glubean/runner";
+import { buildOnlySelectorsFromFlags, deriveRerunSelectors } from "../lib/only-selectors.js";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { stat, readdir, readFile, writeFile, mkdir, rm } from "node:fs/promises";
@@ -165,6 +166,20 @@ interface RunOptions {
    * per-profile gates that the legacy flat-shape path can't express.
    */
   thresholds?: import("@glubean/sdk").ThresholdConfig;
+  /**
+   * B2 M3 — `{id, rowIndex}` selector protocol.
+   *
+   * `onlyId` — run only the test(s) with a matching id (repeatable). For `.each`
+   * rows, pass the concrete expanded id (e.g. `user-0`).
+   *
+   * `row` — with a single `onlyId`, isolate the 0-based `.each` row index.
+   *
+   * `rerunFailed` — re-run only the tests that failed in the last `glubean run`
+   * (reads `.glubean/last-run.result.json`). Mutually exclusive with onlyId/row.
+   */
+  onlyId?: string[];
+  row?: number;
+  rerunFailed?: boolean;
 }
 
 // =============================================================================
@@ -181,6 +196,8 @@ interface CollectedTestRun {
   success: boolean;
   durationMs: number;
   groupId?: string;
+  /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
+  rowIndex?: number;
 }
 
 interface RunSummaryStats {
@@ -819,8 +836,8 @@ export async function runCommand(
     `\n${colors.bold}${colors.blue}🧪 Glubean Test Runner${colors.reset}\n`,
   );
 
-  const testFiles = await resolveTestFiles(target);
-  const isMultiFile = testFiles.length > 1;
+  let testFiles = await resolveTestFiles(target);
+  let isMultiFile = testFiles.length > 1;
   // Single string view of target for serialization / display paths
   // (result.json, junit, traces). Multi-suite passes an array; join with
   // ", " so downstream consumers still see a printable target field.
@@ -856,6 +873,66 @@ export async function runCommand(
 
   const startDir = testFiles[0].substring(0, testFiles[0].lastIndexOf("/"));
   const { rootDir } = await findProjectConfig(startDir);
+
+  // ── B2 M3 — `{id, rowIndex}` "only" selectors ────────────────────────────
+  // Validate the --only-id / --row / --rerun-failed combo up front (single
+  // gate), then resolve the active selector set. `--rerun-failed` reads the
+  // previous run and narrows discovery to the files that failed; `--only-id` /
+  // `--row` narrow `testsToRun` below by template-matching concrete ids against
+  // static `.each` template ids. Either way the precise per-row filter runs in
+  // the harness subprocess via the GLUBEAN_RUNNER_ONLY_SELECTORS env channel.
+  let onlySelectors: OnlySelector[] = [];
+  const selectorFlags = buildOnlySelectorsFromFlags({
+    onlyId: options.onlyId,
+    row: options.row,
+    rerunFailed: options.rerunFailed,
+  });
+  if (!selectorFlags.ok) {
+    console.error(`\n${colors.red}❌ ${selectorFlags.error}${colors.reset}\n`);
+    process.exit(1);
+  }
+  if (options.rerunFailed) {
+    const lastRunPath = resolve(rootDir, ".glubean", "last-run.result.json");
+    let lastRun: {
+      tests?: Array<{ testId?: string; rowIndex?: number; filePath?: string; success: boolean }>;
+    };
+    try {
+      lastRun = JSON.parse(await readFile(lastRunPath, "utf-8"));
+    } catch {
+      console.error(
+        `\n${colors.red}❌ No previous run found. Run \`glubean run\` first.${colors.reset}\n` +
+          `${colors.dim}--rerun-failed reads ${lastRunPath}.${colors.reset}\n`,
+      );
+      process.exit(1);
+    }
+    const { selectors, files } = deriveRerunSelectors({ tests: lastRun.tests ?? [] });
+    if (selectors.length === 0) {
+      console.log(
+        `\n${colors.green}✓ Last run had no failures — nothing to rerun.${colors.reset}\n`,
+      );
+      process.exit(0);
+    }
+    // Narrow discovery to the files that contained a failure. `files` were
+    // written relative to process.cwd() (resultPayload.tests.filePath); resolve
+    // both sides to absolute for an exact match against the discovered testFiles.
+    const failedFilesAbs = new Set(files.map((f) => resolve(process.cwd(), f)));
+    testFiles = testFiles.filter((f) => failedFilesAbs.has(resolve(f)));
+    isMultiFile = testFiles.length > 1;
+    if (testFiles.length === 0) {
+      console.error(
+        `\n${colors.red}❌ --rerun-failed: none of the ${failedFilesAbs.size} failed file(s) ` +
+          `from the last run are in the current target.${colors.reset}\n`,
+      );
+      process.exit(1);
+    }
+    onlySelectors = selectors;
+    console.log(
+      `${colors.dim}--rerun-failed: ${selectors.length} failed test(s) across ` +
+        `${testFiles.length} file(s)${colors.reset}\n`,
+    );
+  } else {
+    onlySelectors = selectorFlags.selectors;
+  }
 
   // Config consolidation (docs/06 P2): the legacy package.json `glubean`
   // flat-shape is no longer read. Profile runs get run/redaction/thresholds
@@ -1174,7 +1251,7 @@ export async function runCommand(
 
   const hasTags = options.tags && options.tags.length > 0;
   const hasExcludeTags = options.excludeTags && options.excludeTags.length > 0;
-  const testsToRun = allFileTests.filter((ft) => {
+  let testsToRun = allFileTests.filter((ft) => {
     const tc = ft.test;
     if (tc.meta.skip) return false;
     if (hasOnly && !tc.meta.only) return false;
@@ -1183,6 +1260,30 @@ export async function runCommand(
     if (hasExcludeTags && matchesExcludeTags(tc, options.excludeTags!)) return false;
     return true;
   });
+
+  // B2 M3 — narrow testsToRun for --only-id / --row. Selector ids are CONCRETE
+  // (e.g. `user-0`); a `.each` export appears in discovery under its TEMPLATE id
+  // (e.g. `user-$index`). Template-match each selector id against the discovered
+  // template ids so concrete selectors reach the right export — the harness then
+  // applies the precise per-row filter at runtime. (Rerun narrows by file above.)
+  if (onlySelectors.length > 0 && !options.rerunFailed) {
+    const selectorIds = Array.from(
+      new Set(onlySelectors.map((s) => (typeof s === "string" ? s : s.id))),
+    );
+    const indexed = testsToRun.map((ft) => ({ id: ft.test.meta.id, ft }));
+    const kept = new Set<(typeof testsToRun)[number]>();
+    for (const selId of selectorIds) {
+      const match = findTemplateMatch(indexed, selId);
+      if (match) kept.add(match.ft);
+    }
+    testsToRun = testsToRun.filter((ft) => kept.has(ft));
+    if (testsToRun.length === 0) {
+      console.error(
+        `\n${colors.red}❌ No tests match --only-id ${selectorIds.join(", ")}${colors.reset}\n`,
+      );
+      process.exit(1);
+    }
+  }
 
   if (testsToRun.length === 0) {
     if (options.filter || hasTags) {
@@ -1357,6 +1458,15 @@ export async function runCommand(
     delete process.env["GLUBEAN_RUNNER_FORCE_STANDALONE_IDS"];
   }
 
+  // B2 M3 — hand the resolved selector set to the harness subprocess (it applies
+  // the precise per-row filter at runtime). Clear it otherwise so a stale value
+  // never leaks across in-process invocations (parity with the input maps above).
+  if (onlySelectors.length > 0) {
+    process.env["GLUBEAN_RUNNER_ONLY_SELECTORS"] = JSON.stringify(onlySelectors);
+  } else {
+    delete process.env["GLUBEAN_RUNNER_ONLY_SELECTORS"];
+  }
+
   if (options.pick) {
     process.env.GLUBEAN_PICK = options.pick;
     console.log(`${colors.dim}  pick: ${options.pick}${colors.reset}`);
@@ -1434,6 +1544,7 @@ export async function runCommand(
   let currentTestItems: (typeof testsToRun) | undefined;
   let testId = "";
   let testName = "";
+  let testRowIndex: number | undefined = undefined;
   let testItem: (typeof testsToRun)[number]["test"] | null = null;
   let startTime = Date.now();
   let testEvents: ExecutionEvent[] = [];
@@ -1511,6 +1622,7 @@ export async function runCommand(
       success: skippedClean ? true : finalSuccess,
       durationMs: duration,
       groupId: testItem?.meta.groupId,
+      rowIndex: testRowIndex,
     });
 
     addLogEntry(
@@ -1884,6 +1996,10 @@ export async function runCommand(
               (currentTestItems ? findFileTestByRuntimeId(currentTestItems, event.id) : undefined);
             testId = event.id;
             testName = entry?.test.meta.name || event.name || event.id;
+            // rowIndex (B2 M3): the runtime start event is authoritative for the
+            // per-row `.each` index (static discovery only sees the template id,
+            // so it carries no rowIndex). undefined for non-each tests.
+            testRowIndex = event.rowIndex;
             testItem = entry?.test || null;
             startTime = Date.now();
             testEvents = [];
@@ -2411,6 +2527,10 @@ export async function runCommand(
       success: r.success,
       durationMs: r.durationMs,
       events: r.events,
+      // B2 M3 — persist rowIndex + filePath so `--rerun-failed` can reconstruct
+      // the failed `{id, rowIndex}` selector set and narrow to the failed files.
+      ...(r.rowIndex !== undefined && { rowIndex: r.rowIndex }),
+      filePath: relative(process.cwd(), r.filePath),
     })),
     ...(thresholdSummary && { thresholds: thresholdSummary }),
     ...(options.meta && Object.keys(options.meta).length > 0 && { customMetadata: options.meta }),

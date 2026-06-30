@@ -179,6 +179,7 @@ export function createExtendedTest<Ctx extends TestContext>(
           id,
           name,
           tags: allTags.length > 0 ? allTags : undefined,
+          rowIndex: index,
         };
 
         const testDef: Test = {
@@ -194,6 +195,7 @@ export function createExtendedTest<Ctx extends TestContext>(
           type: "simple",
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
+          rowIndex: index,
           ...(hasGroup ? { groupId: baseMeta.id } : {}),
           ...(parallel ? { parallel: true } : {}),
         });

@@ -63,6 +63,9 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         tags: e.tags,
         testId: e.id,
         ...(e.retryCount !== undefined ? { retryCount: e.retryCount } : {}),
+        // rowIndex (B2 M3): forward the engine def's `.each` row index so the
+        // engine path's start wire event carries it just like the legacy path.
+        ...(e.rowIndex !== undefined ? { rowIndex: e.rowIndex } : {}),
       };
     case "log":
       return {

@@ -498,6 +498,10 @@ export class RunnerCore {
       name: def.meta.name ?? def.meta.id,
       tags: scope.testMeta.tags,
       ...(scope.retryCount > 0 ? { retryCount: scope.retryCount } : {}),
+      // rowIndex (B2 M3 selector protocol): a `.each` row carries its 0-based
+      // post-filter index so the CLI can persist it for `--rerun-failed`. Static
+      // test metadata, sourced from the def (not scope) — undefined for non-each.
+      ...(def.meta.rowIndex !== undefined ? { rowIndex: def.meta.rowIndex } : {}),
     });
     const ctx = this.makeCtx(scope);
     // Host-provided ctx extensions (e.g. the load runner's input / report /
@@ -1615,7 +1619,7 @@ function wrapScopedKy(
 // --- resolve helpers: map SDK module exports → engine TestDef -----------------
 // Structural shape of an SDK Test (we avoid importing the heavy generic type).
 export interface SdkTestShape {
-  meta: { id: string; name?: string; tags?: string[] | string; skip?: boolean; only?: boolean };
+  meta: { id: string; name?: string; tags?: string[] | string; skip?: boolean; only?: boolean; rowIndex?: number };
   type: "simple" | "steps";
   fn?: unknown;
   setup?: unknown;
@@ -1698,7 +1702,7 @@ export function toTestDef(t: SdkTestShape): TestDef {
   // SDK step fns take the SDK TestContext; the engine provides the narrow subset
   // at runtime, so the cast is sound for the Stage-1 surface.
   return {
-    meta: { id: t.meta.id, name: t.meta.name, tags, skip: t.meta.skip, only: t.meta.only },
+    meta: { id: t.meta.id, name: t.meta.name, tags, skip: t.meta.skip, only: t.meta.only, rowIndex: t.meta.rowIndex },
     type: t.type,
     fn: t.fn as TestFn | undefined,
     setup: t.setup as TestFn | undefined,
