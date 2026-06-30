@@ -142,3 +142,21 @@ test("--rerun-failed with no prior failures says nothing to rerun (exit 0)", asy
   expect(code).toBe(0);
   expect(stdout + stderr).toContain("nothing to rerun");
 }, 90_000);
+
+test("--rerun-failed works across a different cwd (rootDir-stable filePath)", async () => {
+  const dir = await prepare("rerun-cwd");
+  const subdir = join(dir, "tests");
+
+  // Run 1 from the PROJECT ROOT — persists tests[].filePath relative to rootDir.
+  const full = await runCli(["run", "tests/", "--no-session"], { cwd: dir });
+  expect(full.code).toBe(1);
+
+  // Run 2 from a DIFFERENT cwd (the tests/ subdir). rootDir still resolves to
+  // the project root, so the failed-file narrowing must still hit each.test.ts.
+  // (Pre-fix this filtered everything out and reran nothing.)
+  const rerun = await runCli(["run", ".", "--no-session", "--rerun-failed"], { cwd: subdir });
+  expect(rerun.code).toBe(1);
+  const afterRerun = await readLastRun(dir);
+  expect(afterRerun.tests.map((t) => t.testId)).toEqual(["user-20"]);
+  expect(afterRerun.tests[0]?.success).toBe(false);
+}, 90_000);

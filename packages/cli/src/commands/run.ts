@@ -913,9 +913,11 @@ export async function runCommand(
       process.exit(0);
     }
     // Narrow discovery to the files that contained a failure. `files` were
-    // written relative to process.cwd() (resultPayload.tests.filePath); resolve
-    // both sides to absolute for an exact match against the discovered testFiles.
-    const failedFilesAbs = new Set(files.map((f) => resolve(process.cwd(), f)));
+    // written relative to rootDir (resultPayload.tests.filePath) — rootDir is the
+    // stable basis (the dir holding .glubean/), so rerun resolves correctly even
+    // when invoked from a different cwd than the original run. Resolve both sides
+    // to absolute for an exact match against the discovered testFiles.
+    const failedFilesAbs = new Set(files.map((f) => resolve(rootDir, f)));
     testFiles = testFiles.filter((f) => failedFilesAbs.has(resolve(f)));
     isMultiFile = testFiles.length > 1;
     if (testFiles.length === 0) {
@@ -2529,8 +2531,10 @@ export async function runCommand(
       events: r.events,
       // B2 M3 — persist rowIndex + filePath so `--rerun-failed` can reconstruct
       // the failed `{id, rowIndex}` selector set and narrow to the failed files.
+      // filePath is relative to rootDir (the stable .glubean/ basis), NOT cwd, so
+      // rerun resolves correctly when run from a different working directory.
       ...(r.rowIndex !== undefined && { rowIndex: r.rowIndex }),
-      filePath: relative(process.cwd(), r.filePath),
+      filePath: relative(rootDir, r.filePath),
     })),
     ...(thresholdSummary && { thresholds: thresholdSummary }),
     ...(options.meta && Object.keys(options.meta).length > 0 && { customMetadata: options.meta }),

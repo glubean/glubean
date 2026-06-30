@@ -926,6 +926,7 @@ export class TestExecutor {
     const includeTestId = options?.includeTestId ?? false;
     let success = false;
     let testName: string | undefined;
+    let rowIndex: number | undefined;
     let suiteId: string | undefined;
     let suiteName: string | undefined;
     let error: string | undefined;
@@ -943,6 +944,10 @@ export class TestExecutor {
       switch (event.type) {
         case "start":
           testName = event.name;
+          // rowIndex (B2 M3): surface the `.each` row index on the assembled
+          // result so programmatic consumers (not the CLI event stream) can
+          // reconstruct a row-pinned selector. undefined for non-each tests.
+          rowIndex = event.rowIndex;
           suiteId = event.suiteId;
           suiteName = event.suiteName;
           retryCount = event.retryCount;
@@ -1032,7 +1037,7 @@ export class TestExecutor {
     if (!summary.success) success = false;
 
     return {
-      success, testId, testName, suiteId, suiteName, events, error, stack,
+      success, testId, testName, rowIndex, suiteId, suiteName, events, error, stack,
       duration: Date.now() - startTime, retryCount, assertionCount, failedAssertionCount,
       peakMemoryBytes, peakMemoryMB,
       context: buildRunContext(),

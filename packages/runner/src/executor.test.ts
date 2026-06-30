@@ -301,6 +301,53 @@ test("TestExecutor - executeMany includes testId in streamed events", async () =
 });
 
 // ---------------------------------------------------------------------------
+// B2 M3 — execute()/executeMany() surface rowIndex on ExecutionResult
+// ---------------------------------------------------------------------------
+
+const EACH_ROWINDEX_CONTENT = `
+import { test } from "@glubean/sdk";
+
+export const rows = test.each([
+  { id: 10 },
+  { id: 20 },
+  { id: 30 },
+])("row-$id", async (ctx, _data) => {
+  ctx.assert(true, "ok");
+});
+
+export const plain = test("plain", async (ctx) => {
+  ctx.assert(true, "ok");
+});
+`;
+
+test("execute/executeMany surface rowIndex for .each rows (B2 M3)", async () => {
+  const testFile = await makeTempFile(EACH_ROWINDEX_CONTENT);
+  const executor = new TestExecutor();
+
+  // execute() — a single .each row by concrete id carries its 0-based rowIndex.
+  const r0 = await executor.execute(`file://${testFile}`, "row-10", { vars: {}, secrets: {} });
+  expect(r0.rowIndex).toBe(0);
+  const r2 = await executor.execute(`file://${testFile}`, "row-30", { vars: {}, secrets: {} });
+  expect(r2.rowIndex).toBe(2);
+
+  // A plain (non-each) test has no rowIndex.
+  const plain = await executor.execute(`file://${testFile}`, "plain", { vars: {}, secrets: {} });
+  expect(plain.rowIndex).toBeUndefined();
+
+  // executeMany() preserves rowIndex per returned result.
+  const batch = await executor.executeMany(
+    `file://${testFile}`,
+    ["row-10", "row-20", "row-30"],
+    { vars: {}, secrets: {} },
+    { concurrency: 1 },
+  );
+  const byId = new Map(batch.results.map((r) => [r.testId, r.rowIndex]));
+  expect(byId.get("row-10")).toBe(0);
+  expect(byId.get("row-20")).toBe(1);
+  expect(byId.get("row-30")).toBe(2);
+}, 60_000);
+
+// ---------------------------------------------------------------------------
 // ctx.fail tests
 // ---------------------------------------------------------------------------
 
