@@ -66,7 +66,7 @@ export interface EnvProvider {
 // Every event carries the owning test `id` so a host running runs concurrently
 // can attribute assertion/trace/log events to the right run (codex P2-2).
 export type ExecutionEvent =
-  | { type: "start"; id: string; name: string; tags: string[]; retryCount?: number }
+  | { type: "start"; id: string; name: string; tags: string[]; retryCount?: number; rowIndex?: number }
   | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown; stepIndex?: number }
   // ctx.trace + the HTTP auto-trace carry the FULL Trace shape (node parity:
   // harness.ts:767 / :1043) — not a flat {method,url,status,timeMs}. ctx.trace ALSO
@@ -265,7 +265,7 @@ export interface StepDef {
   fn: TestFn;
 }
 export interface TestDef {
-  meta: { id: string; name?: string; tags?: string[]; skip?: boolean; only?: boolean };
+  meta: { id: string; name?: string; tags?: string[]; skip?: boolean; only?: boolean; rowIndex?: number };
   type: "simple" | "steps";
   fn?: TestFn;
   setup?: TestFn;

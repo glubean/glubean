@@ -10,6 +10,7 @@ import { parseArgs } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { inferJsonSchema, truncateDeep } from "./schema_inference.js";
 import { USE_ENGINE, createEngineCore, runViaEngine, engineRoutesId } from "./engine-bridge.js";
+import { matchOnly, type OnlySelector } from "./selector.js";
 import { bootstrap } from "./bootstrap.js";
 import { loadProjectOverlays } from "@glubean/scanner";
 import {
@@ -192,6 +193,12 @@ const runtimeTest = parseRuntimeTestMetadata(contextData.test);
 // Memory monitoring state (per-process — not isolated per-test)
 let peakMemoryBytes = 0;
 let memoryCheckInterval: number | undefined;
+
+// B2 M3 — the `{id, rowIndex}` "only" selector set for this subprocess (parsed
+// from GLUBEAN_RUNNER_ONLY_SELECTORS in the env block below). `null` = no filter;
+// a non-empty array narrows which tests/rows actually run (cloud-parity runtime
+// filter — per-row ids are runtime data, so this lives in the subprocess).
+let onlySelectors: OnlySelector[] | null = null;
 
 // ---------------------------------------------------------------------------
 // Per-test execution context via AsyncLocalStorage
@@ -1486,6 +1493,28 @@ try {
       );
     }
   }
+  // B2 M3 — the `{id, rowIndex}` "only" selector set. JSON `OnlySelector[]`. A
+  // non-empty array makes executeNewTest silently skip any test/row that no
+  // selector matches (cloud-parity runtime filter). Symmetric with the maps
+  // above; wrapped in try/catch so a malformed value never aborts the run.
+  const onlySelectorsRaw = process.env["GLUBEAN_RUNNER_ONLY_SELECTORS"];
+  if (onlySelectorsRaw) {
+    try {
+      const parsed = JSON.parse(onlySelectorsRaw) as unknown;
+      if (Array.isArray(parsed)) {
+        onlySelectors = parsed as OnlySelector[];
+      }
+    } catch (err) {
+      console.log(
+        JSON.stringify({
+          type: "log",
+          message:
+            `Invalid GLUBEAN_RUNNER_ONLY_SELECTORS JSON: ` +
+            (err instanceof Error ? err.message : String(err)),
+        }),
+      );
+    }
+  }
 
   // Dynamic import - LOAD phase
   console.log(
@@ -1970,6 +1999,25 @@ function stepsEngineSupported(steps: StepDefinition<unknown>[]): boolean {
 }
 
 async function executeNewTest(test: Test<unknown>): Promise<void> {
+  // B2 M3 — runtime "only" selector filter (cloud-parity). When a non-empty
+  // selector set is active and this test/row matches none of them, skip it
+  // SILENTLY: emit no events and DON'T throw. The caller's try/catch only marks
+  // hasFailure on a throw, so a clean return leaves hasFailure untouched (this is
+  // a skip, not a failure). NOT a hard error on zero matches — a subprocess that
+  // matches nothing in a multi-file batch is normal; it just runs nothing (exit 0).
+  // The global "no test matched" decision is the CLI's, not the harness's.
+  if (
+    onlySelectors &&
+    onlySelectors.length > 0 &&
+    !matchOnly(onlySelectors, {
+      id: test.meta.id,
+      name: test.meta.name,
+      rowIndex: test.meta.rowIndex,
+    })
+  ) {
+    return;
+  }
+
   // runner-on-engine (plan 0005): route to the engine only when (a) the engine is
   // active, (b) this test id is on the per-test allowlist (GLUBEAN_ENGINE_TESTIDS;
   // "*" = all at cutover) — so the flag never sends arbitrary production tests
@@ -2035,6 +2083,9 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
     name: test.meta.name || test.meta.id,
     tags: testTags,
     ...(retryCount > 0 && { retryCount }),
+    // rowIndex (B2 M3): persist the `.each` row index on the start event so the
+    // CLI can record it in last-run.result.json for `--rerun-failed`.
+    ...(test.meta.rowIndex !== undefined && { rowIndex: test.meta.rowIndex }),
   });
 
   // Start memory monitoring

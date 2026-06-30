@@ -393,6 +393,7 @@ export class EachBuilder<
         steps: stepMetas,
         hasSetup: !!this._setup,
         hasTeardown: !!this._teardown,
+        rowIndex: i,
         ...(hasGroup ? { groupId: this._baseMeta.id } : {}),
         ...(this._parallel ? { parallel: true } : {}),
       });
@@ -418,6 +419,7 @@ export class EachBuilder<
         id,
         name,
         tags: this._tagsForRow(row),
+        rowIndex: index,
       };
 
       const setup = this._setup;

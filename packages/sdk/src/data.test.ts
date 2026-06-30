@@ -490,6 +490,50 @@ test("test.each - filter with all excluded returns empty", () => {
 });
 
 // =============================================================================
+// test.each - rowIndex (B2 M3 selector protocol)
+// =============================================================================
+
+test("test.each - build() assigns 0-based rowIndex per row", () => {
+  clearRegistry();
+  const tests = gbTest.each([{ id: 1 }, { id: 2 }, { id: 3 }])(
+    { id: "user-$id" },
+    async (_ctx, _data) => {},
+  );
+
+  expect(tests.map((t) => t.meta.rowIndex)).toEqual([0, 1, 2]);
+});
+
+test("test.each - registry entries carry rowIndex", () => {
+  clearRegistry();
+  gbTest.each([{ id: 1 }, { id: 2 }])({ id: "reg-$id" })
+    .step("check", async () => {})
+    .build();
+
+  const registry = getRegistry();
+  expect(registry.map((r) => r.rowIndex)).toEqual([0, 1]);
+});
+
+test("test.each - rowIndex is the POST-filter index", () => {
+  clearRegistry();
+  const tests = gbTest.each([
+    { id: 1, country: "US" },
+    { id: 2, country: "JP" },
+    { id: 3, country: "JP" },
+  ])(
+    { id: "user-$id", filter: (row) => row.country === "JP" },
+    async (_ctx, _data) => {},
+  );
+
+  // Rows 2 and 3 survive the filter; their rowIndex is the compacted 0,1 —
+  // not the original table positions 1,2.
+  expect(tests.map((t) => t.meta.id)).toEqual(["user-2", "user-3"]);
+  expect(tests.map((t) => t.meta.rowIndex)).toEqual([0, 1]);
+
+  const registry = getRegistry();
+  expect(registry.map((r) => r.rowIndex)).toEqual([0, 1]);
+});
+
+// =============================================================================
 // test.each - map input (Record<string, T>)
 // =============================================================================
 

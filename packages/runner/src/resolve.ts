@@ -31,6 +31,8 @@ export interface ResolvedTest {
   type: "simple" | "steps";
   only?: boolean;
   skip?: boolean;
+  /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
+  rowIndex?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +225,7 @@ function toResolvedTest(exportName: string, test: Test<unknown>): ResolvedTest {
     type: test.type,
     only: meta.only ?? undefined,
     skip: meta.skip ?? undefined,
+    rowIndex: meta.rowIndex,
   };
 }
 

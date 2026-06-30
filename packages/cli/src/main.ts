@@ -131,6 +131,20 @@ program
     "--force-standalone",
     "DEBUG: bypass `runnability.requireAttachment` for the filtered case. Emits a runtime warning. Author-debug only.",
   )
+  .option(
+    "--only-id <id>",
+    "Run only the test(s) with matching id (repeatable). For `.each` rows pass the concrete expanded id.",
+    collect,
+    [],
+  )
+  .option(
+    "--row <n>",
+    "With a single --only-id, isolate the 0-based `.each` row index.",
+  )
+  .option(
+    "--rerun-failed",
+    "Re-run only the tests that failed in the last `glubean run` (reads .glubean/last-run.result.json).",
+  )
   .action(async (target, options, cmd) => {
     await executeRun(target, options, cmd);
   });
@@ -469,6 +483,21 @@ async function executeRun(
       console.log("");
     }
 
+    // B2 M3 — parse + validate --row (a 0-based `.each` row index). Commander
+    // hands it through as a raw string; reject anything that isn't a
+    // non-negative integer before runCommand builds selectors.
+    let parsedRow: number | undefined;
+    if (options.row !== undefined) {
+      const raw = String(options.row).trim();
+      if (!/^\d+$/.test(raw)) {
+        console.error(
+          `\x1b[31m--row must be a non-negative integer (got "${options.row}").\x1b[0m`,
+        );
+        process.exit(1);
+      }
+      parsedRow = parseInt(raw, 10);
+    }
+
     await runCommand(resolvedTarget, {
       filter: options.filter ?? resolvedPlan?.selection.filter,
       pick: options.pick ?? resolvedPlan?.selection.pick,
@@ -557,6 +586,11 @@ async function executeRun(
       inputJson: options.inputJson,
       bootstrapJson: options.bootstrapJson,
       forceStandalone: options.forceStandalone,
+      // B2 M3 — `{id, rowIndex}` selectors. onlyId is a collected array (may be
+      // empty); row is the validated integer; rerunFailed is a boolean flag.
+      onlyId: options.onlyId as string[] | undefined,
+      row: parsedRow,
+      rerunFailed: !!options.rerunFailed,
       allowedKindsPerFile,
       // Phase 4: thread the v1 plan's full redaction config (replacement
       // format + globalRules + custom patterns) into runCommand so newly
@@ -653,6 +687,20 @@ ciCmd
   .option(
     "--force-standalone",
     "DEBUG: bypass `runnability.requireAttachment` for the filtered case. Emits a runtime warning. Author-debug only.",
+  )
+  .option(
+    "--only-id <id>",
+    "Run only the test(s) with matching id (repeatable). For `.each` rows pass the concrete expanded id.",
+    collect,
+    [],
+  )
+  .option(
+    "--row <n>",
+    "With a single --only-id, isolate the 0-based `.each` row index.",
+  )
+  .option(
+    "--rerun-failed",
+    "Re-run only the tests that failed in the last `glubean run` (reads .glubean/last-run.result.json).",
   )
   .action(async (target, options, cmd) => {
     // Bake in the `ci` profile so executeRun's profile-mode branch fires.

@@ -221,6 +221,7 @@ export namespace test {
           id,
           name,
           tags: allTags.length > 0 ? allTags : undefined,
+          rowIndex: index,
         };
 
         const testDef: Test = {
@@ -235,6 +236,7 @@ export namespace test {
           type: "simple",
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
+          rowIndex: index,
           ...(hasGroup ? { groupId: baseMeta.id } : {}),
           ...(parallel ? { parallel: true } : {}),
         });
