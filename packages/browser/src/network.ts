@@ -5,10 +5,15 @@
  * emits them as Glubean trace events so they appear in the same timeline as
  * `ctx.http` calls.
  *
+ * This is one capability of the shared evidence CDP session (see
+ * {@link EvidenceSession}). It attaches to a session the caller owns — it does
+ * **not** create or detach the session, so `Network`, `Fetch`, and `Emulation`
+ * can all live on the same self-opened session.
+ *
  * @module network
  */
 
-import type { CDPSession, Page } from "puppeteer-core";
+import type { CDPSession } from "puppeteer-core";
 
 /** Callback shape matching `ctx.trace()`. */
 export type TraceFn = (trace: {
@@ -113,17 +118,21 @@ interface PendingRequest {
 }
 
 /**
- * Attach a CDP Network listener to the page that emits Glubean trace events
- * for every in-page network request.
+ * Attach a CDP Network listener to the given (shared) session that emits
+ * Glubean trace events for every in-page network request.
  *
- * Returns a cleanup function that detaches the listener.
+ * The caller owns the session lifecycle: this enables the `Network` domain and
+ * registers listeners, and the returned cleanup only removes those listeners —
+ * it does **not** detach the session (the session may also host `Fetch` and
+ * `Emulation`). See {@link EvidenceSession}.
+ *
+ * @returns A cleanup function that removes the Network listeners.
  */
 export async function attachNetworkTracer(
-  page: Page,
+  cdp: CDPSession,
   options: NetworkTracerOptions,
-): Promise<() => Promise<void>> {
+): Promise<() => void> {
   const { trace, filter, include = DEFAULT_INCLUDE, excludePaths = DEFAULT_EXCLUDE_PATHS } = options;
-  const cdp: CDPSession = await page.createCDPSession();
   await cdp.send("Network.enable");
 
   const pending = new Map<string, PendingRequest>();
@@ -239,16 +248,12 @@ export async function attachNetworkTracer(
   cdp.on("Network.loadingFinished", onLoadingFinished);
   cdp.on("Network.loadingFailed", onLoadingFailed);
 
-  return async () => {
+  return () => {
     cdp.off("Network.requestWillBeSent", onRequestWillBeSent);
     cdp.off("Network.responseReceived", onResponseReceived);
     cdp.off("Network.loadingFinished", onLoadingFinished);
     cdp.off("Network.loadingFailed", onLoadingFailed);
-    try {
-      await cdp.detach();
-    } catch {
-      // page may already be closed
-    }
+    // Note: the session is shared and owned by EvidenceSession — do not detach.
   };
 }
 

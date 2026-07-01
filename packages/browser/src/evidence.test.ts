@@ -1,0 +1,419 @@
+import { test, expect } from "vitest";
+import {
+  buildEmulationCalls,
+  buildFulfillParams,
+  EvidenceSession,
+  findMock,
+  guardPageMethod,
+  matchMock,
+  type MockRule,
+} from "./evidence.js";
+
+// ── Fakes ─────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyFn = (...args: any[]) => any;
+
+class FakeCDPSession {
+  sent: Array<{ method: string; params?: unknown }> = [];
+  listeners = new Map<string, Set<AnyFn>>();
+  detached = false;
+  sendImpl?: (method: string, params?: unknown) => unknown;
+
+  async send(method: string, params?: unknown): Promise<unknown> {
+    this.sent.push({ method, params });
+    if (this.sendImpl) return this.sendImpl(method, params);
+    if (method === "Network.getResponseBody") {
+      return { body: "", base64Encoded: false };
+    }
+    return {};
+  }
+  on(event: string, fn: AnyFn): this {
+    let set = this.listeners.get(event);
+    if (!set) this.listeners.set(event, (set = new Set()));
+    set.add(fn);
+    return this;
+  }
+  off(event: string, fn: AnyFn): this {
+    this.listeners.get(event)?.delete(fn);
+    return this;
+  }
+  emit(event: string, payload: unknown): void {
+    for (const fn of [...(this.listeners.get(event) ?? [])]) fn(payload);
+  }
+  async detach(): Promise<void> {
+    this.detached = true;
+  }
+  methods(): string[] {
+    return this.sent.map((s) => s.method);
+  }
+  listenerCount(event: string): number {
+    return this.listeners.get(event)?.size ?? 0;
+  }
+}
+
+class FakePage {
+  cdp = new FakeCDPSession();
+  interception: boolean | undefined;
+  viewportCalls: unknown[] = [];
+  async createCDPSession(): Promise<FakeCDPSession> {
+    return this.cdp;
+  }
+  async setRequestInterception(v: boolean): Promise<void> {
+    this.interception = v;
+  }
+  async setViewport(v: unknown): Promise<void> {
+    this.viewportCalls.push(v);
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const asPage = (p: FakePage): any => p;
+
+// ── matchMock / findMock ──────────────────────────────────────────────
+
+test("matchMock: string matches by substring", () => {
+  const rule: MockRule = { url: "/api/user" };
+  expect(matchMock(rule, { url: "https://x.com/api/user?id=1", method: "GET" }))
+    .toBe(true);
+  expect(matchMock(rule, { url: "https://x.com/api/order", method: "GET" }))
+    .toBe(false);
+});
+
+test("matchMock: regex matches by test()", () => {
+  const rule: MockRule = { url: /\/api\/user\/\d+$/ };
+  expect(matchMock(rule, { url: "https://x.com/api/user/42", method: "GET" }))
+    .toBe(true);
+  expect(matchMock(rule, { url: "https://x.com/api/user/x", method: "GET" }))
+    .toBe(false);
+});
+
+test("matchMock: method filter is case-insensitive", () => {
+  const rule: MockRule = { url: "/api", method: "post" };
+  expect(matchMock(rule, { url: "/api", method: "POST" })).toBe(true);
+  expect(matchMock(rule, { url: "/api", method: "GET" })).toBe(false);
+});
+
+test("findMock: returns the first matching rule", () => {
+  const mocks: MockRule[] = [
+    { url: "/api/order" },
+    { url: "/api/user", body: "first" },
+    { url: "/api/user", body: "second" },
+  ];
+  const hit = findMock(mocks, { url: "/api/user", method: "GET" });
+  expect(hit?.body).toBe("first");
+  expect(findMock(mocks, { url: "/nope", method: "GET" })).toBeUndefined();
+});
+
+// ── buildFulfillParams ────────────────────────────────────────────────
+
+function decodeBody(b64: string): string {
+  return Buffer.from(b64, "base64").toString("utf8");
+}
+function headerValue(
+  headers: Array<{ name: string; value: string }>,
+  name: string,
+): string | undefined {
+  return headers.find((h) => h.name.toLowerCase() === name)?.value;
+}
+
+test("buildFulfillParams: defaults status 200 and empty body", () => {
+  const p = buildFulfillParams({ url: "/x" }, "req-1");
+  expect(p.requestId).toBe("req-1");
+  expect(p.responseCode).toBe(200);
+  expect(decodeBody(p.body)).toBe("");
+  expect(p.responseHeaders).toEqual([]);
+});
+
+test("buildFulfillParams: string body → text/plain, base64-encoded", () => {
+  const p = buildFulfillParams({ url: "/x", body: "hello", status: 201 }, "r");
+  expect(p.responseCode).toBe(201);
+  expect(decodeBody(p.body)).toBe("hello");
+  expect(headerValue(p.responseHeaders, "content-type"))
+    .toBe("text/plain; charset=utf-8");
+});
+
+test("buildFulfillParams: object body → JSON + application/json", () => {
+  const p = buildFulfillParams({ url: "/x", body: { id: 1, name: "Ada" } }, "r");
+  expect(decodeBody(p.body)).toBe('{"id":1,"name":"Ada"}');
+  expect(headerValue(p.responseHeaders, "content-type"))
+    .toBe("application/json; charset=utf-8");
+});
+
+test("buildFulfillParams: explicit contentType overrides inference", () => {
+  const p = buildFulfillParams(
+    { url: "/x", body: { a: 1 }, contentType: "application/ld+json" },
+    "r",
+  );
+  expect(headerValue(p.responseHeaders, "content-type"))
+    .toBe("application/ld+json");
+});
+
+test("buildFulfillParams: user headers win over inferred content-type", () => {
+  const p = buildFulfillParams(
+    { url: "/x", body: { a: 1 }, headers: { "Content-Type": "text/csv" } },
+    "r",
+  );
+  const cts = p.responseHeaders.filter(
+    (h) => h.name.toLowerCase() === "content-type",
+  );
+  expect(cts).toHaveLength(1);
+  expect(cts[0].value).toBe("text/csv");
+});
+
+// ── buildEmulationCalls ───────────────────────────────────────────────
+
+test("buildEmulationCalls: empty options → no calls", () => {
+  expect(buildEmulationCalls({})).toEqual([]);
+});
+
+test("buildEmulationCalls: timezone only", () => {
+  expect(buildEmulationCalls({ timezone: "America/New_York" })).toEqual([
+    {
+      method: "Emulation.setTimezoneOverride",
+      params: { timezoneId: "America/New_York" },
+    },
+  ]);
+});
+
+test("buildEmulationCalls: geolocation defaults accuracy to 0", () => {
+  const calls = buildEmulationCalls({
+    geolocation: { latitude: 1.5, longitude: -2.5 },
+  });
+  expect(calls).toEqual([
+    {
+      method: "Emulation.setGeolocationOverride",
+      params: { latitude: 1.5, longitude: -2.5, accuracy: 0 },
+    },
+  ]);
+});
+
+test("buildEmulationCalls: viewport fills device-metric defaults", () => {
+  const calls = buildEmulationCalls({ viewport: { width: 390, height: 844 } });
+  expect(calls[0]).toEqual({
+    method: "Emulation.setDeviceMetricsOverride",
+    params: { width: 390, height: 844, deviceScaleFactor: 1, mobile: false },
+  });
+});
+
+test("buildEmulationCalls: viewport is applied LAST (guardrail ①)", () => {
+  const calls = buildEmulationCalls({
+    timezone: "UTC",
+    geolocation: { latitude: 0, longitude: 0 },
+    viewport: { width: 800, height: 600 },
+  });
+  expect(calls.map((c) => c.method)).toEqual([
+    "Emulation.setTimezoneOverride",
+    "Emulation.setGeolocationOverride",
+    "Emulation.setDeviceMetricsOverride",
+  ]);
+});
+
+// ── guardPageMethod ───────────────────────────────────────────────────
+
+test("guardPageMethod: blocks / allows per predicate, then restores", () => {
+  const obj = {
+    calls: [] as unknown[][],
+    async foo(...args: unknown[]) {
+      this.calls.push(args);
+      return "orig";
+    },
+  };
+  const restore = guardPageMethod(
+    obj,
+    "foo",
+    "blocked!",
+    (args) => args[0] === true,
+  );
+  expect(() => obj.foo(true)).toThrow("blocked!");
+  // allowed call delegates to the original (bound to obj)
+  return obj.foo(false).then((r) => {
+    expect(r).toBe("orig");
+    expect(obj.calls).toEqual([[false]]);
+    restore();
+    // restored own method still works
+    return obj.foo(true).then((r2) => {
+      expect(r2).toBe("orig");
+    });
+  });
+});
+
+test("guardPageMethod: restore deletes the guard when method was on prototype", () => {
+  const page = new FakePage();
+  const restore = guardPageMethod(page, "setViewport", "no", () => true);
+  expect(Object.prototype.hasOwnProperty.call(page, "setViewport")).toBe(true);
+  restore();
+  expect(Object.prototype.hasOwnProperty.call(page, "setViewport")).toBe(false);
+  // prototype method is reachable again
+  return page.setViewport({ width: 1 }).then(() => {
+    expect(page.viewportCalls).toEqual([{ width: 1 }]);
+  });
+});
+
+// ── EvidenceSession.attach: capability gating ─────────────────────────
+
+test("attach: trace only enables Network, not Fetch/Emulation", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    trace: () => {},
+  });
+  expect(page.cdp.methods()).toContain("Network.enable");
+  expect(page.cdp.methods()).not.toContain("Fetch.enable");
+  expect(page.cdp.methods().some((m) => m.startsWith("Emulation."))).toBe(false);
+  // No mocks → user request interception is NOT guarded.
+  await page.setRequestInterception(true);
+  expect(page.interception).toBe(true);
+  await session.detach();
+});
+
+test("attach: no trace → Network not enabled", async () => {
+  const page = new FakePage();
+  await EvidenceSession.attach(asPage(page), {});
+  expect(page.cdp.methods()).not.toContain("Network.enable");
+});
+
+// ── EvidenceSession.attach: Fetch mock + guardrail ② ──────────────────
+
+test("attach: mocks enable Fetch and route paused requests", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    mocks: [{ url: "/api/user", body: { ok: true } }],
+  });
+
+  const fetchEnable = page.cdp.sent.find((s) => s.method === "Fetch.enable");
+  expect(fetchEnable).toBeDefined();
+  expect(fetchEnable?.params).toEqual({
+    patterns: [{ urlPattern: "*", requestStage: "Request" }],
+  });
+  expect(page.cdp.listenerCount("Fetch.requestPaused")).toBe(1);
+
+  // Matching request → fulfill
+  page.cdp.emit("Fetch.requestPaused", {
+    requestId: "a",
+    request: { url: "https://x/api/user", method: "GET" },
+  });
+  // Non-matching request → continue
+  page.cdp.emit("Fetch.requestPaused", {
+    requestId: "b",
+    request: { url: "https://x/assets/app.js", method: "GET" },
+  });
+
+  const fulfill = page.cdp.sent.find((s) => s.method === "Fetch.fulfillRequest");
+  const cont = page.cdp.sent.find((s) => s.method === "Fetch.continueRequest");
+  expect((fulfill?.params as { requestId: string }).requestId).toBe("a");
+  expect(cont?.params).toEqual({ requestId: "b" });
+
+  await session.detach();
+});
+
+test("attach: guardrail ② blocks page.setRequestInterception(true)", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    mocks: [{ url: "/x" }],
+  });
+  expect(() => page.setRequestInterception(true)).toThrow(
+    /Glubean request mocking is active/,
+  );
+  // disabling is allowed through to the original
+  await page.setRequestInterception(false);
+  expect(page.interception).toBe(false);
+
+  // detach restores the original method
+  await session.detach();
+  await page.setRequestInterception(true);
+  expect(page.interception).toBe(true);
+});
+
+// ── EvidenceSession.attach: Emulation + guardrail ① ───────────────────
+
+test("attach: emulation sends CDP calls with viewport last", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    trace: () => {},
+    mocks: [{ url: "/x" }],
+    emulate: {
+      timezone: "UTC",
+      geolocation: { latitude: 1, longitude: 2, accuracy: 5 },
+      viewport: { width: 375, height: 667 },
+    },
+  });
+
+  const methods = page.cdp.methods();
+  // Network + Fetch enabled before emulation; viewport (device metrics) last.
+  expect(methods.indexOf("Emulation.setDeviceMetricsOverride"))
+    .toBeGreaterThan(methods.indexOf("Network.enable"));
+  expect(methods.indexOf("Emulation.setDeviceMetricsOverride"))
+    .toBeGreaterThan(methods.indexOf("Fetch.enable"));
+  expect(methods.indexOf("Emulation.setDeviceMetricsOverride"))
+    .toBeGreaterThan(methods.indexOf("Emulation.setGeolocationOverride"));
+
+  const geo = page.cdp.sent.find(
+    (s) => s.method === "Emulation.setGeolocationOverride",
+  );
+  expect(geo?.params).toEqual({ latitude: 1, longitude: 2, accuracy: 5 });
+
+  await session.detach();
+});
+
+test("attach: guardrail ① blocks page.setViewport when viewport is owned", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    emulate: { viewport: { width: 800, height: 600 } },
+  });
+  expect(() => page.setViewport({ width: 1024, height: 768 })).toThrow(
+    /Glubean owns the viewport/,
+  );
+  await session.detach();
+  // restored after detach
+  await page.setViewport({ width: 1024, height: 768 });
+  expect(page.viewportCalls).toEqual([{ width: 1024, height: 768 }]);
+});
+
+test("attach: viewport NOT guarded when emulate has no viewport", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    emulate: { timezone: "UTC" },
+  });
+  await page.setViewport({ width: 320, height: 480 });
+  expect(page.viewportCalls).toEqual([{ width: 320, height: 480 }]);
+  await session.detach();
+});
+
+// ── detach: teardown + idempotency + rollback ─────────────────────────
+
+test("detach: removes listeners, detaches session, is idempotent", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    trace: () => {},
+    mocks: [{ url: "/x" }],
+  });
+  expect(page.cdp.listenerCount("Fetch.requestPaused")).toBe(1);
+  expect(page.cdp.listenerCount("Network.requestWillBeSent")).toBe(1);
+
+  await session.detach();
+  expect(page.cdp.detached).toBe(true);
+  expect(page.cdp.listenerCount("Fetch.requestPaused")).toBe(0);
+  expect(page.cdp.listenerCount("Network.requestWillBeSent")).toBe(0);
+
+  // idempotent — second detach is a no-op
+  page.cdp.detached = false;
+  await session.detach();
+  expect(page.cdp.detached).toBe(false);
+});
+
+test("attach: rolls back guards + session when wiring throws", async () => {
+  const page = new FakePage();
+  page.cdp.sendImpl = (method) => {
+    if (method === "Fetch.enable") throw new Error("boom");
+    return {};
+  };
+  await expect(
+    EvidenceSession.attach(asPage(page), { mocks: [{ url: "/x" }] }),
+  ).rejects.toThrow("boom");
+
+  // Guard was rolled back — interception is settable again.
+  await page.setRequestInterception(true);
+  expect(page.interception).toBe(true);
+  // Session was detached during rollback.
+  expect(page.cdp.detached).toBe(true);
+});
