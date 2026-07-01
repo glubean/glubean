@@ -19,7 +19,13 @@ import type {
   HTTPResponse,
   Page,
 } from "puppeteer-core";
-import { EvidenceSession, type EmulationOptions, type MockRule } from "./evidence.js";
+import {
+  EvidenceSession,
+  type EmulationOptions,
+  type MockRule,
+  type ScreenshotMode,
+  type ScreenshotTrigger,
+} from "./evidence.js";
 import { collectNavigationMetrics } from "./metrics.js";
 import { createWrappedLocator, type WrappedLocator } from "./locator.js";
 import { getRuntime } from "@glubean/sdk/internal";
@@ -67,9 +73,6 @@ export type BrowserOptions =
     | { launch: true; executablePath?: string; endpoint?: never }
     | { endpoint: string; launch?: never; executablePath?: never }
   );
-
-/** Auto-screenshot behavior. */
-export type ScreenshotMode = "off" | "on-failure" | "every-step";
 
 /** Network trace filter configuration. */
 export interface NetworkTraceOptions {
@@ -271,6 +274,19 @@ export interface BrowserTestContext {
   readonly artifactDir?: string;
 }
 
+// ── Module-level helpers (used by the shoot callback in _create) ──────
+
+/** Sanitize a string into a safe filename segment. */
+function _sanitizeFilename(s: string): string {
+  return s.replace(/[^a-z0-9_-]/gi, "_").slice(0, 60);
+}
+
+/** Create a directory (and any parents) if it does not already exist. */
+async function _ensureDir(dir: string): Promise<void> {
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(dir, { recursive: true });
+}
+
 /**
  * Connected browser instance returned by the plugin.
  *
@@ -390,11 +406,7 @@ export class GlubeanPage {
   private readonly _baseUrl: string | undefined;
   private readonly _ctx: BrowserTestContext;
   private readonly _metricsEnabled: boolean;
-  private readonly _screenshotMode: ScreenshotMode;
-  private readonly _screenshotDir: string;
-  private readonly _testId: string;
   private readonly _actionTimeout: number;
-  private _stepCounter = 0;
   private _evidence: EvidenceSession | null = null;
 
   private constructor(
@@ -402,18 +414,12 @@ export class GlubeanPage {
     baseUrl: string | undefined,
     ctx: BrowserTestContext,
     metricsEnabled: boolean,
-    screenshotMode: ScreenshotMode,
-    screenshotDir: string,
-    testId: string,
     actionTimeout: number,
   ) {
     this.raw = page;
     this._baseUrl = baseUrl;
     this._ctx = ctx;
     this._metricsEnabled = metricsEnabled;
-    this._screenshotMode = screenshotMode;
-    this._screenshotDir = screenshotDir;
-    this._testId = testId;
     this._actionTimeout = actionTimeout;
   }
 
@@ -438,9 +444,6 @@ export class GlubeanPage {
       baseUrl,
       ctx,
       metricsEnabled,
-      screenshotMode,
-      screenshotDir,
-      testId,
       actionTimeout,
     );
 
@@ -471,8 +474,53 @@ export class GlubeanPage {
     }
 
     // One shared evidence CDP session hosts Network trace + Fetch mock +
-    // Emulation. Each capability is only wired when its config is present.
+    // Emulation + Screenshot capture. Each capability is only wired when its
+    // config is present.
     const filterOpts = typeof networkTraceOpt === "object" ? networkTraceOpt : undefined;
+
+    // Build the screenshot shoot delegate. It performs I/O (take screenshot,
+    // save artifact, emit ctx.event) and is called by EvidenceSession.captureShot
+    // when mode+trigger policy allows. Defined here so it closes over `page`,
+    // `ctx`, `screenshotDir`, and `testId` without leaking them into EvidenceSession.
+    const screenshotsOpt = screenshotMode !== "off"
+      ? {
+          mode: screenshotMode,
+          shoot: async (
+            filename: string,
+            label: string,
+            trigger: ScreenshotTrigger,
+          ): Promise<{ artifactId?: string; path?: string }> => {
+            if (ctx.saveArtifact) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const buffer = (await page.screenshot({
+                fullPage: true,
+                encoding: "binary",
+              } as any)) as unknown as Uint8Array;
+              const artifactId = await ctx.saveArtifact(filename, buffer, {
+                type: "screenshot",
+                mimeType: "image/png",
+              });
+              ctx.event({
+                type: "browser:screenshot",
+                data: { artifactId, label, trigger, fullPage: true },
+              });
+              return { artifactId };
+            }
+            // Legacy fallback: direct file write when saveArtifact is not available.
+            const subdir = `${screenshotDir}/${_sanitizeFilename(testId)}`;
+            await _ensureDir(subdir);
+            const filePath = `${subdir}/${filename}`;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await page.screenshot({ path: filePath, fullPage: true } as any);
+            ctx.event({
+              type: "browser:screenshot",
+              data: { path: filePath, label, trigger, fullPage: true },
+            });
+            return { path: filePath };
+          },
+        }
+      : undefined;
+
     gp._evidence = await EvidenceSession.attach(page, {
       trace: networkTraceOpt !== false ? (t) => ctx.trace(t) : undefined,
       network: filterOpts && {
@@ -482,6 +530,7 @@ export class GlubeanPage {
       },
       mocks: options.mock,
       emulate: options.emulate,
+      screenshots: screenshotsOpt,
     });
 
     // Proxy: GlubeanPage methods take priority; everything else falls through
@@ -506,93 +555,36 @@ export class GlubeanPage {
 
   // ── Screenshot helpers ──────────────────────────────────────────────
 
-  private _formatTimestamp(): string {
-    return new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
-  }
-
-  private _sanitizeLabel(label: string): string {
-    return label.replace(/[^a-z0-9_-]/gi, "_").slice(0, 60);
-  }
-
-  private async _ensureDir(dir: string): Promise<void> {
-    const { mkdir } = await import("node:fs/promises");
-    await mkdir(dir, { recursive: true });
-  }
-
-  private async _saveScreenshot(
-    filename: string,
-    label: string,
-  ): Promise<string> {
-    if (this._ctx.saveArtifact) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const buffer = (await this.raw.screenshot({
-        fullPage: true,
-        encoding: "binary",
-      } as any)) as unknown as Uint8Array;
-      const id = await this._ctx.saveArtifact(filename, buffer, {
-        type: "screenshot",
-        mimeType: "image/png",
-      });
-      this._ctx.event({
-        type: "browser:screenshot",
-        data: { artifactId: id, label, fullPage: true },
-      });
-      return id;
-    }
-
-    // Legacy fallback: direct file write when saveArtifact is not available
-    const dir = `${this._screenshotDir}/${this._sanitizeLabel(this._testId)}`;
-    await this._ensureDir(dir);
-    const path = `${dir}/${filename}`;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await this.raw.screenshot({ path, fullPage: true } as any);
-    this._ctx.event({
-      type: "browser:screenshot",
-      data: { path, label, fullPage: true },
-    });
-    return path;
-  }
-
-  private async _captureStep(action: string): Promise<void> {
-    if (this._screenshotMode !== "every-step") return;
-    this._stepCounter++;
-    const num = String(this._stepCounter).padStart(3, "0");
-    const ts = this._formatTimestamp();
-    await this._saveScreenshot(
-      `${num}-${this._sanitizeLabel(action)}-${ts}.png`,
-      action,
-    );
-  }
-
-  private async _captureFailure(action: string): Promise<void> {
-    if (this._screenshotMode === "off") return;
-    this._stepCounter++;
-    const num = String(this._stepCounter).padStart(3, "0");
-    const ts = this._formatTimestamp();
-    try {
-      await this._saveScreenshot(
-        `FAIL-${num}-${this._sanitizeLabel(action)}-${ts}.png`,
-        `FAIL:${action}`,
-      );
-    } catch {
-      // best-effort — page may be in a broken state
-    }
-  }
-
   /**
    * Capture a screenshot for a test-level failure (e.g. assertion error).
    *
    * Call this in the fixture's catch block to get a final-state screenshot
-   * when the test body throws.
+   * when the test body throws. Delegates to the shared {@link EvidenceSession}
+   * so the capture obeys the configured {@link ScreenshotMode} and the
+   * screenshot is recorded in the unified evidence timeline.
    */
   async screenshotOnFailure(): Promise<void> {
-    if (this._screenshotMode === "off") return;
-    const ts = this._formatTimestamp();
-    try {
-      await this._saveScreenshot(`FAIL-final-${ts}.png`, "FAIL:final");
-    } catch {
-      // best-effort
-    }
+    await this._evidence?.captureShot("final", "failure");
+  }
+
+  /**
+   * Manually capture a screenshot into the evidence stream.
+   *
+   * Unlike the raw `screenshot()` method (which returns bytes and skips the
+   * evidence flow), this always records the capture in the timeline regardless
+   * of the configured auto-screenshot mode. Use it for explicit checkpoints
+   * inside the test body.
+   *
+   * @param label — human label for this checkpoint (default: `"manual"`)
+   *
+   * @example
+   * ```ts
+   * await page.goto("/checkout");
+   * await page.captureScreenshot("cart-loaded");
+   * ```
+   */
+  async captureScreenshot(label = "manual"): Promise<void> {
+    await this._evidence?.captureShot(label, "manual");
   }
 
   // ── Navigation & interaction ────────────────────────────────────────
@@ -630,7 +622,7 @@ export class GlubeanPage {
         status: "error",
         detail: { url: resolvedUrl, error: String(err) },
       });
-      await this._captureFailure(`goto-${url}`);
+      await this._evidence?.captureShot(`goto-${url}`, "failure");
       throw err;
     }
 
@@ -653,7 +645,7 @@ export class GlubeanPage {
       );
     }
 
-    await this._captureStep(`goto-${url}`);
+    await this._evidence?.captureShot(`goto-${url}`, "step");
   }
 
   /**
@@ -676,8 +668,8 @@ export class GlubeanPage {
     const inner = this.raw.locator(selector);
     return createWrappedLocator(inner, {
       action: (e) => this._ctx.action(e),
-      captureStep: (label) => this._captureStep(label),
-      captureFailure: (label) => this._captureFailure(label),
+      captureStep: (label) => this._evidence?.captureShot(label, "step") ?? Promise.resolve(),
+      captureFailure: (label) => this._evidence?.captureShot(label, "failure") ?? Promise.resolve(),
     }, selector);
   }
 
@@ -811,10 +803,10 @@ export class GlubeanPage {
         status: "error",
         detail: { error: String(err) },
       });
-      await this._captureFailure(`clickAndNavigate-${selector}`);
+      await this._evidence?.captureShot(`clickAndNavigate-${selector}`, "failure");
       throw err;
     }
-    await this._captureStep(`clickAndNavigate-${selector}`);
+    await this._evidence?.captureShot(`clickAndNavigate-${selector}`, "step");
   }
 
   /**
@@ -907,7 +899,7 @@ export class GlubeanPage {
         status: "timeout",
         detail: { values, error: String(err) },
       });
-      await this._captureFailure(`select-${selector}`);
+      await this._evidence?.captureShot(`select-${selector}`, "failure");
       throw err;
     }
   }
@@ -987,10 +979,10 @@ export class GlubeanPage {
         status: "timeout",
         detail: { fileCount: filePaths.length, error: String(err) },
       });
-      await this._captureFailure(`upload-${selector}`);
+      await this._evidence?.captureShot(`upload-${selector}`, "failure");
       throw err;
     }
-    await this._captureStep(`upload-${selector}`);
+    await this._evidence?.captureShot(`upload-${selector}`, "step");
   }
 
   /**
@@ -1033,10 +1025,10 @@ export class GlubeanPage {
         status: "timeout",
         detail: { fileCount: filePaths.length, error: String(err) },
       });
-      await this._captureFailure(`chooseFile-${triggerSelector}`);
+      await this._evidence?.captureShot(`chooseFile-${triggerSelector}`, "failure");
       throw err;
     }
-    await this._captureStep(`chooseFile-${triggerSelector}`);
+    await this._evidence?.captureShot(`chooseFile-${triggerSelector}`, "step");
   }
 
   /** Query a single element by selector. */
@@ -1379,7 +1371,7 @@ export class GlubeanPage {
         status: "ok",
       });
     } catch (err) {
-      await this._captureFailure(`expectURL-${String(pattern)}`);
+      await this._evidence?.captureShot(`expectURL-${String(pattern)}`, "failure");
       this._ctx.action({
         category: "browser:assert",
         target: `expectURL(${JSON.stringify(String(pattern))})`,
@@ -1443,7 +1435,7 @@ export class GlubeanPage {
         detail: { expected: String(expected), actual: lastVal },
       });
     } catch (err) {
-      await this._captureFailure(`expectText-${selector}`);
+      await this._evidence?.captureShot(`expectText-${selector}`, "failure");
       this._ctx.action({
         category: "browser:assert",
         target: `expectText("${selector}")`,
@@ -1483,7 +1475,7 @@ export class GlubeanPage {
         status: "ok",
       });
     } catch (err) {
-      await this._captureFailure(`expectVisible-${selector}`);
+      await this._evidence?.captureShot(`expectVisible-${selector}`, "failure");
       this._ctx.action({
         category: "browser:assert",
         target: `expectVisible("${selector}")`,
@@ -1519,7 +1511,7 @@ export class GlubeanPage {
         status: "ok",
       });
     } catch (err) {
-      await this._captureFailure(`expectHidden-${selector}`);
+      await this._evidence?.captureShot(`expectHidden-${selector}`, "failure");
       this._ctx.action({
         category: "browser:assert",
         target: `expectHidden("${selector}")`,
@@ -1576,7 +1568,7 @@ export class GlubeanPage {
         detail: { expected: String(expected), actual: lastVal },
       });
     } catch (err) {
-      await this._captureFailure(`expectAttribute-${selector}-${attr}`);
+      await this._evidence?.captureShot(`expectAttribute-${selector}-${attr}`, "failure");
       this._ctx.action({
         category: "browser:assert",
         target: `expectAttribute("${selector}", "${attr}")`,
@@ -1619,7 +1611,7 @@ export class GlubeanPage {
         detail: { expected, actual: lastCount },
       });
     } catch (err) {
-      await this._captureFailure(`expectCount-${selector}`);
+      await this._evidence?.captureShot(`expectCount-${selector}`, "failure");
       this._ctx.action({
         category: "browser:assert",
         target: `expectCount("${selector}")`,

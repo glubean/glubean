@@ -6,7 +6,10 @@ import {
   findMock,
   guardPageMethod,
   matchMock,
+  type EvidenceScreenshotOptions,
   type MockRule,
+  type ScreenshotEntry,
+  type ScreenshotTrigger,
 } from "./evidence.js";
 
 // ── Fakes ─────────────────────────────────────────────────────────────
@@ -429,4 +432,149 @@ test("attach: rolls back guards + session when wiring throws", async () => {
   expect(page.interception).toBe(true);
   // Session was detached during rollback.
   expect(page.cdp.detached).toBe(true);
+});
+
+// ── EvidenceSession.captureShot: mode × trigger matrix ────────────────
+
+/** Build a screenshots option whose shoot records calls and returns a fixed ref. */
+function makeShootOpts(
+  mode: EvidenceScreenshotOptions["mode"],
+  calls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }>,
+): EvidenceScreenshotOptions {
+  return {
+    mode,
+    shoot: async (filename, label, trigger) => {
+      calls.push({ filename, label, trigger });
+      return { artifactId: `art-${calls.length}` };
+    },
+  };
+}
+
+test("captureShot: mode=off — never calls shoot", async () => {
+  const page = new FakePage();
+  const shotCalls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }> = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    screenshots: makeShootOpts("off", shotCalls),
+  });
+
+  await session.captureShot("action", "step");
+  await session.captureShot("action", "failure");
+  await session.captureShot("action", "manual");
+  expect(shotCalls).toHaveLength(0);
+  expect(session.screenshots).toHaveLength(0);
+  await session.detach();
+});
+
+test("captureShot: mode=on-failure — step skipped, failure+manual captured", async () => {
+  const page = new FakePage();
+  const shotCalls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }> = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    screenshots: makeShootOpts("on-failure", shotCalls),
+  });
+
+  await session.captureShot("click", "step");       // skipped
+  await session.captureShot("click", "failure");     // captured
+  await session.captureShot("check", "manual");      // captured
+
+  expect(shotCalls).toHaveLength(2);
+  expect(shotCalls[0].trigger).toBe("failure");
+  expect(shotCalls[1].trigger).toBe("manual");
+  expect(session.screenshots).toHaveLength(2);
+  await session.detach();
+});
+
+test("captureShot: mode=every-step — all triggers captured", async () => {
+  const page = new FakePage();
+  const shotCalls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }> = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    screenshots: makeShootOpts("every-step", shotCalls),
+  });
+
+  await session.captureShot("goto", "step");
+  await session.captureShot("click", "failure");
+  await session.captureShot("check", "manual");
+
+  expect(shotCalls).toHaveLength(3);
+  expect(shotCalls.map((c) => c.trigger)).toEqual(["step", "failure", "manual"]);
+  await session.detach();
+});
+
+test("captureShot: screenshots option absent → captureShot is a no-op", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {});
+  // Should not throw and should not add any entries.
+  await session.captureShot("whatever", "step");
+  expect(session.screenshots).toHaveLength(0);
+  await session.detach();
+});
+
+test("captureShot: ScreenshotEntry has correct shape (seq, ts, label, trigger, artifactId)", async () => {
+  const page = new FakePage();
+  const shotCalls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }> = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    screenshots: makeShootOpts("every-step", shotCalls),
+  });
+
+  await session.captureShot("goto-/dashboard", "step");
+  await session.captureShot("click-#submit", "failure");
+
+  const [first, second] = session.screenshots as ScreenshotEntry[];
+  expect(first.seq).toBe(1);
+  expect(first.label).toBe("goto-/dashboard");
+  expect(first.trigger).toBe("step");
+  expect(first.artifactId).toBe("art-1");
+  expect(typeof first.ts).toBe("string");
+  expect(new Date(first.ts).getTime()).toBeGreaterThan(0);
+
+  expect(second.seq).toBe(2);
+  expect(second.trigger).toBe("failure");
+  expect(second.artifactId).toBe("art-2");
+  await session.detach();
+});
+
+test("captureShot: failure trigger produces FAIL- prefixed filename", async () => {
+  const page = new FakePage();
+  const shotCalls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }> = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    screenshots: makeShootOpts("every-step", shotCalls),
+  });
+
+  await session.captureShot("click-btn", "failure");
+  await session.captureShot("goto-home", "step");
+
+  expect(shotCalls[0].filename).toMatch(/^FAIL-001-click-btn-/);
+  expect(shotCalls[1].filename).toMatch(/^002-goto-home-/);
+  expect(shotCalls[0].filename).toMatch(/\.png$/);
+  await session.detach();
+});
+
+test("captureShot: shoot errors are swallowed (best-effort)", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    screenshots: {
+      mode: "every-step",
+      shoot: async () => { throw new Error("screenshot I/O failure"); },
+    },
+  });
+
+  // Should not throw; entry is not pushed on failure.
+  await expect(session.captureShot("action", "step")).resolves.toBeUndefined();
+  expect(session.screenshots).toHaveLength(0);
+  await session.detach();
+});
+
+test("captureShot: seq is monotonically increasing across multiple captures", async () => {
+  const page = new FakePage();
+  const shotCalls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }> = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    screenshots: makeShootOpts("every-step", shotCalls),
+  });
+
+  for (let i = 0; i < 5; i++) {
+    await session.captureShot(`step-${i}`, "step");
+  }
+
+  expect(session.screenshots.map((s) => s.seq)).toEqual([1, 2, 3, 4, 5]);
+  expect(shotCalls[4].filename).toMatch(/^005-/);
+  await session.detach();
 });

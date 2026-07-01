@@ -49,12 +49,15 @@ export type {
   PuppeteerLike,
   NetworkTraceOptions,
   ResponseChecks,
-  ScreenshotMode,
 } from "./page.js";
 export type {
   EmulationOptions,
+  EvidenceScreenshotOptions,
   GeolocationOverride,
   MockRule,
+  ScreenshotEntry,
+  ScreenshotMode,
+  ScreenshotTrigger,
   ViewportOverride,
 } from "./evidence.js";
 export type { WrappedLocator } from "./locator.js";
