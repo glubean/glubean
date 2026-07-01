@@ -38,6 +38,68 @@ import {
   type TraceFn,
 } from "./network.js";
 
+// ── Screenshot types ───────────────────────────────────────────────────
+
+/**
+ * When screenshots are automatically captured into the evidence stream.
+ *
+ * - `"off"` — no automatic screenshots
+ * - `"on-failure"` — capture when a step or test fails (default)
+ * - `"every-step"` — capture after every action AND on failure
+ */
+export type ScreenshotMode = "off" | "on-failure" | "every-step";
+
+/**
+ * What triggered a screenshot capture.
+ *
+ * - `"step"` — post-action capture in every-step mode
+ * - `"failure"` — automatic capture on action or assertion failure
+ * - `"manual"` — explicit call to `page.captureScreenshot()`
+ */
+export type ScreenshotTrigger = "step" | "failure" | "manual";
+
+/** A screenshot captured into the evidence stream. */
+export interface ScreenshotEntry {
+  /** Sequential number within this evidence session (1-based). */
+  seq: number;
+  /** Wall-clock ISO timestamp at capture time. */
+  ts: string;
+  /** Human-readable label (the action or assertion that triggered the capture). */
+  label: string;
+  /** What triggered this capture. */
+  trigger: ScreenshotTrigger;
+  /** Artifact ID when `ctx.saveArtifact` is available (SDK ≥ 0.13). */
+  artifactId?: string;
+  /** File path when falling back to direct file write. */
+  path?: string;
+}
+
+/**
+ * Screenshot capture options for the shared evidence session.
+ *
+ * The `shoot` delegate performs the actual I/O (screenshot + artifact save +
+ * `ctx.event()` emission); {@link EvidenceSession.captureShot} handles the
+ * mode / trigger policy, sequencing, and accumulation of entries.
+ */
+export interface EvidenceScreenshotOptions {
+  /** Policy: which triggers result in a capture. */
+  mode: ScreenshotMode;
+  /**
+   * I/O delegate — takes the screenshot, saves the artifact, and emits
+   * the `browser:screenshot` evidence event. Returns an artifact reference
+   * for {@link ScreenshotEntry}. Called only when the mode/trigger policy allows.
+   *
+   * @param filename — suggested filename: `[FAIL-]NNN-label-ts.png`
+   * @param label — human label for the action/assertion
+   * @param trigger — what triggered this capture
+   */
+  shoot: (
+    filename: string,
+    label: string,
+    trigger: ScreenshotTrigger,
+  ) => Promise<{ artifactId?: string; path?: string }>;
+}
+
 /** A single header as CDP's `Fetch.fulfillRequest` expects it. */
 interface HeaderEntry {
   name: string;
@@ -117,6 +179,14 @@ export interface EvidenceSessionOptions {
   mocks?: MockRule[];
   /** Environment emulation (timezone / geolocation / viewport). */
   emulate?: EmulationOptions;
+  /**
+   * Screenshot capture policy and I/O delegate.
+   *
+   * When provided, {@link EvidenceSession.captureShot} becomes active and will
+   * call `screenshots.shoot` based on the configured mode and trigger.
+   * Omit (or set `mode: "off"`) to disable all automatic screenshot capture.
+   */
+  screenshots?: EvidenceScreenshotOptions;
 }
 
 /** A single CDP call: `{ method, params }`. Kept pure for testing. */
@@ -279,6 +349,11 @@ export class EvidenceSession {
   private readonly _cleanups: Array<() => void | Promise<void>> = [];
   private _detached = false;
 
+  // ── Screenshot state ──────────────────────────────────────────────
+  private _screenshotOpts: EvidenceScreenshotOptions | undefined;
+  private _screenshotSeq = 0;
+  private _screenshotLog: ScreenshotEntry[] = [];
+
   private constructor(cdp: CDPSession) {
     this._cdp = cdp;
   }
@@ -286,6 +361,55 @@ export class EvidenceSession {
   /** The underlying CDP session, for advanced/raw use. */
   get cdp(): CDPSession {
     return this._cdp;
+  }
+
+  /**
+   * All screenshots captured into this evidence session, in order.
+   *
+   * Each entry carries `seq`, `ts`, `label`, `trigger`, and an artifact
+   * reference (`artifactId` or `path`). The list is empty when no screenshot
+   * has been captured yet or when `screenshots.mode` is `"off"`.
+   */
+  get screenshots(): readonly ScreenshotEntry[] {
+    return this._screenshotLog;
+  }
+
+  /**
+   * Capture a screenshot into the evidence stream, subject to the configured
+   * {@link ScreenshotMode} and the `trigger` argument.
+   *
+   * | mode          | "step" trigger | "failure" trigger | "manual" trigger |
+   * |---------------|----------------|-------------------|------------------|
+   * | "off"         | skip           | skip              | skip             |
+   * | "on-failure"  | skip           | capture           | capture          |
+   * | "every-step"  | capture        | capture           | capture          |
+   *
+   * Always best-effort: errors from the I/O delegate are silently swallowed
+   * so a broken page state never masks the real test error.
+   *
+   * Does nothing when no `screenshots` option was passed to {@link attach}.
+   */
+  async captureShot(label: string, trigger: ScreenshotTrigger): Promise<void> {
+    const opts = this._screenshotOpts;
+    if (!opts) return;
+    // "off" blocks automatic triggers but manual checkpoints always fire.
+    if (opts.mode === "off" && trigger !== "manual") return;
+    if (opts.mode === "on-failure" && trigger === "step") return;
+
+    this._screenshotSeq++;
+    const seq = this._screenshotSeq;
+    const ts = new Date().toISOString();
+    const sanitized = label.replace(/[^a-z0-9_-]/gi, "_").slice(0, 60);
+    const tsCompact = ts.replace(/[:.]/g, "").slice(0, 15);
+    const prefix = trigger === "failure" ? "FAIL-" : "";
+    const filename = `${prefix}${String(seq).padStart(3, "0")}-${sanitized}-${tsCompact}.png`;
+
+    try {
+      const ref = await opts.shoot(filename, label, trigger);
+      this._screenshotLog.push({ seq, ts, label, trigger, ...ref });
+    } catch {
+      // best-effort: page may be in a broken state
+    }
   }
 
   /**
@@ -301,6 +425,13 @@ export class EvidenceSession {
   ): Promise<EvidenceSession> {
     const cdp = await page.createCDPSession();
     const session = new EvidenceSession(cdp);
+    // Wire screenshot options (no CDP domain — just stores the delegate).
+    // Store opts even when mode is "off" so that captureShot can still
+    // honour explicit manual checkpoints (captureShot itself gates auto
+    // triggers via `if (mode === "off" && trigger !== "manual") return`).
+    if (options.screenshots) {
+      session._screenshotOpts = options.screenshots;
+    }
     try {
       // 1. Network trace.
       if (options.trace) {
