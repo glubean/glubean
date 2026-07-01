@@ -450,7 +450,7 @@ function makeShootOpts(
   };
 }
 
-test("captureShot: mode=off — never calls shoot", async () => {
+test("captureShot: mode=off — blocks step/failure but manual still fires", async () => {
   const page = new FakePage();
   const shotCalls: Array<{ filename: string; label: string; trigger: ScreenshotTrigger }> = [];
   const session = await EvidenceSession.attach(asPage(page), {
@@ -459,9 +459,15 @@ test("captureShot: mode=off — never calls shoot", async () => {
 
   await session.captureShot("action", "step");
   await session.captureShot("action", "failure");
-  await session.captureShot("action", "manual");
+  // Automatic triggers are blocked in off mode.
   expect(shotCalls).toHaveLength(0);
   expect(session.screenshots).toHaveLength(0);
+
+  // Explicit manual checkpoint must always fire regardless of mode.
+  await session.captureShot("checkpoint", "manual");
+  expect(shotCalls).toHaveLength(1);
+  expect(shotCalls[0]!.trigger).toBe("manual");
+  expect(session.screenshots).toHaveLength(1);
   await session.detach();
 });
 

@@ -426,7 +426,10 @@ export class EvidenceSession {
     const cdp = await page.createCDPSession();
     const session = new EvidenceSession(cdp);
     // Wire screenshot options (no CDP domain — just stores the delegate).
-    if (options.screenshots && options.screenshots.mode !== "off") {
+    // Store opts even when mode is "off" so that captureShot can still
+    // honour explicit manual checkpoints (captureShot itself gates auto
+    // triggers via `if (mode === "off" && trigger !== "manual") return`).
+    if (options.screenshots) {
       session._screenshotOpts = options.screenshots;
     }
     try {
