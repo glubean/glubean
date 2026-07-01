@@ -19,7 +19,7 @@ import type {
   HTTPResponse,
   Page,
 } from "puppeteer-core";
-import { attachNetworkTracer } from "./network.js";
+import { EvidenceSession, type EmulationOptions, type MockRule } from "./evidence.js";
 import { collectNavigationMetrics } from "./metrics.js";
 import { createWrappedLocator, type WrappedLocator } from "./locator.js";
 import { getRuntime } from "@glubean/sdk/internal";
@@ -137,6 +137,50 @@ interface BrowserOptionsBase {
    * Default: `true`.
    */
   networkTrace?: boolean | NetworkTraceOptions;
+  /**
+   * Request mocking. Matching requests are fulfilled with a canned response on
+   * the shared evidence CDP session (via the CDP `Fetch` domain); everything
+   * else passes through untouched and is still network-traced.
+   *
+   * When set, Glubean owns request interception on the page. **Do not also call
+   * `page.setRequestInterception(true)`** — it conflicts with the mock handler
+   * and Glubean throws a clear error if you try. Leave `mock` unset to manage
+   * interception yourself.
+   *
+   * @example
+   * ```ts
+   * browser({
+   *   launch: true,
+   *   mock: [
+   *     { url: "/api/user", body: { id: 1, name: "Ada" } },
+   *     { url: /\/api\/flaky/, status: 500, body: "boom" },
+   *   ],
+   * })
+   * ```
+   */
+  mock?: MockRule[];
+  /**
+   * Environment emulation applied on the shared evidence CDP session (via the
+   * CDP `Emulation` domain): `timezone`, `geolocation`, and `viewport`.
+   *
+   * When `emulate.viewport` is set, **Glubean is the sole viewport owner** — do
+   * **not** also call `page.setViewport()`. Both drive device metrics and clobber
+   * each other last-wins, so Glubean applies the viewport last and throws a clear
+   * error if `page.setViewport()` is called.
+   *
+   * @example
+   * ```ts
+   * browser({
+   *   launch: true,
+   *   emulate: {
+   *     timezone: "America/New_York",
+   *     geolocation: { latitude: 40.71, longitude: -74.0 },
+   *     viewport: { width: 390, height: 844, mobile: true },
+   *   },
+   * })
+   * ```
+   */
+  emulate?: EmulationOptions;
   /** Emit `ctx.metric()` for navigation timing. Default: true. */
   metrics?: boolean;
   /** Forward browser console output to `ctx.log()`/`ctx.warn()`. Default: true. */
@@ -351,7 +395,7 @@ export class GlubeanPage {
   private readonly _testId: string;
   private readonly _actionTimeout: number;
   private _stepCounter = 0;
-  private _networkCleanup: (() => Promise<void>) | null = null;
+  private _evidence: EvidenceSession | null = null;
 
   private constructor(
     page: Page,
@@ -426,15 +470,19 @@ export class GlubeanPage {
       });
     }
 
-    if (networkTraceOpt !== false) {
-      const filterOpts = typeof networkTraceOpt === "object" ? networkTraceOpt : undefined;
-      gp._networkCleanup = await attachNetworkTracer(page, {
-        trace: (t) => ctx.trace(t),
-        include: filterOpts?.include,
-        excludePaths: filterOpts?.excludePaths,
-        filter: filterOpts?.filter,
-      });
-    }
+    // One shared evidence CDP session hosts Network trace + Fetch mock +
+    // Emulation. Each capability is only wired when its config is present.
+    const filterOpts = typeof networkTraceOpt === "object" ? networkTraceOpt : undefined;
+    gp._evidence = await EvidenceSession.attach(page, {
+      trace: networkTraceOpt !== false ? (t) => ctx.trace(t) : undefined,
+      network: filterOpts && {
+        include: filterOpts.include,
+        excludePaths: filterOpts.excludePaths,
+        filter: filterOpts.filter,
+      },
+      mocks: options.mock,
+      emulate: options.emulate,
+    });
 
     // Proxy: GlubeanPage methods take priority; everything else falls through
     // to the raw Puppeteer Page so users can call page.waitForNavigation(),
@@ -1754,11 +1802,11 @@ export class GlubeanPage {
     }
   }
 
-  /** Clean up: remove CDP listeners and close the page. */
+  /** Clean up: detach the shared evidence CDP session and close the page. */
   async close(): Promise<void> {
-    if (this._networkCleanup) {
-      await this._networkCleanup();
-      this._networkCleanup = null;
+    if (this._evidence) {
+      await this._evidence.detach();
+      this._evidence = null;
     }
     try {
       await this.raw.close();

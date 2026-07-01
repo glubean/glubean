@@ -51,4 +51,10 @@ export type {
   ResponseChecks,
   ScreenshotMode,
 } from "./page.js";
+export type {
+  EmulationOptions,
+  GeolocationOverride,
+  MockRule,
+  ViewportOverride,
+} from "./evidence.js";
 export type { WrappedLocator } from "./locator.js";
