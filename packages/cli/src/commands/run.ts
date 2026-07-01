@@ -2595,23 +2595,24 @@ export async function runCommand(
   }
 
   // ── Screenshot paths ──────────────────────────────────────────────────
-  {
-    const screenshotPaths: string[] = [];
-    for (const run of collectedRuns) {
-      for (const event of run.events) {
-        if (event.type !== "event") continue;
-        const ev = event.data as { type?: string; data?: Record<string, unknown> };
-        if (ev.type === "browser:screenshot" && typeof ev.data?.path === "string") {
-          screenshotPaths.push(resolve(rootDir, ev.data.path));
-        }
+  // This run's exact screenshot files, pulled from the `browser:screenshot`
+  // event stream. Doubles as the upload whitelist below so `--upload` attaches
+  // only THIS run's screenshots, not every file in the shared dir (ART1).
+  const screenshotPaths: string[] = [];
+  for (const run of collectedRuns) {
+    for (const event of run.events) {
+      if (event.type !== "event") continue;
+      const ev = event.data as { type?: string; data?: Record<string, unknown> };
+      if (ev.type === "browser:screenshot" && typeof ev.data?.path === "string") {
+        screenshotPaths.push(resolve(rootDir, ev.data.path));
       }
     }
-    if (screenshotPaths.length > 0) {
-      for (const p of screenshotPaths) {
-        console.log(`${colors.dim}Screenshot: ${colors.reset}${p}`);
-      }
-      console.log();
+  }
+  if (screenshotPaths.length > 0) {
+    for (const p of screenshotPaths) {
+      console.log(`${colors.dim}Screenshot: ${colors.reset}${p}`);
     }
+    console.log();
   }
 
   // ── Cloud upload ────────────────────────────────────────────────────────
@@ -2780,6 +2781,9 @@ export async function runCommand(
           targetId,
           envFile: effectiveRun.envFile,
           rootDir,
+          // Upload only THIS run's screenshots (whitelist), not the whole
+          // shared `.glubean/screenshots` dir which accumulates prior runs.
+          screenshotPaths,
         });
         if (options.uploadReceiptJson) {
           const receiptPath = resolveOutputPath(options.uploadReceiptJson, process.cwd());

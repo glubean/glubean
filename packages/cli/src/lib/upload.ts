@@ -11,8 +11,8 @@
  *    the inline cap are skipped (presigned R2 upload is an M6 follow-up).
  */
 
-import { readdir, stat, readFile } from "node:fs/promises";
-import { basename, extname, join, relative } from "node:path";
+import { readdir, stat, readFile, realpath } from "node:fs/promises";
+import { basename, extname, join, relative, sep } from "node:path";
 import { CLI_VERSION } from "../version.js";
 import { detectCiContext } from "./ci.js";
 
@@ -232,6 +232,15 @@ export interface UploadOptions {
    *  runs set this — those dirs hold TEST artifacts (the LoadArtifact is already
    *  the `result` blob), so attaching them would misattribute stale files. */
   skipArtifacts?: boolean;
+  /** This run's exact screenshot file paths (absolute), extracted from the
+   *  `browser:screenshot` event stream. When provided, the `.glubean/screenshots`
+   *  portion uploads ONLY these files instead of walking the whole dir — the dir
+   *  accumulates screenshots across runs, so a plain walk misattributes stale
+   *  files from previous runs to this run (ART1). Each path is realpath-checked
+   *  to be inside `.glubean/screenshots`; escapees are dropped. When omitted, the
+   *  screenshots dir is walked as before (backward compatible). Does NOT affect
+   *  the `.glubean/artifacts` scan, which always walks. */
+  screenshotPaths?: string[];
 }
 
 export interface UploadReceipt {
@@ -356,6 +365,88 @@ async function walkDir(dir: string): Promise<string[]> {
     // Directory doesn't exist
   }
   return files;
+}
+
+/**
+ * Resolve this run's screenshot whitelist against the on-disk screenshots dir.
+ *
+ * The whitelist replaces walkDir's natural containment, so every path is
+ * realpath'd and confirmed to live under the (realpath'd) screenshots root —
+ * an escapee (e.g. an event-stream `path` of `../../.env`) is dropped, never
+ * read. Returns the safe candidates plus counts of what was skipped:
+ *  - `outOfBounds`: whitelist entries that don't resolve or escape the root.
+ *  - `outOfList`: files physically present in the dir but NOT in this run's
+ *    list (stale prior-run files, or a `saveArtifact` that emitted no `path`).
+ */
+async function collectRunScreenshots(
+  screenshotsRoot: string,
+  whitelist: string[],
+): Promise<{
+  candidates: { path: string; relativeName: string }[];
+  outOfBounds: number;
+  outOfList: number;
+}> {
+  let realRoot: string | undefined;
+  try {
+    realRoot = await realpath(screenshotsRoot);
+  } catch {
+    realRoot = undefined; // dir doesn't exist
+  }
+
+  const included = new Set<string>();
+  const candidates: { path: string; relativeName: string }[] = [];
+  let outOfBounds = 0;
+
+  if (realRoot === undefined) {
+    // The run listed screenshots but the dir is gone — nothing safe to upload.
+    return { candidates, outOfBounds: whitelist.length, outOfList: 0 };
+  }
+
+  for (const p of whitelist) {
+    let real: string;
+    try {
+      real = await realpath(p);
+    } catch {
+      outOfBounds += 1; // missing / unreadable
+      continue;
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+      outOfBounds += 1; // escapes the screenshots root — refuse it
+      continue;
+    }
+    // Regular files only — matches the walkDir path this replaces. A dir/FIFO
+    // slipping in would throw at readFile and fail the whole artifact batch.
+    try {
+      if (!(await stat(real)).isFile()) {
+        outOfBounds += 1;
+        continue;
+      }
+    } catch {
+      outOfBounds += 1; // vanished between realpath and stat
+      continue;
+    }
+    if (included.has(real)) continue; // dedupe repeats in the list
+    included.add(real);
+    candidates.push({
+      path: real,
+      relativeName: join("screenshots", relative(realRoot, real)),
+    });
+  }
+
+  // Count files on disk that this run's list didn't cover (surfaced as a
+  // warning by the caller so an upstream regression can't silently drop them).
+  let outOfList = 0;
+  for (const filePath of await walkDir(screenshotsRoot)) {
+    let real: string;
+    try {
+      real = await realpath(filePath);
+    } catch {
+      continue;
+    }
+    if (!included.has(real)) outOfList += 1;
+  }
+
+  return { candidates, outOfBounds, outOfList };
 }
 
 /**
@@ -484,15 +575,43 @@ export async function uploadToCloud(
   if (options.skipArtifacts) return receipt;
 
   const artifactRoot = join(rootDir, ".glubean");
-  const artifactDirs = [
-    join(artifactRoot, "artifacts"),
-    join(artifactRoot, "screenshots"),
-  ];
+  const screenshotsRoot = join(artifactRoot, "screenshots");
 
   const candidates: { path: string; relativeName: string }[] = [];
-  for (const dir of artifactDirs) {
-    const dirFiles = await walkDir(dir);
-    for (const filePath of dirFiles) {
+
+  // `.glubean/artifacts` — always walked (out of ART1 scope: it holds
+  // per-run-named artifact files, not the shared screenshot pool).
+  for (const filePath of await walkDir(join(artifactRoot, "artifacts"))) {
+    candidates.push({
+      path: filePath,
+      relativeName: relative(artifactRoot, filePath),
+    });
+  }
+
+  // `.glubean/screenshots` — the dir accumulates screenshots across runs, so
+  // walking it uploads stale files from previous runs as this run's evidence
+  // (ART1). When the caller passes this run's exact screenshot list, use it as
+  // a whitelist (realpath-contained to the screenshots root) instead.
+  if (options.screenshotPaths) {
+    const { candidates: shots, outOfBounds, outOfList } =
+      await collectRunScreenshots(screenshotsRoot, options.screenshotPaths);
+    candidates.push(...shots);
+    if (outOfBounds > 0 || outOfList > 0) {
+      const parts: string[] = [];
+      if (outOfList > 0) {
+        parts.push(`${outOfList} on disk not in this run's screenshot list`);
+      }
+      if (outOfBounds > 0) {
+        parts.push(`${outOfBounds} out of bounds / unresolved`);
+      }
+      // Surfaced (not silent) so a future `saveArtifact` that omits `path`
+      // can't quietly drop this run's screenshots from the upload.
+      console.log(
+        `${colors.yellow}Skipped ${parts.join(", ")} screenshot file(s) — only this run's screenshots are uploaded.${colors.reset}`,
+      );
+    }
+  } else {
+    for (const filePath of await walkDir(screenshotsRoot)) {
       candidates.push({
         path: filePath,
         relativeName: relative(artifactRoot, filePath),

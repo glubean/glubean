@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { uploadToCloud, type UploadRunInput } from "./upload.js";
@@ -36,6 +36,19 @@ function runResponse(id = "run_123") {
     JSON.stringify({ id, projectId: "proj_123", targetId: "tgt_123", kind: "test" }),
     { status: 201, headers: { "Content-Type": "application/json" } },
   );
+}
+
+function artifactResponse() {
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Filenames of the multipart `files` parts on the artifact POST (2nd fetch). */
+function uploadedNames(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  const form = fetchMock.mock.calls[1][1].body as FormData;
+  return form.getAll("files").map((f) => (f as File).name);
 }
 
 let rootDir: string;
@@ -167,6 +180,121 @@ test("uploadToCloud fails cleanly when the response omits the run id", async () 
 
   expect(receipt.resultUpload.status).toBe("failed");
   expect(receipt.runId).toBeUndefined();
+});
+
+test("screenshotPaths whitelist uploads only this run's screenshots, not stale ones", async () => {
+  // A screenshots dir that accumulated files across runs: two from THIS run
+  // plus one left over from a PREVIOUS run (ART1 — the whole-dir walk would
+  // have attached the stale file to this run).
+  const shotsDir = join(rootDir, ".glubean", "screenshots", "mytest");
+  await mkdir(shotsDir, { recursive: true });
+  const shot1 = join(shotsDir, "shot-1.png");
+  const shot2 = join(shotsDir, "shot-2.png");
+  const stale = join(shotsDir, "stale-prev-run.png");
+  await writeFile(shot1, "png-1");
+  await writeFile(shot2, "png-2");
+  await writeFile(stale, "png-stale");
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(runResponse())
+    .mockResolvedValueOnce(artifactResponse());
+  vi.stubGlobal("fetch", fetchMock);
+
+  const receipt = await uploadToCloud(input, {
+    ...baseOptions,
+    rootDir,
+    screenshotPaths: [shot1, shot2],
+  });
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  const names = uploadedNames(fetchMock);
+  expect(names.sort()).toEqual([
+    "screenshots/mytest/shot-1.png",
+    "screenshots/mytest/shot-2.png",
+  ]);
+  expect(names).not.toContain("screenshots/mytest/stale-prev-run.png");
+  expect(receipt.artifactUpload).toMatchObject({
+    status: "uploaded",
+    attempted: true,
+    count: 2,
+  });
+});
+
+test("screenshotPaths guard drops paths that escape the screenshots root", async () => {
+  const shotsDir = join(rootDir, ".glubean", "screenshots", "mytest");
+  await mkdir(shotsDir, { recursive: true });
+  const shot1 = join(shotsDir, "shot-1.png");
+  await writeFile(shot1, "png-1");
+  // A secret outside the screenshots root that a malicious/broken event-stream
+  // `path` (e.g. "../../.env") could point at — must never be read/uploaded.
+  const secret = join(rootDir, "secret.env");
+  await writeFile(secret, "API_KEY=super-secret");
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(runResponse())
+    .mockResolvedValueOnce(artifactResponse());
+  vi.stubGlobal("fetch", fetchMock);
+
+  const receipt = await uploadToCloud(input, {
+    ...baseOptions,
+    rootDir,
+    screenshotPaths: [shot1, secret],
+  });
+
+  const names = uploadedNames(fetchMock);
+  expect(names).toEqual(["screenshots/mytest/shot-1.png"]);
+  expect(names).not.toContain("secret.env");
+  expect(receipt.artifactUpload.count).toBe(1);
+});
+
+test("screenshotPaths whitelist skips a non-file entry (dir) without failing the batch", async () => {
+  const shotsDir = join(rootDir, ".glubean", "screenshots", "mytest");
+  await mkdir(shotsDir, { recursive: true });
+  const shot1 = join(shotsDir, "shot-1.png");
+  await writeFile(shot1, "png-1");
+  // A directory whose path could arrive as a malformed screenshot event —
+  // realpath-contained but not a regular file; reading it would throw.
+  const subdir = join(shotsDir, "nested");
+  await mkdir(subdir, { recursive: true });
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(runResponse())
+    .mockResolvedValueOnce(artifactResponse());
+  vi.stubGlobal("fetch", fetchMock);
+
+  const receipt = await uploadToCloud(input, {
+    ...baseOptions,
+    rootDir,
+    screenshotPaths: [shot1, subdir],
+  });
+
+  const names = uploadedNames(fetchMock);
+  expect(names).toEqual(["screenshots/mytest/shot-1.png"]);
+  expect(receipt.artifactUpload).toMatchObject({ status: "uploaded", count: 1 });
+});
+
+test("without screenshotPaths the screenshots dir is walked (backward compatible)", async () => {
+  const shotsDir = join(rootDir, ".glubean", "screenshots", "mytest");
+  await mkdir(shotsDir, { recursive: true });
+  await writeFile(join(shotsDir, "a.png"), "a");
+  await writeFile(join(shotsDir, "b.png"), "b");
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(runResponse())
+    .mockResolvedValueOnce(artifactResponse());
+  vi.stubGlobal("fetch", fetchMock);
+
+  await uploadToCloud(input, { ...baseOptions, rootDir });
+
+  const names = uploadedNames(fetchMock).sort();
+  expect(names).toEqual([
+    "screenshots/mytest/a.png",
+    "screenshots/mytest/b.png",
+  ]);
 });
 
 test("uploadToCloud uploads load runs (kind=load, LoadArtifact as result)", async () => {
