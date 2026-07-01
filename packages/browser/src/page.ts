@@ -482,44 +482,45 @@ export class GlubeanPage {
     // save artifact, emit ctx.event) and is called by EvidenceSession.captureShot
     // when mode+trigger policy allows. Defined here so it closes over `page`,
     // `ctx`, `screenshotDir`, and `testId` without leaking them into EvidenceSession.
-    const screenshotsOpt = screenshotMode !== "off"
-      ? {
-          mode: screenshotMode,
-          shoot: async (
-            filename: string,
-            label: string,
-            trigger: ScreenshotTrigger,
-          ): Promise<{ artifactId?: string; path?: string }> => {
-            if (ctx.saveArtifact) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const buffer = (await page.screenshot({
-                fullPage: true,
-                encoding: "binary",
-              } as any)) as unknown as Uint8Array;
-              const artifactId = await ctx.saveArtifact(filename, buffer, {
-                type: "screenshot",
-                mimeType: "image/png",
-              });
-              ctx.event({
-                type: "browser:screenshot",
-                data: { artifactId, label, trigger, fullPage: true },
-              });
-              return { artifactId };
-            }
-            // Legacy fallback: direct file write when saveArtifact is not available.
-            const subdir = `${screenshotDir}/${_sanitizeFilename(testId)}`;
-            await _ensureDir(subdir);
-            const filePath = `${subdir}/${filename}`;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            await page.screenshot({ path: filePath, fullPage: true } as any);
-            ctx.event({
-              type: "browser:screenshot",
-              data: { path: filePath, label, trigger, fullPage: true },
-            });
-            return { path: filePath };
-          },
+    // Always install the shoot delegate so captureScreenshot() (manual, trigger="manual")
+    // works even when screenshotMode is "off". The mode only gates automatic triggers
+    // (step / failure); manual captures bypass the mode filter inside EvidenceSession.
+    const screenshotsOpt = {
+      mode: screenshotMode,
+      shoot: async (
+        filename: string,
+        label: string,
+        trigger: ScreenshotTrigger,
+      ): Promise<{ artifactId?: string; path?: string }> => {
+        if (ctx.saveArtifact) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const buffer = (await page.screenshot({
+            fullPage: true,
+            encoding: "binary",
+          } as any)) as unknown as Uint8Array;
+          const artifactId = await ctx.saveArtifact(filename, buffer, {
+            type: "screenshot",
+            mimeType: "image/png",
+          });
+          ctx.event({
+            type: "browser:screenshot",
+            data: { artifactId, label, trigger, fullPage: true },
+          });
+          return { artifactId };
         }
-      : undefined;
+        // Legacy fallback: direct file write when saveArtifact is not available.
+        const subdir = `${screenshotDir}/${_sanitizeFilename(testId)}`;
+        await _ensureDir(subdir);
+        const filePath = `${subdir}/${filename}`;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await page.screenshot({ path: filePath, fullPage: true } as any);
+        ctx.event({
+          type: "browser:screenshot",
+          data: { path: filePath, label, trigger, fullPage: true },
+        });
+        return { path: filePath };
+      },
+    };
 
     gp._evidence = await EvidenceSession.attach(page, {
       trace: networkTraceOpt !== false ? (t) => ctx.trace(t) : undefined,

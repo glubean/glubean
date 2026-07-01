@@ -391,7 +391,9 @@ export class EvidenceSession {
    */
   async captureShot(label: string, trigger: ScreenshotTrigger): Promise<void> {
     const opts = this._screenshotOpts;
-    if (!opts || opts.mode === "off") return;
+    if (!opts) return;
+    // "off" blocks automatic triggers but manual checkpoints always fire.
+    if (opts.mode === "off" && trigger !== "manual") return;
     if (opts.mode === "on-failure" && trigger === "step") return;
 
     this._screenshotSeq++;
