@@ -135,9 +135,16 @@ export function matchMock(
   if (rule.method && rule.method.toUpperCase() !== req.method.toUpperCase()) {
     return false;
   }
-  return typeof rule.url === "string"
-    ? req.url.includes(rule.url)
-    : rule.url.test(req.url);
+  if (typeof rule.url === "string") return req.url.includes(rule.url);
+  // Test against a stateless clone: a user-supplied global/sticky regex
+  // (`/g`, `/y`) carries `lastIndex` state, so `.test()` on the original would
+  // flip-flop matches for the same URL across repeated requests (and would also
+  // mutate the caller's regex). Strip `g`/`y` on a copy to keep matching pure.
+  const stateless = new RegExp(
+    rule.url.source,
+    rule.url.flags.replace(/[gy]/g, ""),
+  );
+  return stateless.test(req.url);
 }
 
 /** @internal Find the first matching mock rule, or `undefined`. */

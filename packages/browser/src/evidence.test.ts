@@ -94,6 +94,19 @@ test("matchMock: method filter is case-insensitive", () => {
   expect(matchMock(rule, { url: "/api", method: "GET" })).toBe(false);
 });
 
+test("matchMock: global/sticky regex matches same URL on repeated calls", () => {
+  // A `/g` (or `/y`) regex carries lastIndex state, so `.test()` on the raw
+  // regex would flip-flop for the same URL and leak repeat requests to the real
+  // network. Matching must be stateless and must not mutate the caller's regex.
+  const re = /\/api\/user/g;
+  const rule: MockRule = { url: re };
+  const req = { url: "https://x.com/api/user", method: "GET" };
+  expect(matchMock(rule, req)).toBe(true);
+  expect(matchMock(rule, req)).toBe(true);
+  expect(matchMock(rule, req)).toBe(true);
+  expect(re.lastIndex).toBe(0); // original regex untouched
+});
+
 test("findMock: returns the first matching rule", () => {
   const mocks: MockRule[] = [
     { url: "/api/order" },
