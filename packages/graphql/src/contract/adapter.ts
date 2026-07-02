@@ -56,7 +56,13 @@ import type {
 // Helpers
 // =============================================================================
 
-/** Convert a SchemaLike to a JSON Schema fragment if possible (best-effort). */
+/**
+ * Convert a SchemaLike to a JSON Schema fragment if possible (best-effort).
+ * Falls back to the author-declared `SchemaLike.jsonSchema` companion for
+ * hand-rolled (safeParse-only, no schema-library backing) validators —
+ * including as a recovery path when a present `toJSONSchema()` throws
+ * (GLU-90; mirrors the HTTP adapter's `schemaToJsonSchema`).
+ */
 export function schemaToJsonSchema(schema: unknown): Record<string, unknown> | null {
   if (!schema || typeof schema !== "object") return null;
   const maybe = (schema as { toJSONSchema?: () => unknown }).toJSONSchema;
@@ -65,8 +71,17 @@ export function schemaToJsonSchema(schema: unknown): Record<string, unknown> | n
       const out = maybe.call(schema);
       if (out && typeof out === "object") return out as Record<string, unknown>;
     } catch {
-      return null;
+      return declaredJsonSchemaOrNull(schema as Record<string, unknown>);
     }
+  }
+  return declaredJsonSchemaOrNull(schema as Record<string, unknown>);
+}
+
+/** Read the `SchemaLike.jsonSchema` companion hint (GLU-90), verbatim, or null. */
+function declaredJsonSchemaOrNull(schema: Record<string, unknown>): Record<string, unknown> | null {
+  const declared = schema.jsonSchema;
+  if (declared && typeof declared === "object" && !Array.isArray(declared)) {
+    return declared as Record<string, unknown>;
   }
   return null;
 }

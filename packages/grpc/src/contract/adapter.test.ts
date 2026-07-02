@@ -273,6 +273,74 @@ describe("project + normalize", () => {
     expect(() => JSON.parse(JSON.stringify(extracted))).not.toThrow();
   });
 
+  // GLU-90 — a hand-rolled (safeParse-only) SchemaLike declaring the
+  // `jsonSchema` companion now projects instead of landing in
+  // unprojectableSchemas (mirrors the same fix in the HTTP adapter).
+  test("normalize: a jsonSchema hint on an opaque SchemaLike projects (GLU-90)", () => {
+    const opaqueWithHint = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d }),
+      jsonSchema: { type: "object", properties: { ok: { type: "boolean" } } },
+    };
+    const spec: GrpcContractSpec = {
+      target: "A/B",
+      cases: {
+        ok: { description: "ok", expect: { schema: opaqueWithHint } },
+      },
+    };
+    const runtime = grpcAdapter.project(spec);
+    const extracted = grpcAdapter.normalize!({ ...runtime, id: "c1" });
+
+    expect(extracted.unprojectableSchemas).toBeUndefined();
+    expect((extracted.cases[0].schemas as any)?.response).toEqual({
+      type: "object",
+      properties: { ok: { type: "boolean" } },
+    });
+  });
+
+  test("normalize: an opaque SchemaLike with no jsonSchema hint stays unprojectable (GLU-90 gap, no hint)", () => {
+    const opaqueNoHint = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d }),
+    };
+    const spec: GrpcContractSpec = {
+      target: "A/B",
+      cases: {
+        ok: { description: "ok", expect: { schema: opaqueNoHint } },
+      },
+    };
+    const runtime = grpcAdapter.project(spec);
+    const extracted = grpcAdapter.normalize!({ ...runtime, id: "c1" });
+
+    expect(extracted.unprojectableSchemas).toEqual(["cases.ok.response"]);
+    expect((extracted.cases[0].schemas as any)?.response).toBeUndefined();
+  });
+
+  // GLU-90 codex round-2 P3 — lock the throw-fallback branch (a present
+  // toJSONSchema() that throws must still fall back to the jsonSchema hint)
+  // for grpc too, not just the HTTP adapter's dedicated test.
+  test("normalize: a jsonSchema hint recovers projection when toJSONSchema() throws (GLU-90)", () => {
+    const throwingWithHint = {
+      safeParse: (d: unknown) => ({ success: true as const, data: d }),
+      toJSONSchema: () => {
+        throw new Error("unrepresentable");
+      },
+      jsonSchema: { type: "string", format: "date-time" },
+    };
+    const spec: GrpcContractSpec = {
+      target: "A/B",
+      cases: {
+        ok: { description: "ok", expect: { schema: throwingWithHint as any } },
+      },
+    };
+    const runtime = grpcAdapter.project(spec);
+    const extracted = grpcAdapter.normalize!({ ...runtime, id: "c1" });
+
+    expect(extracted.unprojectableSchemas).toBeUndefined();
+    expect((extracted.cases[0].schemas as any)?.response).toEqual({
+      type: "string",
+      format: "date-time",
+    });
+  });
+
   test("invalid target is tolerated at projection time", () => {
     // parseTarget returns undefined for bad targets; project still emits
     // meta with empty service/method (normalize still JSON-safe).

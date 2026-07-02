@@ -506,6 +506,128 @@ test("no unprojectableSchemas when schemas are absent or project cleanly", () =>
   expect((c2._extracted.cases[0].schemas as any)?.response?.body).toEqual({ type: "object" });
 });
 
+// GLU-90 — hand-rolled `SchemaLike` (safeParse-only, no schema-library
+// backing, no `toJSONSchema`, no `type`/`$ref` key) is the ONE shape that
+// fell through every existing branch of schemaToJsonSchema to `null` no
+// matter how well-documented the validator was. This is the exact shape of
+// the public-demo's `inventory-items-shape` / `stable-users-shape` /
+// `tier-account-shape` contracts (zod-free demos), which is why they never
+// showed up in Cloud's Validate picker (projectionComplete === false).
+test("GLU-90: a hand-rolled safeParse-only SchemaLike with no jsonSchema hint stays unprojectable (documents the pre-existing gap)", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  // Mirrors packages/demo/tests/inventory/inventory-items.contract.ts exactly:
+  // only `safeParse`, no `toJSONSchema`, no `type`/`$ref` key, no `jsonSchema`.
+  const handRolledNoHint: SchemaLike<unknown> = {
+    safeParse(data: unknown) {
+      return { success: true as const, data };
+    },
+  };
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: handRolledNoHint } },
+    },
+  });
+
+  expect(c._extracted.unprojectableSchemas).toEqual(["cases.ok.response.body"]);
+  expect((c._extracted.cases[0].schemas as any)?.response?.body).toBeUndefined();
+});
+
+test("GLU-90: a hand-rolled safeParse-only SchemaLike WITH a jsonSchema hint now projects fully", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  // Same opaque safeParse-only shape as inventory-items-shape, but with the
+  // new sanctioned escape hatch: SchemaLike.jsonSchema declared verbatim.
+  const itemsJsonSchema = {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            sku: { type: "string" },
+            name: { type: "string" },
+            stockQty: { type: "number" },
+            priceCents: { type: "number" },
+          },
+          required: ["sku", "name", "stockQty", "priceCents"],
+        },
+      },
+      total: { type: "number" },
+      inStock: { type: "number" },
+    },
+    required: ["items", "total", "inStock"],
+  };
+  const handRolledWithHint: SchemaLike<unknown> = {
+    safeParse(data: unknown) {
+      return { success: true as const, data };
+    },
+    jsonSchema: itemsJsonSchema,
+  };
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: handRolledWithHint } },
+    },
+  });
+
+  // No unprojectable entry — the contract is now projectionComplete.
+  expect(c._extracted.unprojectableSchemas).toBeUndefined();
+  // The declared hint is used verbatim (array response, nested object item shape).
+  expect((c._extracted.cases[0].schemas as any)?.response?.body).toEqual(itemsJsonSchema);
+});
+
+test("GLU-90: a jsonSchema hint that is an array (malformed) is ignored, not passed through", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  const malformed: SchemaLike<unknown> = {
+    safeParse: (data: unknown) => ({ success: true as const, data }),
+    // Malformed hint (array, not a JSON Schema object) — must NOT be treated
+    // as a valid declared shape; still recorded as unprojectable.
+    jsonSchema: ["not", "a", "schema"] as unknown as Record<string, unknown>,
+  };
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: malformed } },
+    },
+  });
+
+  expect(c._extracted.unprojectableSchemas).toEqual(["cases.ok.response.body"]);
+  expect((c._extracted.cases[0].schemas as any)?.response?.body).toBeUndefined();
+});
+
+test("GLU-90: a jsonSchema hint recovers projection when toJSONSchema() throws (codex round-1 P3)", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  // A schema-library instance whose toJSONSchema() throws (e.g. z.date(), a
+  // custom refinement zod can't represent) — but the author also declared a
+  // jsonSchema hint as a manual override. Must NOT fall through to the
+  // `"type" in schema` shortcut (that would leak whatever partial shape the
+  // throwing instance carries); must use the declared hint instead.
+  const throwingWithHint: SchemaLike<unknown> & { toJSONSchema(): unknown } = {
+    safeParse: (data: unknown) => ({ success: true as const, data }),
+    toJSONSchema: () => {
+      throw new Error("unrepresentable");
+    },
+    jsonSchema: { type: "string", format: "date-time" },
+  };
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: throwingWithHint as any } },
+    },
+  });
+
+  expect(c._extracted.unprojectableSchemas).toBeUndefined();
+  expect((c._extracted.cases[0].schemas as any)?.response?.body).toEqual({
+    type: "string",
+    format: "date-time",
+  });
+});
+
 test("a schema-lib instance that carries a `type` field (zod v4 shape) projects to JSON Schema, not raw", () => {
   const client = makeMockClient();
   const api = contract.http.with("api", { client });

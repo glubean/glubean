@@ -1786,6 +1786,45 @@ export interface SchemaLike<T> {
       };
   /** Fallback — throws on failure, returns parsed value on success. */
   parse?: (data: unknown) => T;
+  /**
+   * Optional JSON Schema companion (GLU-90). Schema-library instances (Zod
+   * v4, Valibot, …) project via their own `toJSONSchema()` method — this
+   * field is for **hand-rolled** `SchemaLike` objects (safeParse/parse-only,
+   * no schema library backing them). Without it, the projector has no
+   * structural information to derive a JSON Schema from an opaque validator
+   * function, so the schema is recorded as unprojectable
+   * (`ExtractedContractProjection.unprojectableSchemas`) and contract-sync /
+   * OpenAPI generation silently drop it — the picker on Glubean Cloud then
+   * treats the contract as incomplete.
+   *
+   * Declare `jsonSchema` alongside `safeParse` to document the shape your
+   * validator enforces; it is used **verbatim** (never re-derived from
+   * `safeParse`/`parse` by introspection or sampling) and is **not
+   * validated** — the same trust model as authoring a plain JSON Schema
+   * object directly for `expect.schema`. It is also consulted as a recovery
+   * path when a schema-library instance's own `toJSONSchema()` throws
+   * (e.g. an unrepresentable zod type), letting you supply a manual
+   * override for shapes the library itself can't project.
+   *
+   * Every protocol adapter that ships with the SDK (HTTP, GraphQL, gRPC)
+   * honors this field via its `schemaToJsonSchema()`.
+   *
+   * @example
+   * ```ts
+   * const ItemsResponse: SchemaLike<{ items: Item[]; total: number }> = {
+   *   safeParse(data) { ... },
+   *   jsonSchema: {
+   *     type: "object",
+   *     properties: {
+   *       items: { type: "array", items: { type: "object" } },
+   *       total: { type: "number" },
+   *     },
+   *     required: ["items", "total"],
+   *   },
+   * };
+   * ```
+   */
+  jsonSchema?: Record<string, unknown>;
 }
 
 /**
