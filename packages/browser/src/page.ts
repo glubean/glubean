@@ -359,8 +359,6 @@ export class GlubeanBrowser {
       clearTimeout(this._closeTimer);
       this._closeTimer = null;
     }
-    this._openPages++;
-
     const browser = await this._getBrowser();
 
     // Reuse the default about:blank tab instead of opening a new one.
@@ -373,12 +371,7 @@ export class GlubeanBrowser {
     });
     const rawPage = blank ?? await browser.newPage();
 
-    rawPage.once("close", () => {
-      this._openPages--;
-      if (this._openPages <= 0) {
-        this._scheduleClose();
-      }
-    });
+    this._track(rawPage);
 
     // Read testId lazily from the runtime carrier — the harness updates it
     // before each test runs, so reading at newPage() time is always fresh.
@@ -389,7 +382,29 @@ export class GlubeanBrowser {
       ctx,
       this._options,
       runtimeTestId,
+      this,
     );
+  }
+
+  /**
+   * @internal Register a raw page in the open-page accounting so the browser
+   * isn't auto-closed while it's alive. Cancels any pending close, increments
+   * the counter, and decrements (rescheduling close at zero) on page close.
+   * Used by both `newPage()` and `GlubeanPage.waitForPopup()` (popups are
+   * real pages that must keep the browser open too).
+   */
+  _track(rawPage: Page): void {
+    if (this._closeTimer) {
+      clearTimeout(this._closeTimer);
+      this._closeTimer = null;
+    }
+    this._openPages++;
+    rawPage.once("close", () => {
+      this._openPages--;
+      if (this._openPages <= 0) {
+        this._scheduleClose();
+      }
+    });
   }
 
   private _scheduleClose(): void {
@@ -440,6 +455,8 @@ export class GlubeanPage {
   private readonly _actionTimeout: number;
   private readonly _options: BrowserOptions;
   private readonly _testId: string;
+  /** Owning browser — used to register popups in its open-page accounting. */
+  private readonly _owner: GlubeanBrowser | undefined;
   private _evidence: EvidenceSession | null = null;
   private _dialogHandler: DialogHandler | null = null;
 
@@ -451,6 +468,7 @@ export class GlubeanPage {
     actionTimeout: number,
     options: BrowserOptions,
     testId: string,
+    owner: GlubeanBrowser | undefined,
   ) {
     this.raw = page;
     this._baseUrl = baseUrl;
@@ -459,6 +477,7 @@ export class GlubeanPage {
     this._actionTimeout = actionTimeout;
     this._options = options;
     this._testId = testId;
+    this._owner = owner;
   }
 
   /** @internal */
@@ -468,6 +487,7 @@ export class GlubeanPage {
     ctx: BrowserTestContext,
     options: BrowserOptions,
     runtimeTestId?: string,
+    owner?: GlubeanBrowser,
   ): Promise<InstrumentedPage> {
     const consoleForward = options.consoleForward ?? true;
     const networkTraceOpt = options.networkTrace ?? true;
@@ -486,6 +506,7 @@ export class GlubeanPage {
       actionTimeout,
       options,
       testId,
+      owner,
     );
 
     // Native dialogs (alert/confirm/prompt/beforeunload) always emit evidence.
@@ -728,25 +749,38 @@ export class GlubeanPage {
   ): Promise<InstrumentedPage> {
     const timeout = options?.timeout ?? this._actionTimeout;
     const start = Date.now();
+
+    // Named listener + timer so BOTH are always cleaned up — a failed wait
+    // must not leave a stale `popup` listener behind (it would swallow a later
+    // popup and accumulate across repeated failed waits).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onPopup: ((popup: Page | null) => void) | undefined;
+    const popupPromise = new Promise<Page>((resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`waitForPopup: no popup opened after ${timeout}ms`));
+      }, timeout);
+      onPopup = (popup: Page | null) => {
+        if (popup) resolve(popup);
+        else reject(new Error("waitForPopup: popup event fired with no page"));
+      };
+      this.raw.once("popup", onPopup);
+    });
+    const cleanup = (): void => {
+      if (timer) clearTimeout(timer);
+      if (onPopup) this.raw.off("popup", onPopup);
+    };
+
     try {
-      const [rawPopup] = await Promise.all([
-        new Promise<Page>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            reject(new Error(`waitForPopup: no popup opened after ${timeout}ms`));
-          }, timeout);
-          this.raw.once("popup", (popup: Page | null) => {
-            clearTimeout(timer);
-            if (popup) resolve(popup);
-            else reject(new Error("waitForPopup: popup event fired with no page"));
-          });
-        }),
-        action(),
-      ]);
-      const duration = Date.now() - start;
+      const [rawPopup] = await Promise.all([popupPromise, action()]);
+      cleanup();
+      // Register the popup in the owning browser's open-page accounting so
+      // the parent closing doesn't schedule a browser shutdown while the
+      // popup wrapper is still in use (popups are real pages).
+      this._owner?._track(rawPopup);
       this._ctx.action({
         category: "browser:waitForPopup",
         target: rawPopup.url(),
-        duration,
+        duration: Date.now() - start,
         status: "ok",
       });
       return await GlubeanPage._create(
@@ -755,13 +789,14 @@ export class GlubeanPage {
         this._ctx,
         this._options,
         this._testId,
+        this._owner,
       );
     } catch (err) {
-      const duration = Date.now() - start;
+      cleanup();
       this._ctx.action({
         category: "browser:waitForPopup",
         target: "(popup)",
-        duration,
+        duration: Date.now() - start,
         status: "timeout",
         detail: { error: String(err) },
       });

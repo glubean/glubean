@@ -24,9 +24,10 @@ export interface LocatorContext {
  * An index-scoped locator returned by `WrappedLocator.nth()`.
  *
  * Puppeteer's own `Locator` resolves a CSS/text/ARIA selector to its
- * **first** DOM match only (`document.querySelector` semantics) — there is
- * no native way to act on the Nth match. `nth()` fills that gap with a
- * minimal, independently-polled action surface (not a full `Locator`).
+ * **first** match only — there is no native way to act on the Nth match.
+ * `nth()` fills that gap with a minimal, independently-polled action surface
+ * (not a full `Locator`), resolving matches via `page.$$()` so Puppeteer's
+ * `::-p-text()` / `::-p-aria()` / `::-p-xpath()` pseudo-selectors still work.
  */
 export interface IndexedLocator {
   click(): Promise<void>;
@@ -79,10 +80,20 @@ const NTH_POLL_MS = 100;
 /** @internal Default nth()/count() action timeout — mirrors `actionTimeout`. */
 const NTH_DEFAULT_TIMEOUT_MS = 30_000;
 
+/** @internal Error thrown when count()/nth() are used on a filtered/mapped locator. */
+const COUNT_NTH_FILTERED_MSG = (method: string): string =>
+  `${method}() is not supported after .filter()/.map(): it re-queries by the ` +
+  `original selector and cannot replay the predicate. Encode the condition in ` +
+  `the selector, or use page.$$()/page.$$eval() directly.`;
+
 /**
  * @internal Poll for the 0-based `index`-th element matching `selector`,
- * using `document.querySelectorAll` (unlike Puppeteer's Locator, which only
- * ever resolves the first match). Throws with a clear message on timeout.
+ * returning its ElementHandle. Uses Puppeteer's own `page.$$()` (not raw
+ * `document.querySelectorAll`) so it understands Puppeteer's custom
+ * pseudo-selectors — `::-p-text()`, `::-p-aria()`, `::-p-xpath()` — that
+ * `byText()` / `byRole()` / `byLabel()` emit and that the DOM API can't parse.
+ * The non-chosen matches are disposed each poll; only the returned handle
+ * survives (the caller disposes it). Throws with a clear message on timeout.
  */
 export async function resolveNthHandle(
   page: Page,
@@ -92,15 +103,13 @@ export async function resolveNthHandle(
 ): Promise<ElementHandle> {
   const start = Date.now();
   for (;;) {
-    const jsHandle = await page.evaluateHandle(
-      (sel: string, i: number) =>
-        (document.querySelectorAll(sel)[i] as Element | undefined) ?? null,
-      selector,
-      index,
+    const handles = await page.$$(selector);
+    const chosen = handles[index];
+    // Dispose every handle we're not returning so remote objects don't leak.
+    await Promise.all(
+      handles.map((h) => (h === chosen ? Promise.resolve() : h.dispose())),
     );
-    const el = jsHandle.asElement() as ElementHandle | null;
-    if (el) return el;
-    await jsHandle.dispose();
+    if (chosen) return chosen;
     if (Date.now() - start >= timeoutMs) {
       throw new Error(
         `nth(${index}): no element matched "${selector}" at index ${index} after ${timeoutMs}ms`,
@@ -185,6 +194,14 @@ const CHAIN_METHODS = new Set([
   "map",
 ]);
 
+/**
+ * Chain methods that change the *match set* a Locator resolves — after these,
+ * `count()` / `nth()` (which re-query by the raw selector string, not by
+ * replaying the Locator's predicate) would give results inconsistent with the
+ * chained Locator. They throw instead of silently returning wrong matches.
+ */
+const SET_MUTATING_METHODS = new Set(["filter", "map"]);
+
 /** Action methods that get trace/screenshot injection. */
 const ACTION_METHODS = new Set([
   "click",
@@ -200,30 +217,44 @@ const ACTION_METHODS = new Set([
  * - **Action methods** (click, fill, hover, scroll) inject trace + screenshot.
  * - **type()** is a custom extension (Locator has no type method).
  * - **count() / nth()** are custom extensions (see {@link IndexedLocator}) —
- *   Puppeteer's Locator only ever resolves the first DOM match.
+ *   Puppeteer's Locator only ever resolves the first DOM match. They re-query
+ *   by the selector string (via `page.$$`, which understands Puppeteer's
+ *   `::-p-*` pseudo-selectors), so they cannot honor a `.filter()` / `.map()`
+ *   predicate — calling them after those throws rather than mislead.
  * - Everything else is transparently forwarded.
+ *
+ * @param filtered — set on locators produced by a `.filter()` / `.map()` chain;
+ *   makes `count()` / `nth()` throw (their selector re-query can't replay the predicate).
  */
 export function createWrappedLocator(
   inner: Locator<unknown>,
   ctx: LocatorContext,
   selector: string,
   page: Page,
+  filtered = false,
 ): WrappedLocator {
   const proxy = new Proxy(inner, {
     get(target, prop, receiver) {
       if (prop === "count") {
-        return async (): Promise<number> => (await page.$$(selector)).length;
+        // Non-async so the filtered guard throws synchronously (like nth()),
+        // not as a rejected promise.
+        return (): Promise<number> => {
+          if (filtered) throw new Error(COUNT_NTH_FILTERED_MSG("count"));
+          return page.$$(selector).then((els) => els.length);
+        };
       }
 
       if (prop === "nth") {
-        return (index: number, options?: { timeout?: number }): IndexedLocator =>
-          createIndexedLocator(
+        return (index: number, options?: { timeout?: number }): IndexedLocator => {
+          if (filtered) throw new Error(COUNT_NTH_FILTERED_MSG("nth"));
+          return createIndexedLocator(
             page,
             ctx,
             selector,
             index,
             options?.timeout ?? NTH_DEFAULT_TIMEOUT_MS,
           );
+        };
       }
 
       if (prop === "type") {
@@ -263,7 +294,11 @@ export function createWrappedLocator(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return (...args: any[]) => {
             const newLocator = origFn.apply(target, args);
-            return createWrappedLocator(newLocator, ctx, selector, page);
+            // Once a match-set-mutating method (filter/map) is applied, the
+            // re-wrapped locator carries `filtered` so count()/nth() refuse
+            // to run against the raw selector.
+            const nextFiltered = filtered || SET_MUTATING_METHODS.has(prop);
+            return createWrappedLocator(newLocator, ctx, selector, page, nextFiltered);
           };
         }
       }

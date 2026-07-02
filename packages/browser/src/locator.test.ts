@@ -43,36 +43,19 @@ class FakeHandle {
   }
 }
 
-class FakeJsHandle {
-  disposed = false;
-  constructor(private readonly el: FakeHandle | null) {}
-  asElement(): FakeHandle | null {
-    return this.el;
-  }
-  async dispose(): Promise<void> {
-    this.disposed = true;
-  }
-}
-
 class FakePage {
-  /** Elements "present" for `evaluateHandle`-based nth() resolution. */
-  elements: (FakeHandle | undefined)[] = [];
-  /** Elements returned by `$$` for `count()`. */
-  queryAllResult: unknown[] = [];
-  evaluateHandleCalls: Array<{ selector: string; index: number }> = [];
+  /**
+   * Dense list of matches `page.$$(selector)` returns — drives BOTH `count()`
+   * and `nth()` (resolveNthHandle now goes through `$$`, like the real code,
+   * so Puppeteer's `::-p-*` pseudo-selectors keep working). Read live on each
+   * call so a test can grow it mid-poll.
+   */
+  elements: FakeHandle[] = [];
+  $$calls: string[] = [];
 
-  async $$(_selector: string): Promise<unknown[]> {
-    return this.queryAllResult;
-  }
-
-  async evaluateHandle(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _fn: (...args: any[]) => unknown,
-    selector: string,
-    index: number,
-  ): Promise<FakeJsHandle> {
-    this.evaluateHandleCalls.push({ selector, index });
-    return new FakeJsHandle(this.elements[index] ?? null);
+  async $$(selector: string): Promise<FakeHandle[]> {
+    this.$$calls.push(selector);
+    return this.elements;
   }
 }
 
@@ -105,13 +88,17 @@ function makeCtx(): LocatorContext & {
 
 // ── resolveNthHandle ─────────────────────────────────────────────────
 
-test("resolveNthHandle: resolves immediately when the element is present", async () => {
+test("resolveNthHandle: resolves via page.$$ and disposes the non-chosen matches", async () => {
   const page = new FakePage();
-  const el = new FakeHandle("button");
-  page.elements = [undefined, el];
+  const zero = new FakeHandle("first");
+  const one = new FakeHandle("button");
+  page.elements = [zero, one];
   const handle = await resolveNthHandle(asPage(page), "[data-x]", 1, 1000);
-  expect(handle).toBe(el);
-  expect(page.evaluateHandleCalls[0]).toEqual({ selector: "[data-x]", index: 1 });
+  expect(handle).toBe(one);
+  expect(page.$$calls[0]).toBe("[data-x]");
+  // Non-chosen match disposed; the returned handle is NOT (caller disposes it).
+  expect(zero.disposed).toBe(true);
+  expect(one.disposed).toBe(false);
 });
 
 test("resolveNthHandle: polls until the element appears", async () => {
@@ -122,7 +109,7 @@ test("resolveNthHandle: polls until the element appears", async () => {
   }, 150);
   const handle = await resolveNthHandle(asPage(page), "[data-x]", 0, 2000);
   expect(handle).toBeInstanceOf(FakeHandle);
-  expect(page.evaluateHandleCalls.length).toBeGreaterThan(1);
+  expect(page.$$calls.length).toBeGreaterThan(1);
 });
 
 test("resolveNthHandle: throws a clear error after timeout", async () => {
@@ -137,7 +124,7 @@ test("resolveNthHandle: throws a clear error after timeout", async () => {
 
 test("count(): returns the immediate $$ match length, no polling", async () => {
   const page = new FakePage();
-  page.queryAllResult = [1, 2, 3];
+  page.elements = [new FakeHandle("a"), new FakeHandle("b"), new FakeHandle("c")];
   const ctx = makeCtx();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wrapped = createWrappedLocator(fakeInner, ctx, "[data-testid=x]", asPage(page)) as any;
@@ -148,11 +135,39 @@ test("count(): returns the immediate $$ match length, no polling", async () => {
 
 test("count(): reflects zero matches", async () => {
   const page = new FakePage();
-  page.queryAllResult = [];
+  page.elements = [];
   const ctx = makeCtx();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wrapped = createWrappedLocator(fakeInner, ctx, "[data-testid=x]", asPage(page)) as any;
   await expect(wrapped.count()).resolves.toBe(0);
+});
+
+test("count(): passes the selector to page.$$ (so ::-p-* pseudo-selectors work)", async () => {
+  const page = new FakePage();
+  page.elements = [new FakeHandle("a")];
+  const ctx = makeCtx();
+  // A byText()-style semantic selector — only page.$$ understands it, not
+  // document.querySelectorAll.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wrapped = createWrappedLocator(fakeInner, ctx, "::-p-text(Sign in)", asPage(page)) as any;
+  await wrapped.count();
+  expect(page.$$calls).toEqual(["::-p-text(Sign in)"]);
+});
+
+// ── WrappedLocator count()/nth() — filtered guard ────────────────────
+
+test("count()/nth() throw after .filter() (can't replay the predicate)", () => {
+  const page = new FakePage();
+  const ctx = makeCtx();
+  // A real Puppeteer Locator has a filter() that returns a new Locator; the
+  // fake inner just needs filter() to return something the proxy re-wraps.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const inner: any = { filter: () => ({}) };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wrapped = createWrappedLocator(inner, ctx, "[data-testid=x]", asPage(page)) as any;
+  const filtered = wrapped.filter(() => true);
+  expect(() => filtered.count()).toThrow(/not supported after \.filter\(\)\/\.map\(\)/);
+  expect(() => filtered.nth(0)).toThrow(/not supported after \.filter\(\)\/\.map\(\)/);
 });
 
 // ── WrappedLocator.nth() ─────────────────────────────────────────────
