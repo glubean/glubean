@@ -933,6 +933,36 @@ async function captureRequestBody(request: Request): Promise<unknown> {
   }
 }
 
+/** True for an absolute (has a scheme, e.g. "https:") or protocol-relative ("//host/…")
+ *  URL string — the cases where no host resolves it against anything (engine parity:
+ *  engine.ts ABSOLUTE_URL_RE). */
+const ABSOLUTE_URL_RE = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * The ky option key that carries the ORIGINAL relative-URL string exactly as a test
+ * author wrote it, captured before ky resolves it to an absolute URL (GLU-81, engine
+ * parity: engine.ts RAW_URL_OPTION). A plain, ky-UNKNOWN option — unlike `context`
+ * (used for `glubeanRoute`), ky forwards an unknown option to BOTH its own hooks'
+ * `options` (→ `trace.requestedUrl`) AND as the second arg to a custom `fetch`, which
+ * is what a browser host adapter (the Playground worker) would need to recover the
+ * clean relative form when a Worker's implicit-base `Request` pollutes `request.url`
+ * with its own script directory. Node has no implicit base (a bare relative string
+ * throws immediately here too), so this mainly matters for the engine's browser path —
+ * kept in lockstep here purely for byte-parity with the engine's trace shape.
+ */
+const RAW_URL_OPTION = "glubeanRawUrl";
+
+/** Stash the caller's raw URL string on `options` when `input` is a plain relative
+ *  string (engine parity: engine.ts attachRawUrl). `Request`/`URL` inputs and
+ *  already-absolute strings are left untouched. */
+function attachRawUrl(
+  input: string | URL | Request,
+  options: KyOptionsWithSchema | undefined,
+): KyOptionsWithSchema | undefined {
+  if (typeof input !== "string" || ABSOLUTE_URL_RE.test(input) || input.startsWith("//")) return options;
+  return { ...(options ?? {}), [RAW_URL_OPTION]: input } as KyOptionsWithSchema;
+}
+
 /** Max serialized body size (chars) to include in trace events. */
 const TRACE_BODY_MAX_SIZE = 1_048_576; // 1MB
 
@@ -1039,6 +1069,13 @@ const kyInstance = ky.create({
         const glubeanOp = request.headers.get("x-glubean-op");
         if (glubeanOp) {
           traceData.name = glubeanOp;
+        }
+
+        // The clean pre-absolutization relative URL (GLU-81, engine parity — see
+        // RAW_URL_OPTION), when the call site passed one.
+        const rawUrl = (options as unknown as Record<string, unknown>)[RAW_URL_OPTION];
+        if (typeof rawUrl === "string") {
+          traceData.requestedUrl = rawUrl;
         }
 
         if (emitFullTrace) {
@@ -1300,6 +1337,9 @@ function wrapKy(instance: KyInstance, label = "base"): Record<string, unknown> {
         },
       };
     }
+    // Capture the clean pre-absolutization URL (GLU-81) BEFORE normalizeUrl / ky /
+    // the host Request constructor ever touch `input`.
+    kyOptions = attachRawUrl(input, kyOptions);
     if (glubeanDebug) {
       process.stderr.write(`[glubean:debug] ky.call [${label}] url=${String(input)} per-call-options=${JSON.stringify(kyOptions ?? null)}\n`);
     }

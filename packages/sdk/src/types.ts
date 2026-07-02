@@ -2066,6 +2066,21 @@ export interface Trace {
    *  The load runner uses it for an exact endpoint routeKey instead of the heuristic
    *  URL-normalization fallback. Absent → fall back. */
   routeKey?: string;
+  /** HTTP only. The relative URL string EXACTLY as the test author wrote it (e.g.
+   *  `ctx.http.get("todos/1")` → `"todos/1"`), captured before the host resolves it
+   *  to an absolute URL. Present only when the call site passed a plain relative
+   *  string (an already-absolute string, or a `Request`/`URL` object, leaves this
+   *  unset — nothing to recover).
+   *
+   *  Why: inside a browser Web Worker, `Request` has an IMPLICIT base — the worker
+   *  SCRIPT's own URL — so a bare relative path silently resolves against the
+   *  worker's script directory (e.g. "todos/1" → ".../assets/todos/1"), NOT the
+   *  intended API. That pollutes `url`/`target` above; `requestedUrl` is the clean
+   *  form a re-anchoring host can fall back to (GLU-81, F11 residual — see cloud
+   *  dd38fcc / GLU-46 comment). Node has no implicit base — a bare relative URL
+   *  there throws immediately (unchanged), so this field is browser/Worker-specific
+   *  in practice. */
+  requestedUrl?: string;
 
   // ── HTTP backward-compat fields (populated when protocol === "http") ──
 

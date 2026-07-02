@@ -448,6 +448,12 @@ export class RunnerCore {
             // it for an exact endpoint routeKey instead of heuristic URL normalization.
             const ctxRoute = (options.context as { glubeanRoute?: string } | undefined)?.glubeanRoute;
             if (ctxRoute) trace.routeKey = ctxRoute;
+            // The clean pre-absolutization relative URL (GLU-81), when the call site
+            // passed one (see RAW_URL_OPTION) — lets a re-anchoring host recover the
+            // author's intended path even when `request.url`/`trace.url` above got
+            // polluted by a Worker's implicit-base Request resolution.
+            const rawUrl = (options as unknown as Record<string, unknown>)[RAW_URL_OPTION];
+            if (typeof rawUrl === "string") trace.requestedUrl = rawUrl;
 
             // Full-trace capture (node parity: harness.ts:1062-1106), gated by
             // emitFullTrace. Reads a CLONE so the user's res.json()/text() still works.
@@ -1434,6 +1440,49 @@ function normalizeUrl(input: unknown): unknown {
   return input;
 }
 
+/** True for an absolute (has a scheme, e.g. "https:") or protocol-relative ("//host/…")
+ *  URL string — the cases where no host resolves it against anything. */
+const ABSOLUTE_URL_RE = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * The ky option key that carries the ORIGINAL relative-URL string exactly as a test
+ * author wrote it (e.g. `ctx.http.get("todos/1")` → `"todos/1"`), captured BEFORE ky
+ * (or the host `Request` constructor) resolves it to an absolute URL (GLU-81).
+ *
+ * Why this matters: inside a browser Web Worker (the Playground sandbox), `Request`
+ * has an IMPLICIT base — the worker SCRIPT's own URL — so `new Request("todos/1")`
+ * silently resolves against the worker's script directory (e.g. "/assets/todos/1"),
+ * not the intended API. ky 2 builds that `Request` internally (`new
+ * Request(input, options)`) before any hook or host `fetch` ever sees it, so by the
+ * time `request.url` is observable downstream, the directory-prefix pollution is
+ * baked in and unrecoverable from `request.url` alone (F11 residual, cloud dd38fcc
+ * comment / GLU-46). Node has no such implicit base — a bare relative string there
+ * throws immediately (unchanged, still a loud failure); this capture only matters
+ * for a host with implicit-base URL resolution.
+ *
+ * A plain, ky-UNKNOWN option (deliberately NOT ky's own `context`, which is comparable
+ * prior art for non-wire metadata — see `routeKey`/`glubeanRoute` — but ky only
+ * forwards `context` to its OWN hooks, never to a custom `fetch`; verified against ky
+ * 2's `findUnknownOptions`/`#getNormalizedOptions`). Because this key isn't part of
+ * ky's known option set, ky forwards it BOTH to `beforeRequest`/`afterResponse` hooks'
+ * `options` (→ `trace.requestedUrl`, see `createScopedKy`) AND as the second arg to a
+ * custom `fetch` (`nonRequestOptions`) — the exact channel a browser host adapter (the
+ * Playground worker's postMessage proxy) would need to recover the clean relative form
+ * for re-anchoring. It never touches request headers/body, so it can't leak to the SUT.
+ */
+const RAW_URL_OPTION = "glubeanRawUrl";
+
+/**
+ * Stash the caller's raw URL string (see `RAW_URL_OPTION`) on `opts` when `input` is a
+ * plain relative string — i.e. exactly the case a Worker's implicit-base `Request`
+ * would silently pollute. `Request`/`URL` object inputs and already-absolute strings
+ * are left untouched (nothing to recover; ky resolves those correctly already).
+ */
+function attachRawUrl(input: unknown, opts: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (typeof input !== "string" || ABSOLUTE_URL_RE.test(input) || input.startsWith("//")) return opts;
+  return { ...(opts ?? {}), [RAW_URL_OPTION]: input };
+}
+
 /**
  * Wrap a per-run ky instance into the public ctx.http facade. A Proxy preserves the
  * full KyInstance surface and adds, on calls + `.extend()`:
@@ -1591,8 +1640,11 @@ function wrapScopedKy(
   ): KyResp => {
     const normalized = normalizeKyOptions(opts);
     preRequest(normalized);
-    const promise = kyCall(normalizeUrl(input), injectSignal(input, toKyOptions(normalized)));
-    return wrapResponse(promise, normalized);
+    // Capture the clean pre-absolutization URL (GLU-81) BEFORE normalizeUrl / ky /
+    // the host Request constructor ever touch `input`.
+    const withRawUrl = attachRawUrl(input, normalized);
+    const promise = kyCall(normalizeUrl(input), injectSignal(input, toKyOptions(withRawUrl)));
+    return wrapResponse(promise, withRawUrl);
   };
 
   return new Proxy(instance, {
