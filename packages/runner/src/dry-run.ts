@@ -17,7 +17,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Test, TestContext, SwitchCase } from "@glubean/sdk";
+import type { Test, TestContext, SwitchCase, EachRowMeta } from "@glubean/sdk";
 import { runWithRuntime, type InternalRuntime } from "@glubean/sdk/internal";
 
 /** A single recorded assertion intent. */
@@ -60,6 +60,14 @@ export interface TestShape {
   incompleteReason?: string;
   /** True when the body called `ctx.skip()`. */
   skipped?: boolean;
+  /**
+   * Data-driven row provenance (`idTemplate` + reorder-stable `rowKey` +
+   * `$index` stability flag), copied from the runtime `Test.each` set by
+   * `test.each` / `test.pick` / `EachBuilder`. Absent for non-data-driven
+   * tests. Rides the projection upload so Cloud derive can resolve a stable
+   * cross-run row identity (B3 T1.5, `run-evidence-identity-model.md` §7).
+   */
+  each?: EachRowMeta;
 }
 
 /** Breaker for data-dependent loops (synthetic guards are perpetually truthy). */
@@ -501,6 +509,9 @@ export async function dryRunTest(
     assertions: [],
     endpoints: [],
     assertionCount: 0,
+    // Row provenance (B3 T1.5): present on every branch below (including the
+    // non-simple early return) so data-driven builder rows keep it too.
+    ...(test.each ? { each: test.each } : {}),
   };
 
   // Only simple tests have a directly-invokable fn body. Builder/workflow tests

@@ -12,6 +12,60 @@
 import type { EachRowMeta, TestMeta } from "../types.js";
 
 /**
+ * Single-pass `$placeholder` tokenizer shared by `interpolateTemplate` and
+ * `interpolateRowKey` so the interpolated id and the row key NEVER disagree on
+ * how a data field is substituted (the `rowKey === id` contract for stable
+ * templates depends on this).
+ *
+ * Semantics (matching the documented template contract, but collision-safe):
+ * - The reserved positional `$index` placeholder wins at every `$` position
+ *   (it shadows any data field, including one literally named `index` or a
+ *   longer field like `indexed`). `index === undefined` leaves it literal
+ *   (the row-key mode).
+ * - Data keys match LONGEST-FIRST, so a key that is a prefix of another
+ *   (`$id` vs `$id2`) or of a later placeholder can never corrupt it.
+ * - Substituted values are emitted verbatim in one pass — a value containing
+ *   `$something` is never re-scanned (no value injection).
+ * - A `$` matching nothing stays literal.
+ */
+function interpolatePlaceholders(
+  template: string,
+  data: Record<string, unknown>,
+  index: number | undefined,
+): string {
+  // Longest-first so a key that prefixes another key never wins the match.
+  const keys = Object.keys(data)
+    .filter((k) => k.length > 0 && k !== "index")
+    .sort((a, b) => b.length - a.length);
+  let out = "";
+  let i = 0;
+  while (i < template.length) {
+    const ch = template[i]!;
+    if (ch !== "$") {
+      out += ch;
+      i++;
+      continue;
+    }
+    const rest = template.slice(i + 1);
+    // Reserved positional placeholder — always wins (documented shadowing).
+    if (rest.startsWith("index")) {
+      out += index === undefined ? "$index" : String(index);
+      i += "$index".length;
+      continue;
+    }
+    const key = keys.find((k) => rest.startsWith(k));
+    if (key !== undefined) {
+      out += String(data[key]);
+      i += 1 + key.length;
+    } else {
+      out += "$";
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
  * Interpolate `$key` placeholders in a template string with data values.
  * Supports `$index` for the row index and `$key` for any key in the data object.
  *
@@ -22,11 +76,7 @@ export function interpolateTemplate(
   data: Record<string, unknown>,
   index: number,
 ): string {
-  let result = template.replace(/\$index/g, String(index));
-  for (const [key, value] of Object.entries(data)) {
-    result = result.replaceAll(`$${key}`, String(value));
-  }
-  return result;
+  return interpolatePlaceholders(template, data, index);
 }
 
 /**
@@ -44,9 +94,10 @@ export function templateUsesIndex(template: string): boolean {
 /**
  * Build the reorder-stable per-row key: `interpolateTemplate` with the data
  * fields ONLY, leaving the positional `$index` placeholder literal so an
- * `$index`-based template stays detectable downstream. Mirrors
- * `interpolateTemplate`'s data-field substitution (a data field named `index`
- * is shadowed by the reserved `$index` placeholder), minus the index step.
+ * `$index`-based template stays detectable downstream. Same tokenizer as
+ * `interpolateTemplate` (a data field named `index` is shadowed by the
+ * reserved `$index` placeholder), minus the index substitution — so for a
+ * template that never references `$index`, `rowKey === id` exactly.
  *
  * @internal
  */
@@ -54,13 +105,7 @@ export function interpolateRowKey(
   template: string,
   data: Record<string, unknown>,
 ): string {
-  let result = template;
-  for (const [key, value] of Object.entries(data)) {
-    // `$index` is the reserved positional placeholder, never a data field.
-    if (key === "index") continue;
-    result = result.replaceAll(`$${key}`, String(value));
-  }
-  return result;
+  return interpolatePlaceholders(template, data, undefined);
 }
 
 /**

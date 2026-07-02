@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { EachBuilder, SPEC_VERSION, test as glubeanTest, TestBuilder } from "./index.js";
 import { clearRegistry, getRegistry } from "./internal.js";
-import { buildEachRowMeta, interpolateRowKey, templateUsesIndex } from "./test/utils.js";
+import { buildEachRowMeta, interpolateRowKey, interpolateTemplate, templateUsesIndex } from "./test/utils.js";
 import { Expectation } from "./expect.js";
 import type { SecretsAccessor, TestContext, ValidatorFn, VarsAccessor } from "./types.js";
 
@@ -617,6 +617,26 @@ test("row-key helpers - interpolateRowKey substitutes data, keeps $index literal
   // A data field literally named `index` is shadowed by the reserved
   // positional `$index` placeholder (mirrors interpolateTemplate).
   expect(interpolateRowKey("k-$index", { index: 99 })).toBe("k-$index");
+});
+
+test("row-key helpers - tokenizer is collision-safe (codex R1 P2)", () => {
+  // A data key that PREFIXES the literal `$index` token must not corrupt it.
+  expect(interpolateRowKey("case-$index", { in: "us" })).toBe("case-$index");
+  expect(interpolateRowKey("case-$index", { i: "z" })).toBe("case-$index");
+  // A data key that prefixes ANOTHER data key: longest match wins, regardless
+  // of object insertion order.
+  expect(interpolateRowKey("$id2-$id", { id: "1", id2: "2" })).toBe("2-1");
+  expect(interpolateRowKey("$id2-$id", { id2: "2", id: "1" })).toBe("2-1");
+  // Single-pass: a substituted VALUE containing `$key` text is emitted
+  // verbatim, never re-scanned (no value injection).
+  expect(interpolateRowKey("$a-$b", { a: "$b", b: "X" })).toBe("$b-X");
+  // A `$` matching no key stays literal.
+  expect(interpolateRowKey("price-$USD", { userId: 1 })).toBe("price-$USD");
+  // interpolateTemplate shares the tokenizer, so id and rowKey agree for
+  // stable templates even with prefix-colliding keys.
+  expect(interpolateTemplate("$id2-$id", { id: "1", id2: "2" }, 0)).toBe("2-1");
+  // ...and the reserved `$index` still substitutes positionally there.
+  expect(interpolateTemplate("case-$index", { in: "us" }, 3)).toBe("case-3");
 });
 
 test("row-key helpers - buildEachRowMeta composes the full provenance", () => {

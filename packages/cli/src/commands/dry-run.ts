@@ -6,6 +6,7 @@ import {
   renderArtifact,
   openapiArtifact,
   type ExtractedContractProjection,
+  type EachRowMeta,
 } from "@glubean/sdk";
 
 const colors = {
@@ -40,6 +41,10 @@ export interface ProjectedTest {
   projectionComplete: boolean;
   incompleteReason?: string;
   skipped?: boolean;
+  /** Data-driven row provenance (idTemplate + reorder-stable rowKey + `$index`
+   *  stability flag) from the runtime shape — B3 T1.5, uploaded with the
+   *  projection so Cloud derive can resolve stable cross-run row identity. */
+  each?: EachRowMeta;
 }
 
 /** One projected contract (C1) — the scanner's static normalized contract, plus
@@ -181,6 +186,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
       projectionComplete,
       ...(incompleteReason ? { incompleteReason } : {}),
       ...(s.skipped ? { skipped: true } : {}),
+      ...(s.each ? { each: s.each } : {}),
     };
   });
 

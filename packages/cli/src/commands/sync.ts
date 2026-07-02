@@ -172,6 +172,12 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     projectionComplete: p.projectionComplete,
     incompleteReason: p.incompleteReason ?? null,
     skipped: p.skipped ?? false,
+    // B3 T1.5 row provenance — a server that predates the field strips it
+    // (ingest zod is non-strict), so this is forward-compatible. NOT redacted
+    // below (like testId): idTemplate/rowKey are identity keys built from the
+    // same row values as the uploaded testId itself — masking them would break
+    // the rowKey === id join Cloud derive performs.
+    ...(p.each ? { each: p.each } : {}),
   }));
 
   // Redact outbound data before it leaves the machine (parity with run/load):
