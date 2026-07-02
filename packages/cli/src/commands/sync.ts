@@ -5,7 +5,7 @@ import { loadProjectEnv } from "@glubean/runner";
 import { buildProjections } from "./dry-run.js";
 import { findProjectConfig } from "./run.js";
 import { resolveToken, resolveProjectId, resolveApiUrl } from "../lib/auth.js";
-import { resolveEnvFileName } from "../lib/active_env.js";
+import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -65,8 +65,25 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // running) projection — so a typo fails fast. A missing explicit env file
   // would otherwise load empty and let global/process credentials upload to the
   // WRONG project (parity with run/load). Default: the active env (or .env).
+  // GLU-88: resolveEnvFileName throws SensitiveActiveEnvError instead of
+  // silently returning a prod-like active-env file — surface it as a clear,
+  // actionable error (mirrors run/load) rather than silently syncing
+  // projections against prod.
   const userSpecifiedEnvFile = !!options.envFile;
-  const envFileName = options.envFile ?? (await resolveEnvFileName(rootDir));
+  let envFileName: string;
+  if (userSpecifiedEnvFile) {
+    envFileName = options.envFile!;
+  } else {
+    try {
+      envFileName = await resolveEnvFileName(rootDir);
+    } catch (err) {
+      if (err instanceof SensitiveActiveEnvError) {
+        console.error(`${colors.red}Sync failed: ${err.message}${colors.reset}`);
+        process.exit(1);
+      }
+      throw err;
+    }
+  }
   if (userSpecifiedEnvFile) {
     try {
       await stat(resolve(rootDir, envFileName));
