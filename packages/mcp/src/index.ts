@@ -4,7 +4,8 @@
  * Purpose:
  * - Let AI agents (Cursor, etc.) run verification-as-code locally
  * - Fetch structured failures (assertions/logs/traces) for automatic fixing
- * - Optionally trigger/tail remote runs via Glubean Open Platform APIs
+ * - Optionally report runs to Glubean Cloud via the `/v1/*` ingest contract
+ *   (the same contract `glubean run --upload` uses — see ./cloud.ts)
  *
  * IMPORTANT (stdio transport):
  * - Never write to stdout. Use stderr for logs.
@@ -40,6 +41,17 @@ import {
 import type { BundleMetadata, ExportMeta, FileMeta, ScanResult } from "@glubean/scanner";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
 import { checkSdkCompat, type CompatResult } from "./version-compat.js";
+import {
+  buildRunIngestBody,
+  cloudFetchJson,
+  MISSING_AUTH_MESSAGES,
+  resolveCloudAuth,
+  resolveDefaultTargetId,
+  runIngestUrl,
+  runTestEventsUrl,
+  runTestResultsUrl,
+  runUrl,
+} from "./cloud.js";
 
 type Vars = Record<string, string>;
 const METADATA_SCHEMA_VERSION = "1";
@@ -1244,27 +1256,6 @@ export async function runLocalTestsFromFile(args: {
   };
 }
 
-function bearerHeaders(token?: string): HeadersInit {
-  if (!token) return {};
-  return { Authorization: `Bearer ${token}` };
-}
-
-async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
-  const res = await fetch(url, init);
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(
-      `HTTP ${res.status} ${res.statusText}: ${text.slice(0, 2000)}`,
-    );
-  }
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
 const server = new McpServer({
   name: "glubean",
   version: MCP_PACKAGE_VERSION,
@@ -1281,7 +1272,7 @@ export const MCP_TOOL_NAMES = {
   openapi: "glubean_openapi",
   diagnoseConfig: "glubean_diagnose_config",
   getMetadata: "glubean_get_metadata",
-  openTriggerRun: "glubean_open_trigger_run",
+  openUploadRun: "glubean_open_upload_run",
   openGetRun: "glubean_open_get_run",
   openGetRunEvents: "glubean_open_get_run_events",
 } as const;
@@ -1756,54 +1747,188 @@ server.registerTool(
   },
 );
 
+// =============================================================================
+// Cloud open* tools — /v1 ingest contract (GLU-77)
+//
+// The legacy Open Platform (`/open/v1/*` — server-side bundle execution) was
+// retired with the old stack. These tools speak the new platform API: runs
+// execute LOCALLY (glubean_run_local_file), then results are reported via
+// `POST /v1/projects/{projectId}/targets/{targetId}/runs` — the same ingest
+// contract and credential conventions as `glubean run --upload`.
+// =============================================================================
+
+const OPEN_AUTH_INPUT_SCHEMA = {
+  apiUrl: z
+    .string()
+    .optional()
+    .describe(
+      "Platform API base URL (default: GLUBEAN_API_URL, or https://api.glubean.com)",
+    ),
+  token: z
+    .string()
+    .optional()
+    .describe(
+      "API token (default: GLUBEAN_TOKEN from process env or .env.secrets, else ~/.glubean/credentials.json)",
+    ),
+  projectId: z
+    .string()
+    .optional()
+    .describe(
+      "Project id (default: GLUBEAN_PROJECT_ID from process env or .env, else ~/.glubean/credentials.json)",
+    ),
+  targetId: z
+    .string()
+    .optional()
+    .describe(
+      "Target id within the project (default: GLUBEAN_TARGET_ID, else the project's default target)",
+    ),
+  dir: z
+    .string()
+    .optional()
+    .describe(
+      "Project root for .env/.env.secrets credential resolution (default: the last run snapshot's project root, else cwd)",
+    ),
+  envFile: z
+    .string()
+    .optional()
+    .describe("Path to .env file (default: <projectRoot>/.env)"),
+};
+
+interface OpenToolAuthInput {
+  apiUrl?: string;
+  token?: string;
+  projectId?: string;
+  targetId?: string;
+  dir?: string;
+  envFile?: string;
+}
+
+/**
+ * Resolve Cloud credentials for the open* tools with the CLI's precedence
+ * (explicit arg > process env > project .env/.env.secrets >
+ * ~/.glubean/credentials.json), then require the full token/project/target
+ * set — resolving the project's DEFAULT target when none is configured.
+ * Returns a human-actionable error message when a piece is missing.
+ */
+async function requireOpenToolAuth(
+  input: OpenToolAuthInput,
+  fallbackRoot?: string,
+): Promise<
+  | { ok: true; auth: { apiUrl: string; token: string; projectId: string; targetId: string } }
+  | { ok: false; error: string }
+> {
+  const projectRoot = input.dir ? resolve(input.dir) : (fallbackRoot ?? process.cwd());
+  const envPath = await resolveEnvPath(projectRoot, input.envFile);
+  const { vars, secrets } = await loadProjectEnv(projectRoot, basename(envPath));
+  const auth = await resolveCloudAuth(input, {
+    envFileVars: { ...vars, ...secrets },
+  });
+  if (!auth.token) return { ok: false, error: MISSING_AUTH_MESSAGES.token };
+  if (!auth.projectId) return { ok: false, error: MISSING_AUTH_MESSAGES.projectId };
+  const targetId =
+    auth.targetId ??
+    (await resolveDefaultTargetId(auth.apiUrl, auth.projectId, auth.token));
+  if (!targetId) return { ok: false, error: MISSING_AUTH_MESSAGES.targetId };
+  return {
+    ok: true,
+    auth: { apiUrl: auth.apiUrl, token: auth.token, projectId: auth.projectId, targetId },
+  };
+}
+
+function errorContent(error: string, extra?: Record<string, unknown>) {
+  return {
+    content: [
+      { type: "text" as const, text: JSON.stringify({ error, ...extra }) },
+    ],
+  };
+}
+
 server.registerTool(
-  MCP_TOOL_NAMES.openTriggerRun,
+  MCP_TOOL_NAMES.openUploadRun,
   {
-    description: "Trigger a remote run via Glubean Open Platform API (POST /open/v1/runs).",
+    description:
+      "Upload the most recent glubean_run_local_file results to Glubean Cloud " +
+      "(POST /v1/projects/{projectId}/targets/{targetId}/runs — the same ingest contract as `glubean run --upload`). " +
+      "Replaces the retired glubean_open_trigger_run (/open/v1): the platform ingests locally-executed runs; there is no remote trigger. " +
+      "Credentials resolve like the CLI: explicit args > GLUBEAN_TOKEN / GLUBEAN_PROJECT_ID / GLUBEAN_TARGET_ID / GLUBEAN_API_URL " +
+      "(process env or project .env/.env.secrets) > ~/.glubean/credentials.json.",
     inputSchema: {
-      apiUrl: z.string().describe("Base API URL, e.g. https://api.glubean.com"),
-      token: z.string().describe("Project token with runs:write scope"),
-      projectId: z.string().describe("Project ID (short id)"),
-      bundleId: z.string().describe("Bundle ID (short id)"),
-      jobId: z.string().optional().describe("Optional job ID"),
+      ...OPEN_AUTH_INPUT_SCHEMA,
+      environment: z
+        .string()
+        .optional()
+        .describe(
+          "Environment label recorded on the run (default: GLUBEAN_ENV, else 'default')",
+        ),
     },
   },
-  async (input: {
-    apiUrl: string;
-    token: string;
-    projectId: string;
-    bundleId: string;
-    jobId?: string;
-  }) => {
-    const { apiUrl, token, projectId, bundleId, jobId } = input;
-    const url = `${apiUrl.replace(/\/$/, "")}/open/v1/runs`;
-    const body = { projectId, bundleId, jobId };
-    const json = await fetchJson(url, {
+  async (input: OpenToolAuthInput & { environment?: string }) => {
+    if (!lastLocalRunSnapshot) {
+      return errorContent(
+        "No local run snapshot to upload. Run glubean_run_local_file first, then call this tool.",
+      );
+    }
+    if (lastLocalRunSnapshot.results.length === 0) {
+      return errorContent(
+        "The last local run produced no results — nothing to upload.",
+      );
+    }
+    const check = await requireOpenToolAuth(input, lastLocalRunSnapshot.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    const { apiUrl, token, projectId, targetId } = check.auth;
+
+    const environment = input.environment || process.env.GLUBEAN_ENV || "default";
+    const body = buildRunIngestBody(lastLocalRunSnapshot, { environment });
+    const json = (await cloudFetchJson(runIngestUrl(apiUrl, projectId, targetId), {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...bearerHeaders(token) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
-    return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
+      token,
+    })) as { id?: unknown } | null;
+    const runId = typeof json?.id === "string" ? json.id : undefined;
+    if (!runId) {
+      return errorContent(
+        "Cloud accepted the upload but the response was missing the run id.",
+        { response: json },
+      );
+    }
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            runId,
+            url: runUrl(apiUrl, projectId, targetId, runId),
+            projectId,
+            targetId,
+            environment,
+            summary: lastLocalRunSnapshot.summary,
+          }),
+        },
+      ],
+    };
   },
 );
 
 server.registerTool(
   MCP_TOOL_NAMES.openGetRun,
   {
-    description: "Get run status via Glubean Open Platform API (GET /open/v1/runs/:runId).",
+    description:
+      "Get a run's status + metadata from Glubean Cloud " +
+      "(GET /v1/projects/{projectId}/targets/{targetId}/runs/{runId}).",
     inputSchema: {
-      apiUrl: z.string().describe("Base API URL, e.g. https://api.glubean.com"),
-      token: z.string().describe("Project token with runs:read scope"),
       runId: z.string().describe("Run ID"),
+      ...OPEN_AUTH_INPUT_SCHEMA,
     },
   },
-  async (input: { apiUrl: string; token: string; runId: string }) => {
-    const { apiUrl, token, runId } = input;
-    const url = `${apiUrl.replace(/\/$/, "")}/open/v1/runs/${encodeURIComponent(runId)}`;
-    const json = await fetchJson(url, {
-      method: "GET",
-      headers: bearerHeaders(token),
-    });
+  async (input: OpenToolAuthInput & { runId: string }) => {
+    const check = await requireOpenToolAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    const { apiUrl, token, projectId, targetId } = check.auth;
+    const json = await cloudFetchJson(
+      runUrl(apiUrl, projectId, targetId, input.runId),
+      { method: "GET", token },
+    );
     return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
   },
 );
@@ -1811,52 +1936,88 @@ server.registerTool(
 server.registerTool(
   MCP_TOOL_NAMES.openGetRunEvents,
   {
-    description: "Fetch a page of run events via Glubean Open Platform API (GET /open/v1/runs/:runId/events).",
+    description:
+      "Fetch a test's events for a Cloud run " +
+      "(GET /v1/projects/{projectId}/targets/{targetId}/runs/{runId}/tests/{testId}/events). " +
+      "The /v1 contract stores events per test — omit testId to list the run's tests (with their testIds) instead.",
     inputSchema: {
-      apiUrl: z.string().describe("Base API URL, e.g. https://api.glubean.com"),
-      token: z.string().describe("Project token with runs:read scope"),
       runId: z.string().describe("Run ID"),
-      afterSeq: z
-        .number()
-        .int()
-        .min(0)
+      testId: z
+        .string()
         .optional()
-        .describe("Cursor: return events after this seq"),
+        .describe("Test ID within the run. Omit to list the run's tests instead."),
+      type: z
+        .string()
+        .optional()
+        .describe("Filter by event type (assertion/log/error/status) — applied client-side"),
       limit: z
         .number()
         .int()
         .min(1)
-        .max(1000)
+        .max(2000)
         .optional()
-        .describe("Max events (default server: 100)"),
-      type: z
-        .string()
-        .optional()
-        .describe("Filter by event type (log/assert/trace/result)"),
+        .describe("Max events returned (default: 200)"),
+      ...OPEN_AUTH_INPUT_SCHEMA,
     },
   },
-  async (input: {
-    apiUrl: string;
-    token: string;
-    runId: string;
-    afterSeq?: number;
-    limit?: number;
-    type?: string;
-  }) => {
-    const { apiUrl, token, runId, afterSeq, limit, type } = input;
-    const base = `${apiUrl.replace(/\/$/, "")}/open/v1/runs/${encodeURIComponent(runId)}/events`;
-    const params = new URLSearchParams();
-    if (afterSeq !== undefined) params.set("afterSeq", String(afterSeq));
-    if (limit !== undefined) params.set("limit", String(limit));
-    if (type) params.set("type", type);
-    const qs = params.toString();
-    const url = qs ? `${base}?${qs}` : base;
+  async (
+    input: OpenToolAuthInput & {
+      runId: string;
+      testId?: string;
+      type?: string;
+      limit?: number;
+    },
+  ) => {
+    const check = await requireOpenToolAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    const { apiUrl, token, projectId, targetId } = check.auth;
 
-    const json = await fetchJson(url, {
-      method: "GET",
-      headers: bearerHeaders(token),
-    });
-    return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
+    if (!input.testId) {
+      const rows = await cloudFetchJson(
+        runTestResultsUrl(apiUrl, projectId, targetId, input.runId),
+        { method: "GET", token },
+      );
+      const empty = Array.isArray(rows) && rows.length === 0;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              message: empty
+                ? "No per-test rows yet — the run may still be deriving " +
+                  "(check the run's `derivation` field via glubean_open_get_run and retry in a few seconds)."
+                : "The /v1 contract stores run events per test — pass one of these testIds to fetch its events.",
+              runId: input.runId,
+              tests: rows,
+            }),
+          },
+        ],
+      };
+    }
+
+    const events = await cloudFetchJson(
+      runTestEventsUrl(apiUrl, projectId, targetId, input.runId, input.testId),
+      { method: "GET", token },
+    );
+    const all = Array.isArray(events) ? events : [];
+    const filtered = input.type
+      ? all.filter((e) => (e as { type?: unknown } | null)?.type === input.type)
+      : all;
+    const limit = Math.max(1, Math.min(input.limit ?? 200, 2000));
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            runId: input.runId,
+            testId: input.testId,
+            availableTotal: all.length,
+            returned: Math.min(filtered.length, limit),
+            events: filtered.slice(0, limit),
+          }),
+        },
+      ],
+    };
   },
 );
 

@@ -26,6 +26,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@glubean/redaction": "workspace:*",
     "@glubean/runner": "workspace:*",
     "@glubean/scanner": "workspace:*",
     "@glubean/sdk": "workspace:*",
