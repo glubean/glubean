@@ -22,6 +22,7 @@ import type {
 } from "puppeteer-core";
 import {
   EvidenceSession,
+  type DownloadEntry,
   type EmulationOptions,
   type MockRule,
   type ScreenshotMode,
@@ -30,6 +31,7 @@ import {
 } from "./evidence.js";
 import { collectNavigationMetrics } from "./metrics.js";
 import { createWrappedLocator, type WrappedLocator } from "./locator.js";
+import { createFrame, type GlubeanFrame } from "./frame.js";
 import { getRuntime } from "@glubean/sdk/internal";
 
 /**
@@ -228,6 +230,12 @@ interface BrowserOptionsBase {
   screenshot?: ScreenshotMode;
   /** Directory for auto-screenshots. Default: `".glubean/screenshots"`. */
   screenshotDir?: string;
+  /**
+   * Directory downloads are saved to. Default: `".glubean/downloads"`.
+   * Downloads are always captured as evidence (like dialogs/popups) — this
+   * only controls where the files land, not whether capture is on.
+   */
+  downloadDir?: string;
   /** Default timeout (ms) for Locator auto-waiting on `click()`/`type()` etc. Default: 30 000. */
   actionTimeout?: number;
   /**
@@ -495,6 +503,12 @@ export class GlubeanPage {
     const screenshotMode = options.screenshot ?? "on-failure";
     const screenshotDir = options.screenshotDir ?? ".glubean/screenshots";
     const testId = runtimeTestId ?? ctx.testId ?? "unknown";
+    // ONE download dir for the whole browser — NOT per-test. `Browser.setDownloadBehavior`
+    // is browser-context-global (last call wins the path), so two concurrent instrumented
+    // pages sharing one Chrome (e.g. concurrent tests off one `browser()` fixture) must
+    // agree on the directory or one would silently repoint the other's downloads. The
+    // per-download `browser:download` evidence carries the testId for attribution instead.
+    const downloadDir = options.downloadDir ?? ".glubean/downloads";
     const actionTimeout = options.actionTimeout ?? 30_000;
     const dialogMode: DialogMode = options.dialogMode ?? "dismiss";
 
@@ -621,6 +635,10 @@ export class GlubeanPage {
       },
     };
 
+    // Downloads are always captured as evidence (like dialog/popup) — the
+    // save directory must exist before Chrome is told to use it.
+    await _ensureDir(downloadDir);
+
     gp._evidence = await EvidenceSession.attach(page, {
       trace: networkTraceOpt !== false ? (t) => ctx.trace(t) : undefined,
       network: filterOpts && {
@@ -632,6 +650,24 @@ export class GlubeanPage {
       emulate: options.emulate,
       storageState: options.storageState,
       screenshots: screenshotsOpt,
+      downloads: {
+        dir: downloadDir,
+        onDownload: (entry, state) => {
+          // Only terminal states are evidence — "inProgress" fires repeatedly
+          // per download and would flood the timeline with no new information.
+          if (state === "inProgress") return;
+          ctx.event({
+            type: "browser:download",
+            data: {
+              guid: entry.guid,
+              url: entry.url,
+              filename: entry.suggestedFilename,
+              path: entry.path,
+              state,
+            },
+          });
+        },
+      },
     });
 
     // Proxy: GlubeanPage methods take priority; everything else falls through
@@ -806,6 +842,137 @@ export class GlubeanPage {
         status: "timeout",
         detail: { error: String(err) },
       });
+      throw err;
+    }
+  }
+
+  // ── Downloads ────────────────────────────────────────────────────────
+
+  /**
+   * Run `action`, wait for it to produce a completed download, and return
+   * the download's metadata. A `browser:download` evidence event is emitted
+   * for every download (`completed` or `canceled`) regardless of whether
+   * `waitForDownload()` is used to capture it — like `waitForPopup()`.
+   *
+   * @example
+   * ```ts
+   * const dl = await page.waitForDownload(() => page.click('[data-testid="download-receipt"]'));
+   * ctx.assert(dl.suggestedFilename.endsWith(".txt"), "expected a .txt receipt");
+   * ```
+   */
+  async waitForDownload(
+    action: () => Promise<void>,
+    options?: { timeout?: number },
+  ): Promise<DownloadEntry> {
+    const timeout = options?.timeout ?? this._actionTimeout;
+    const start = Date.now();
+    if (!this._evidence) {
+      throw new Error("waitForDownload: evidence session not attached");
+    }
+    // Register the wait BEFORE the action so a fast download can't slip past,
+    // and scope it to THIS action: if `action()` throws, abort the wait so it
+    // neither leaks a waiter nor gets satisfied by a later, unrelated download.
+    const ac = new AbortController();
+    const waitPromise = this._evidence.waitForDownload(timeout, ac.signal);
+    try {
+      await action();
+    } catch (err) {
+      ac.abort();
+      await waitPromise.catch(() => {}); // settle the aborted wait; swallow its rejection
+      this._ctx.action({
+        category: "browser:waitForDownload",
+        target: "(download)",
+        duration: Date.now() - start,
+        status: "timeout",
+        detail: { error: String(err) },
+      });
+      throw err;
+    }
+    try {
+      const entry = await waitPromise;
+      this._ctx.action({
+        category: "browser:waitForDownload",
+        target: entry.suggestedFilename,
+        duration: Date.now() - start,
+        status: "ok",
+        detail: { url: entry.url, path: entry.path },
+      });
+      return entry;
+    } catch (err) {
+      this._ctx.action({
+        category: "browser:waitForDownload",
+        target: "(download)",
+        duration: Date.now() - start,
+        status: "timeout",
+        detail: { error: String(err) },
+      });
+      throw err;
+    }
+  }
+
+  // ── iframe ───────────────────────────────────────────────────────────
+
+  /**
+   * Locate an `<iframe>` matching `selector` and return its content frame,
+   * wrapped with the same locator API as `GlubeanPage` (`byTestId`/`byText`/
+   * `byRole`/`byLabel`, `click`/`fill`/`type`/`hover`, `expectVisible`/
+   * `expectText`/`expectHidden`).
+   *
+   * CDP already handles the execution-context switch into the frame (that's
+   * Puppeteer's own `Frame` machinery) — this method is purely the
+   * encapsulation-layer half: locator ergonomics scoped to the frame instead
+   * of the top-level page.
+   *
+   * @example
+   * ```ts
+   * const policy = await page.frame('[data-testid="policy-frame"]');
+   * await policy.expectText("body", "Return Policy");
+   * ```
+   */
+  async frame(
+    selector: string,
+    options?: ActionOptions,
+  ): Promise<GlubeanFrame> {
+    const timeout = options?.timeout ?? this._actionTimeout;
+    const start = Date.now();
+    try {
+      const handle = await this.raw.waitForSelector(selector, { timeout });
+      if (!handle) {
+        throw new Error(`frame("${selector}"): element not found`);
+      }
+      // try/finally so the handle is disposed even if contentFrame() throws.
+      let contentFrame;
+      try {
+        contentFrame = await handle.contentFrame();
+      } finally {
+        await handle.dispose();
+      }
+      if (!contentFrame) {
+        throw new Error(
+          `frame("${selector}"): element matched but is not an <iframe> (no content frame)`,
+        );
+      }
+      this._ctx.action({
+        category: "browser:frame",
+        target: selector,
+        duration: Date.now() - start,
+        status: "ok",
+        detail: { url: contentFrame.url() },
+      });
+      return createFrame(contentFrame, {
+        action: (e) => this._ctx.action(e),
+        captureStep: (label) => this._evidence?.captureShot(label, "step") ?? Promise.resolve(),
+        captureFailure: (label) => this._evidence?.captureShot(label, "failure") ?? Promise.resolve(),
+      }, this._actionTimeout);
+    } catch (err) {
+      this._ctx.action({
+        category: "browser:frame",
+        target: selector,
+        duration: Date.now() - start,
+        status: "timeout",
+        detail: { error: String(err) },
+      });
+      await this._evidence?.captureShot(`frame-${selector}`, "failure");
       throw err;
     }
   }

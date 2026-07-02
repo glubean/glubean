@@ -5,7 +5,17 @@
  * @module locator
  */
 
-import type { ElementHandle, Locator, Page } from "puppeteer-core";
+import type { ElementHandle, Locator } from "puppeteer-core";
+
+/**
+ * Structural subset of `Page` / `Frame` needed to re-query a selector for
+ * `count()` / `nth()`. Both Puppeteer types satisfy this — widened from a
+ * hard `Page` type (BT1-M5) so `createWrappedLocator` also works when called
+ * with a `Frame` (`page.frame()`'s locator scoping), not just a top-level Page.
+ */
+export interface Queryable {
+  $$(selector: string): Promise<ElementHandle[]>;
+}
 
 /** Context required by the WrappedLocator for trace/screenshot injection. */
 export interface LocatorContext {
@@ -96,7 +106,7 @@ const COUNT_NTH_FILTERED_MSG = (method: string): string =>
  * survives (the caller disposes it). Throws with a clear message on timeout.
  */
 export async function resolveNthHandle(
-  page: Page,
+  page: Queryable,
   selector: string,
   index: number,
   timeoutMs: number,
@@ -121,7 +131,7 @@ export async function resolveNthHandle(
 
 /** @internal Build the {@link IndexedLocator} returned by `WrappedLocator.nth()`. */
 function createIndexedLocator(
-  page: Page,
+  page: Queryable,
   ctx: LocatorContext,
   selector: string,
   index: number,
@@ -230,7 +240,7 @@ export function createWrappedLocator(
   inner: Locator<unknown>,
   ctx: LocatorContext,
   selector: string,
-  page: Page,
+  page: Queryable,
   filtered = false,
 ): WrappedLocator {
   const proxy = new Proxy(inner, {

@@ -42,6 +42,36 @@
  * `storageState.localStorage` therefore seeds via Puppeteer's own
  * `page.evaluateOnNewDocument()`, not a raw CDP call on this session.
  *
+ * **Downloads** (`Browser` domain, BT1-M5) — `Browser.setDownloadBehavior`
+ * with `eventsEnabled: true`, called on this same auxiliary session, both
+ * configures the save directory AND (unlike guardrail ③'s Page-domain
+ * finding) reliably delivers `Browser.downloadWillBegin` /
+ * `Browser.downloadProgress` back on THIS session — verified empirically
+ * (spike script) against puppeteer-core ^24; `Browser.*` is genuinely
+ * session-agnostic where `Page.addScriptToEvaluateOnNewDocument` was not.
+ * The deprecated `Page.setDownloadBehavior` / `Page.downloadWillBegin` also
+ * work on the same spike but `Browser.*` is the protocol's forward path, so
+ * that's what's wired here. One caveat verified in the same spike: the file
+ * on disk is saved as `suggestedFilename`, not `guid` (despite some CDP docs
+ * implying the latter) — `DownloadEntry.path` is built from that name, which
+ * is only exact when Chrome didn't have to de-duplicate a collision.
+ * Always wired when a page is created (like dialog/popup) — a download IS
+ * evidence the moment it happens, not an opt-in capability.
+ *
+ * **Guardrail ④ — download events are browser-context-global.** Unlike the
+ * page-scoped `Network`/`Fetch` domains, `Browser.setDownloadBehavior` sets a
+ * single context-wide save path (last caller wins) and its `downloadWillBegin`/
+ * `downloadProgress` events fire on *every* session that turned events on, for
+ * *every* download in the context. So two instrumented pages in one Chrome
+ * would otherwise cross-observe and cross-repoint each other's downloads. Two
+ * mitigations: (a) the page layer uses ONE browser-wide download dir (not
+ * per-test) so the last-wins path is a no-op; (b) this session enables the
+ * `Page` domain, tracks its target's frame ids (`Page.getFrameTree` +
+ * `frameAttached`/`frameDetached`), and only records downloads whose
+ * originating `frameId` it owns — so a page never resolves another page's
+ * download. Both degrade safely: an unreadable frame tree falls back to
+ * accepting all events (single-page runs are unaffected).
+ *
  * @module evidence
  */
 
@@ -215,6 +245,41 @@ export interface StorageState {
   localStorage?: Record<string, string>;
 }
 
+/** Lifecycle state of a browser download (mirrors CDP `Browser.downloadProgress.state`). */
+export type DownloadState = "inProgress" | "completed" | "canceled";
+
+/**
+ * A browser download captured via CDP `Browser.downloadWillBegin` /
+ * `Browser.downloadProgress`.
+ */
+export interface DownloadEntry {
+  /** CDP-assigned globally-unique download id. */
+  guid: string;
+  /** URL the download was initiated from (may be `data:`/`blob:`). */
+  url: string;
+  /** Filename suggested by the server/anchor at download start. */
+  suggestedFilename: string;
+  /**
+   * Best-effort on-disk path: `${dir}/${suggestedFilename}`. Exact only when
+   * Chrome didn't have to de-duplicate a filename collision in `dir` — see
+   * the module doc's Downloads note.
+   */
+  path: string;
+}
+
+/** Options wiring the shared session's download capture. */
+export interface DownloadOptions {
+  /** Directory downloads are saved to. Must already exist — the caller creates it. */
+  dir: string;
+  /**
+   * Called on every state transition (`inProgress` fires once per progress
+   * tick — usually more than once per download; `completed`/`canceled` fire
+   * exactly once). Mainly for evidence emission; {@link EvidenceSession.waitForDownload}
+   * is the ergonomic way to correlate a triggering action with its result.
+   */
+  onDownload?: (entry: DownloadEntry, state: DownloadState) => void;
+}
+
 /** Options for {@link EvidenceSession.attach}. */
 export interface EvidenceSessionOptions {
   /**
@@ -243,6 +308,12 @@ export interface EvidenceSessionOptions {
    * Omit (or set `mode: "off"`) to disable all automatic screenshot capture.
    */
   screenshots?: EvidenceScreenshotOptions;
+  /**
+   * Download capture (`Browser.setDownloadBehavior` + `downloadWillBegin`/
+   * `downloadProgress`). When provided, every download on this page is
+   * allowed (not blocked) and reported via `onDownload` / {@link EvidenceSession.waitForDownload}.
+   */
+  downloads?: DownloadOptions;
 }
 
 /** A single CDP call: `{ method, params }`. Kept pure for testing. */
@@ -428,6 +499,36 @@ export class EvidenceSession {
   private _screenshotSeq = 0;
   private _screenshotLog: ScreenshotEntry[] = [];
 
+  // ── Download state ───────────────────────────────────────────────
+  private _downloadsEnabled = false;
+  private _downloadDir: string | undefined;
+  private _onDownload: DownloadOptions["onDownload"];
+  /**
+   * Frame ids owned by THIS page's target. `Browser.setDownloadBehavior`'s
+   * events are browser-context-global — every session that turned events on
+   * receives every download in the context. We only record downloads whose
+   * originating `frameId` belongs to this page, so two instrumented pages
+   * sharing one Chrome never cross-observe each other's downloads.
+   */
+  private _ownedFrames = new Set<string>();
+  /**
+   * True only once the initial `Page.getFrameTree` seeded {@link _ownedFrames}.
+   * The frame filter engages ONLY when this is set — otherwise we accept all
+   * download events (fallback mode). Without this flag, a later
+   * `Page.frameAttached` would grow `_ownedFrames` from empty to non-empty and
+   * silently flip fallback mode into a PARTIAL filter that drops the page's own
+   * top-frame downloads (codex R2 P2).
+   */
+  private _frameTreeSeeded = false;
+  private _pendingDownloads = new Map<
+    string,
+    { url: string; suggestedFilename: string }
+  >();
+  private _downloadWaiters: Array<{
+    resolve: (entry: DownloadEntry) => void;
+    reject: (err: Error) => void;
+  }> = [];
+
   private constructor(cdp: CDPSession) {
     this._cdp = cdp;
   }
@@ -540,6 +641,11 @@ export class EvidenceSession {
       if (options.storageState) {
         await session._applyStorageState(page, options.storageState);
       }
+
+      // 5. Downloads — see the module doc's Downloads note. Order-independent.
+      if (options.downloads) {
+        await session._enableDownloads(options.downloads);
+      }
     } catch (err) {
       // Roll back any partial wiring so we never leak a half-open session.
       await session.detach();
@@ -632,6 +738,220 @@ export class EvidenceSession {
         }
       }, entries);
     }
+  }
+
+  /**
+   * @internal Wire `Browser.setDownloadBehavior` (`eventsEnabled: true`) plus
+   * the `downloadWillBegin` / `downloadProgress` listeners on this session.
+   * See the module doc's Downloads note for why `Browser.*` (not the
+   * deprecated `Page.*` pair) and why it works on an auxiliary session.
+   *
+   * `Browser.*` download events are browser-context-global, so we also enable
+   * the `Page` domain and track this target's frame ids, then only record
+   * downloads originating from a frame we own — two instrumented pages in one
+   * Chrome must not cross-observe each other's downloads.
+   */
+  private async _enableDownloads(opts: DownloadOptions): Promise<void> {
+    this._downloadsEnabled = true;
+    this._downloadDir = opts.dir;
+    this._onDownload = opts.onDownload;
+
+    // Seed + track the frame ids owned by this page's target so download-event
+    // attribution is page-scoped (Browser.* events are context-global). Page
+    // domain on our auxiliary session is independent of Puppeteer's own session.
+    await this._cdp.send("Page.enable");
+    try {
+      const { frameTree } = (await this._cdp.send("Page.getFrameTree")) as {
+        frameTree: { frame: { id: string }; childFrames?: unknown[] };
+      };
+      const walk = (node: { frame: { id: string }; childFrames?: unknown[] }): void => {
+        this._ownedFrames.add(node.frame.id);
+        for (const child of node.childFrames ?? []) {
+          walk(child as { frame: { id: string }; childFrames?: unknown[] });
+        }
+      };
+      walk(frameTree);
+      this._frameTreeSeeded = true;
+    } catch {
+      // best-effort: if the frame tree can't be read, fall back to accepting
+      // all download events (single-page runs are unaffected; the cross-page
+      // guard just degrades to off rather than erroring).
+    }
+    const onFrameAttached = (e: { frameId: string }): void => {
+      this._ownedFrames.add(e.frameId);
+    };
+    const onFrameDetached = (e: { frameId: string }): void => {
+      this._ownedFrames.delete(e.frameId);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this._cdp.on("Page.frameAttached", onFrameAttached as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this._cdp.on("Page.frameDetached", onFrameDetached as any);
+
+    await this._cdp.send("Browser.setDownloadBehavior", {
+      behavior: "allow",
+      downloadPath: opts.dir,
+      eventsEnabled: true,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    const onWillBegin = (event: {
+      guid: string;
+      url: string;
+      suggestedFilename: string;
+      frameId?: string;
+    }): void => {
+      // Only record downloads from a frame this page owns. The filter engages
+      // ONLY when the initial frame tree seeded successfully (_frameTreeSeeded)
+      // — otherwise we accept all events (fallback), and later frameAttached
+      // ids must NOT flip that into a partial filter (codex R2 P2). An event
+      // with no frameId is also accepted rather than silently dropped.
+      if (
+        this._frameTreeSeeded &&
+        event.frameId !== undefined &&
+        !this._ownedFrames.has(event.frameId)
+      ) {
+        return;
+      }
+      this._pendingDownloads.set(event.guid, {
+        url: event.url,
+        suggestedFilename: event.suggestedFilename,
+      });
+    };
+
+    const onProgress = (event: {
+      guid: string;
+      state: DownloadState;
+    }): void => {
+      // Unknown guid = a download we didn't record in onWillBegin (either it
+      // began before attach, or it belongs to another page — see the frame
+      // filter above). Ignore it.
+      const pending = this._pendingDownloads.get(event.guid);
+      if (!pending) return;
+
+      const entry: DownloadEntry = {
+        guid: event.guid,
+        url: pending.url,
+        suggestedFilename: pending.suggestedFilename,
+        path: `${this._downloadDir}/${pending.suggestedFilename}`,
+      };
+
+      if (event.state === "inProgress") {
+        this._notifyDownload(entry, "inProgress");
+        return;
+      }
+
+      this._pendingDownloads.delete(event.guid);
+      // Emit evidence for EVERY terminal download (best-effort, isolated from
+      // the waiter state machine — a throwing callback must not wedge it).
+      this._notifyDownload(entry, event.state);
+
+      // Hand the terminal result to the next waiter (FIFO). A terminal
+      // download with no waiter is untargeted — its evidence is already
+      // emitted, so we simply drop it (never buffer it to satisfy a LATER,
+      // unrelated waitForDownload — that would silently mis-scope the wait).
+      const waiter = this._downloadWaiters.shift();
+      if (!waiter) return;
+      if (event.state === "completed") {
+        waiter.resolve(entry);
+      } else {
+        waiter.reject(
+          new Error(
+            `waitForDownload: download "${entry.suggestedFilename}" (${entry.guid}) was canceled`,
+          ),
+        );
+      }
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this._cdp.on("Browser.downloadWillBegin", onWillBegin as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this._cdp.on("Browser.downloadProgress", onProgress as any);
+    this._cleanups.push(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this._cdp.off("Browser.downloadWillBegin", onWillBegin as any);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this._cdp.off("Browser.downloadProgress", onProgress as any);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this._cdp.off("Page.frameAttached", onFrameAttached as any);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this._cdp.off("Page.frameDetached", onFrameDetached as any);
+      // Mark disabled + reject any still-pending waiters so nothing hangs
+      // until its own timeout past detach, and a post-detach call fails fast.
+      this._downloadsEnabled = false;
+      this._frameTreeSeeded = false;
+      this._pendingDownloads.clear();
+      this._ownedFrames.clear();
+      const waiting = this._downloadWaiters.splice(0, this._downloadWaiters.length);
+      for (const w of waiting) {
+        w.reject(new Error("waitForDownload: evidence session detached while waiting"));
+      }
+    });
+  }
+
+  /** @internal Best-effort onDownload callback — never let it wedge the waiter machine. */
+  private _notifyDownload(entry: DownloadEntry, state: DownloadState): void {
+    try {
+      this._onDownload?.(entry, state);
+    } catch {
+      // best-effort — a throwing evidence callback must not break download waits
+    }
+  }
+
+  /**
+   * Wait for the NEXT download (one that completes after this call) to finish,
+   * and resolve with its metadata. Register the wait *before* triggering the
+   * action that starts the download — `GlubeanPage.waitForDownload(action)` in
+   * `page.ts` does exactly this and is the ergonomic wrapper most callers
+   * should use instead of this lower-level method.
+   *
+   * Rejects if the next download is canceled, after `timeoutMs`, if `signal`
+   * aborts (e.g. the triggering action threw), or if the session has detached.
+   * Does **not** resolve from downloads that already completed before the call —
+   * each wait is scoped to a fresh, future download.
+   */
+  waitForDownload(timeoutMs: number, signal?: AbortSignal): Promise<DownloadEntry> {
+    if (!this._downloadsEnabled) {
+      return Promise.reject(
+        new Error("waitForDownload: downloads are not enabled on this page"),
+      );
+    }
+    if (signal?.aborted) {
+      return Promise.reject(new Error("waitForDownload: aborted before it started"));
+    }
+    return new Promise<DownloadEntry>((resolve, reject) => {
+      // Single teardown for EVERY exit path (timeout, abort, resolve, reject)
+      // so the timer, the waiter registration, and the abort listener are all
+      // always released — no listener leak on the timeout path (codex R2 P3).
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        const idx = this._downloadWaiters.indexOf(waiter);
+        if (idx >= 0) this._downloadWaiters.splice(idx, 1);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(`waitForDownload: no download completed after ${timeoutMs}ms`),
+        );
+      }, timeoutMs);
+      const onAbort = (): void => {
+        cleanup();
+        reject(new Error("waitForDownload: aborted (triggering action failed)"));
+      };
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      const waiter = {
+        resolve: (entry: DownloadEntry) => {
+          cleanup();
+          resolve(entry);
+        },
+        reject: (err: Error) => {
+          cleanup();
+          reject(err);
+        },
+      };
+      this._downloadWaiters.push(waiter);
+    });
   }
 
   /**
