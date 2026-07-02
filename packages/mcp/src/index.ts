@@ -381,7 +381,7 @@ export class SensitiveActiveEnvError extends Error {
  * Throws `SensitiveActiveEnvError` instead of silently resolving a prod-like
  * active-env (GLU-88) — explicit `envFile` always bypasses this check.
  */
-async function resolveEnvPath(projectRoot: string, envFile?: string): Promise<string> {
+export async function resolveEnvPath(projectRoot: string, envFile?: string): Promise<string> {
   if (envFile) return resolve(envFile);
   const activeEnv = await readActiveEnv(projectRoot);
   if (activeEnv) {

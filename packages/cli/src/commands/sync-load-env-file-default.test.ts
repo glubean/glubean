@@ -51,6 +51,27 @@ describe("glubean sync — refuses a 'prod' active-env instead of silently uploa
     expect(out).toContain("looks like a production environment");
     expect(out).not.toContain("Loaded");
   }, 30_000);
+
+  test("explicit --env-file .env.prod bypasses the guard even with active-env=prod (does NOT fail on the sensitive-env check)", async () => {
+    // Guards the codex-flagged regression risk: a future refactor calling
+    // resolveEnvFileName() BEFORE honoring --env-file would re-block this.
+    // sync will still fail later (no real token/project), but it must get
+    // PAST the sensitive-env gate — so the specific message must be absent.
+    const { stdout, stderr } = await runCli(
+      ["sync", "--env-file", ".env.prod"],
+      { cwd: dir },
+    );
+    const out = stripAnsi(stdout + stderr);
+    expect(out).not.toContain("looks like a production environment");
+  }, 30_000);
+
+  test("ordinary active-env (staging) is honored — sync does NOT trip the sensitive-env gate (backward compat)", async () => {
+    await writeFile(join(dir, ".glubean", "active-env"), "staging\n");
+    await writeFile(join(dir, ".env.staging"), "ENV_MARKER=dotenv_staging\n");
+    const { stdout, stderr } = await runCli(["sync"], { cwd: dir });
+    const out = stripAnsi(stdout + stderr);
+    expect(out).not.toContain("looks like a production environment");
+  }, 30_000);
 });
 
 describe("glubean load — refuses a 'prod' active-env instead of silently running against it", () => {
@@ -66,5 +87,25 @@ describe("glubean load — refuses a 'prod' active-env instead of silently runni
     expect(code).not.toBe(0);
     expect(out).toContain("looks like a production environment");
     expect(out).not.toContain("Loaded");
+  }, 30_000);
+
+  test("explicit --env-file .env.prod bypasses the guard even with active-env=prod", async () => {
+    await writeFile(join(dir, "smoke.load.ts"), "// placeholder — never imported, guard checked first\n");
+    const { stdout, stderr } = await runCli(
+      ["load", "--env-file", ".env.prod"],
+      { cwd: dir },
+    );
+    const out = stripAnsi(stdout + stderr);
+    // Gets past the sensitive-env gate (may fail later on plan execution).
+    expect(out).not.toContain("looks like a production environment");
+  }, 30_000);
+
+  test("ordinary active-env (staging) is honored — load does NOT trip the sensitive-env gate (backward compat)", async () => {
+    await writeFile(join(dir, "smoke.load.ts"), "// placeholder\n");
+    await writeFile(join(dir, ".glubean", "active-env"), "staging\n");
+    await writeFile(join(dir, ".env.staging"), "ENV_MARKER=dotenv_staging\n");
+    const { stdout, stderr } = await runCli(["load"], { cwd: dir });
+    const out = stripAnsi(stdout + stderr);
+    expect(out).not.toContain("looks like a production environment");
   }, 30_000);
 });

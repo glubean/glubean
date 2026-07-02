@@ -9,7 +9,9 @@ import {
   diagnoseProjectConfig,
   discoverTestsFromFile,
   filterLocalDebugEvents,
+  resolveEnvPath,
   runLocalTestsFromFile,
+  SensitiveActiveEnvError,
   type LocalRunSnapshot,
   MCP_TOOL_NAMES,
   toLocalDebugEvents,
@@ -977,3 +979,57 @@ test("contractsToOpenApi: request body emits schema + example(s) (P1 regression)
 
 
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GLU-88 — MCP env-path resolution mirrors the CLI's active-env guard.
+// resolveEnvPath is the single funnel every MCP env consumer goes through
+// (diagnose_config, run_local_file, open_upload_run). These lock the same
+// "refuse a prod-like active-env, but honor explicit envFile + ordinary
+// active-env" contract the CLI has, so the intentionally-duplicated guard
+// can't silently drift.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("resolveEnvPath: no active-env resolves to .env (even with .env.prod on disk)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-env-guard-"));
+  try {
+    await writeFile(join(dir, ".env"), "X=1\n");
+    await writeFile(join(dir, ".env.prod"), "X=2\n");
+    expect(await resolveEnvPath(dir)).toBe(resolve(dir, ".env"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveEnvPath: ordinary active-env (staging) resolves .env.staging (backward compat)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-env-guard-"));
+  try {
+    await mkdir(join(dir, ".glubean"), { recursive: true });
+    await writeFile(join(dir, ".glubean", "active-env"), "staging\n");
+    expect(await resolveEnvPath(dir)).toBe(resolve(dir, ".env.staging"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveEnvPath: active-env=prod throws SensitiveActiveEnvError instead of resolving .env.prod", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-env-guard-"));
+  try {
+    await mkdir(join(dir, ".glubean"), { recursive: true });
+    await writeFile(join(dir, ".glubean", "active-env"), "  PROD \n");
+    await expect(resolveEnvPath(dir)).rejects.toBeInstanceOf(SensitiveActiveEnvError);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveEnvPath: explicit envFile bypasses the guard even when active-env=prod", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-env-guard-"));
+  try {
+    await mkdir(join(dir, ".glubean"), { recursive: true });
+    await writeFile(join(dir, ".glubean", "active-env"), "prod\n");
+    // Explicit envFile is resolved as-is, never consulting active-env.
+    expect(await resolveEnvPath(dir, resolve(dir, ".env.prod"))).toBe(resolve(dir, ".env.prod"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
