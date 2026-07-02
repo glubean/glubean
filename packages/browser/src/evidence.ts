@@ -511,6 +511,15 @@ export class EvidenceSession {
    * sharing one Chrome never cross-observe each other's downloads.
    */
   private _ownedFrames = new Set<string>();
+  /**
+   * True only once the initial `Page.getFrameTree` seeded {@link _ownedFrames}.
+   * The frame filter engages ONLY when this is set — otherwise we accept all
+   * download events (fallback mode). Without this flag, a later
+   * `Page.frameAttached` would grow `_ownedFrames` from empty to non-empty and
+   * silently flip fallback mode into a PARTIAL filter that drops the page's own
+   * top-frame downloads (codex R2 P2).
+   */
+  private _frameTreeSeeded = false;
   private _pendingDownloads = new Map<
     string,
     { url: string; suggestedFilename: string }
@@ -762,6 +771,7 @@ export class EvidenceSession {
         }
       };
       walk(frameTree);
+      this._frameTreeSeeded = true;
     } catch {
       // best-effort: if the frame tree can't be read, fall back to accepting
       // all download events (single-page runs are unaffected; the cross-page
@@ -791,12 +801,13 @@ export class EvidenceSession {
       suggestedFilename: string;
       frameId?: string;
     }): void => {
-      // Only record downloads from a frame this page owns. When we couldn't
-      // read the frame tree (_ownedFrames empty) OR the event carries no
-      // frameId, accept it — degrade to the pre-filter behavior rather than
-      // silently drop a real download.
+      // Only record downloads from a frame this page owns. The filter engages
+      // ONLY when the initial frame tree seeded successfully (_frameTreeSeeded)
+      // — otherwise we accept all events (fallback), and later frameAttached
+      // ids must NOT flip that into a partial filter (codex R2 P2). An event
+      // with no frameId is also accepted rather than silently dropped.
       if (
-        this._ownedFrames.size > 0 &&
+        this._frameTreeSeeded &&
         event.frameId !== undefined &&
         !this._ownedFrames.has(event.frameId)
       ) {
@@ -868,6 +879,7 @@ export class EvidenceSession {
       // Mark disabled + reject any still-pending waiters so nothing hangs
       // until its own timeout past detach, and a post-detach call fails fast.
       this._downloadsEnabled = false;
+      this._frameTreeSeeded = false;
       this._pendingDownloads.clear();
       this._ownedFrames.clear();
       const waiting = this._downloadWaiters.splice(0, this._downloadWaiters.length);
@@ -908,31 +920,33 @@ export class EvidenceSession {
       return Promise.reject(new Error("waitForDownload: aborted before it started"));
     }
     return new Promise<DownloadEntry>((resolve, reject) => {
-      const remove = (): void => {
+      // Single teardown for EVERY exit path (timeout, abort, resolve, reject)
+      // so the timer, the waiter registration, and the abort listener are all
+      // always released — no listener leak on the timeout path (codex R2 P3).
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         const idx = this._downloadWaiters.indexOf(waiter);
         if (idx >= 0) this._downloadWaiters.splice(idx, 1);
       };
       const timer = setTimeout(() => {
-        remove();
+        cleanup();
         reject(
           new Error(`waitForDownload: no download completed after ${timeoutMs}ms`),
         );
       }, timeoutMs);
       const onAbort = (): void => {
-        remove();
-        clearTimeout(timer);
+        cleanup();
         reject(new Error("waitForDownload: aborted (triggering action failed)"));
       };
       if (signal) signal.addEventListener("abort", onAbort, { once: true });
       const waiter = {
         resolve: (entry: DownloadEntry) => {
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", onAbort);
+          cleanup();
           resolve(entry);
         },
         reject: (err: Error) => {
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", onAbort);
+          cleanup();
           reject(err);
         },
       };

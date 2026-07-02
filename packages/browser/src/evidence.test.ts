@@ -1023,6 +1023,26 @@ test("downloads: cross-page events are filtered by owned frameId (no cross-obser
   await session.detach();
 });
 
+test("downloads: fallback mode (unreadable frame tree) stays OFF even after frameAttached — accepts a foreign-frameId download", async () => {
+  const page = new FakePage();
+  // Default FakeCDPSession returns {} for Page.getFrameTree → seeding throws →
+  // _frameTreeSeeded stays false → filter never engages (fallback: accept all).
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+  // A later iframe attaches (grows _ownedFrames from empty to non-empty). This
+  // must NOT flip fallback into a partial filter (codex R2 P2).
+  page.cdp.emit("Page.frameAttached", { frameId: "F_LATE" });
+  const pending = session.waitForDownload(5_000);
+  // A download from a DIFFERENT frame than the attached one — still accepted.
+  page.cdp.emit("Browser.downloadWillBegin", {
+    guid: "g1", url: "https://x/a.pdf", suggestedFilename: "a.pdf", frameId: "F_SOMETHING_ELSE",
+  });
+  page.cdp.emit("Browser.downloadProgress", { guid: "g1", state: "completed" });
+  await expect(pending).resolves.toMatchObject({ guid: "g1" });
+  await session.detach();
+});
+
 test("downloads: dynamically-attached frame (iframe) is added to the owned set", async () => {
   const page = new FakePage();
   page.cdp.sendImpl = (method) => {
