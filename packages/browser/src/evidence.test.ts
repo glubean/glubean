@@ -803,3 +803,149 @@ test("captureStorageState: round-trips into a subsequent attach()'s storageState
   expect(page2.newDocumentScripts[0].args).toEqual([{ token: "xyz" }]);
   await session2.detach();
 });
+
+// ── EvidenceSession: downloads (BT1-M5) ────────────────────────────────
+
+/** Simulate a full download lifecycle on `page.cdp`: willBegin, N inProgress ticks, then a terminal state. */
+function emitDownload(
+  page: FakePage,
+  guid: string,
+  url: string,
+  suggestedFilename: string,
+  terminal: "completed" | "canceled" = "completed",
+): void {
+  page.cdp.emit("Browser.downloadWillBegin", { guid, url, suggestedFilename });
+  page.cdp.emit("Browser.downloadProgress", { guid, state: "inProgress" });
+  page.cdp.emit("Browser.downloadProgress", { guid, state: terminal });
+}
+
+test("attach: downloads wires Browser.setDownloadBehavior with eventsEnabled", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+  const call = page.cdp.sent.find((s) => s.method === "Browser.setDownloadBehavior");
+  expect(call?.params).toEqual({
+    behavior: "allow",
+    downloadPath: "/tmp/dl",
+    eventsEnabled: true,
+  });
+  await session.detach();
+});
+
+test("attach: no downloads option → Browser.setDownloadBehavior not sent", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {});
+  expect(page.cdp.methods()).not.toContain("Browser.setDownloadBehavior");
+  await session.detach();
+});
+
+test("downloads: onDownload fires inProgress then completed with correct entry shape", async () => {
+  const page = new FakePage();
+  const seen: Array<[string, string]> = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: {
+      dir: "/tmp/dl",
+      onDownload: (entry, state) => seen.push([state, entry.path]),
+    },
+  });
+
+  emitDownload(page, "g1", "https://x/receipt.txt", "receipt.txt");
+
+  expect(seen).toEqual([
+    ["inProgress", "/tmp/dl/receipt.txt"],
+    ["completed", "/tmp/dl/receipt.txt"],
+  ]);
+  await session.detach();
+});
+
+test("downloads: waitForDownload resolves a download that completes AFTER the call (race-safe)", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+
+  const pending = session.waitForDownload(5_000);
+  emitDownload(page, "g1", "https://x/a.pdf", "a.pdf");
+
+  const entry = await pending;
+  expect(entry).toEqual({
+    guid: "g1",
+    url: "https://x/a.pdf",
+    suggestedFilename: "a.pdf",
+    path: "/tmp/dl/a.pdf",
+  });
+  await session.detach();
+});
+
+test("downloads: waitForDownload resolves immediately from a download that completed BEFORE the call (queued)", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+
+  emitDownload(page, "g1", "https://x/a.pdf", "a.pdf");
+  // No waiter was registered yet — the completed entry must be queued.
+  const entry = await session.waitForDownload(5_000);
+  expect(entry.suggestedFilename).toBe("a.pdf");
+  await session.detach();
+});
+
+test("downloads: waitForDownload rejects with a clear error when the download is canceled", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+
+  const pending = session.waitForDownload(5_000);
+  emitDownload(page, "g1", "https://x/a.pdf", "a.pdf", "canceled");
+
+  await expect(pending).rejects.toThrow(/canceled/);
+  await session.detach();
+});
+
+test("downloads: waitForDownload times out with a clear error when nothing downloads", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+
+  await expect(session.waitForDownload(10)).rejects.toThrow(/no download completed after 10ms/);
+  await session.detach();
+});
+
+test("downloads: waitForDownload rejects immediately when downloads are not enabled", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {});
+  await expect(session.waitForDownload(1_000)).rejects.toThrow(/not enabled/);
+  await session.detach();
+});
+
+test("downloads: detach() rejects a still-pending waiter instead of leaving it hanging", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+
+  const pending = session.waitForDownload(60_000);
+  await session.detach();
+
+  await expect(pending).rejects.toThrow(/detached/);
+});
+
+test("downloads: two concurrent downloads resolve to two separate waitForDownload calls, FIFO", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+
+  const first = session.waitForDownload(5_000);
+  const second = session.waitForDownload(5_000);
+
+  emitDownload(page, "g1", "https://x/1.pdf", "1.pdf");
+  emitDownload(page, "g2", "https://x/2.pdf", "2.pdf");
+
+  await expect(first).resolves.toMatchObject({ guid: "g1" });
+  await expect(second).resolves.toMatchObject({ guid: "g2" });
+  await session.detach();
+});

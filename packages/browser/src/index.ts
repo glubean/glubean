@@ -53,6 +53,9 @@ export type {
   ResponseChecks,
 } from "./page.js";
 export type {
+  DownloadEntry,
+  DownloadOptions,
+  DownloadState,
   EmulationOptions,
   EvidenceScreenshotOptions,
   GeolocationOverride,
@@ -64,4 +67,6 @@ export type {
   StorageState,
   ViewportOverride,
 } from "./evidence.js";
-export type { IndexedLocator, WrappedLocator } from "./locator.js";
+export type { IndexedLocator, Queryable, WrappedLocator } from "./locator.js";
+export { GlubeanFrame } from "./frame.js";
+export type { FrameActionOptions } from "./frame.js";

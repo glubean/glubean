@@ -42,6 +42,22 @@
  * `storageState.localStorage` therefore seeds via Puppeteer's own
  * `page.evaluateOnNewDocument()`, not a raw CDP call on this session.
  *
+ * **Downloads** (`Browser` domain, BT1-M5) — `Browser.setDownloadBehavior`
+ * with `eventsEnabled: true`, called on this same auxiliary session, both
+ * configures the save directory AND (unlike guardrail ③'s Page-domain
+ * finding) reliably delivers `Browser.downloadWillBegin` /
+ * `Browser.downloadProgress` back on THIS session — verified empirically
+ * (spike script) against puppeteer-core ^24; `Browser.*` is genuinely
+ * session-agnostic where `Page.addScriptToEvaluateOnNewDocument` was not.
+ * The deprecated `Page.setDownloadBehavior` / `Page.downloadWillBegin` also
+ * work on the same spike but `Browser.*` is the protocol's forward path, so
+ * that's what's wired here. One caveat verified in the same spike: the file
+ * on disk is saved as `suggestedFilename`, not `guid` (despite some CDP docs
+ * implying the latter) — `DownloadEntry.path` is built from that name, which
+ * is only exact when Chrome didn't have to de-duplicate a collision.
+ * Always wired when a page is created (like dialog/popup) — a download IS
+ * evidence the moment it happens, not an opt-in capability.
+ *
  * @module evidence
  */
 
@@ -215,6 +231,41 @@ export interface StorageState {
   localStorage?: Record<string, string>;
 }
 
+/** Lifecycle state of a browser download (mirrors CDP `Browser.downloadProgress.state`). */
+export type DownloadState = "inProgress" | "completed" | "canceled";
+
+/**
+ * A browser download captured via CDP `Browser.downloadWillBegin` /
+ * `Browser.downloadProgress`.
+ */
+export interface DownloadEntry {
+  /** CDP-assigned globally-unique download id. */
+  guid: string;
+  /** URL the download was initiated from (may be `data:`/`blob:`). */
+  url: string;
+  /** Filename suggested by the server/anchor at download start. */
+  suggestedFilename: string;
+  /**
+   * Best-effort on-disk path: `${dir}/${suggestedFilename}`. Exact only when
+   * Chrome didn't have to de-duplicate a filename collision in `dir` — see
+   * the module doc's Downloads note.
+   */
+  path: string;
+}
+
+/** Options wiring the shared session's download capture. */
+export interface DownloadOptions {
+  /** Directory downloads are saved to. Must already exist — the caller creates it. */
+  dir: string;
+  /**
+   * Called on every state transition (`inProgress` fires once per progress
+   * tick — usually more than once per download; `completed`/`canceled` fire
+   * exactly once). Mainly for evidence emission; {@link EvidenceSession.waitForDownload}
+   * is the ergonomic way to correlate a triggering action with its result.
+   */
+  onDownload?: (entry: DownloadEntry, state: DownloadState) => void;
+}
+
 /** Options for {@link EvidenceSession.attach}. */
 export interface EvidenceSessionOptions {
   /**
@@ -243,6 +294,12 @@ export interface EvidenceSessionOptions {
    * Omit (or set `mode: "off"`) to disable all automatic screenshot capture.
    */
   screenshots?: EvidenceScreenshotOptions;
+  /**
+   * Download capture (`Browser.setDownloadBehavior` + `downloadWillBegin`/
+   * `downloadProgress`). When provided, every download on this page is
+   * allowed (not blocked) and reported via `onDownload` / {@link EvidenceSession.waitForDownload}.
+   */
+  downloads?: DownloadOptions;
 }
 
 /** A single CDP call: `{ method, params }`. Kept pure for testing. */
@@ -428,6 +485,19 @@ export class EvidenceSession {
   private _screenshotSeq = 0;
   private _screenshotLog: ScreenshotEntry[] = [];
 
+  // ── Download state ───────────────────────────────────────────────
+  private _downloadDir: string | undefined;
+  private _onDownload: DownloadOptions["onDownload"];
+  private _pendingDownloads = new Map<
+    string,
+    { url: string; suggestedFilename: string }
+  >();
+  private _completedDownloads: DownloadEntry[] = [];
+  private _downloadWaiters: Array<{
+    resolve: (entry: DownloadEntry) => void;
+    reject: (err: Error) => void;
+  }> = [];
+
   private constructor(cdp: CDPSession) {
     this._cdp = cdp;
   }
@@ -540,6 +610,11 @@ export class EvidenceSession {
       if (options.storageState) {
         await session._applyStorageState(page, options.storageState);
       }
+
+      // 5. Downloads — see the module doc's Downloads note. Order-independent.
+      if (options.downloads) {
+        await session._enableDownloads(options.downloads);
+      }
     } catch (err) {
       // Roll back any partial wiring so we never leak a half-open session.
       await session.detach();
@@ -632,6 +707,130 @@ export class EvidenceSession {
         }
       }, entries);
     }
+  }
+
+  /**
+   * @internal Wire `Browser.setDownloadBehavior` (`eventsEnabled: true`) plus
+   * the `downloadWillBegin` / `downloadProgress` listeners on this session.
+   * See the module doc's Downloads note for why `Browser.*` (not the
+   * deprecated `Page.*` pair) and why it works on an auxiliary session.
+   */
+  private async _enableDownloads(opts: DownloadOptions): Promise<void> {
+    this._downloadDir = opts.dir;
+    this._onDownload = opts.onDownload;
+
+    await this._cdp.send("Browser.setDownloadBehavior", {
+      behavior: "allow",
+      downloadPath: opts.dir,
+      eventsEnabled: true,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    const onWillBegin = (event: {
+      guid: string;
+      url: string;
+      suggestedFilename: string;
+    }): void => {
+      this._pendingDownloads.set(event.guid, {
+        url: event.url,
+        suggestedFilename: event.suggestedFilename,
+      });
+    };
+
+    const onProgress = (event: {
+      guid: string;
+      state: DownloadState;
+    }): void => {
+      const pending = this._pendingDownloads.get(event.guid);
+      // downloadWillBegin always precedes downloadProgress for a given guid —
+      // an unknown guid here would mean the events arrived out of order.
+      if (!pending) return;
+
+      const entry: DownloadEntry = {
+        guid: event.guid,
+        url: pending.url,
+        suggestedFilename: pending.suggestedFilename,
+        path: `${this._downloadDir}/${pending.suggestedFilename}`,
+      };
+
+      if (event.state === "inProgress") {
+        this._onDownload?.(entry, "inProgress");
+        return;
+      }
+
+      this._pendingDownloads.delete(event.guid);
+      this._onDownload?.(entry, event.state);
+
+      const waiter = this._downloadWaiters.shift();
+      if (event.state === "completed") {
+        if (waiter) waiter.resolve(entry);
+        else this._completedDownloads.push(entry);
+      } else {
+        // canceled — fail the waiter now instead of letting it silently
+        // time out with no explanation.
+        waiter?.reject(
+          new Error(
+            `waitForDownload: download "${entry.suggestedFilename}" (${entry.guid}) was canceled`,
+          ),
+        );
+      }
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this._cdp.on("Browser.downloadWillBegin", onWillBegin as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this._cdp.on("Browser.downloadProgress", onProgress as any);
+    this._cleanups.push(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this._cdp.off("Browser.downloadWillBegin", onWillBegin as any);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this._cdp.off("Browser.downloadProgress", onProgress as any);
+      // Never leave a waiter hanging until its own timeout past detach.
+      const pending = this._downloadWaiters.splice(0, this._downloadWaiters.length);
+      for (const w of pending) {
+        w.reject(new Error("waitForDownload: evidence session detached while waiting"));
+      }
+    });
+  }
+
+  /**
+   * Wait for the next download to complete. If one already completed since
+   * {@link attach} (e.g. it raced ahead of the caller registering the wait),
+   * resolves immediately with that queued entry instead of waiting for a new
+   * one. Rejects if the next download is canceled, or after `timeoutMs`.
+   *
+   * Pair with an action that triggers the download — see `GlubeanPage.waitForDownload()`
+   * in `page.ts` for the ergonomic wrapper most callers should use instead of
+   * this lower-level method directly.
+   */
+  waitForDownload(timeoutMs: number): Promise<DownloadEntry> {
+    const queued = this._completedDownloads.shift();
+    if (queued) return Promise.resolve(queued);
+    if (this._downloadDir === undefined) {
+      return Promise.reject(
+        new Error("waitForDownload: downloads are not enabled on this page"),
+      );
+    }
+    return new Promise<DownloadEntry>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this._downloadWaiters.indexOf(waiter);
+        if (idx >= 0) this._downloadWaiters.splice(idx, 1);
+        reject(
+          new Error(`waitForDownload: no download completed after ${timeoutMs}ms`),
+        );
+      }, timeoutMs);
+      const waiter = {
+        resolve: (entry: DownloadEntry) => {
+          clearTimeout(timer);
+          resolve(entry);
+        },
+        reject: (err: Error) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      };
+      this._downloadWaiters.push(waiter);
+    });
   }
 
   /**
