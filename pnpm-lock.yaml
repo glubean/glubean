@@ -152,6 +152,9 @@ importers:
 
   packages/mcp:
     dependencies:
+      '@glubean/redaction':
+        specifier: workspace:*
+        version: link:../redaction
       '@glubean/runner':
         specifier: workspace:*
         version: link:../runner

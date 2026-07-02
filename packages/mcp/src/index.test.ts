@@ -39,6 +39,8 @@ test("mcp tool name registry includes all tools", () => {
 test("toLocalDebugEvents flattens local run results", () => {
   const snapshot: LocalRunSnapshot = {
     createdAt: "2026-02-19T00:00:00.000Z",
+    startedAt: "2026-02-19T00:00:00.000Z",
+    clientRunId: "test-client-run-id",
     fileUrl: "file:///tmp/sample.test.ts",
     projectRoot: "/tmp/project",
     summary: { total: 1, passed: 1, failed: 0 },
@@ -89,6 +91,8 @@ test("filterLocalDebugEvents applies type/testId/limit", () => {
 test("buildLastRunSummary computes event counters", () => {
   const snapshot: LocalRunSnapshot = {
     createdAt: "2026-02-19T00:00:00.000Z",
+    startedAt: "2026-02-19T00:00:00.000Z",
+    clientRunId: "test-client-run-id",
     fileUrl: "file:///tmp/sample.test.ts",
     projectRoot: "/tmp/project",
     summary: { total: 2, passed: 1, failed: 1 },
