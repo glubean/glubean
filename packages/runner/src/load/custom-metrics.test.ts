@@ -156,11 +156,12 @@ describe("customMetric thresholds (A2)", () => {
     expect(pass).toBe(true);
   });
 
-  it("skips a key that is N/A to the metric's kind (sum on a rate)", () => {
-    const { thresholds: rows } = evaluateThresholds(pollOk, {
+  it("skips a key that is N/A to the metric's kind (sum on a rate) — with an advisory", () => {
+    const { thresholds: rows, advisories } = evaluateThresholds(pollOk, {
       customMetric: { pollOk: { sum: ">10" } },
     });
     expect(rows).toHaveLength(0);
+    expect(advisories.some((a) => a.includes('"pollOk".sum') && a.includes('"rate"'))).toBe(true);
   });
 
   it("gates a metric whose ID itself contains a colon (exact id wins over tag-split)", () => {
@@ -326,5 +327,34 @@ describe("validateLoadMetricsConfig", () => {
     const errs = validateLoadMetricsConfig(undefined, { pollOk: {} });
     expect(errs).toHaveLength(1);
     expect(errs[0]).toContain("not declared");
+  });
+
+  it("rejects gate keys that are N/A to the declared kind (and typo'd keys)", () => {
+    const errs = validateLoadMetricsConfig(
+      { pollOk: { kind: "rate" }, retries: { kind: "counter" }, e2e: { kind: "trend" } },
+      {
+        pollOk: { sum: ">10" }, // sum on a rate
+        retries: { p95: "<800ms" }, // percentile on a counter
+        e2e: { p85: "<800ms" }, // typo'd key
+        "pollOk:class=extreme": { rate: ">90%" }, // valid per-series gate — no error
+      },
+    );
+    expect(errs.some((e) => e.includes('"pollOk"].sum') && e.includes('"rate"'))).toBe(true);
+    expect(errs.some((e) => e.includes('"retries"].p95') && e.includes('"counter"'))).toBe(true);
+    expect(errs.some((e) => e.includes('"e2e"].p85'))).toBe(true);
+    expect(errs).toHaveLength(3);
+  });
+
+  it("accepts every kind-compatible key", () => {
+    expect(
+      validateLoadMetricsConfig(
+        { pollOk: { kind: "rate" }, retries: { kind: "counter" }, e2e: { kind: "trend", unit: "ms" } },
+        {
+          pollOk: { rate: ">99%", count: ">10" },
+          retries: { sum: "<100", count: "<50" },
+          e2e: { count: ">0", p50: "<100", p90: "<400", p95: "<800ms", p99: "<2s" },
+        },
+      ),
+    ).toEqual([]);
   });
 });

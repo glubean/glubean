@@ -247,6 +247,14 @@ function resolveCustomTarget(
 /** The declared custom-metric kinds (mirrors `LoadMetricKind` for runtime checks). */
 const METRIC_KINDS = ["rate", "trend", "counter"] as const;
 
+/** Gate keys applicable to each kind (`count` is folded for every kind). A key
+ *  outside its kind's set would evaluate to `undefined` and skip silently. */
+const KIND_GATE_KEYS: Record<(typeof METRIC_KINDS)[number], readonly CustomMetricKey[]> = {
+  rate: ["rate", "count"],
+  counter: ["sum", "count"],
+  trend: ["count", "p50", "p90", "p95", "p99"],
+};
+
 /**
  * Fail-fast validation for `loadRunner({ metrics, thresholds.customMetric })`, run
  * BEFORE any iteration (untyped JS config bypasses the compile-time types):
@@ -254,12 +262,14 @@ const METRIC_KINDS = ["rate", "trend", "counter"] as const;
  *    emit schema-invalid custom-metric artifact rows instead of failing config;
  *  - every `thresholds.customMetric` gate must target a DECLARED metric with a
  *    well-formed tag selector — a typo'd target would otherwise never match a
- *    folded series, silently skip, and leave CI green.
+ *    folded series, silently skip, and leave CI green;
+ *  - every gate key must be applicable to the target's declared kind (`sum` on a
+ *    `rate`, or a typo'd key, would otherwise evaluate nothing and skip silently).
  * Returns error strings (empty = valid); the caller owns the throw + prefix.
  */
 export function validateLoadMetricsConfig(
   metrics: Record<string, { kind: string; unit?: unknown } | undefined> | undefined,
-  customMetricThresholds: Record<string, unknown> | undefined,
+  customMetricThresholds: Record<string, object | undefined> | undefined,
 ): string[] {
   const errors: string[] = [];
   for (const [id, d] of Object.entries(metrics ?? {})) {
@@ -272,16 +282,30 @@ export function validateLoadMetricsConfig(
       errors.push(`metrics.${id}: unit must be a string`);
     }
   }
-  for (const targetKey of Object.keys(customMetricThresholds ?? {})) {
+  for (const [targetKey, cfg] of Object.entries(customMetricThresholds ?? {})) {
     const m = matchMetricId(Object.keys(metrics ?? {}), targetKey);
     if (!m) {
       errors.push(
         `thresholds.customMetric["${targetKey}"]: gates a metric that is not declared in \`metrics\``,
       );
-    } else if (m.suffix !== undefined && parseTagSuffix(m.suffix) === undefined) {
+      continue;
+    }
+    if (m.suffix !== undefined && parseTagSuffix(m.suffix) === undefined) {
       errors.push(
         `thresholds.customMetric["${targetKey}"]: malformed tag selector "${m.suffix}" — expected \`${m.id}:tagKey=tagVal\``,
       );
+    }
+    // Gate keys must fit the declared kind (skip when the declaration itself is
+    // invalid — that already errored above).
+    const kind = metrics?.[m.id]?.kind as (typeof METRIC_KINDS)[number] | undefined;
+    const validKeys = kind !== undefined ? KIND_GATE_KEYS[kind] : undefined;
+    if (validKeys === undefined) continue;
+    for (const key of Object.keys(cfg ?? {})) {
+      if (!(validKeys as readonly string[]).includes(key)) {
+        errors.push(
+          `thresholds.customMetric["${targetKey}"].${key}: not applicable to a "${kind}" metric — valid keys: ${validKeys.join(" / ")}`,
+        );
+      }
     }
   }
   return errors;
@@ -447,7 +471,14 @@ export function evaluateThresholds(
         const expr = cfg[key];
         if (expr === undefined) continue;
         const actual = customActualFor(key, series);
-        if (actual === undefined) continue; // N/A to this metric's kind
+        if (actual === undefined) {
+          // N/A to this metric's kind (`sum` on a rate). Startup validation rejects
+          // this for our own config; an adapter-produced artifact still surfaces it.
+          advisories.push(
+            `customMetric threshold "${targetKey}".${key} was skipped: not applicable to a "${resolved?.metric.kind}" metric`,
+          );
+          continue;
+        }
         const { op, value } = parseCustomExpression(expr, key, resolved?.metric.unit);
         out.push({
           scope: "customMetric",
