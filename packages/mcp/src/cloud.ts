@@ -22,9 +22,11 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { parse as parseYaml } from "yaml";
 import { DEFAULT_GLOBAL_RULES, redactValue } from "@glubean/redaction";
+import type { GlobalRules } from "@glubean/redaction";
 import { MCP_PACKAGE_VERSION } from "./version.js";
 
 /** Mirror of packages/cli/src/lib/constants.ts `DEFAULT_API_URL` (the
@@ -74,6 +76,14 @@ async function readCredentialsFile(): Promise<CredentialsFile | null> {
  * process env > .env/.env.secrets vars > ~/.glubean/credentials.json.
  * (`||` not `??` — an empty-string env var is treated as absent, matching
  * the CLI's resolveToken.)
+ *
+ * Two CLI sources are intentionally NOT mirrored (codex GLU-77 R1):
+ * - package.json `glubean.cloud` config — dead in the CLI too: the config
+ *   consolidation (docs/06 P2) stopped reading the legacy package.json
+ *   `glubean` shape, so `glubeanConfig.cloud` is always the built-in default
+ *   (undefined) on the upload path.
+ * - per-profile `upload.tokenEnv` — profiles are a `glubean run` concept; the
+ *   MCP server has no profile context to resolve one from.
  */
 export async function resolveCloudAuth(
   args: CloudAuthArgs,
@@ -207,8 +217,19 @@ export function runTestEventsUrl(
 
 // ── Fetch with human-actionable error mapping ────────────────────────────────
 
+/**
+ * Scrub bearer-token-shaped strings from server error text before it reaches
+ * the MCP client — a misconfigured apiUrl / proxy can echo request headers
+ * (including `Authorization: Bearer glb_…`) back in the error body.
+ */
+function scrubTokens(text: string): string {
+  return text
+    .replace(/glb_[A-Za-z0-9_-]{6,}/g, "glb_[redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, "Bearer [redacted]");
+}
+
 function friendlyHttpError(status: number, body: string): string {
-  const detail = body.slice(0, 2000);
+  const detail = scrubTokens(body.slice(0, 2000));
   switch (status) {
     case 401:
       return (
@@ -235,18 +256,39 @@ function friendlyHttpError(status: number, body: string): string {
   }
 }
 
+/** Default request timeout — an MCP tool must not hang on a stalled network
+ *  call (mirrors the spirit of the CLI's RESULTS_TIMEOUT_MS, slightly wider
+ *  since ingest bodies can be larger than a status GET). */
+const CLOUD_FETCH_TIMEOUT_MS = 15_000;
+
 export async function cloudFetchJson(
   url: string,
-  init: RequestInit & { token: string },
+  init: RequestInit & { token: string; timeoutMs?: number },
 ): Promise<unknown> {
-  const { token, ...fetchInit } = init;
-  const res = await fetch(url, {
-    ...fetchInit,
-    headers: {
-      ...(fetchInit.headers ?? {}),
-      Authorization: `Bearer ${token}`,
-    },
-  });
+  const { token, timeoutMs, ...fetchInit } = init;
+  const budget = timeoutMs ?? CLOUD_FETCH_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budget);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...fetchInit,
+      signal: controller.signal,
+      headers: {
+        ...(fetchInit.headers ?? {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(
+        `Request to Glubean Cloud timed out after ${budget}ms — check the apiUrl and your network.`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await res.text();
   if (!res.ok) throw new Error(friendlyHttpError(res.status, text));
   if (!text) return null;
@@ -255,6 +297,87 @@ export async function cloudFetchJson(
   } catch {
     return text;
   }
+}
+
+// ── Upload environment label (mirror of packages/cli/src/lib/upload.ts) ─────
+
+/**
+ * Derive the run's environment label from the env file name the way the CLI
+ * does: `.env` → "default", `.env.staging` → "staging", `custom.env` →
+ * "custom". Keep in sync with the CLI's `envLabelFromEnvFile`.
+ */
+export function envLabelFromEnvFile(envFile?: string): string {
+  const fileName = basename(envFile || ".env");
+  if (fileName === ".env") return "default";
+  if (fileName.startsWith(".env.")) {
+    return fileName.slice(".env.".length) || "default";
+  }
+  const ext = extname(fileName);
+  const stem = ext ? basename(fileName, ext) : fileName;
+  return stem || "default";
+}
+
+// ── Project redaction config (glubean.yaml `defaults.redaction`) ────────────
+
+export interface UploadRedaction {
+  globalRules: GlobalRules;
+  replacementFormat: "simple" | "labeled" | "partial";
+}
+
+/**
+ * Load the project's upload redaction rules — the built-in baseline
+ * (DEFAULT_GLOBAL_RULES + built-in sensitive keys, applied inside
+ * `redactValue`) plus any custom `sensitiveKeys` / `customPatterns` /
+ * `replacementFormat` from glubean.yaml `defaults.redaction`. Mirror of the
+ * CLI's `resolveRedactionConfig` merge semantics (additive on the baseline);
+ * without this, projects relying on custom rules would leak matching values
+ * through MCP uploads that the CLI would have scrubbed (codex GLU-77 R1).
+ * A missing or malformed glubean.yaml falls back to the baseline.
+ */
+export async function loadUploadRedaction(projectRoot: string): Promise<UploadRedaction> {
+  const rules: GlobalRules = structuredClone(DEFAULT_GLOBAL_RULES);
+  let replacementFormat: UploadRedaction["replacementFormat"] = "partial";
+  try {
+    const parsed = parseYaml(
+      await readFile(resolve(projectRoot, "glubean.yaml"), "utf-8"),
+    ) as {
+      defaults?: {
+        redaction?: {
+          sensitiveKeys?: unknown;
+          customPatterns?: unknown;
+          replacementFormat?: unknown;
+        };
+      };
+    } | null;
+    const input = parsed?.defaults?.redaction;
+    if (input) {
+      if (Array.isArray(input.sensitiveKeys)) {
+        for (const key of input.sensitiveKeys) {
+          if (typeof key === "string" && !rules.sensitiveKeys.includes(key)) {
+            rules.sensitiveKeys.push(key);
+          }
+        }
+      }
+      if (Array.isArray(input.customPatterns)) {
+        for (const pattern of input.customPatterns) {
+          const p = pattern as { name?: unknown; regex?: unknown } | null;
+          if (p && typeof p.name === "string" && typeof p.regex === "string") {
+            rules.customPatterns.push({ name: p.name, regex: p.regex });
+          }
+        }
+      }
+      if (
+        input.replacementFormat === "simple" ||
+        input.replacementFormat === "labeled" ||
+        input.replacementFormat === "partial"
+      ) {
+        replacementFormat = input.replacementFormat;
+      }
+    }
+  } catch {
+    // Missing/unreadable glubean.yaml → baseline rules.
+  }
+  return { globalRules: rules, replacementFormat };
 }
 
 // ── RunIngest envelope from a local MCP run snapshot ─────────────────────────
@@ -266,7 +389,15 @@ export async function cloudFetchJson(
 /** Structural view of the fields `buildRunIngestBody` needs from the MCP's
  *  `LocalRunSnapshot` (index.ts) — kept structural to avoid an import cycle. */
 export interface SnapshotForUpload {
+  /** When the run FINISHED (the snapshot is taken after the run completes). */
   createdAt: string;
+  /** When the run STARTED (recorded before execution). Optional for older
+   *  snapshot shapes; without it, durations fall back to summed test times. */
+  startedAt?: string;
+  /** Stable per-snapshot idempotency id — re-uploading the SAME snapshot
+   *  REPLACES the Cloud run (`(targetId, clientRunId)` dedupe) instead of
+   *  duplicating it. Generated once when the snapshot is taken. */
+  clientRunId?: string;
   fileUrl: string;
   projectRoot: string;
   summary: { total: number; passed: number; failed: number; skipped: number };
@@ -304,12 +435,20 @@ export interface SnapshotForUpload {
  */
 export function buildRunIngestBody(
   snapshot: SnapshotForUpload,
-  opts?: { environment?: string },
+  opts?: { environment?: string; redaction?: UploadRedaction },
 ): Record<string, unknown> {
-  const durationMs = snapshot.results.reduce((acc, r) => acc + r.durationMs, 0);
+  const summedMs = snapshot.results.reduce((acc, r) => acc + r.durationMs, 0);
   const { total, passed, failed, skipped } = snapshot.summary;
-  const startedAt = snapshot.createdAt;
-  const completedAt = new Date(Date.parse(startedAt) + durationMs).toISOString();
+  // `createdAt` is the run's END (the snapshot is taken after the run). When
+  // the snapshot carries a real start time, duration is wall-clock; otherwise
+  // (older shape) fall back to summed per-test durations from the start.
+  const startedAt = snapshot.startedAt ?? snapshot.createdAt;
+  const durationMs = snapshot.startedAt
+    ? Math.max(0, Date.parse(snapshot.createdAt) - Date.parse(snapshot.startedAt))
+    : summedMs;
+  const completedAt = snapshot.startedAt
+    ? snapshot.createdAt
+    : new Date(Date.parse(startedAt) + summedMs).toISOString();
 
   const tests = snapshot.results.map((r) => ({
     testId: r.id,
@@ -349,9 +488,13 @@ export function buildRunIngestBody(
     tests,
   };
 
-  const redactedResult = redactValue(resultBlob, {
+  const redaction = opts?.redaction ?? {
     globalRules: DEFAULT_GLOBAL_RULES,
-    replacementFormat: "partial",
+    replacementFormat: "partial" as const,
+  };
+  const redactedResult = redactValue(resultBlob, {
+    globalRules: redaction.globalRules,
+    replacementFormat: redaction.replacementFormat,
     maxDepth: 64,
   }) as Record<string, unknown>;
 
@@ -367,9 +510,11 @@ export function buildRunIngestBody(
   return {
     kind: "test",
     schemaVersion: "glubean.test.v1",
-    // Stable idempotency id (P1) — a retry of the SAME body replaces the run
-    // server-side instead of duplicating it.
-    clientRunId: randomUUID(),
+    // Stable idempotency id (P1) — re-uploading the same snapshot replaces
+    // the run server-side instead of duplicating it. The snapshot carries the
+    // id (generated once at snapshot time); randomUUID is only the fallback
+    // for older snapshot shapes.
+    clientRunId: snapshot.clientRunId ?? randomUUID(),
     status: failed > 0 ? "failed" : "passed",
     startedAt,
     completedAt,

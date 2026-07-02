@@ -17,7 +17,7 @@ import { z } from "zod";
 import { basename, dirname, resolve } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import { applyEnvTemplating, bootstrap, loadProjectEnv, LOCAL_RUN_DEFAULTS, ProjectRunner, TestExecutor, toSingleExecutionOptions } from "@glubean/runner";
@@ -44,6 +44,8 @@ import { checkSdkCompat, type CompatResult } from "./version-compat.js";
 import {
   buildRunIngestBody,
   cloudFetchJson,
+  envLabelFromEnvFile,
+  loadUploadRedaction,
   MISSING_AUTH_MESSAGES,
   resolveCloudAuth,
   resolveDefaultTargetId,
@@ -650,7 +652,14 @@ export interface LocalDebugEvent {
 }
 
 export interface LocalRunSnapshot {
+  /** When the run finished (the snapshot is taken after completion). */
   createdAt: string;
+  /** When the run started (recorded before execution) — the honest
+   *  `startedAt` for the Cloud upload envelope. */
+  startedAt: string;
+  /** Stable idempotency id for Cloud upload — re-uploading the SAME snapshot
+   *  replaces the Cloud run instead of duplicating it. */
+  clientRunId: string;
   fileUrl: string;
   projectRoot: string;
   summary: { total: number; passed: number; failed: number; skipped: number };
@@ -658,6 +667,8 @@ export interface LocalRunSnapshot {
   includeLogs: boolean;
   includeTraces: boolean;
   filter?: string;
+  /** The envFile argument the run was executed with (env label provenance). */
+  envFile?: string;
 }
 
 export interface ConfigDiagnostics {
@@ -1369,6 +1380,9 @@ server.registerTool(
     bootstrapInput?: unknown;
     forceStandalone?: boolean;
   }) => {
+    // Recorded BEFORE execution — the snapshot's honest startedAt for Cloud
+    // upload (createdAt below is the run's END; codex GLU-77 R1 P2).
+    const runStartedAt = new Date().toISOString();
     const result = await runLocalTestsFromFile({
       filePath: input.filePath,
       filter: input.filter,
@@ -1408,6 +1422,8 @@ server.registerTool(
 
     lastLocalRunSnapshot = {
       createdAt: new Date().toISOString(),
+      startedAt: runStartedAt,
+      clientRunId: randomUUID(),
       fileUrl: result.fileUrl,
       projectRoot: result.projectRoot,
       summary: result.summary,
@@ -1415,6 +1431,7 @@ server.registerTool(
       includeLogs: input.includeLogs ?? true,
       includeTraces: input.includeTraces ?? false,
       filter: input.filter,
+      ...(input.envFile ? { envFile: input.envFile } : {}),
     };
 
     return {
@@ -1877,8 +1894,22 @@ server.registerTool(
     if (!check.ok) return errorContent(check.error);
     const { apiUrl, token, projectId, targetId } = check.auth;
 
-    const environment = input.environment || process.env.GLUBEAN_ENV || "default";
-    const body = buildRunIngestBody(lastLocalRunSnapshot, { environment });
+    // Environment label — same chain as the CLI's resolveUploadEnvironment:
+    // explicit arg > GLUBEAN_ENV > derived from the env file the RUN used
+    // (`.env.staging` → "staging"; resolveEnvPath honors .glubean/active-env).
+    const snapshotRoot = lastLocalRunSnapshot.projectRoot;
+    const runEnvPath = await resolveEnvPath(
+      snapshotRoot,
+      lastLocalRunSnapshot.envFile ?? input.envFile,
+    );
+    const environment =
+      input.environment ||
+      process.env.GLUBEAN_ENV?.trim() ||
+      envLabelFromEnvFile(runEnvPath);
+    // Project redaction rules (glubean.yaml defaults.redaction) — additive on
+    // the built-in baseline, matching the CLI's upload-path scrub.
+    const redaction = await loadUploadRedaction(snapshotRoot);
+    const body = buildRunIngestBody(lastLocalRunSnapshot, { environment, redaction });
     const json = (await cloudFetchJson(runIngestUrl(apiUrl, projectId, targetId), {
       method: "POST",
       headers: { "Content-Type": "application/json" },

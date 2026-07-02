@@ -11,6 +11,8 @@ import {
   MISSING_AUTH_MESSAGES,
   buildRunIngestBody,
   cloudFetchJson,
+  envLabelFromEnvFile,
+  loadUploadRedaction,
   resolveCloudAuth,
   resolveDefaultTargetId,
   runIngestUrl,
@@ -221,6 +223,78 @@ describe("cloudFetchJson", () => {
       /HTTP 500: boom/,
     );
   });
+
+  it("scrubs bearer-token-shaped strings from error bodies", async () => {
+    const leaked = "proxy echo: Authorization: Bearer glb_SuperSecretValue123456";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(leaked, { status: 502 })));
+    const err = await cloudFetchJson("https://x.test/u", { token: "t" }).catch((e) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toContain("glb_SuperSecretValue123456");
+    expect((err as Error).message).toContain("[redacted]");
+  });
+
+  it("maps an aborted request to a friendly timeout message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }),
+    );
+    await expect(
+      cloudFetchJson("https://x.test/u", { token: "t", timeoutMs: 123 }),
+    ).rejects.toThrow(/timed out after 123ms/);
+  });
+});
+
+describe("envLabelFromEnvFile", () => {
+  it("mirrors the CLI's env label derivation", () => {
+    expect(envLabelFromEnvFile(undefined)).toBe("default");
+    expect(envLabelFromEnvFile("/proj/.env")).toBe("default");
+    expect(envLabelFromEnvFile("/proj/.env.staging")).toBe("staging");
+    expect(envLabelFromEnvFile("/proj/custom.env")).toBe("custom");
+  });
+});
+
+describe("loadUploadRedaction", () => {
+  it("merges glubean.yaml defaults.redaction on the built-in baseline", async () => {
+    const root = await mkdtemp(join(tmpdir(), "glubean-mcp-redact-"));
+    try {
+      await writeFile(
+        join(root, "glubean.yaml"),
+        [
+          "defaults:",
+          "  redaction:",
+          "    sensitiveKeys: [xInternalId]",
+          "    customPatterns:",
+          "      - name: acme-key",
+          "        regex: 'ACME-[0-9]{8}'",
+          "    replacementFormat: labeled",
+        ].join("\n"),
+        "utf-8",
+      );
+      const r = await loadUploadRedaction(root);
+      expect(r.globalRules.sensitiveKeys).toContain("xInternalId");
+      expect(r.globalRules.customPatterns).toEqual([
+        { name: "acme-key", regex: "ACME-[0-9]{8}" },
+      ]);
+      expect(r.replacementFormat).toBe("labeled");
+      // Baseline patterns preserved.
+      expect(r.globalRules.patterns).toContain("bearer");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the baseline without glubean.yaml", async () => {
+    const root = await mkdtemp(join(tmpdir(), "glubean-mcp-noyaml-"));
+    try {
+      const r = await loadUploadRedaction(root);
+      expect(r.replacementFormat).toBe("partial");
+      expect(r.globalRules.customPatterns).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 function makeSnapshot(overrides?: Partial<SnapshotForUpload>): SnapshotForUpload {
@@ -324,6 +398,39 @@ describe("buildRunIngestBody", () => {
     const body = buildRunIngestBody(makeSnapshot());
     const serialized = JSON.stringify(body.result);
     expect(serialized).not.toContain("supersecret123");
+  });
+
+  it("applies project custom redaction rules when provided", () => {
+    const snapshot = makeSnapshot();
+    snapshot.results[0]!.logs.push({
+      message: "custom",
+      data: { note: "key is ACME-12345678" },
+    });
+    const body = buildRunIngestBody(snapshot, {
+      redaction: {
+        globalRules: {
+          sensitiveKeys: [],
+          patterns: [],
+          customPatterns: [{ name: "acme-key", regex: "ACME-[0-9]{8}" }],
+        },
+        replacementFormat: "labeled",
+      },
+    });
+    expect(JSON.stringify(body.result)).not.toContain("ACME-12345678");
+  });
+
+  it("uses wall-clock timing and the snapshot's stable clientRunId when present", () => {
+    const snapshot = makeSnapshot({
+      startedAt: "2026-07-02T09:59:58.000Z", // run ENDED at createdAt 10:00:00
+      clientRunId: "stable-id-1",
+    });
+    const body = buildRunIngestBody(snapshot);
+    expect(body.startedAt).toBe("2026-07-02T09:59:58.000Z");
+    expect(body.completedAt).toBe("2026-07-02T10:00:00.000Z");
+    expect(body.durationMs).toBe(2000);
+    expect(body.clientRunId).toBe("stable-id-1");
+    // Re-building for a retry keeps the id → Cloud replaces, not duplicates.
+    expect(buildRunIngestBody(snapshot).clientRunId).toBe("stable-id-1");
   });
 
   it("never includes traces in the uploaded result (local trace view keeps auth headers)", () => {
