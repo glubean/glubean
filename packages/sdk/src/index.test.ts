@@ -639,6 +639,28 @@ test("row-key helpers - tokenizer is collision-safe (codex R1 P2)", () => {
   expect(interpolateTemplate("case-$index", { in: "us" }, 3)).toBe("case-3");
 });
 
+test("row-key helpers - `$indexed` is a data placeholder, not reserved (codex R2 P2)", () => {
+  // Word-boundary: the reserved token is exactly `$index`; `$indexed` names a
+  // data field and stays STABLE.
+  expect(interpolateTemplate("k-$indexed", { indexed: "OK" }, 5)).toBe("k-OK");
+  expect(interpolateRowKey("k-$indexed", { indexed: "OK" })).toBe("k-OK");
+  expect(templateUsesIndex("k-$indexed")).toBe(false);
+  expect(buildEachRowMeta("k-$indexed", { indexed: "OK" }, 5)).toEqual({
+    idTemplate: "k-$indexed",
+    index: 5,
+    rowKey: "k-OK",
+    stable: true,
+  });
+  // `$index` followed by a non-word char is still reserved.
+  expect(interpolateTemplate("c-$index-x", { x: 1 }, 2)).toBe("c-2-x");
+  expect(templateUsesIndex("c-$index-x")).toBe(true);
+  // `$index` at end-of-string is reserved.
+  expect(interpolateTemplate("c-$index", {}, 4)).toBe("c-4");
+  // A data key named `index2` is a normal placeholder.
+  expect(interpolateRowKey("v-$index2", { index2: "II" })).toBe("v-II");
+  expect(templateUsesIndex("v-$index2")).toBe(false);
+});
+
 test("row-key helpers - buildEachRowMeta composes the full provenance", () => {
   expect(buildEachRowMeta("user-$userId", { userId: 3 }, 0)).toEqual({
     idTemplate: "user-$userId",

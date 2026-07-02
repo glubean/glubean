@@ -19,15 +19,20 @@ import type { EachRowMeta, TestMeta } from "../types.js";
  *
  * Semantics (matching the documented template contract, but collision-safe):
  * - The reserved positional `$index` placeholder wins at every `$` position
- *   (it shadows any data field, including one literally named `index` or a
- *   longer field like `indexed`). `index === undefined` leaves it literal
- *   (the row-key mode).
+ *   where the placeholder word is EXACTLY `index` (word-boundary checked, so
+ *   `$indexed` is a normal data placeholder). It shadows a data field
+ *   literally named `index`. `index === undefined` leaves it literal (the
+ *   row-key mode).
  * - Data keys match LONGEST-FIRST, so a key that is a prefix of another
  *   (`$id` vs `$id2`) or of a later placeholder can never corrupt it.
  * - Substituted values are emitted verbatim in one pass — a value containing
  *   `$something` is never re-scanned (no value injection).
  * - A `$` matching nothing stays literal.
  */
+/** Placeholder-name character class — used only to word-boundary the reserved
+ *  `$index` token (data keys themselves may contain any characters). */
+const PLACEHOLDER_WORD = /[A-Za-z0-9_]/;
+
 function interpolatePlaceholders(
   template: string,
   data: Record<string, unknown>,
@@ -47,8 +52,10 @@ function interpolatePlaceholders(
       continue;
     }
     const rest = template.slice(i + 1);
-    // Reserved positional placeholder — always wins (documented shadowing).
-    if (rest.startsWith("index")) {
+    // Reserved positional placeholder — wins over data keys (documented
+    // shadowing), but only when the placeholder word is exactly `index`
+    // (word-boundary: `$indexed` is a data placeholder, not `$index` + "ed").
+    if (rest.startsWith("index") && !PLACEHOLDER_WORD.test(rest.charAt("index".length))) {
       out += index === undefined ? "$index" : String(index);
       i += "$index".length;
       continue;
@@ -82,13 +89,14 @@ export function interpolateTemplate(
 /**
  * True when an id/name template references the positional `$index` placeholder.
  * `$index` makes the interpolated id reorder-unstable; this is the SDK's
- * authoritative check (it owns interpolation, where `$index` is substituted
- * before — and so shadows — a data field literally named `index`).
+ * authoritative check (it owns interpolation, where the reserved `$index`
+ * shadows a data field literally named `index`). Word-boundary checked so
+ * `$indexed` (a data placeholder) does NOT count — mirrors the tokenizer.
  *
  * @internal
  */
 export function templateUsesIndex(template: string): boolean {
-  return template.includes("$index");
+  return /\$index(?![A-Za-z0-9_])/.test(template);
 }
 
 /**
