@@ -6,7 +6,7 @@
   "packageManager": "pnpm@10.13.1+sha512.37ebf1a5c7a30d5fabe0c5df44ee8da4c965ca0c5af3dbab28c3a1681b70a256218d05c81c9c0dcf767ef6b8551eb5b960042b9ed4300c59242336377e01cfad",
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.21.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
   },
@@ -27,8 +27,7 @@
       "brace-expansion@2": "^2.0.3",
       "picomatch@4": "^4.0.4",
       "postcss@8": "^8.5.10",
-      "vite@7": "^7.3.5",
-      "esbuild@^0.27.0": "0.28.1"
+      "vite@7": "^7.3.5"
     }
   }
 }
