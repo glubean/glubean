@@ -737,9 +737,10 @@ describe("runLoadIteration — single iteration through the engine core", () => 
       .step("poll", async (ctx) => {
         await ctx.http.get(`${base}/items/${ctx.input.run}`).json();
         // Undeclared ids that collide with Object.prototype must stay no-ops.
-        const m = ctx.metrics as Record<string, { add(v?: unknown): void }>;
-        m.constructor.add(true);
-        m.toString.add(1);
+        // (Variable-key access so TS resolves the index signature, not the Function members.)
+        const handle = (id: string) => (ctx.metrics as Record<string, { add(v?: unknown): void }>)[id]!;
+        handle("constructor").add(true);
+        handle("toString").add(1);
         ctx.metrics.real.add(true);
       })
       .build();

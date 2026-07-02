@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LoadArtifact, LoadEvent, LoadThresholds } from "@glubean/sdk/load";
 import { createLoadReducer } from "./reducer.js";
-import { evaluateThresholds } from "./threshold.js";
+import { evaluateThresholds, validateLoadMetricsConfig } from "./threshold.js";
 
 // ── reducer fold (A2) ──────────────────────────────────────────────────────
 
@@ -185,5 +185,146 @@ describe("customMetric thresholds (A2)", () => {
     });
     expect(rows).toHaveLength(0);
     expect(pass).toBe(true);
+  });
+
+  it("surfaces every skipped gate as an advisory (metric absent / series absent)", () => {
+    const { thresholds: rows, pass, advisories } = evaluateThresholds(pollOk, {
+      customMetric: {
+        missing: { rate: ">99%" },
+        "pollOk:class=ghost": { rate: ">99%" },
+      },
+    });
+    expect(rows).toHaveLength(0);
+    expect(pass).toBe(true); // skip-on-absent policy holds…
+    // …but neither skip is silent.
+    expect(advisories.some((a) => a.includes('"missing"') && a.includes("never recorded"))).toBe(true);
+    expect(advisories.some((a) => a.includes('"pollOk:class=ghost"'))).toBe(true);
+    // An evaluated gate produces no advisory.
+    expect(evaluateThresholds(pollOk, { customMetric: { pollOk: { rate: ">90%" } } }).advisories).toEqual([]);
+  });
+
+  it("calls out maxSeries truncation when a per-series gate finds no folded series", () => {
+    const truncated = artifactWithCustomMetrics([
+      {
+        metricId: "perItem",
+        kind: "rate",
+        seriesTruncated: true,
+        series: [{ tags: {}, count: 60, trueCount: 60, rate: 1 }],
+      },
+    ]);
+    const { advisories } = evaluateThresholds(truncated, {
+      customMetric: { "perItem:itemId=i59": { rate: ">99%" } },
+    });
+    expect(advisories.some((a) => a.includes("maxSeries"))).toBe(true);
+  });
+
+  it("gates a non-ms trend in its own unit: bare numbers ok, ms/s suffix rejected", () => {
+    const bytes = artifactWithCustomMetrics([
+      {
+        metricId: "payload",
+        kind: "trend",
+        unit: "bytes",
+        series: [{ tags: {}, count: 10, latency: { p50: 512, p90: 900, p95: 1200, p99: 4000, max: 5000 } }],
+      },
+    ]);
+    // Bare number = the metric's own unit (bytes), no ms scaling.
+    const { thresholds: rows } = evaluateThresholds(bytes, {
+      customMetric: { payload: { p95: "<4096" } },
+    });
+    expect(rows[0]).toMatchObject({ metric: "p95", actual: 1200, pass: true });
+    // An `s` suffix would ×1000 a byte count — rejected, not silently scaled.
+    expect(() => evaluateThresholds(bytes, { customMetric: { payload: { p95: "<2s" } } })).toThrow(/unit/);
+    expect(() => evaluateThresholds(bytes, { customMetric: { payload: { p95: "<800ms" } } })).toThrow(/unit/);
+    // A declared-"ms" trend keeps the duration sugar.
+    const ms = artifactWithCustomMetrics([
+      {
+        metricId: "e2e",
+        kind: "trend",
+        unit: "ms",
+        series: [{ tags: {}, count: 10, latency: { p50: 100, p90: 400, p95: 1500, p99: 1900, max: 2000 } }],
+      },
+    ]);
+    const evald = evaluateThresholds(ms, { customMetric: { e2e: { p95: "<2s" } } });
+    expect(evald.thresholds[0]).toMatchObject({ actual: 1500, pass: true });
+  });
+});
+
+// ── reducer fold defenses (codex R1) ────────────────────────────────────────
+
+describe("custom metric fold defenses", () => {
+  it("drops non-finite event values at the fold point (adapter path)", () => {
+    const art = foldMetrics([
+      { type: "metric:observed", metricId: "pollOk", kind: "rate", value: Number.NaN },
+      { type: "metric:observed", metricId: "pollOk", kind: "rate", value: Number.POSITIVE_INFINITY },
+      { type: "metric:observed", metricId: "pollOk", kind: "rate", value: 1 },
+      { type: "metric:observed", metricId: "retries", kind: "counter", value: Number.NaN },
+    ]);
+    const total = art.summary.customMetrics
+      ?.find((m) => m.metricId === "pollOk")
+      ?.series.find((s) => Object.keys(s.tags).length === 0);
+    expect(total).toMatchObject({ count: 1, trueCount: 1, rate: 1 }); // NaN/Infinity never counted as true
+    // A metric whose ONLY samples were invalid is absent, not a zero-shaped row.
+    expect(art.summary.customMetrics?.some((m) => m.metricId === "retries")).toBe(false);
+  });
+
+  it("drops an out-of-union kind instead of folding a schema-invalid row", () => {
+    const art = foldMetrics([
+      { type: "metric:observed", metricId: "weird", kind: "gauge", value: 5 },
+    ]);
+    expect(art.summary.customMetrics).toBeUndefined();
+  });
+
+  it("keeps tag combinations distinct when a value embeds the separator/`=`", () => {
+    // Old joined-key form: {a:"1", b:"2"} and {a:"1\u0000b=2"} collided into one series.
+    const art = foldMetrics([
+      { type: "metric:observed", metricId: "m", kind: "counter", value: 1, tags: { a: "1", b: "2" } },
+      { type: "metric:observed", metricId: "m", kind: "counter", value: 10, tags: { a: "1\u0000b=2" } },
+    ]);
+    const metric = art.summary.customMetrics?.find((m) => m.metricId === "m");
+    expect(metric?.series).toHaveLength(3); // total + 2 DISTINCT tag series
+    expect(metric?.series.find((s) => s.tags.b === "2")?.sum).toBe(1);
+    expect(metric?.series.find((s) => s.tags.a === "1\u0000b=2")?.sum).toBe(10);
+  });
+});
+
+// ── config validation (fail fast, codex R1) ─────────────────────────────────
+
+describe("validateLoadMetricsConfig", () => {
+  it("accepts a well-formed declaration + matching gates", () => {
+    expect(
+      validateLoadMetricsConfig(
+        { pollOk: { kind: "rate" }, e2e: { kind: "trend", unit: "ms" }, "http:ok": { kind: "rate" } },
+        { pollOk: {}, "pollOk:class=extreme": {}, "http:ok": {} },
+      ),
+    ).toEqual([]);
+    expect(validateLoadMetricsConfig(undefined, undefined)).toEqual([]);
+  });
+
+  it("rejects an out-of-union kind and a non-string unit (untyped JS config)", () => {
+    const errs = validateLoadMetricsConfig(
+      {
+        gaugeish: { kind: "gauge" },
+        e2e: { kind: "trend", unit: 42 },
+      },
+      undefined,
+    );
+    expect(errs.some((e) => e.includes("gaugeish") && e.includes("rate / trend / counter"))).toBe(true);
+    expect(errs.some((e) => e.includes("e2e") && e.includes("unit"))).toBe(true);
+  });
+
+  it("rejects a gate on an undeclared metric and a malformed tag selector", () => {
+    const errs = validateLoadMetricsConfig(
+      { pollOk: { kind: "rate" } },
+      { missing: {}, "pollOk:class": {}, "pollOk:": {} },
+    );
+    expect(errs.some((e) => e.includes('"missing"') && e.includes("not declared"))).toBe(true);
+    expect(errs.some((e) => e.includes('"pollOk:class"') && e.includes("malformed"))).toBe(true);
+    expect(errs.some((e) => e.includes('"pollOk:"') && e.includes("malformed"))).toBe(true);
+  });
+
+  it("rejects gates when no metrics are declared at all", () => {
+    const errs = validateLoadMetricsConfig(undefined, { pollOk: {} });
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toContain("not declared");
   });
 });

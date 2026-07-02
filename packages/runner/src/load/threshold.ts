@@ -190,30 +190,101 @@ type CustomMetricKey = (typeof CUSTOM_METRIC_KEYS)[number];
 
 /** Parse a custom-metric expression by reusing the base parser under a unit-compatible
  *  proxy metric: `rate` is a fraction (`%` ok, like errorRate), `sum`/`count` are unitless
- *  counts (like backlog), `p50..p99` are durations (ms, like latency percentiles). */
-function parseCustomExpression(expr: string, key: CustomMetricKey): ParsedThreshold {
+ *  counts (like backlog), `p50..p99` are durations (ms, like latency percentiles) — but
+ *  ONLY when the trend's declared unit is `"ms"` (or unset). A trend in any other unit
+ *  ("bytes", "items") is gated in ITS OWN unit: bare numbers only — an `ms`/`s` suffix
+ *  would silently scale a non-duration value and is rejected instead. */
+function parseCustomExpression(expr: string, key: CustomMetricKey, unit?: string): ParsedThreshold {
   if (key === "rate") return parseThresholdExpression(expr, "errorRate");
   if (key === "sum" || key === "count") return parseThresholdExpression(expr, "backlog");
+  if (unit !== undefined && unit !== "ms") {
+    const m = EXPR_RE.exec(expr.trim());
+    if (!m) {
+      throw new Error(
+        `invalid threshold expression ${JSON.stringify(expr)} — expected e.g. "<1%", "<800ms", ">100/s"`,
+      );
+    }
+    if (m[3] !== undefined) {
+      throw new Error(
+        `threshold unit "${m[3]}" is not valid for a trend declared with unit "${unit}" (in ${JSON.stringify(expr)}) — use a bare number in the metric's own unit`,
+      );
+    }
+    const num = Number(m[2]);
+    if (!Number.isFinite(num)) throw new Error(`invalid threshold number in ${JSON.stringify(expr)}`);
+    return { op: m[1] as Op, value: num };
+  }
   return parseThresholdExpression(expr, key);
 }
 
-/** Resolve a custom-metric threshold target to its declared metric, disambiguating a
+/** Match a custom-metric threshold target against a set of metric ids, disambiguating a
  *  `:` in the metric ID from the `metricId:tag=val` selector: an EXACT id match wins
- *  (so `"http:ok"` resolves to the metric named `http:ok`), else the longest declared id
- *  that is a `${id}:` prefix of the target (the tag-selector form). Undefined → skipped. */
+ *  (so `"http:ok"` resolves to the metric named `http:ok`), else the longest id that is
+ *  a `${id}:` prefix of the target (the tag-selector form). Undefined → no such metric. */
+function matchMetricId(ids: Iterable<string>, targetKey: string): { id: string; suffix?: string } | undefined {
+  let best: string | undefined;
+  for (const id of ids) {
+    if (id === targetKey) return { id }; // exact id → untagged total
+    if (targetKey.startsWith(`${id}:`) && (best === undefined || id.length > best.length)) {
+      best = id;
+    }
+  }
+  return best !== undefined ? { id: best, suffix: targetKey.slice(best.length + 1) } : undefined;
+}
+
+/** Resolve a custom-metric threshold target to its folded artifact metric (see
+ *  `matchMetricId` for the `metricId` vs `metricId:tag=val` disambiguation). */
 function resolveCustomTarget(
   metrics: readonly LoadCustomMetric[] | undefined,
   targetKey: string,
 ): { metric: LoadCustomMetric; suffix?: string } | undefined {
   if (!metrics) return undefined;
-  let best: LoadCustomMetric | undefined;
-  for (const m of metrics) {
-    if (m.metricId === targetKey) return { metric: m }; // exact id → untagged total
-    if (targetKey.startsWith(`${m.metricId}:`) && (best === undefined || m.metricId.length > best.metricId.length)) {
-      best = m;
+  const m = matchMetricId(metrics.map((x) => x.metricId), targetKey);
+  if (!m) return undefined;
+  const metric = metrics.find((x) => x.metricId === m.id);
+  return metric ? { metric, ...(m.suffix !== undefined ? { suffix: m.suffix } : {}) } : undefined;
+}
+
+/** The declared custom-metric kinds (mirrors `LoadMetricKind` for runtime checks). */
+const METRIC_KINDS = ["rate", "trend", "counter"] as const;
+
+/**
+ * Fail-fast validation for `loadRunner({ metrics, thresholds.customMetric })`, run
+ * BEFORE any iteration (untyped JS config bypasses the compile-time types):
+ *  - every declaration's `kind` must be in the union — an out-of-union kind would
+ *    emit schema-invalid custom-metric artifact rows instead of failing config;
+ *  - every `thresholds.customMetric` gate must target a DECLARED metric with a
+ *    well-formed tag selector — a typo'd target would otherwise never match a
+ *    folded series, silently skip, and leave CI green.
+ * Returns error strings (empty = valid); the caller owns the throw + prefix.
+ */
+export function validateLoadMetricsConfig(
+  metrics: Record<string, { kind: string; unit?: unknown } | undefined> | undefined,
+  customMetricThresholds: Record<string, unknown> | undefined,
+): string[] {
+  const errors: string[] = [];
+  for (const [id, d] of Object.entries(metrics ?? {})) {
+    if (id === "") errors.push("metrics: a metric id must be a non-empty string");
+    if (d === null || typeof d !== "object" || !(METRIC_KINDS as readonly string[]).includes(d.kind)) {
+      errors.push(
+        `metrics${id ? `.${id}` : ""}: kind must be one of ${METRIC_KINDS.join(" / ")} — declare via rate() / trend() / counter()`,
+      );
+    } else if (d.unit !== undefined && typeof d.unit !== "string") {
+      errors.push(`metrics.${id}: unit must be a string`);
     }
   }
-  return best ? { metric: best, suffix: targetKey.slice(best.metricId.length + 1) } : undefined;
+  for (const targetKey of Object.keys(customMetricThresholds ?? {})) {
+    const m = matchMetricId(Object.keys(metrics ?? {}), targetKey);
+    if (!m) {
+      errors.push(
+        `thresholds.customMetric["${targetKey}"]: gates a metric that is not declared in \`metrics\``,
+      );
+    } else if (m.suffix !== undefined && parseTagSuffix(m.suffix) === undefined) {
+      errors.push(
+        `thresholds.customMetric["${targetKey}"]: malformed tag selector "${m.suffix}" — expected \`${m.id}:tagKey=tagVal\``,
+      );
+    }
+  }
+  return errors;
 }
 
 /** Parse a tag suffix (`"a=1,b=2"`) into a tag record, or `undefined` if it is malformed
@@ -273,8 +344,9 @@ function customActualFor(key: CustomMetricKey, series: LoadCustomMetricSeries): 
 export function evaluateThresholds(
   artifact: LoadArtifact,
   thresholds: LoadThresholds,
-): { thresholds: ThresholdEvaluation[]; pass: boolean } {
+): { thresholds: ThresholdEvaluation[]; pass: boolean; advisories: string[] } {
   const out: ThresholdEvaluation[] = [];
+  const advisories: string[] = [];
 
   const evalScope = (
     scope: ThresholdEvaluation["scope"],
@@ -357,13 +429,26 @@ export function evaluateThresholds(
     for (const [targetKey, cfg] of Object.entries(thresholds.customMetric)) {
       const resolved = resolveCustomTarget(s.customMetrics, targetKey);
       const series = resolved ? findCustomSeries(resolved.metric, resolved.suffix) : undefined;
-      if (!series) continue; // metric or targeted series absent / malformed → skipped
+      if (!series) {
+        // Skip-on-absent is the module policy (a gate can't fail on missing data),
+        // but a CONFIGURED gate that measured nothing must not stay silent: it
+        // surfaces as an advisory so a metric that never records / a tag series
+        // dropped by `maxSeries` truncation can't leave CI green unnoticed.
+        advisories.push(
+          resolved
+            ? resolved.metric.seriesTruncated && resolved.suffix !== undefined
+              ? `customMetric threshold "${targetKey}" was skipped: the targeted tag series was not folded — metric "${resolved.metric.metricId}" hit its maxSeries cap and overflow folded into the untagged total`
+              : `customMetric threshold "${targetKey}" was skipped: no samples were folded for the targeted series`
+            : `customMetric threshold "${targetKey}" was skipped: metric was declared but never recorded a sample`,
+        );
+        continue;
+      }
       for (const key of CUSTOM_METRIC_KEYS) {
         const expr = cfg[key];
         if (expr === undefined) continue;
         const actual = customActualFor(key, series);
         if (actual === undefined) continue; // N/A to this metric's kind
-        const { op, value } = parseCustomExpression(expr, key);
+        const { op, value } = parseCustomExpression(expr, key, resolved?.metric.unit);
         out.push({
           scope: "customMetric",
           target: targetKey,
@@ -379,5 +464,5 @@ export function evaluateThresholds(
 
   // A crash already fails the run; otherwise every evaluable threshold must hold.
   const pass = s.pass && out.every((e) => e.pass);
-  return { thresholds: out, pass };
+  return { thresholds: out, pass, advisories };
 }

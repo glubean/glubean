@@ -69,7 +69,10 @@ export function rate(): LoadMetricDescriptor<"rate"> {
   return { kind: "rate" };
 }
 
-/** Declare a numeric-distribution metric (k6 Trend). Optional display `unit`. */
+/** Declare a numeric-distribution metric (k6 Trend). Optional display `unit`.
+ *  Thresholds (`p50`..`p99`) are ms-shaped (`"<800ms"`, `"<2s"`) when the unit is
+ *  `"ms"` or unset; any OTHER unit (`"bytes"`, `"items"`) is gated with bare
+ *  numbers in that unit (`"<4096"`) — an `ms`/`s` suffix is rejected there. */
 export function trend(options?: { unit?: string }): LoadMetricDescriptor<"trend"> {
   return options?.unit !== undefined
     ? { kind: "trend", unit: options.unit }

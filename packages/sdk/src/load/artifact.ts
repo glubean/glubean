@@ -389,7 +389,9 @@ export interface LoadCustomMetricSeries {
   /** `counter` only: summed increments. */
   sum?: number;
   // trend:
-  /** `trend` only: distribution percentiles of the folded samples. */
+  /** `trend` only: distribution percentiles of the folded samples. The field reuses
+   *  the artifact-wide `latency` shape; for a trend declared with a non-duration
+   *  `unit`, the values are in THAT unit, not ms. */
   latency?: Percentiles;
   /** `trend` only: fixed-ladder histogram (reuses the latency bucket type). */
   distribution?: LoadLatencyBucket[];

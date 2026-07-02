@@ -81,12 +81,11 @@ interface CustomMetricAgg {
   truncated: boolean;
 }
 
-/** Stable key for a tag combination: keys sorted so `{a,b}` and `{b,a}` collapse. */
+/** Stable key for a tag combination: keys sorted so `{a,b}` and `{b,a}` collapse.
+ *  JSON-encoded (not joined) so a tag key/value containing a separator or `=`
+ *  can't collide two distinct combinations into one series. */
 function canonicalTagKey(tags: Record<string, string>): string {
-  return Object.keys(tags)
-    .sort()
-    .map((k) => `${k}=${tags[k]}`)
-    .join(SEP);
+  return JSON.stringify(Object.keys(tags).sort().map((k) => [k, tags[k]]));
 }
 
 function newCustomSeries(tags: Record<string, string>, kind: LoadMetricKind): CustomSeriesAgg {
@@ -634,6 +633,12 @@ export class LoadReducerImpl implements LoadReducer {
   /** Fold one `metric:observed` into the untagged total and (if tagged) its
    *  tag-series, enforcing the per-metric series cap. */
   private foldCustomMetric(e: Extract<LoadEvent, { type: "metric:observed" }>): void {
+    // Defense at the FOLD point, not just the handle: `metric:observed` can come from
+    // an external-engine adapter (M9), where a NaN/Infinity value would count as a
+    // true rate / poison a counter sum, and an out-of-union kind would fork the fold
+    // into a schema-invalid artifact row. (`ctx.metrics` handles already filter both.)
+    if (!Number.isFinite(e.value)) return;
+    if (e.kind !== "rate" && e.kind !== "counter" && e.kind !== "trend") return;
     let m = this.customMetrics.get(e.metricId);
     if (!m) {
       m = {
