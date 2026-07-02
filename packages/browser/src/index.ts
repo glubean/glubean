@@ -45,6 +45,8 @@ export type {
   BrowserEvent,
   BrowserOptions,
   BrowserTestContext,
+  DialogHandler,
+  DialogMode,
   InstrumentedPage,
   PuppeteerLike,
   NetworkTraceOptions,
@@ -58,6 +60,8 @@ export type {
   ScreenshotEntry,
   ScreenshotMode,
   ScreenshotTrigger,
+  StorageCookie,
+  StorageState,
   ViewportOverride,
 } from "./evidence.js";
-export type { WrappedLocator } from "./locator.js";
+export type { IndexedLocator, WrappedLocator } from "./locator.js";

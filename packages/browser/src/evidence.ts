@@ -8,12 +8,17 @@
  *   trace event (see {@link ./network.ts}).
  * - **Request mock** (`Fetch` domain) — fulfill matching requests with a canned
  *   response; non-matching requests are continued untouched.
- * - **Emulation** (`Emulation` domain) — timezone / geolocation / viewport.
+ * - **Emulation** (`Emulation` domain) — timezone / geolocation / viewport / user agent.
+ * - **Storage state** — restore cookies / localStorage before the page's
+ *   first script runs, and capture them back out on demand (a thin "login
+ *   once, reuse the session" primitive). Cookies go through this session's
+ *   `Network.setCookies` (browser-context scoped, session-agnostic in CDP).
+ *   localStorage does **not** — see guardrail ③.
  *
  * The keystone spike disproved the "Fetch is near-exclusive" hypothesis: a
  * self-opened session running `Fetch.enable`/`fulfillRequest` is stable **as
  * long as the user has not enabled Puppeteer's own request interception**.
- * Two coexistence hazards remain, each handled by a guardrail below:
+ * Three coexistence hazards exist, each handled below:
  *
  * **Guardrail ① — viewport ownership.** Our `Emulation.setDeviceMetricsOverride`
  * and Puppeteer's `page.setViewport()` both drive device metrics and clobber
@@ -27,6 +32,15 @@
  * conflicts. When mocks are enabled, Glubean owns `Fetch` and blocks
  * `page.setRequestInterception(true)` with a clear error. When no mocks are
  * configured we never enable `Fetch`, so the user's own interception is free.
+ *
+ * **Guardrail ③ — new-document scripts need Puppeteer's OWN session.**
+ * Verified empirically: sending `Page.addScriptToEvaluateOnNewDocument` on
+ * our *auxiliary* `page.createCDPSession()` session registers without error
+ * (a real `identifier` comes back) but the script never actually fires on
+ * subsequent navigations — only the session Puppeteer itself uses for the
+ * page's frame-lifecycle bookkeeping gets its new-document scripts run.
+ * `storageState.localStorage` therefore seeds via Puppeteer's own
+ * `page.evaluateOnNewDocument()`, not a raw CDP call on this session.
  *
  * @module evidence
  */
@@ -153,8 +167,8 @@ export interface ViewportOverride {
 /**
  * Environment emulation applied on the shared evidence session.
  *
- * Timezone and geolocation are pure overrides with no Puppeteer conflict.
- * Viewport is special: see guardrail ① — do **not** also call
+ * Timezone, geolocation, and user agent are pure overrides with no Puppeteer
+ * conflict. Viewport is special: see guardrail ① — do **not** also call
  * `page.setViewport()`, it will race with this override.
  */
 export interface EmulationOptions {
@@ -164,6 +178,41 @@ export interface EmulationOptions {
   geolocation?: GeolocationOverride;
   /** Viewport / device metrics. Glubean becomes the sole viewport owner. */
   viewport?: ViewportOverride;
+  /** User-agent string override (`Emulation.setUserAgentOverride`). */
+  userAgent?: string;
+}
+
+/**
+ * A cookie as accepted by {@link EvidenceSession.attach}'s `storageState.cookies`
+ * and returned by {@link EvidenceSession.captureStorageState}. Mirrors the CDP
+ * `Network.CookieParam` / `Network.Cookie` shapes closely enough to round-trip:
+ * a captured cookie can be fed straight back in as an applied one.
+ */
+export interface StorageCookie {
+  name: string;
+  value: string;
+  /** Either `domain` or `url` must be resolvable for CDP to place the cookie. */
+  domain?: string;
+  path?: string;
+  url?: string;
+  /** Unix time in seconds, or `-1` for a session cookie. */
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+}
+
+/**
+ * Cookies + localStorage for one page — a thin "login once, reuse the
+ * session" primitive (à la Playwright's `storageState`). Cookies apply via
+ * CDP `Network.setCookies`; localStorage applies via Puppeteer's own
+ * `page.evaluateOnNewDocument()` (see guardrail ③) so it is present before
+ * the page's own scripts run on every navigation of this page.
+ */
+export interface StorageState {
+  cookies?: StorageCookie[];
+  /** Key/value pairs seeded into `localStorage` on every new document. */
+  localStorage?: Record<string, string>;
 }
 
 /** Options for {@link EvidenceSession.attach}. */
@@ -177,8 +226,15 @@ export interface EvidenceSessionOptions {
   network?: Pick<NetworkTracerOptions, "include" | "excludePaths" | "filter">;
   /** Request-mock rules. When non-empty, the `Fetch` domain is enabled (guardrail ②). */
   mocks?: MockRule[];
-  /** Environment emulation (timezone / geolocation / viewport). */
+  /** Environment emulation (timezone / geolocation / viewport / user agent). */
   emulate?: EmulationOptions;
+  /**
+   * Cookies / localStorage to restore before the page's first script runs
+   * (`storageState.cookies` via `Network.setCookies`, `storageState.localStorage`
+   * via Puppeteer's `page.evaluateOnNewDocument()` — see guardrail ③).
+   * Capture the current state with {@link EvidenceSession.captureStorageState}.
+   */
+  storageState?: StorageState;
   /**
    * Screenshot capture policy and I/O delegate.
    *
@@ -272,8 +328,9 @@ export function buildFulfillParams(
 /**
  * @internal Build the ordered list of `Emulation.*` CDP calls.
  *
- * Timezone and geolocation come first; the viewport override is applied **last**
- * (guardrail ①) so it is the final word on device metrics at setup time.
+ * Timezone, geolocation, and user agent come first (order-independent among
+ * themselves); the viewport override is applied **last** (guardrail ①) so it
+ * is the final word on device metrics at setup time.
  */
 export function buildEmulationCalls(emulate: EmulationOptions): CdpCall[] {
   const calls: CdpCall[] = [];
@@ -290,6 +347,12 @@ export function buildEmulationCalls(emulate: EmulationOptions): CdpCall[] {
       params: { latitude, longitude, accuracy: accuracy ?? 0 },
     });
   }
+  if (emulate.userAgent !== undefined) {
+    calls.push({
+      method: "Emulation.setUserAgentOverride",
+      params: { userAgent: emulate.userAgent },
+    });
+  }
   if (emulate.viewport) {
     const { width, height, deviceScaleFactor, mobile } = emulate.viewport;
     calls.push({
@@ -303,6 +366,17 @@ export function buildEmulationCalls(emulate: EmulationOptions): CdpCall[] {
     });
   }
   return calls;
+}
+
+/**
+ * @internal Build `Network.setCookies` params from `storageState.cookies`.
+ * Returns `undefined` when there is nothing to set (caller skips the call).
+ */
+export function buildSetCookiesParams(
+  cookies: StorageCookie[] | undefined,
+): { cookies: StorageCookie[] } | undefined {
+  if (!cookies || cookies.length === 0) return undefined;
+  return { cookies };
 }
 
 /**
@@ -414,10 +488,10 @@ export class EvidenceSession {
 
   /**
    * Open one CDP session on `page` and wire up the requested capabilities:
-   * Network trace, Fetch mock (guardrail ②), and Emulation (guardrail ① for
-   * viewport). Capabilities are only enabled when their config is present, so a
-   * page with no mocks never enables `Fetch` and leaves the user's own request
-   * interception untouched.
+   * Network trace, Fetch mock (guardrail ②), Emulation (guardrail ① for
+   * viewport), and storage state (cookies + localStorage). Capabilities are
+   * only enabled when their config is present, so a page with no mocks never
+   * enables `Fetch` and leaves the user's own request interception untouched.
    */
   static async attach(
     page: Page,
@@ -450,7 +524,7 @@ export class EvidenceSession {
         await session._installMocks(page, mocks);
       }
 
-      // 3. Emulation (timezone / geolocation) + viewport last (guardrail ①).
+      // 3. Emulation (timezone / geolocation / user agent) + viewport last (guardrail ①).
       if (options.emulate) {
         for (const call of buildEmulationCalls(options.emulate)) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -459,6 +533,12 @@ export class EvidenceSession {
         if (options.emulate.viewport) {
           session._guardViewport(page);
         }
+      }
+
+      // 4. Storage state — cookies + localStorage restored before the page's
+      // first script runs. Order-independent from the other capabilities.
+      if (options.storageState) {
+        await session._applyStorageState(page, options.storageState);
       }
     } catch (err) {
       // Roll back any partial wiring so we never leak a half-open session.
@@ -516,6 +596,93 @@ export class EvidenceSession {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this._cdp.off("Fetch.requestPaused", onPaused as any);
     });
+  }
+
+  private async _applyStorageState(
+    page: Page,
+    state: StorageState,
+  ): Promise<void> {
+    // Cookies are browser-context scoped in CDP, so our auxiliary session
+    // sets them fine (`Network.setCookies` isn't tied to a particular
+    // DevTools session/target the way frame-lifecycle hooks are).
+    const cookieParams = buildSetCookiesParams(state.cookies);
+    if (cookieParams) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await this._cdp.send("Network.setCookies", cookieParams as any);
+    }
+    // localStorage seeding, in contrast, MUST go through Puppeteer's own
+    // page.evaluateOnNewDocument() — sending the equivalent raw
+    // `Page.addScriptToEvaluateOnNewDocument` on our *auxiliary*
+    // `page.createCDPSession()` session silently registers (no error, a
+    // real `identifier` comes back) but never actually fires on subsequent
+    // navigations. Verified empirically (spike script) against puppeteer-core
+    // ^24/^25: only the session Puppeteer itself uses for the page's own
+    // frame-lifecycle bookkeeping gets its new-document scripts run — a
+    // second, independently-attached session's registration is a no-op.
+    // Puppeteer's own API owns that session, so route through it here.
+    if (state.localStorage && Object.keys(state.localStorage).length > 0) {
+      const entries = state.localStorage;
+      await page.evaluateOnNewDocument((seed: Record<string, string>) => {
+        for (const [k, v] of Object.entries(seed)) {
+          try {
+            localStorage.setItem(k, v);
+          } catch {
+            // best-effort — e.g. storage quota exceeded
+          }
+        }
+      }, entries);
+    }
+  }
+
+  /**
+   * Capture the current page's cookies + localStorage as a {@link StorageState}
+   * snapshot — the counterpart to {@link EvidenceSessionOptions.storageState}.
+   * Cookies are scoped to the page's current URL (`Network.getCookies`), not
+   * every cookie the browser holds, so unrelated tabs/origins never leak in.
+   *
+   * @example
+   * ```ts
+   * await page.goto("/login");
+   * // ... perform login ...
+   * const state = await page.getStorageState();
+   * // Reuse on a fresh page to skip the login flow:
+   * const chrome2 = browser({ launch: true, storageState: state });
+   * ```
+   */
+  async captureStorageState(page: Page): Promise<StorageState> {
+    const { cookies } = (await this._cdp.send("Network.getCookies", {
+      urls: [page.url()],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)) as { cookies: StorageCookie[] };
+
+    const localStorage = await page.evaluate(() => {
+      const out: Record<string, string> = {};
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ls = (globalThis as any).localStorage;
+        for (let i = 0; i < ls.length; i++) {
+          const key = ls.key(i);
+          if (key !== null) out[key] = ls.getItem(key) ?? "";
+        }
+      } catch {
+        // localStorage may be inaccessible (e.g. sandboxed/about:blank) — best-effort.
+      }
+      return out;
+    });
+
+    return {
+      cookies: (cookies ?? []).map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        expires: c.expires,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+        sameSite: c.sameSite,
+      })),
+      localStorage,
+    };
   }
 
   private _guardViewport(page: Page): void {
