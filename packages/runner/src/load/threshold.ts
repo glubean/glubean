@@ -467,10 +467,20 @@ export function evaluateThresholds(
         );
         continue;
       }
-      for (const key of CUSTOM_METRIC_KEYS) {
-        const expr = cfg[key];
+      // Iterate the CONFIGURED keys (not just the known set), so a typo'd key on the
+      // evaluator-only path (an adapter/imported artifact that bypassed our config
+      // validation) surfaces as an advisory instead of skipping silently.
+      for (const key of Object.keys(cfg)) {
+        if (!(CUSTOM_METRIC_KEYS as readonly string[]).includes(key)) {
+          advisories.push(
+            `customMetric threshold "${targetKey}".${key} was skipped: unknown gate key — valid keys: ${CUSTOM_METRIC_KEYS.join(" / ")}`,
+          );
+          continue;
+        }
+        const known = key as CustomMetricKey;
+        const expr = cfg[known];
         if (expr === undefined) continue;
-        const actual = customActualFor(key, series);
+        const actual = customActualFor(known, series);
         if (actual === undefined) {
           // N/A to this metric's kind (`sum` on a rate). Startup validation rejects
           // this for our own config; an adapter-produced artifact still surfaces it.
@@ -479,11 +489,11 @@ export function evaluateThresholds(
           );
           continue;
         }
-        const { op, value } = parseCustomExpression(expr, key, resolved?.metric.unit);
+        const { op, value } = parseCustomExpression(expr, known, resolved?.metric.unit);
         out.push({
           scope: "customMetric",
           target: targetKey,
-          metric: key,
+          metric: known,
           expression: expr,
           actual,
           pass: compare(actual, op, value),

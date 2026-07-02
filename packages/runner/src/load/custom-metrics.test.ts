@@ -164,6 +164,14 @@ describe("customMetric thresholds (A2)", () => {
     expect(advisories.some((a) => a.includes('"pollOk".sum') && a.includes('"rate"'))).toBe(true);
   });
 
+  it("surfaces a typo'd gate key on the evaluator-only path (adapter artifact)", () => {
+    const { thresholds: rows, advisories } = evaluateThresholds(pollOk, {
+      customMetric: { pollOk: { p85: "<800ms" } as Record<string, string> },
+    });
+    expect(rows).toHaveLength(0);
+    expect(advisories.some((a) => a.includes('"pollOk".p85') && a.includes("unknown gate key"))).toBe(true);
+  });
+
   it("gates a metric whose ID itself contains a colon (exact id wins over tag-split)", () => {
     const art = artifactWithCustomMetrics([
       { metricId: "http:ok", kind: "rate", series: [{ tags: {}, count: 100, trueCount: 90, rate: 0.9 }] },
