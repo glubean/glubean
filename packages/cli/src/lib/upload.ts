@@ -11,8 +11,8 @@
  *    the inline cap are skipped (presigned R2 upload is an M6 follow-up).
  */
 
-import { readdir, stat, readFile } from "node:fs/promises";
-import { basename, extname, join, relative } from "node:path";
+import { readdir, stat, lstat, readFile, realpath, unlink } from "node:fs/promises";
+import { basename, extname, join, relative, sep } from "node:path";
 import { CLI_VERSION } from "../version.js";
 import { detectCiContext } from "./ci.js";
 
@@ -232,6 +232,29 @@ export interface UploadOptions {
    *  runs set this — those dirs hold TEST artifacts (the LoadArtifact is already
    *  the `result` blob), so attaching them would misattribute stale files. */
   skipArtifacts?: boolean;
+  /** This run's exact screenshot file paths (absolute), extracted from the
+   *  `browser:screenshot` event stream. When provided, the `.glubean/screenshots`
+   *  portion uploads ONLY these files instead of walking the whole dir — the dir
+   *  accumulates screenshots across runs, so a plain walk misattributes stale
+   *  files from previous runs to this run (ART1). Each path is realpath-checked
+   *  to be inside `.glubean/screenshots`; escapees are dropped. When omitted, the
+   *  screenshots dir is walked as before (backward compatible). Does NOT affect
+   *  the `.glubean/artifacts` scan, which always walks. */
+  screenshotPaths?: string[];
+}
+
+/** A file the server confirmed receiving, with the stat identity it had when
+ *  its bytes were read into the upload form. Cleanup (ART1-B) re-checks this
+ *  identity immediately before unlinking so it never deletes a file that was
+ *  recreated at the same path after the upload (different content the server
+ *  never saw). */
+export interface UploadedArtifactFile {
+  /** Absolute (realpath'd for whitelist screenshots) path of the posted file. */
+  path: string;
+  size: number;
+  mtimeMs: number;
+  ino: number;
+  dev: number;
 }
 
 export interface UploadReceipt {
@@ -258,6 +281,15 @@ export interface UploadReceipt {
     sizeBytes?: number;
     statusCode?: number;
     error?: string;
+    /** The files that actually entered the multipart form (absolute path +
+     *  stat identity captured at upload time), set only when the server
+     *  confirmed the batch (`status: "uploaded"`). Excludes over-cap skips.
+     *  Mixed set: `.glubean/artifacts` walk entries AND whitelist screenshots
+     *  — a caller cleaning up local screenshots must intersect with its own
+     *  run's screenshot list (ART1-B), never delete this list wholesale. The
+     *  identity lets cleanup verify the on-disk file is still the exact file
+     *  the server received (a concurrent run may have recreated the path). */
+    uploadedFiles?: UploadedArtifactFile[];
   };
 }
 
@@ -356,6 +388,165 @@ async function walkDir(dir: string): Promise<string[]> {
     // Directory doesn't exist
   }
   return files;
+}
+
+/**
+ * Resolve this run's screenshot whitelist against the on-disk screenshots dir.
+ *
+ * The whitelist replaces walkDir's natural containment, so every path is
+ * realpath'd and confirmed to live under the (realpath'd) screenshots root —
+ * an escapee (e.g. an event-stream `path` of `../../.env`) is dropped, never
+ * read. Returns the safe candidates plus counts of what was skipped:
+ *  - `outOfBounds`: whitelist entries that don't resolve or escape the root.
+ *  - `outOfList`: files physically present in the dir but NOT in this run's
+ *    list (stale prior-run files, or a `saveArtifact` that emitted no `path`).
+ */
+async function collectRunScreenshots(
+  screenshotsRoot: string,
+  whitelist: string[],
+): Promise<{
+  candidates: { path: string; relativeName: string }[];
+  outOfBounds: number;
+  outOfList: number;
+}> {
+  let realRoot: string | undefined;
+  try {
+    realRoot = await realpath(screenshotsRoot);
+  } catch {
+    realRoot = undefined; // dir doesn't exist
+  }
+
+  const included = new Set<string>();
+  const candidates: { path: string; relativeName: string }[] = [];
+  let outOfBounds = 0;
+
+  if (realRoot === undefined) {
+    // The run listed screenshots but the dir is gone — nothing safe to upload.
+    return { candidates, outOfBounds: whitelist.length, outOfList: 0 };
+  }
+
+  for (const p of whitelist) {
+    let real: string;
+    try {
+      real = await realpath(p);
+    } catch {
+      outOfBounds += 1; // missing / unreadable
+      continue;
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+      outOfBounds += 1; // escapes the screenshots root — refuse it
+      continue;
+    }
+    // Regular files only — matches the walkDir path this replaces. A dir/FIFO
+    // slipping in would throw at readFile and fail the whole artifact batch.
+    try {
+      if (!(await stat(real)).isFile()) {
+        outOfBounds += 1;
+        continue;
+      }
+    } catch {
+      outOfBounds += 1; // vanished between realpath and stat
+      continue;
+    }
+    if (included.has(real)) continue; // dedupe repeats in the list
+    included.add(real);
+    candidates.push({
+      path: real,
+      relativeName: join("screenshots", relative(realRoot, real)),
+    });
+  }
+
+  // Count files on disk that this run's list didn't cover (surfaced as a
+  // warning by the caller so an upstream regression can't silently drop them).
+  let outOfList = 0;
+  for (const filePath of await walkDir(screenshotsRoot)) {
+    let real: string;
+    try {
+      real = await realpath(filePath);
+    } catch {
+      continue;
+    }
+    if (!included.has(real)) outOfList += 1;
+  }
+
+  return { candidates, outOfBounds, outOfList };
+}
+
+/**
+ * ART1-B — delete this run's screenshots locally once the Cloud confirmed it
+ * received them. Deletes ONLY the intersection of:
+ *   - `screenshotPaths`: this run's screenshot list (from the event stream), and
+ *   - `uploadedFiles`: what `uploadToCloud` actually posted in a server-confirmed
+ *     batch (`receipt.artifactUpload.uploadedFiles`).
+ * plus the same realpath containment guard as the upload whitelist: a path is
+ * only unlinked when it resolves strictly inside `.glubean/screenshots`. On top
+ * of path membership, the file's stat identity (dev/ino/size/mtimeMs) must still
+ * match what was uploaded — a concurrent run that recreated the same path put
+ * bytes there the server never received, and those must survive. (The check is
+ * re-done immediately before each unlink; POSIX offers no unlink-by-fd, so a
+ * recreation landing in the sub-ms window between lstat and unlink is the one
+ * residual race — codex r2 P3, accepted.) So a partial
+ * upload (over-cap skip) keeps its file, a failed batch keeps everything, and
+ * nothing outside the screenshots dir (e.g. `.glubean/artifacts`, or an escapee
+ * event path) is ever touched. Idempotent: already-missing files are skipped
+ * silently. Returns how many files were removed.
+ */
+export async function removeUploadedScreenshots(
+  rootDir: string,
+  screenshotPaths: string[],
+  uploadedFiles: UploadedArtifactFile[],
+): Promise<{ removed: number }> {
+  let realRoot: string;
+  try {
+    realRoot = await realpath(join(rootDir, ".glubean", "screenshots"));
+  } catch {
+    return { removed: 0 }; // dir gone — nothing local to clean
+  }
+
+  // uploadedFiles screenshot entries are keyed by realpath (the whitelist
+  // resolver emits realpaths), so realpath'd screenshotPaths compare directly.
+  const uploaded = new Map(uploadedFiles.map((f) => [f.path, f]));
+  const seen = new Set<string>();
+  let removed = 0;
+
+  for (const p of screenshotPaths) {
+    let real: string;
+    try {
+      real = await realpath(p);
+    } catch {
+      continue; // already gone (idempotent) or never existed
+    }
+    if (seen.has(real)) continue; // dedupe repeats in the list
+    seen.add(real);
+    // Containment guard (strictly inside the root — never the root itself):
+    // an event path that resolved elsewhere must not be deleted even if a
+    // same-string entry was uploaded via the `.glubean/artifacts` walk.
+    if (!real.startsWith(realRoot + sep)) continue;
+    const identity = uploaded.get(real);
+    if (!identity) continue; // not confirmed uploaded — keep it
+    // Identity check immediately before unlink: the on-disk file must still be
+    // the exact file whose bytes the server received. lstat (not stat) so a
+    // symlink swapped in at this path can't borrow its target's identity.
+    try {
+      const s = await lstat(real);
+      if (
+        !s.isFile() ||
+        s.dev !== identity.dev ||
+        s.ino !== identity.ino ||
+        s.size !== identity.size ||
+        s.mtimeMs !== identity.mtimeMs
+      ) {
+        continue; // recreated/replaced since upload — the server never saw it
+      }
+      await unlink(real);
+      removed += 1;
+    } catch {
+      // Vanished concurrently or not deletable — keeping a local file is
+      // always safe; never fail the run over cleanup.
+    }
+  }
+
+  return { removed };
 }
 
 /**
@@ -484,15 +675,43 @@ export async function uploadToCloud(
   if (options.skipArtifacts) return receipt;
 
   const artifactRoot = join(rootDir, ".glubean");
-  const artifactDirs = [
-    join(artifactRoot, "artifacts"),
-    join(artifactRoot, "screenshots"),
-  ];
+  const screenshotsRoot = join(artifactRoot, "screenshots");
 
   const candidates: { path: string; relativeName: string }[] = [];
-  for (const dir of artifactDirs) {
-    const dirFiles = await walkDir(dir);
-    for (const filePath of dirFiles) {
+
+  // `.glubean/artifacts` — always walked (out of ART1 scope: it holds
+  // per-run-named artifact files, not the shared screenshot pool).
+  for (const filePath of await walkDir(join(artifactRoot, "artifacts"))) {
+    candidates.push({
+      path: filePath,
+      relativeName: relative(artifactRoot, filePath),
+    });
+  }
+
+  // `.glubean/screenshots` — the dir accumulates screenshots across runs, so
+  // walking it uploads stale files from previous runs as this run's evidence
+  // (ART1). When the caller passes this run's exact screenshot list, use it as
+  // a whitelist (realpath-contained to the screenshots root) instead.
+  if (options.screenshotPaths) {
+    const { candidates: shots, outOfBounds, outOfList } =
+      await collectRunScreenshots(screenshotsRoot, options.screenshotPaths);
+    candidates.push(...shots);
+    if (outOfBounds > 0 || outOfList > 0) {
+      const parts: string[] = [];
+      if (outOfList > 0) {
+        parts.push(`${outOfList} on disk not in this run's screenshot list`);
+      }
+      if (outOfBounds > 0) {
+        parts.push(`${outOfBounds} out of bounds / unresolved`);
+      }
+      // Surfaced (not silent) so a future `saveArtifact` that omits `path`
+      // can't quietly drop this run's screenshots from the upload.
+      console.log(
+        `${colors.yellow}Skipped ${parts.join(", ")} screenshot file(s) — only this run's screenshots are uploaded.${colors.reset}`,
+      );
+    }
+  } else {
+    for (const filePath of await walkDir(screenshotsRoot)) {
       candidates.push({
         path: filePath,
         relativeName: relative(artifactRoot, filePath),
@@ -507,6 +726,11 @@ export async function uploadToCloud(
     let uploadedCount = 0;
     let skippedCount = 0;
     let totalSize = 0;
+    // Files that actually enter the form — NOT the over-cap skips — with their
+    // upload-time stat identity. Reported on the receipt (uploadedFiles) only
+    // once the server confirms the batch, so local cleanup (ART1-B) can never
+    // delete a file the Cloud never received.
+    const postedFiles: UploadedArtifactFile[] = [];
     for (const file of candidates) {
       const s = await stat(file.path);
       if (s.size > INLINE_THRESHOLD) {
@@ -528,6 +752,13 @@ export async function uploadToCloud(
       );
       uploadedCount += 1;
       totalSize += s.size;
+      postedFiles.push({
+        path: file.path,
+        size: s.size,
+        mtimeMs: s.mtimeMs,
+        ino: s.ino,
+        dev: s.dev,
+      });
     }
 
     if (uploadedCount === 0) {
@@ -551,6 +782,9 @@ export async function uploadToCloud(
       sizeBytes: totalSize,
       ...(outcome.statusCode !== undefined ? { statusCode: outcome.statusCode } : {}),
       ...(outcome.error ? { error: outcome.error } : {}),
+      // Only a server-confirmed batch exposes what was posted — a failed POST
+      // must never feed the local cleanup path.
+      ...(outcome.ok ? { uploadedFiles: postedFiles } : {}),
     };
     if (!outcome.ok) return receipt;
 
