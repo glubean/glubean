@@ -33,6 +33,38 @@ export const users = test.each([
 });
 `;
 
+// A file that mixes a FAILING plain test with a capability-gated (browser)
+// test. On a headless run the browser test is capability-skipped (⊘) and the
+// plain test fails — so `--rerun-failed` targets ONLY the plain test, and the
+// browser test (not in the failed set) must NOT re-emit a skip row. Used by the
+// GLU-67 regression for "rerun narrowing vs capability-skip order".
+const MIXED_CAP_FIXTURE = `
+import { test } from "@glubean/sdk";
+
+export const checkout = test("checkout", async (ctx) => {
+  ctx.assert(false, "checkout must pass");
+});
+
+export const loginBrowser = test(
+  { id: "login-browser", requires: "browser" },
+  async (ctx) => {
+    ctx.assert(true, "ok");
+  },
+);
+`;
+
+// Two DIFFERENT files that both export a test with the SAME id (\`ping\`). A
+// single \`--only-id ping\` must run BOTH (keep-all-matches), not silently drop
+// the second. Used by the GLU-67 "--only-id keep-all-matches" regression.
+const PING_FIXTURE_A = `
+import { test } from "@glubean/sdk";
+export const ping = test("ping", async (ctx) => { ctx.assert(true, "a ok"); });
+`;
+const PING_FIXTURE_B = `
+import { test } from "@glubean/sdk";
+export const ping = test("ping", async (ctx) => { ctx.assert(true, "b ok"); });
+`;
+
 function pkgJson(name: string): string {
   return JSON.stringify(
     {
@@ -52,6 +84,19 @@ async function prepare(name: string): Promise<string> {
   await mkdir(join(dir, "tests"), { recursive: true });
   await writeFile(join(dir, "package.json"), pkgJson(`selector-e2e-${seq}`), "utf-8");
   await writeFile(join(dir, "tests", "each.test.ts"), EACH_FIXTURE, "utf-8");
+  return dir;
+}
+
+/** Prepare a project with an explicit set of `tests/<name>` files (for the
+ *  multi-file / mixed-capability GLU-67 regressions). */
+async function prepareFiles(name: string, files: Record<string, string>): Promise<string> {
+  seq += 1;
+  const dir = join(FIXTURE_ROOT, `${name}-${seq}`);
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), pkgJson(`selector-e2e-${seq}`), "utf-8");
+  for (const [rel, contents] of Object.entries(files)) {
+    await writeFile(join(dir, "tests", rel), contents, "utf-8");
+  }
   return dir;
 }
 
@@ -192,3 +237,56 @@ test("a real `glubean run` persists `.each` row-identity provenance in last-run.
   expect(byId.get("user-20")).toEqual({ idTemplate: "user-$id", index: 1, rowKey: "user-20", stable: true });
   expect(byId.get("user-30")).toEqual({ idTemplate: "user-$id", index: 2, rowKey: "user-30", stable: true });
 }, 60_000);
+
+// ---------------------------------------------------------------------------
+// GLU-67 (B2 M3 follow-up) — selector edge cases.
+// ---------------------------------------------------------------------------
+
+test("--rerun-failed does not re-emit a capability-skip for a test outside the failed set (GLU-67)", async () => {
+  const dir = await prepareFiles("rerun-cap", { "mixed.test.ts": MIXED_CAP_FIXTURE });
+
+  // Full headless run: `checkout` fails, `login-browser` is capability-skipped.
+  const full = await runCli(["run", "tests/", "--no-session"], { cwd: dir });
+  expect(full.code).toBe(1);
+  const fullOut = full.stdout + full.stderr;
+  // Sanity: the browser test IS capability-skipped on the full run.
+  expect(fullOut).toContain("login-browser");
+  const afterFull = await readLastRun(dir);
+  expect(afterFull.tests.find((t) => t.testId === "checkout")?.success).toBe(false);
+
+  // Rerun the failed set. Only `checkout` failed, so `login-browser` is NOT in
+  // the rerun set. Pre-fix, the CLI skipped selector-narrowing for --rerun-failed,
+  // so the capability-skip pass still emitted a spurious `⊘ ... requires: browser`
+  // row for login-browser. Post-fix it's narrowed out first — no such row.
+  const rerun = await runCli(["run", "tests/", "--no-session", "--rerun-failed"], { cwd: dir });
+  expect(rerun.code).toBe(1);
+  const rerunOut = rerun.stdout + rerun.stderr;
+  expect(rerunOut).not.toContain("login-browser");
+  expect(rerunOut).not.toContain("requires: browser");
+
+  const afterRerun = await readLastRun(dir);
+  expect(afterRerun.tests.map((t) => t.testId)).toEqual(["checkout"]);
+  expect(afterRerun.tests[0]?.success).toBe(false);
+}, 90_000);
+
+test("--only-id runs EVERY export sharing that id across files (keep-all-matches, GLU-67)", async () => {
+  const dir = await prepareFiles("only-id-multi", {
+    "a.test.ts": PING_FIXTURE_A,
+    "b.test.ts": PING_FIXTURE_B,
+  });
+
+  const { code } = await runCli(["run", "tests/", "--no-session", "--only-id", "ping"], {
+    cwd: dir,
+  });
+  expect(code).toBe(0);
+
+  // Both files' `ping` must have run — pre-fix `findTemplateMatch` kept only the
+  // first, silently dropping the second file's `ping`.
+  const last = await readLastRun(dir);
+  const files = last.tests
+    .filter((t) => t.testId === "ping")
+    .map((t) => t.filePath)
+    .sort();
+  expect(last.tests.filter((t) => t.testId === "ping")).toHaveLength(2);
+  expect(files).toEqual(["tests/a.test.ts", "tests/b.test.ts"]);
+}, 90_000);

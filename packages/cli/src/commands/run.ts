@@ -23,6 +23,7 @@ import {
   classifyByStem,
   extractContractFromFile,
   findTemplateMatch,
+  findTemplateMatches,
   GLUBEAN_KINDS,
   loadProjectOverlays,
   matchesTemplateFilter,
@@ -1291,25 +1292,44 @@ export async function runCommand(
     return true;
   });
 
-  // B2 M3 — narrow testsToRun for --only-id / --row. Selector ids are CONCRETE
+  // B2 M3 — narrow testsToRun to the selected ids. Selector ids are CONCRETE
   // (e.g. `user-0`); a `.each` export appears in discovery under its TEMPLATE id
   // (e.g. `user-$index`). Template-match each selector id against the discovered
   // template ids so concrete selectors reach the right export — the harness then
-  // applies the precise per-row filter at runtime. (Rerun narrows by file above.)
-  if (onlySelectors.length > 0 && !options.rerunFailed) {
+  // applies the precise per-row filter at runtime.
+  //
+  // This runs for `--rerun-failed` too (GLU-67 follow-up): `--rerun-failed`
+  // narrows DISCOVERY to the failed FILES above, but a failed file can also hold
+  // PASSED tests. Without narrowing testsToRun here as well, those passed tests
+  // reach the capability-skip pass below and emit spurious `⊘ skipped` rows that
+  // aren't part of the rerun set (the harness `matchOnly` still filters them at
+  // runtime, but only after the CLI has already printed the noise). Narrowing here
+  // makes the rerun path's ordering match the `--only-id` path: filter to the
+  // selected ids FIRST, then capability-skip only what remains.
+  //
+  // keep-all-matches (GLU-67 follow-up): `findTemplateMatches` (plural) keeps
+  // EVERY export a selector id matches — a bare id shared by two files, or two
+  // overlapping `.each` templates, all run — instead of `findTemplateMatch`'s
+  // silent first-match-wins drop.
+  if (onlySelectors.length > 0) {
     const selectorIds = Array.from(
       new Set(onlySelectors.map((s) => (typeof s === "string" ? s : s.id))),
     );
     const indexed = testsToRun.map((ft) => ({ id: ft.test.meta.id, ft }));
     const kept = new Set<(typeof testsToRun)[number]>();
     for (const selId of selectorIds) {
-      const match = findTemplateMatch(indexed, selId);
-      if (match) kept.add(match.ft);
+      for (const match of findTemplateMatches(indexed, selId)) kept.add(match.ft);
     }
     testsToRun = testsToRun.filter((ft) => kept.has(ft));
     if (testsToRun.length === 0) {
+      // In rerun mode the ids come from the last run's failed set, not a
+      // `--only-id` flag — report accordingly (e.g. a failed test was renamed
+      // or removed since the recorded run).
       console.error(
-        `\n${colors.red}❌ No tests match --only-id ${selectorIds.join(", ")}${colors.reset}\n`,
+        options.rerunFailed
+          ? `\n${colors.red}❌ --rerun-failed: none of the last run's failed test ids ` +
+              `(${selectorIds.join(", ")}) still exist in the target files.${colors.reset}\n`
+          : `\n${colors.red}❌ No tests match --only-id ${selectorIds.join(", ")}${colors.reset}\n`,
       );
       process.exit(1);
     }
