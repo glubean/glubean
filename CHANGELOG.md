@@ -15,6 +15,31 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ---
 
+## [0.8.4] — 2026-07-02
+
+> Scope: lockstep release re-aligning all 13 packages on one version (mixed 0.8.1 / 0.8.2 / 0.8.3 → 0.8.4). `@glubean/sdk` 0.8.4 is a version-only republish of 0.8.2 (see [0.8.2] below — F31 zod JSON Schema fix + the sdk authoring surface that rode along); `@glubean/cli` picks up everything since its independent 0.8.3 (2026-06-27); all other packages ship everything since 0.8.1. Unchanged packages (`auth`, `graphql`, `grpc`, `oauth-code`, `redaction`, `glubean` meta) are republished at 0.8.4 per lockstep policy. There is no 0.8.3 lockstep release — 0.8.3 was a cli-only manual publish with no tag.
+
+### Changed
+
+#### BREAKING — MCP cloud tools migrate to the `/v1` ingest contract (`@glubean/mcp`, GLU-77)
+- **`glubean_open_trigger_run` is removed and replaced by `glubean_open_upload_run` — the SEMANTICS changed, not just the name.** The old tool asked the retired Open Platform (`POST /open/v1/runs`) to execute a test bundle *remotely on the platform*. The new tool works in the opposite direction: it **uploads the most recent local `glubean_run_local_file` run** to the platform (`POST /v1/projects/{projectId}/targets/{targetId}/runs`) — the same ingest contract and credential conventions as `glubean run --upload`. Nothing executes remotely anymore; runs execute locally and their results are reported. The payload is deep-redacted client-side before upload, and HTTP traces are never uploaded (the local trace view keeps authorization headers).
+- **`glubean_open_get_run` / `glubean_open_get_run_events` now read the target-scoped `/v1` endpoints.** Events are stored per test — `glubean_open_get_run_events` takes a `testId` (omit it to list the run's tests); the `afterSeq` cursor is gone (no run-level event log in `/v1`). Practical baseline: on 0.8.1 every `/open/v1` call 404'd because the legacy Open Platform was retired — these tools were unusable before this migration.
+- Credential/environment resolution mirrors the CLI precedence (explicit argument > `GLUBEAN_*` env vars > `.env`/`.env.secrets` > `~/.glubean/credentials.json`) and defaults both credentials and the environment label to the env file the run was executed with. A stable `clientRunId` is minted per local snapshot, so re-uploading the same run *replaces* the Cloud run instead of duplicating it.
+
+### Added
+- **`glubean sync`** (`@glubean/cli`) — upload test-definition projections to Cloud (`C2`): test shapes captured via a sandboxed dry-run (incl. `ctx.when`/`ctx.switch`/`ctx.while` branches and per-row data-driven shapes), contract + workflow projections (`C1`), and project tags. Honors project redaction config and fails closed on invalid config, dropped files, or projection errors.
+- **OpenAPI 3.1 from HTTP contracts** (`@glubean/cli`) — render an OpenAPI 3.1 document from a project's HTTP contracts and include it in `sync`.
+- **Run selectors** (`@glubean/cli`, with the `{id, rowIndex}` selector protocol across `@glubean/sdk`/`engine`/`runner`, `B2-M3`) — `--only-id` / `--row` target a single test or data row; `--rerun-failed` re-runs exactly the previous run's failures.
+- **Screenshots as first-class evidence** (`@glubean/browser`, `BT-M3`) — `EvidenceSession.captureShot()` / `screenshots`, `ScreenshotMode` with a 3-trigger policy (failure / checkpoint / always-on manual).
+- **Shared `EvidenceSession` CDP session** (`@glubean/browser`, `BT-M2`) — one self-opened CDP session shared by network trace, Fetch mock, and emulation; capability-gated, with guardrails against viewport takeover and double-opened Fetch domains.
+- **`ctx.http.track(pattern)` runtime** (`@glubean/runner`, `@glubean/engine`) — runner/engine execution support for the sdk-side `.track()` API published in 0.8.2 (pin a raw HTTP call to its canonical endpoint).
+
+### Fixed
+- **Artifact upload scope (`ART1`)** (`@glubean/cli`) — `--upload` sends only *this run's* screenshots instead of the whole artifact directory (A), and unlinks local screenshots after a confirmed upload; `--keep-local` opts out (B).
+- **Empty-test-file gate is provenance-verified** (`@glubean/scanner`) — the scanner only flags empty test files that verifiably import the Glubean SDK (multi-line + comment safe) and gates on parse failure rather than import heuristics; static scan tags are used as a fallback when the runner predates shape tags.
+
+---
+
 ## [0.8.2] — 2026-07-02
 
 > Scope: `@glubean/sdk` republish only (F31). Other packages stay at their current published versions; `@glubean/cli` had already moved ahead independently (0.8.3). Published manually via `pnpm --filter @glubean/sdk publish` — the `v*` tag workflow is intentionally NOT used here, because its final gate verifies all 13 packages at the tag version and would go red on a single-package release.
@@ -109,8 +134,9 @@ Changes prior to `v0.7.0` are not captured in this CHANGELOG. Use `git log v0.2.
 - `v0.3.x`–`v0.5.x` — config profiles, multi-suite, `--ci` flag, demo template, per-profile multi-project upload.
 - `v0.2.x` — initial Node.js port from Deno; `@glubean/engine` spike, inbound contract receivers, workflow vNext (S2 series).
 
-[Unreleased]: https://github.com/glubean/glubean/compare/v0.8.2...HEAD
-[0.8.2]: https://github.com/glubean/glubean/compare/v0.8.1...v0.8.2
+[Unreleased]: https://github.com/glubean/glubean/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/glubean/glubean/compare/v0.8.1...v0.8.4
+[0.8.2]: https://github.com/glubean/glubean/compare/v0.8.1...5db5384
 [0.8.1]: https://github.com/glubean/glubean/compare/v0.7.0...v0.8.1
-[0.8.0]: https://github.com/glubean/glubean/compare/v0.7.0...v0.8.0
+[0.8.0]: https://github.com/glubean/glubean/compare/v0.7.0...8ecde8e
 [0.7.0]: https://github.com/glubean/glubean/compare/v0.2.10...v0.7.0
