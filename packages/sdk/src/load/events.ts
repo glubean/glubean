@@ -11,6 +11,7 @@
  * this is the type contract those modules and external-engine adapters share.
  */
 import type { LoadArtifactConfig, LoadCrashSummary, LoadErrorKind } from "./artifact.js";
+import type { LoadMetricKind } from "./metrics.js";
 
 /** Resolved (ms-normalized) config emitted on `load:start`. */
 export type LoadResolvedConfig = LoadArtifactConfig;
@@ -83,6 +84,19 @@ export type LoadEvent =
       type: "report:checkpoint";
       checkpointId: string;
       data?: Record<string, unknown>;
+    })
+  | (LoadEventEnvelope & {
+      // A custom-metric fold (parallel to `request:observed`), so the reducer
+      // stays the single fold point and a failed iteration still leaves a trace.
+      type: "metric:observed";
+      metricId: string;
+      kind: LoadMetricKind;
+      /** rate: 0|1, counter: increment, trend: the sample value. */
+      value: number;
+      /** Display unit for a `trend` (stamped from the declaration), so the reducer
+       *  folds custom metrics from the event stream alone — no declaration lookup. */
+      unit?: string;
+      tags?: Record<string, string>;
     })
   | (LoadEventEnvelope & {
       type: "producer:primaryCompleted";

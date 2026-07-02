@@ -15,6 +15,7 @@ import type {
   LoadEndReason,
   LoadErrorKind,
   LoadEvent,
+  LoadMetricKind,
   LoadReducer,
   LoadResolvedConfig,
 } from "@glubean/sdk/load";
@@ -208,6 +209,28 @@ export class LoadSink {
    *  leaves that share a display name (the reducer keys aggregates by stepId). */
   private stepIdOf(index: number, name: string): string {
     return `${index}:${name}`;
+  }
+
+  /** Emit `metric:observed` (backs `ctx.metrics.<id>.add(...)`) — a custom-metric
+   *  fold the reducer aggregates into `summary.customMetrics`. */
+  emitMetricObserved(
+    env: LoadIterationEnvelope,
+    obs: { metricId: string; kind: LoadMetricKind; value: number; unit?: string; tags?: Record<string, string> },
+  ): void {
+    // A handle that escaped its step (a non-awaited callback / timer) could fire after the
+    // iteration ended but before the run is sealed; drop it so a late sample can't fold into
+    // a completed iteration's aggregates (and `baseOf` doesn't resurrect it as `primary`).
+    // Post-seal is already a no-op in `emit()`.
+    if (!this.envelopes.has(env.iterationId)) return;
+    this.emit({
+      type: "metric:observed",
+      ...this.baseOf(env),
+      metricId: obs.metricId,
+      kind: obs.kind,
+      value: obs.value,
+      ...(obs.unit !== undefined ? { unit: obs.unit } : {}),
+      ...(obs.tags !== undefined ? { tags: obs.tags } : {}),
+    });
   }
 
   /** Emit `report:checkpoint` (backs `ctx.report.checkpoint`). */

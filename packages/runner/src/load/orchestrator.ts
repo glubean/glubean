@@ -43,7 +43,7 @@ import {
 import { ContinuationPool } from "./continuation-pool.js";
 import { createLoadReducer } from "./reducer.js";
 import { LoadSink, type LoadIterationEnvelope } from "./sink.js";
-import { evaluateThresholds } from "./threshold.js";
+import { evaluateThresholds, validateLoadMetricsConfig } from "./threshold.js";
 
 /** Options for one local load run. */
 export interface RunLoadOptions {
@@ -254,6 +254,14 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   const slowSummaryCap = config.report?.slowTransactionSummaries;
   if (slowSummaryCap !== undefined && (!Number.isInteger(slowSummaryCap) || slowSummaryCap < 0)) {
     throw new Error(`loadRunner "${plan.id}": report.slowTransactionSummaries must be a non-negative integer (got ${slowSummaryCap})`);
+  }
+  // Custom metrics: declarations + `thresholds.customMetric` targets fail fast HERE —
+  // untyped JS config bypasses the compile-time types, and an out-of-union kind or a
+  // typo'd gate target would otherwise surface as a schema-invalid artifact / a
+  // silently-skipped gate at the END of the run.
+  const metricConfigErrors = validateLoadMetricsConfig(config.metrics, config.thresholds?.customMetric);
+  if (metricConfigErrors.length > 0) {
+    throw new Error(`loadRunner "${plan.id}": ${metricConfigErrors.join("; ")}`);
   }
 
   const now = opts.now ?? (() => Date.now());
@@ -599,6 +607,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       iteration,
       session: cloneSession(baseSession), // copy-on-write: each iteration gets its own (deep)
       ...(Object.keys(feederKeys).length > 0 ? { feederKeys } : {}),
+      ...(config.metrics !== undefined ? { metrics: config.metrics } : {}),
       now,
       continuation: { pool: continuationPool },
       signal: runAbort.signal,
@@ -707,9 +716,12 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // verdict (a crash-free run still fails if a threshold is breached). Thresholds are
   // run-level — for a mix they apply to the aggregate, not per scenario.
   if (config.thresholds !== undefined) {
-    const { thresholds, pass } = evaluateThresholds(artifact, config.thresholds);
+    const { thresholds, pass, advisories } = evaluateThresholds(artifact, config.thresholds);
     artifact.summary.thresholds = thresholds;
     artifact.summary.pass = pass;
+    // Configured-but-unevaluable gates (e.g. a custom metric that never recorded a
+    // sample) surface as advisories, so a skipped gate can't leave CI green unnoticed.
+    if (advisories.length > 0) (artifact.summary.advisories ??= []).push(...advisories);
   }
   return artifact;
 }

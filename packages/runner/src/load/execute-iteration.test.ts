@@ -639,6 +639,127 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(out.ok).toBe(true);
     expect(reducer.finalize().summary.successfulIterations).toBe(1);
   });
+
+  it("no-ops `ctx.metrics` when the runner declared none (no throw, no fold)", async () => {
+    const { reducer, sink, core } = rig("run-metrics");
+
+    let added = false;
+    const scenario = loadScenario<{ run: number }>("with-metrics")
+      .step("browse", async (ctx) => {
+        await ctx.http.get(`${base}/items/${ctx.input.run}`).json();
+        // No declarations passed below → the surface is a safe no-op.
+        ctx.metrics.pollOk.add(true, { class: "fast" });
+        ctx.metrics.retries.add();
+        added = true;
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("with-metrics", "it-1"),
+      input: { run: 9 },
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+    });
+
+    expect(added).toBe(true);
+    expect(out.ok).toBe(true);
+    expect(reducer.finalize().summary.customMetrics).toBeUndefined();
+  });
+
+  it("folds declared `ctx.metrics` end-to-end (handle → sink → reducer)", async () => {
+    const { reducer, sink, core } = rig("run-metrics2");
+
+    const scenario = loadScenario<{ run: number }>("declared-metrics")
+      .step("poll", async (ctx) => {
+        await ctx.http.get(`${base}/items/${ctx.input.run}`).json();
+        ctx.metrics.pollOk.add(true, { class: "fast" });
+        ctx.metrics.retries.add(); // counter default +1
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("declared-metrics", "it-1"),
+      input: { run: 9 },
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      metrics: { pollOk: { kind: "rate" }, retries: { kind: "counter" } },
+    });
+
+    expect(out.ok).toBe(true);
+    const cm = reducer.finalize().summary.customMetrics ?? [];
+    const pollOk = cm.find((m) => m.metricId === "pollOk");
+    expect(pollOk?.series.find((s) => s.tags.class === "fast")).toMatchObject({ count: 1, trueCount: 1, rate: 1 });
+    const retries = cm.find((m) => m.metricId === "retries");
+    expect(retries?.series.find((s) => Object.keys(s.tags).length === 0)).toMatchObject({ count: 1, sum: 1 });
+  });
+
+  it("drops non-finite metric samples (NaN/Infinity), folding only the valid one", async () => {
+    const { reducer, sink, core } = rig("run-metrics3");
+
+    const scenario = loadScenario<{ run: number }>("nan-metrics")
+      .step("poll", async (ctx) => {
+        await ctx.http.get(`${base}/items/${ctx.input.run}`).json();
+        ctx.metrics.e2e.add(Number("not-a-number")); // NaN → dropped
+        ctx.metrics.e2e.add(Infinity); // dropped
+        ctx.metrics.e2e.add(120); // the only valid sample
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("nan-metrics", "it-1"),
+      input: { run: 9 },
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      metrics: { e2e: { kind: "trend", unit: "ms" } },
+    });
+
+    expect(out.ok).toBe(true);
+    const total = reducer
+      .finalize()
+      .summary.customMetrics?.find((m) => m.metricId === "e2e")
+      ?.series.find((s) => Object.keys(s.tags).length === 0);
+    expect(total?.count).toBe(1); // two malformed samples dropped, one folded
+  });
+
+  it("no-ops an inherited property name (constructor/toString) without throwing", async () => {
+    const { reducer, sink, core } = rig("run-metrics4");
+
+    const scenario = loadScenario<{ run: number }>("inherited-name")
+      .step("poll", async (ctx) => {
+        await ctx.http.get(`${base}/items/${ctx.input.run}`).json();
+        // Undeclared ids that collide with Object.prototype must stay no-ops.
+        // (Variable-key access so TS resolves the index signature, not the Function members.)
+        const handle = (id: string) => (ctx.metrics as Record<string, { add(v?: unknown): void }>)[id]!;
+        handle("constructor").add(true);
+        handle("toString").add(1);
+        ctx.metrics.real.add(true);
+      })
+      .build();
+
+    const out = await runLoadIteration({
+      core,
+      sink,
+      scenario: compileLoadScenario(scenario),
+      envelope: envelope("inherited-name", "it-1"),
+      input: { run: 9 },
+      producerSlot: { id: "p0", index: 0 },
+      iteration: { id: "it-1", index: 0 },
+      metrics: { real: { kind: "rate" } },
+    });
+
+    expect(out.ok).toBe(true);
+    const ids = (reducer.finalize().summary.customMetrics ?? []).map((m) => m.metricId);
+    expect(ids).toEqual(["real"]); // only the declared metric folded; no throw above
+  });
 });
 
 describe("runLoadIteration — primaryComplete boundary (M5)", () => {
