@@ -154,6 +154,33 @@ export function findTemplateMatch<T extends { id: string }>(
   return exact ?? items.find((item) => matchesTemplateId(item.id, concreteId));
 }
 
+/**
+ * Like {@link findTemplateMatch}, but returns EVERY matching entry instead of
+ * just the first (B2 M3 follow-up — GLU-67 "`--only-id` keep-all-matches"). The
+ * single-match variant is correct for mapping ONE concrete event id back to ONE
+ * static meta; but when a caller is SELECTING which exports to run for a
+ * user-supplied id (`--only-id health`), silently dropping every match past the
+ * first means a second file's `health` — or a second overlapping template —
+ * never runs. This keeps them all.
+ *
+ * Same exact-over-template preference as the singular form, pluralized: if any
+ * entry matches `concreteId` EXACTLY (variant-prefix-stripped, case-insensitive),
+ * ALL exact matches are returned and template entries are ignored; otherwise ALL
+ * template matches are returned. Declaration order is preserved. Returns `[]`
+ * when nothing matches.
+ */
+export function findTemplateMatches<T extends { id: string }>(
+  items: readonly T[],
+  concreteId: string,
+): T[] {
+  const normalizedConcrete = stripVariantPrefix(concreteId).toLowerCase();
+  const exact = items.filter(
+    (item) => stripVariantPrefix(item.id).toLowerCase() === normalizedConcrete,
+  );
+  if (exact.length > 0) return exact;
+  return items.filter((item) => matchesTemplateId(item.id, concreteId));
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

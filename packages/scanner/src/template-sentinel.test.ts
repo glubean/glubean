@@ -1,6 +1,7 @@
 import { test, expect } from "vitest";
 import {
   findTemplateMatch,
+  findTemplateMatches,
   hasTemplatePlaceholders,
   matchesTemplateFilter,
   matchesTemplateId,
@@ -38,4 +39,35 @@ test("findTemplateMatch prefers exact ids then template-shaped ids", () => {
   expect(findTemplateMatch(items, "case-101")?.id).toBe("case-101");
   expect(findTemplateMatch(items, "case-202")?.id).toBe("case-$id");
   expect(findTemplateMatch(items, "missing")).toBeUndefined();
+});
+
+test("findTemplateMatches keeps EVERY match, not just the first (GLU-67)", () => {
+  // Same exact id in two entries (e.g. `health` defined in two files) — both kept.
+  const dupExact = [
+    { id: "health", file: "a" },
+    { id: "other", file: "b" },
+    { id: "health", file: "c" },
+  ];
+  expect(findTemplateMatches(dupExact, "health").map((m) => m.file)).toEqual(["a", "c"]);
+
+  // Two overlapping templates that a concrete id both satisfy — both kept
+  // (findTemplateMatch would silently drop the second).
+  const overlap = [
+    { id: "case-$x", file: "t1" },
+    { id: "case-$y", file: "t2" },
+    { id: "misc-$z", file: "t3" },
+  ];
+  expect(findTemplateMatches(overlap, "case-101").map((m) => m.file)).toEqual(["t1", "t2"]);
+
+  // Exact-over-template preference is preserved AND pluralized: an exact match
+  // suppresses template entries, and all exact matches come back.
+  const mixed = [
+    { id: "case-$id", file: "tmpl" },
+    { id: "case-101", file: "exactA" },
+    { id: "case-101", file: "exactB" },
+  ];
+  expect(findTemplateMatches(mixed, "case-101").map((m) => m.file)).toEqual(["exactA", "exactB"]);
+
+  // No match → empty array.
+  expect(findTemplateMatches(overlap, "nope-1")).toEqual([]);
 });

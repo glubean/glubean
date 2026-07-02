@@ -75,6 +75,7 @@ export type {
 
 export {
   findTemplateMatch,
+  findTemplateMatches,
   hasTemplatePlaceholders,
   matchesTemplateFilter,
   matchesTemplateId,
