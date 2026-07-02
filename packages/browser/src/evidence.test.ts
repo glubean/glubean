@@ -171,6 +171,63 @@ test("matchMock: global/sticky regex matches same URL on repeated calls", () => 
   expect(re.lastIndex).toBe(0); // original regex untouched
 });
 
+test("matchMock: sticky (/y) regex also matches statelessly across repeated calls", () => {
+  // Same statelessness contract as the /g case above, but for /y specifically:
+  // a sticky regex advances (or resets) `lastIndex` on `.test()` just like a
+  // global one does. Repeated matchMock() calls against the SAME sticky rule
+  // must all agree, and the caller's regex object must come out untouched.
+  const re = /^\/api\/user\/\d+$/y;
+  const rule: MockRule = { url: re };
+  const req = { url: "/api/user/42", method: "GET" };
+  expect(matchMock(rule, req)).toBe(true);
+  expect(matchMock(rule, req)).toBe(true);
+  expect(matchMock(rule, req)).toBe(true);
+  expect(re.lastIndex).toBe(0); // original regex untouched
+});
+
+test("matchMock: sticky (/y) regex anchors at the start of the string — GLU-73 regression", () => {
+  // `/y` requires the match to start exactly at `lastIndex` (0 on a fresh
+  // clone) — that's the whole point of sticky matching, distinct from a
+  // plain regex's "match anywhere in the string" `.test()` semantics.
+  //
+  // A prior fix (b63b117) stripped `g`/`y` from the matching clone to solve
+  // a *different* problem (lastIndex state leaking across calls). That also
+  // erased the sticky anchor: `/\/api\/user/y` would then match
+  // "https://x.com/api/user" as a mid-string substring hit, even though the
+  // sticky flag says it must only match starting at index 0. That's the
+  // over-matching this test guards against.
+  const stickyNoCaret = /\/api\/user/y;
+  // Matches: the pattern occurs starting at index 0 of the string.
+  expect(matchMock({ url: stickyNoCaret }, { url: "/api/user", method: "GET" }))
+    .toBe(true);
+  // Does NOT match: "/api/user" only occurs mid-string (after "https://x.com"),
+  // not at index 0 — a sticky regex must reject this, unlike a plain one.
+  expect(
+    matchMock(
+      { url: stickyNoCaret },
+      { url: "https://x.com/api/user", method: "GET" },
+    ),
+  ).toBe(false);
+
+  // An explicitly-anchored sticky pattern still works as expected either way.
+  const stickyAnchored = /^\/api\/user\/\d+$/y;
+  expect(
+    matchMock({ url: stickyAnchored }, { url: "/api/user/42", method: "GET" }),
+  ).toBe(true);
+  expect(
+    matchMock(
+      { url: stickyAnchored },
+      { url: "/api/user/42/extra", method: "GET" },
+    ),
+  ).toBe(false);
+  expect(
+    matchMock(
+      { url: stickyAnchored },
+      { url: "/other/api/user/42", method: "GET" },
+    ),
+  ).toBe(false);
+});
+
 test("findMock: returns the first matching rule", () => {
   const mocks: MockRule[] = [
     { url: "/api/order" },
