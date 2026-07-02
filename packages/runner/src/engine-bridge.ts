@@ -66,6 +66,10 @@ export function engineEventToWire(e: ExecutionEvent): Record<string, unknown> {
         // rowIndex (B2 M3): forward the engine def's `.each` row index so the
         // engine path's start wire event carries it just like the legacy path.
         ...(e.rowIndex !== undefined ? { rowIndex: e.rowIndex } : {}),
+        // each (B3 T3, `run-evidence-identity-model.md` §7/§14): forward the
+        // engine def's row-identity provenance so the engine path's start wire
+        // event carries it just like the legacy path.
+        ...(e.each !== undefined ? { each: e.each } : {}),
       };
     case "log":
       return {

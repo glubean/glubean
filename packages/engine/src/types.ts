@@ -18,7 +18,7 @@
  */
 import type { KyInstance, Options } from "ky";
 import type { InternalRuntime, RuntimeCarrier } from "@glubean/sdk/internal";
-import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaIssue, SchemaLike, SwitchCase, Trace, ValidateOptions } from "@glubean/sdk";
+import type { EachRowMeta, GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaIssue, SchemaLike, SwitchCase, Trace, ValidateOptions } from "@glubean/sdk";
 
 /** ky request options plus Glubean's retained public `prefixUrl` (the engine maps
  *  it to ky 2's `prefix` at the boundary) and the `schema` option for automatic
@@ -66,7 +66,18 @@ export interface EnvProvider {
 // Every event carries the owning test `id` so a host running runs concurrently
 // can attribute assertion/trace/log events to the right run (codex P2-2).
 export type ExecutionEvent =
-  | { type: "start"; id: string; name: string; tags: string[]; retryCount?: number; rowIndex?: number }
+  | {
+    type: "start";
+    id: string;
+    name: string;
+    tags: string[];
+    retryCount?: number;
+    rowIndex?: number;
+    /** Data-driven row provenance (B3 T3, `run-evidence-identity-model.md` §7/§14) —
+     *  forwarded from the def's `.each` metadata so the run-events channel carries
+     *  row identity without a projection join. Undefined for non-each tests. */
+    each?: EachRowMeta;
+  }
   | { type: "assertion"; id: string; passed: boolean; message?: string; actual?: unknown; expected?: unknown; stepIndex?: number }
   // ctx.trace + the HTTP auto-trace carry the FULL Trace shape (node parity:
   // harness.ts:767 / :1043) — not a flat {method,url,status,timeMs}. ctx.trace ALSO
@@ -265,7 +276,7 @@ export interface StepDef {
   fn: TestFn;
 }
 export interface TestDef {
-  meta: { id: string; name?: string; tags?: string[]; skip?: boolean; only?: boolean; rowIndex?: number };
+  meta: { id: string; name?: string; tags?: string[]; skip?: boolean; only?: boolean; rowIndex?: number; each?: EachRowMeta };
   type: "simple" | "steps";
   fn?: TestFn;
   setup?: TestFn;

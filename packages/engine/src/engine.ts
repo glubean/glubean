@@ -18,7 +18,7 @@
 import ky, { type KyInstance } from "ky";
 import { captureRequestBody, inferJsonSchema, truncateBody, truncateDeep } from "./http-trace.js";
 import { Expectation } from "@glubean/sdk";
-import type { GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaEntry, SchemaIssue, SchemaLike, SwitchCase, Trace, ValidateOptions } from "@glubean/sdk";
+import type { EachRowMeta, GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaEntry, SchemaIssue, SchemaLike, SwitchCase, Trace, ValidateOptions } from "@glubean/sdk";
 import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
@@ -502,6 +502,11 @@ export class RunnerCore {
       // post-filter index so the CLI can persist it for `--rerun-failed`. Static
       // test metadata, sourced from the def (not scope) — undefined for non-each.
       ...(def.meta.rowIndex !== undefined ? { rowIndex: def.meta.rowIndex } : {}),
+      // each (B3 T3, `run-evidence-identity-model.md` §7/§14): row identity
+      // provenance (idTemplate/index/rowKey/stable), forwarded on the start
+      // event so the run-events channel self-describes row identity without a
+      // projection join. Undefined for non-each tests.
+      ...(def.meta.each !== undefined ? { each: def.meta.each } : {}),
     });
     const ctx = this.makeCtx(scope);
     // Host-provided ctx extensions (e.g. the load runner's input / report /
@@ -1625,6 +1630,9 @@ export interface SdkTestShape {
   setup?: unknown;
   steps?: unknown;
   teardown?: unknown;
+  /** Data-driven row provenance (B3, `run-evidence-identity-model.md` §7) — mirrors
+   *  the SDK's top-level `Test.each` (sibling to `meta`, set by `test.each`/`test.pick`). */
+  each?: EachRowMeta;
 }
 
 // Only the Stage-1 supported markers — a `workflow-builder` also has __glubean_type
@@ -1702,7 +1710,7 @@ export function toTestDef(t: SdkTestShape): TestDef {
   // SDK step fns take the SDK TestContext; the engine provides the narrow subset
   // at runtime, so the cast is sound for the Stage-1 surface.
   return {
-    meta: { id: t.meta.id, name: t.meta.name, tags, skip: t.meta.skip, only: t.meta.only, rowIndex: t.meta.rowIndex },
+    meta: { id: t.meta.id, name: t.meta.name, tags, skip: t.meta.skip, only: t.meta.only, rowIndex: t.meta.rowIndex, each: t.each },
     type: t.type,
     fn: t.fn as TestFn | undefined,
     setup: t.setup as TestFn | undefined,

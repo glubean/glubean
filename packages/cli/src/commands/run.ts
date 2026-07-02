@@ -202,6 +202,15 @@ interface CollectedTestRun {
   groupId?: string;
   /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
   rowIndex?: number;
+  /**
+   * Data-driven row provenance (B3 T3, `run-evidence-identity-model.md` §7/§14) —
+   * `idTemplate`/reorder-stable `rowKey`/`$index` stability flag, read off the
+   * runtime "start" event (harness/engine both emit it — see harness.ts/engine.ts).
+   * Persisted into last-run.result.json / the uploaded run blob so row identity
+   * is self-contained, without depending on a projection join. Undefined for
+   * non-each tests (backward compatible: old runs simply omit it).
+   */
+  each?: import("@glubean/sdk").EachRowMeta;
 }
 
 interface RunSummaryStats {
@@ -1551,6 +1560,7 @@ export async function runCommand(
   let testId = "";
   let testName = "";
   let testRowIndex: number | undefined = undefined;
+  let testEach: import("@glubean/sdk").EachRowMeta | undefined = undefined;
   let testItem: (typeof testsToRun)[number]["test"] | null = null;
   let startTime = Date.now();
   let testEvents: ExecutionEvent[] = [];
@@ -1629,6 +1639,7 @@ export async function runCommand(
       durationMs: duration,
       groupId: testItem?.meta.groupId,
       rowIndex: testRowIndex,
+      each: testEach,
     });
 
     addLogEntry(
@@ -2006,6 +2017,10 @@ export async function runCommand(
             // per-row `.each` index (static discovery only sees the template id,
             // so it carries no rowIndex). undefined for non-each tests.
             testRowIndex = event.rowIndex;
+            // each (B3 T3): same reasoning — the runtime start event is
+            // authoritative for row-identity provenance (idTemplate/rowKey/
+            // stable). undefined for non-each tests.
+            testEach = event.each;
             testItem = entry?.test || null;
             startTime = Date.now();
             testEvents = [];
@@ -2538,6 +2553,12 @@ export async function runCommand(
       // filePath is relative to rootDir (the stable .glubean/ basis), NOT cwd, so
       // rerun resolves correctly when run from a different working directory.
       ...(r.rowIndex !== undefined && { rowIndex: r.rowIndex }),
+      // B3 T3 (`run-evidence-identity-model.md` §7/§14) — persist row-identity
+      // provenance (idTemplate/rowKey/stable) on each test entry, so the
+      // uploaded run blob (`result.tests[].each`) self-describes row identity
+      // without depending on a projection join. Undefined for non-each tests
+      // (backward compatible: old runs / old CLI builds simply omit the field).
+      ...(r.each !== undefined && { each: r.each }),
       filePath: relative(rootDir, r.filePath),
     })),
     ...(thresholdSummary && { thresholds: thresholdSummary }),

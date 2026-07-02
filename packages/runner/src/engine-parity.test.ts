@@ -565,6 +565,14 @@ export const pollUntilThrowTimeoutTest = test(
   { id: "pollUntilThrowTimeoutTest", name: "pollUntil throw timeout" },
   async (ctx) => { await ctx.pollUntil({ timeoutMs: 20, intervalMs: 5 }, async () => false); ctx.assert(true, "unreached"); }
 );
+// B3 T3 (run-evidence-identity-model.md §7/§14) — a stable (non-$index)
+// data-driven template, so row-identity provenance is exercised on both legs.
+export const eachRowsTest = test.each([
+  { userId: "alice" },
+  { userId: "bob" },
+])("user-$userId", async (ctx, row) => {
+  ctx.assert(typeof row.userId === "string", "row available");
+});
 `;
 
 ptest("engine parity: passing simple test (start + log + assertion + status)", async () => {
@@ -856,4 +864,44 @@ ptest("engine parity: ctx.pollUntil silent timeout (onTimeout, no throw)", async
 
 ptest("engine parity: ctx.pollUntil timeout throws (test fails)", async () => {
   await assertParity(MODULE, "pollUntilThrowTimeoutTest");
+});
+
+// ---------------------------------------------------------------------------
+// B3 T3 (run-evidence-identity-model.md §7/§14) — `each` row-identity
+// provenance on the "start" event. `assertParity` alone would pass VACUOUSLY
+// if both legs simply omitted the field, so this case also asserts the field
+// is actually present with the expected shape — not just symmetric.
+// ---------------------------------------------------------------------------
+
+ptest("engine parity: `each` row-identity provenance surfaced on the start event (both legs)", async () => {
+  await assertParity(MODULE, "user-alice");
+});
+
+ptest("`each` on the start event carries idTemplate/index/rowKey/stable — both legacy and engine legs", async () => {
+  const file = await makeTempFile(MODULE);
+  const legacy = normalize(await rawEvents(file, "user-alice", false));
+  const engine = normalize(await rawEvents(file, "user-alice", true));
+  const expected = { idTemplate: "user-$userId", index: 0, rowKey: "user-alice", stable: true };
+
+  const legacyStart = legacy.find((e) => (e as { type?: string }).type === "start") as
+    | { each?: unknown }
+    | undefined;
+  const engineStart = engine.find((e) => (e as { type?: string }).type === "start") as
+    | { each?: unknown }
+    | undefined;
+
+  expect(legacyStart?.each).toEqual(expected);
+  expect(engineStart?.each).toEqual(expected);
+
+  // A plain (non-each) test in the SAME module carries no `each` on either leg.
+  const legacyPlain = normalize(await rawEvents(file, "passingTest", false));
+  const enginePlain = normalize(await rawEvents(file, "passingTest", true));
+  const legacyPlainStart = legacyPlain.find((e) => (e as { type?: string }).type === "start") as
+    | { each?: unknown }
+    | undefined;
+  const enginePlainStart = enginePlain.find((e) => (e as { type?: string }).type === "start") as
+    | { each?: unknown }
+    | undefined;
+  expect(legacyPlainStart?.each).toBeUndefined();
+  expect(enginePlainStart?.each).toBeUndefined();
 });
