@@ -35,7 +35,7 @@
   },
   "devDependencies": {
     "@glubean/runner": "workspace:*",
-    "vitest": "^3.2.1",
+    "vitest": "^3.2.6",
     "typescript": "^5.8.3"
   },
   "repository": {
