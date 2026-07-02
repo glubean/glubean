@@ -1015,3 +1015,35 @@ test("normalizeGraphql: a jsonSchema hint on an opaque SchemaLike projects (GLU-
     properties: { ok: { type: "boolean" } },
   });
 });
+
+// GLU-90 codex round-2 P3 — lock the throw-fallback branch (a present
+// toJSONSchema() that throws must still fall back to the jsonSchema hint)
+// for graphql too, not just the HTTP adapter's dedicated test.
+test("normalizeGraphql: a jsonSchema hint recovers projection when toJSONSchema() throws (GLU-90)", () => {
+  const throwingWithHint = {
+    safeParse: (d: unknown) => ({ success: true as const, data: d }),
+    toJSONSchema: () => {
+      throw new Error("unrepresentable");
+    },
+    jsonSchema: { type: "string", format: "date-time" },
+  };
+  const ext = graphqlAdapter.normalize!({
+    id: "c1",
+    protocol: "graphql",
+    target: "POST /graphql",
+    cases: [
+      {
+        key: "ok",
+        lifecycle: "active",
+        severity: "warning",
+        schemas: { response: throwingWithHint },
+      },
+    ],
+  } as any);
+
+  expect(ext.unprojectableSchemas).toBeUndefined();
+  expect((ext.cases[0].schemas as any)?.response).toEqual({
+    type: "string",
+    format: "date-time",
+  });
+});
