@@ -877,6 +877,14 @@ export async function runLocalTestsFromFile(args: {
   secrets: Vars;
   results: LocalRunResult[];
   summary: { total: number; passed: number; failed: number; skipped: number };
+  /**
+   * The RESOLVED env file path this run used (explicit envFile, else
+   * `.glubean/active-env`, else `.env`). Recorded on the snapshot so a later
+   * Cloud upload sources credentials + the environment label from the env
+   * the run ACTUALLY used — even if active-env changes in between (codex
+   * GLU-77 R3). Absent only on the version-skew early return (no run).
+   */
+  envPath?: string;
   error?: string;
   /** Runner-fallback or protocol warnings emitted by the executor. (Plan 1 AC6) */
   warnings?: string[];
@@ -951,6 +959,7 @@ export async function runLocalTestsFromFile(args: {
       secrets,
       results: [],
       summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
+      envPath,
       error: tests.length === 0
         ? "No tests discovered in file. Check that exports use test() or contract.http.with() from @glubean/sdk."
         : `No tests matched filter "${args.filter}". Available: ${tests.map((t) => t.id).join(", ")}`,
@@ -1015,6 +1024,7 @@ export async function runLocalTestsFromFile(args: {
         secrets,
         results: [],
         summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
+        envPath,
         error:
           "inputJson and bootstrapInput are mutually exclusive. " +
           "Per attachment-model §5.1: explicit input bypasses the overlay, so bootstrap params would be ignored. Pick one channel per run.",
@@ -1029,6 +1039,7 @@ export async function runLocalTestsFromFile(args: {
         secrets,
         results: [],
         summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
+        envPath,
         error:
           `inputJson / bootstrapInput / forceStandalone require \`filter\` ` +
           `to match exactly one testId. Matched ${selected.length} tests` +
@@ -1261,6 +1272,7 @@ export async function runLocalTestsFromFile(args: {
     secrets,
     results,
     summary: { total: results.length, passed, failed, skipped: skippedCount },
+    envPath,
     ...(orchestrationError !== undefined && { error: orchestrationError }),
     ...(warningsArr.length > 0 && { warnings: warningsArr }),
     versionInfo,
@@ -1431,7 +1443,13 @@ server.registerTool(
       includeLogs: input.includeLogs ?? true,
       includeTraces: input.includeTraces ?? false,
       filter: input.filter,
-      ...(input.envFile ? { envFile: input.envFile } : {}),
+      // The RESOLVED env path the run used (handles .glubean/active-env) —
+      // NOT the raw input, so a later upload can't re-resolve to a DIFFERENT
+      // active env than the run's (codex GLU-77 R3 P2). Falls back to the raw
+      // input only on the version-skew early return (no run happened).
+      ...(result.envPath ?? input.envFile
+        ? { envFile: result.envPath ?? input.envFile }
+        : {}),
     };
 
     return {
