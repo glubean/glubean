@@ -9,14 +9,16 @@
  * - **Request mock** (`Fetch` domain) — fulfill matching requests with a canned
  *   response; non-matching requests are continued untouched.
  * - **Emulation** (`Emulation` domain) — timezone / geolocation / viewport / user agent.
- * - **Storage state** (`Network` + `Page` domains) — restore cookies /
- *   localStorage before the page's first script runs, and capture them back
- *   out on demand (a thin "login once, reuse the session" primitive).
+ * - **Storage state** — restore cookies / localStorage before the page's
+ *   first script runs, and capture them back out on demand (a thin "login
+ *   once, reuse the session" primitive). Cookies go through this session's
+ *   `Network.setCookies` (browser-context scoped, session-agnostic in CDP).
+ *   localStorage does **not** — see guardrail ③.
  *
  * The keystone spike disproved the "Fetch is near-exclusive" hypothesis: a
  * self-opened session running `Fetch.enable`/`fulfillRequest` is stable **as
  * long as the user has not enabled Puppeteer's own request interception**.
- * Two coexistence hazards remain, each handled by a guardrail below:
+ * Three coexistence hazards exist, each handled below:
  *
  * **Guardrail ① — viewport ownership.** Our `Emulation.setDeviceMetricsOverride`
  * and Puppeteer's `page.setViewport()` both drive device metrics and clobber
@@ -30,6 +32,15 @@
  * conflicts. When mocks are enabled, Glubean owns `Fetch` and blocks
  * `page.setRequestInterception(true)` with a clear error. When no mocks are
  * configured we never enable `Fetch`, so the user's own interception is free.
+ *
+ * **Guardrail ③ — new-document scripts need Puppeteer's OWN session.**
+ * Verified empirically: sending `Page.addScriptToEvaluateOnNewDocument` on
+ * our *auxiliary* `page.createCDPSession()` session registers without error
+ * (a real `identifier` comes back) but the script never actually fires on
+ * subsequent navigations — only the session Puppeteer itself uses for the
+ * page's frame-lifecycle bookkeeping gets its new-document scripts run.
+ * `storageState.localStorage` therefore seeds via Puppeteer's own
+ * `page.evaluateOnNewDocument()`, not a raw CDP call on this session.
  *
  * @module evidence
  */
@@ -194,9 +205,9 @@ export interface StorageCookie {
 /**
  * Cookies + localStorage for one page — a thin "login once, reuse the
  * session" primitive (à la Playwright's `storageState`). Cookies apply via
- * CDP `Network.setCookies`; localStorage applies via
- * `Page.addScriptToEvaluateOnNewDocument` so it is present before the page's
- * own scripts run on every navigation of this page.
+ * CDP `Network.setCookies`; localStorage applies via Puppeteer's own
+ * `page.evaluateOnNewDocument()` (see guardrail ③) so it is present before
+ * the page's own scripts run on every navigation of this page.
  */
 export interface StorageState {
   cookies?: StorageCookie[];
@@ -220,8 +231,8 @@ export interface EvidenceSessionOptions {
   /**
    * Cookies / localStorage to restore before the page's first script runs
    * (`storageState.cookies` via `Network.setCookies`, `storageState.localStorage`
-   * via `Page.addScriptToEvaluateOnNewDocument`). Capture the current state with
-   * {@link EvidenceSession.captureStorageState}.
+   * via Puppeteer's `page.evaluateOnNewDocument()` — see guardrail ③).
+   * Capture the current state with {@link EvidenceSession.captureStorageState}.
    */
   storageState?: StorageState;
   /**
@@ -355,23 +366,6 @@ export function buildEmulationCalls(emulate: EmulationOptions): CdpCall[] {
     });
   }
   return calls;
-}
-
-/**
- * @internal Build the `Page.addScriptToEvaluateOnNewDocument` source that
- * seeds `localStorage` before any page script runs. Each entry is emitted as
- * an individually-guarded `localStorage.setItem` call (one bad key/value
- * pair — e.g. storage quota exceeded — must not blank out the rest).
- */
-export function buildLocalStorageSeedScript(
-  entries: Record<string, string>,
-): string {
-  const sets = Object.entries(entries)
-    .map(([k, v]) =>
-      `try { localStorage.setItem(${JSON.stringify(k)}, ${JSON.stringify(v)}); } catch (e) {}`
-    )
-    .join(" ");
-  return `(() => { ${sets} })();`;
 }
 
 /**
@@ -544,7 +538,7 @@ export class EvidenceSession {
       // 4. Storage state — cookies + localStorage restored before the page's
       // first script runs. Order-independent from the other capabilities.
       if (options.storageState) {
-        await session._applyStorageState(options.storageState);
+        await session._applyStorageState(page, options.storageState);
       }
     } catch (err) {
       // Roll back any partial wiring so we never leak a half-open session.
@@ -604,16 +598,39 @@ export class EvidenceSession {
     });
   }
 
-  private async _applyStorageState(state: StorageState): Promise<void> {
+  private async _applyStorageState(
+    page: Page,
+    state: StorageState,
+  ): Promise<void> {
+    // Cookies are browser-context scoped in CDP, so our auxiliary session
+    // sets them fine (`Network.setCookies` isn't tied to a particular
+    // DevTools session/target the way frame-lifecycle hooks are).
     const cookieParams = buildSetCookiesParams(state.cookies);
     if (cookieParams) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await this._cdp.send("Network.setCookies", cookieParams as any);
     }
+    // localStorage seeding, in contrast, MUST go through Puppeteer's own
+    // page.evaluateOnNewDocument() — sending the equivalent raw
+    // `Page.addScriptToEvaluateOnNewDocument` on our *auxiliary*
+    // `page.createCDPSession()` session silently registers (no error, a
+    // real `identifier` comes back) but never actually fires on subsequent
+    // navigations. Verified empirically (spike script) against puppeteer-core
+    // ^24/^25: only the session Puppeteer itself uses for the page's own
+    // frame-lifecycle bookkeeping gets its new-document scripts run — a
+    // second, independently-attached session's registration is a no-op.
+    // Puppeteer's own API owns that session, so route through it here.
     if (state.localStorage && Object.keys(state.localStorage).length > 0) {
-      await this._cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-        source: buildLocalStorageSeedScript(state.localStorage),
-      });
+      const entries = state.localStorage;
+      await page.evaluateOnNewDocument((seed: Record<string, string>) => {
+        for (const [k, v] of Object.entries(seed)) {
+          try {
+            localStorage.setItem(k, v);
+          } catch {
+            // best-effort — e.g. storage quota exceeded
+          }
+        }
+      }, entries);
     }
   }
 

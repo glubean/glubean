@@ -2,7 +2,6 @@ import { test, expect } from "vitest";
 import {
   buildEmulationCalls,
   buildFulfillParams,
-  buildLocalStorageSeedScript,
   buildSetCookiesParams,
   EvidenceSession,
   findMock,
@@ -63,6 +62,8 @@ class FakePage {
   interception: boolean | undefined;
   viewportCalls: unknown[] = [];
   pageUrl = "https://x.example/app";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  newDocumentScripts: Array<{ fn: (...args: any[]) => unknown; args: unknown[] }> = [];
   async createCDPSession(): Promise<FakeCDPSession> {
     return this.cdp;
   }
@@ -82,6 +83,17 @@ class FakePage {
     // such global by default, so tests that exercise localStorage patch it.
     return await fn();
   }
+  /**
+   * `page.evaluateOnNewDocument()` — records the call rather than actually
+   * re-running it on a simulated navigation (matching this suite's style of
+   * asserting "the right thing was invoked", as for CDP `send()` calls).
+   * Real end-to-end proof that this specific API (not a raw CDP call on an
+   * auxiliary session) is required lives in the module doc's guardrail ③.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async evaluateOnNewDocument(fn: (...args: any[]) => unknown, ...args: unknown[]): Promise<void> {
+    this.newDocumentScripts.push({ fn, args });
+  }
 }
 
 /**
@@ -100,6 +112,9 @@ async function withFakeLocalStorage<T>(
     },
     key: (i: number) => Object.keys(data)[i] ?? null,
     getItem: (k: string) => (k in data ? data[k] : null),
+    setItem: (k: string, v: string) => {
+      data[k] = v;
+    },
   };
   const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "localStorage", {
@@ -653,28 +668,6 @@ test("buildEmulationCalls: userAgent + viewport — viewport still applied last"
   ]);
 });
 
-// ── M4: buildLocalStorageSeedScript ─────────────────────────────────────
-
-test("buildLocalStorageSeedScript: builds a guarded setItem call per entry", () => {
-  const script = buildLocalStorageSeedScript({ token: "abc", theme: "dark" });
-  expect(script).toContain('localStorage.setItem("token", "abc")');
-  expect(script).toContain('localStorage.setItem("theme", "dark")');
-  expect(script).toMatch(/^\(\(\) => \{.*\}\)\(\);$/);
-});
-
-test("buildLocalStorageSeedScript: JSON-escapes keys/values (quotes, newlines)", () => {
-  const script = buildLocalStorageSeedScript({ 'a"b': 'line1\nline2' });
-  // Round-trips through JSON.stringify — safe to embed in a script string.
-  expect(script).toContain(JSON.stringify('a"b'));
-  expect(script).toContain(JSON.stringify('line1\nline2'));
-});
-
-test("buildLocalStorageSeedScript: empty object → no setItem calls, still valid IIFE", () => {
-  const script = buildLocalStorageSeedScript({});
-  expect(script).not.toContain("setItem");
-  expect(script).toBe("(() => {  })();");
-});
-
 // ── M4: buildSetCookiesParams ────────────────────────────────────────────
 
 test("buildSetCookiesParams: undefined cookies → undefined (no CDP call)", () => {
@@ -692,11 +685,11 @@ test("buildSetCookiesParams: non-empty array → wrapped params", () => {
 
 // ── M4: EvidenceSession.attach — storage state ────────────────────────
 
-test("attach: no storageState → neither Network.setCookies nor addScript called", async () => {
+test("attach: no storageState → neither Network.setCookies nor evaluateOnNewDocument called", async () => {
   const page = new FakePage();
   await EvidenceSession.attach(asPage(page), {});
   expect(page.cdp.methods()).not.toContain("Network.setCookies");
-  expect(page.cdp.methods()).not.toContain("Page.addScriptToEvaluateOnNewDocument");
+  expect(page.newDocumentScripts).toHaveLength(0);
 });
 
 test("attach: storageState.cookies sends Network.setCookies", async () => {
@@ -712,27 +705,35 @@ test("attach: storageState.cookies sends Network.setCookies", async () => {
   await session.detach();
 });
 
-test("attach: storageState.localStorage seeds via addScriptToEvaluateOnNewDocument", async () => {
+test("attach: storageState.localStorage seeds via page.evaluateOnNewDocument() — NOT a raw CDP call on this session", async () => {
+  // Guardrail ③: a raw `Page.addScriptToEvaluateOnNewDocument` CDP call on
+  // this auxiliary session silently never fires (verified empirically) —
+  // this must go through Puppeteer's own evaluateOnNewDocument() instead.
   const page = new FakePage();
   const session = await EvidenceSession.attach(asPage(page), {
     storageState: { localStorage: { token: "xyz" } },
   });
-  const call = page.cdp.sent.find(
-    (s) => s.method === "Page.addScriptToEvaluateOnNewDocument",
-  );
-  expect(call).toBeDefined();
-  const source = (call?.params as { source: string }).source;
-  expect(source).toContain('localStorage.setItem("token", "xyz")');
+  expect(page.cdp.methods()).not.toContain("Page.addScriptToEvaluateOnNewDocument");
+  expect(page.newDocumentScripts).toHaveLength(1);
+  const [{ fn, args }] = page.newDocumentScripts;
+  expect(args).toEqual([{ token: "xyz" }]);
+  // The registered function actually seeds localStorage when run — exercise
+  // it the way the real browser would run it on a new document.
+  await withFakeLocalStorage({}, async () => {
+    fn(...args);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((globalThis as any).localStorage.getItem("token")).toBe("xyz");
+  });
   await session.detach();
 });
 
-test("attach: storageState with empty cookies/localStorage sends neither CDP call", async () => {
+test("attach: storageState with empty cookies/localStorage sends neither call", async () => {
   const page = new FakePage();
   const session = await EvidenceSession.attach(asPage(page), {
     storageState: { cookies: [], localStorage: {} },
   });
   expect(page.cdp.methods()).not.toContain("Network.setCookies");
-  expect(page.cdp.methods()).not.toContain("Page.addScriptToEvaluateOnNewDocument");
+  expect(page.newDocumentScripts).toHaveLength(0);
   await session.detach();
 });
 
@@ -798,11 +799,7 @@ test("captureStorageState: round-trips into a subsequent attach()'s storageState
   });
   const setCookiesCall = page2.cdp.sent.find((s) => s.method === "Network.setCookies");
   expect(setCookiesCall?.params).toEqual({ cookies: capturedCookies });
-  const addScriptCall = page2.cdp.sent.find(
-    (s) => s.method === "Page.addScriptToEvaluateOnNewDocument",
-  );
-  expect((addScriptCall?.params as { source: string }).source).toContain(
-    'localStorage.setItem("token", "xyz")',
-  );
+  expect(page2.newDocumentScripts).toHaveLength(1);
+  expect(page2.newDocumentScripts[0].args).toEqual([{ token: "xyz" }]);
   await session2.detach();
 });
