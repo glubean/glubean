@@ -95,6 +95,39 @@ test("waitForDownload: propagates a timeout/cancel error and emits a timeout act
   expect(timeoutAction).toBeDefined();
 });
 
+test("waitForDownload: registers the wait BEFORE the action", async () => {
+  const order: string[] = [];
+  const { page } = makePageWithEvidence({
+    waitForDownload: vi.fn(() => {
+      order.push("wait-registered");
+      return Promise.resolve({ guid: "g1", url: "u", suggestedFilename: "a.pdf", path: "/tmp/a.pdf" });
+    }),
+  });
+  await page.waitForDownload(async () => { order.push("action-ran"); });
+  expect(order).toEqual(["wait-registered", "action-ran"]);
+});
+
+test("waitForDownload: when the action rejects, it aborts the wait (passes an AbortSignal) and rethrows the action error", async () => {
+  let receivedSignal: AbortSignal | undefined;
+  // The evidence wait rejects when its signal aborts — mirroring the real impl.
+  const waitForDownload = vi.fn((_timeout: number, signal?: AbortSignal) => {
+    receivedSignal = signal;
+    return new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("waitForDownload: aborted (triggering action failed)")), { once: true });
+    });
+  });
+  const { page, actions } = makePageWithEvidence({ waitForDownload });
+
+  await expect(
+    page.waitForDownload(async () => { throw new Error("click failed: selector not found"); }),
+  ).rejects.toThrow(/click failed/);
+
+  expect(receivedSignal).toBeInstanceOf(AbortSignal);
+  expect(receivedSignal?.aborted).toBe(true); // the wrapper aborted it
+  const timeoutAction = actions.find((a) => a.category === "browser:waitForDownload" && a.status === "timeout");
+  expect(timeoutAction).toBeDefined();
+});
+
 // ── frame() (BT1-M5) ─────────────────────────────────────────────────
 
 class FakeElementHandle {

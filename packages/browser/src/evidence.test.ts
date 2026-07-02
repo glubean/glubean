@@ -878,16 +878,50 @@ test("downloads: waitForDownload resolves a download that completes AFTER the ca
   await session.detach();
 });
 
-test("downloads: waitForDownload resolves immediately from a download that completed BEFORE the call (queued)", async () => {
+test("downloads: waitForDownload is action-scoped — a download that completed BEFORE the call does NOT satisfy it (no stale buffer)", async () => {
+  const page = new FakePage();
+  const seen: string[] = [];
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl", onDownload: (e, s) => { if (s === "completed") seen.push(e.guid); } },
+  });
+
+  // A download completes with NO waiter registered — its evidence is emitted,
+  // but it must NOT be buffered to satisfy a later, unrelated waitForDownload
+  // (that would silently mis-scope the wait — codex R1 P1).
+  emitDownload(page, "g0", "https://x/old.pdf", "old.pdf");
+  expect(seen).toEqual(["g0"]); // evidence still emitted
+
+  // A fresh wait must time out (nothing NEW downloaded), not resolve "old.pdf".
+  await expect(session.waitForDownload(30)).rejects.toThrow(/no download completed/);
+  await session.detach();
+});
+
+test("downloads: waitForDownload aborts (rejects, removes waiter) when its AbortSignal fires", async () => {
   const page = new FakePage();
   const session = await EvidenceSession.attach(asPage(page), {
     downloads: { dir: "/tmp/dl" },
   });
 
+  const ac = new AbortController();
+  const pending = session.waitForDownload(60_000, ac.signal);
+  ac.abort();
+  await expect(pending).rejects.toThrow(/aborted/);
+
+  // The aborted waiter must be gone: a later download resolves a NEW wait, not the aborted one.
+  const next = session.waitForDownload(5_000);
   emitDownload(page, "g1", "https://x/a.pdf", "a.pdf");
-  // No waiter was registered yet — the completed entry must be queued.
-  const entry = await session.waitForDownload(5_000);
-  expect(entry.suggestedFilename).toBe("a.pdf");
+  await expect(next).resolves.toMatchObject({ guid: "g1" });
+  await session.detach();
+});
+
+test("downloads: a pre-aborted signal rejects immediately", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+  const ac = new AbortController();
+  ac.abort();
+  await expect(session.waitForDownload(5_000, ac.signal)).rejects.toThrow(/aborted before it started/);
   await session.detach();
 });
 
@@ -931,6 +965,84 @@ test("downloads: detach() rejects a still-pending waiter instead of leaving it h
   await session.detach();
 
   await expect(pending).rejects.toThrow(/detached/);
+});
+
+test("downloads: after detach(), a new waitForDownload fails fast (not enabled) rather than hanging", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+  await session.detach();
+  await expect(session.waitForDownload(5_000)).rejects.toThrow(/not enabled/);
+});
+
+test("downloads: onDownload throwing on a terminal event does NOT wedge the waiter (still resolves)", async () => {
+  const page = new FakePage();
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: {
+      dir: "/tmp/dl",
+      onDownload: () => { throw new Error("callback boom"); },
+    },
+  });
+  const pending = session.waitForDownload(5_000);
+  emitDownload(page, "g1", "https://x/a.pdf", "a.pdf");
+  // Despite the callback throwing on both inProgress and completed, the waiter resolves.
+  await expect(pending).resolves.toMatchObject({ guid: "g1" });
+  await session.detach();
+});
+
+test("downloads: cross-page events are filtered by owned frameId (no cross-observe)", async () => {
+  const page = new FakePage();
+  // Make this session's target own only frame "F_MINE".
+  page.cdp.sendImpl = (method) => {
+    if (method === "Page.getFrameTree") {
+      return { frameTree: { frame: { id: "F_MINE" }, childFrames: [] } };
+    }
+    return {};
+  };
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+
+  const pending = session.waitForDownload(60);
+  // A download from ANOTHER page's frame — must be ignored entirely.
+  page.cdp.emit("Browser.downloadWillBegin", {
+    guid: "g_other", url: "https://x/other.pdf", suggestedFilename: "other.pdf", frameId: "F_OTHER",
+  });
+  page.cdp.emit("Browser.downloadProgress", { guid: "g_other", state: "completed" });
+  // The wait sees nothing and times out (proves the foreign download didn't satisfy it).
+  await expect(pending).rejects.toThrow(/no download completed/);
+
+  // A download from OUR frame resolves a fresh wait.
+  const mine = session.waitForDownload(5_000);
+  page.cdp.emit("Browser.downloadWillBegin", {
+    guid: "g_mine", url: "https://x/mine.pdf", suggestedFilename: "mine.pdf", frameId: "F_MINE",
+  });
+  page.cdp.emit("Browser.downloadProgress", { guid: "g_mine", state: "completed" });
+  await expect(mine).resolves.toMatchObject({ guid: "g_mine" });
+  await session.detach();
+});
+
+test("downloads: dynamically-attached frame (iframe) is added to the owned set", async () => {
+  const page = new FakePage();
+  page.cdp.sendImpl = (method) => {
+    if (method === "Page.getFrameTree") {
+      return { frameTree: { frame: { id: "F_MAIN" }, childFrames: [] } };
+    }
+    return {};
+  };
+  const session = await EvidenceSession.attach(asPage(page), {
+    downloads: { dir: "/tmp/dl" },
+  });
+  // An iframe attaches after load; a download from it must be accepted.
+  page.cdp.emit("Page.frameAttached", { frameId: "F_IFRAME" });
+  const pending = session.waitForDownload(5_000);
+  page.cdp.emit("Browser.downloadWillBegin", {
+    guid: "g1", url: "https://x/embed.pdf", suggestedFilename: "embed.pdf", frameId: "F_IFRAME",
+  });
+  page.cdp.emit("Browser.downloadProgress", { guid: "g1", state: "completed" });
+  await expect(pending).resolves.toMatchObject({ guid: "g1" });
+  await session.detach();
 });
 
 test("downloads: two concurrent downloads resolve to two separate waitForDownload calls, FIFO", async () => {

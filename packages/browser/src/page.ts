@@ -503,7 +503,12 @@ export class GlubeanPage {
     const screenshotMode = options.screenshot ?? "on-failure";
     const screenshotDir = options.screenshotDir ?? ".glubean/screenshots";
     const testId = runtimeTestId ?? ctx.testId ?? "unknown";
-    const downloadDir = `${options.downloadDir ?? ".glubean/downloads"}/${_sanitizeFilename(testId)}`;
+    // ONE download dir for the whole browser — NOT per-test. `Browser.setDownloadBehavior`
+    // is browser-context-global (last call wins the path), so two concurrent instrumented
+    // pages sharing one Chrome (e.g. concurrent tests off one `browser()` fixture) must
+    // agree on the directory or one would silently repoint the other's downloads. The
+    // per-download `browser:download` evidence carries the testId for attribution instead.
+    const downloadDir = options.downloadDir ?? ".glubean/downloads";
     const actionTimeout = options.actionTimeout ?? 30_000;
     const dialogMode: DialogMode = options.dialogMode ?? "dismiss";
 
@@ -864,11 +869,27 @@ export class GlubeanPage {
     if (!this._evidence) {
       throw new Error("waitForDownload: evidence session not attached");
     }
+    // Register the wait BEFORE the action so a fast download can't slip past,
+    // and scope it to THIS action: if `action()` throws, abort the wait so it
+    // neither leaks a waiter nor gets satisfied by a later, unrelated download.
+    const ac = new AbortController();
+    const waitPromise = this._evidence.waitForDownload(timeout, ac.signal);
     try {
-      const [entry] = await Promise.all([
-        this._evidence.waitForDownload(timeout),
-        action(),
-      ]);
+      await action();
+    } catch (err) {
+      ac.abort();
+      await waitPromise.catch(() => {}); // settle the aborted wait; swallow its rejection
+      this._ctx.action({
+        category: "browser:waitForDownload",
+        target: "(download)",
+        duration: Date.now() - start,
+        status: "timeout",
+        detail: { error: String(err) },
+      });
+      throw err;
+    }
+    try {
+      const entry = await waitPromise;
       this._ctx.action({
         category: "browser:waitForDownload",
         target: entry.suggestedFilename,
@@ -919,8 +940,13 @@ export class GlubeanPage {
       if (!handle) {
         throw new Error(`frame("${selector}"): element not found`);
       }
-      const contentFrame = await handle.contentFrame();
-      await handle.dispose();
+      // try/finally so the handle is disposed even if contentFrame() throws.
+      let contentFrame;
+      try {
+        contentFrame = await handle.contentFrame();
+      } finally {
+        await handle.dispose();
+      }
       if (!contentFrame) {
         throw new Error(
           `frame("${selector}"): element matched but is not an <iframe> (no content frame)`,
