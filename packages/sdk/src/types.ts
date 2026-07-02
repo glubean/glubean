@@ -1799,7 +1799,15 @@ export interface SchemaLike<T> {
    *
    * Declare `jsonSchema` alongside `safeParse` to document the shape your
    * validator enforces; it is used **verbatim** (never re-derived from
-   * `safeParse`/`parse` by introspection or sampling).
+   * `safeParse`/`parse` by introspection or sampling) and is **not
+   * validated** — the same trust model as authoring a plain JSON Schema
+   * object directly for `expect.schema`. It is also consulted as a recovery
+   * path when a schema-library instance's own `toJSONSchema()` throws
+   * (e.g. an unrepresentable zod type), letting you supply a manual
+   * override for shapes the library itself can't project.
+   *
+   * Every protocol adapter that ships with the SDK (HTTP, GraphQL, gRPC)
+   * honors this field via its `schemaToJsonSchema()`.
    *
    * @example
    * ```ts

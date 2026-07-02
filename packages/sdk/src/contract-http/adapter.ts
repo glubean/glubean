@@ -231,8 +231,11 @@ export async function readJsonBody(res: {
  * Uses the schema's own `toJSONSchema` method if present. Falls back to
  * passing through as-is if already plain, or to the author-declared
  * `SchemaLike.jsonSchema` companion for hand-rolled (safeParse-only)
- * validators (GLU-90). Returns null (unprojectable) only when none of
- * those three sources yield a shape.
+ * validators (GLU-90) — including as a recovery path when a present
+ * `toJSONSchema()` throws. Returns null (unprojectable) only when none
+ * of those sources yield a shape. `jsonSchema` is used verbatim and is
+ * NOT validated (same as the plain-JSON-Schema pass-through below) —
+ * an author who declares a malformed hint gets it echoed into the doc.
  */
 export function schemaToJsonSchema(schema: unknown): unknown | null {
   if (schema == null) return null;
@@ -253,11 +256,18 @@ export function schemaToJsonSchema(schema: unknown): unknown | null {
       return out;
     } catch {
       // Unrepresentable schema (z.date(), z.bigint(), maps, transforms) → zod's
-      // default `toJSONSchema()` throws. Returning null keeps it out of the doc
-      // AND preserves the `unprojectableSchemas` completeness signal. Do NOT pass
-      // `{ unrepresentable: "any" }`: it would silently emit a permissive `{}`
-      // and mark the projection complete, hiding the hole from dry-run/sync.
-      return null;
+      // default `toJSONSchema()` throws. Fall through to the declared
+      // `jsonSchema` hint (GLU-90) — deliberately SKIPPING the plain-JSON-
+      // Schema shortcut below: a zod instance's `type` getter would
+      // misclassify it as already-plain and leak the raw object (the exact
+      // historical bug this function guards against, see comment above). If
+      // no hint is declared, `declaredJsonSchemaOrNull` returns null, which
+      // keeps the schema out of the doc AND preserves the
+      // `unprojectableSchemas` completeness signal — same as before this
+      // fix. Do NOT pass `{ unrepresentable: "any" }` to zod: it would
+      // silently emit a permissive `{}` and mark the projection complete,
+      // hiding the hole from dry-run/sync.
+      return declaredJsonSchemaOrNull(schema as Record<string, unknown>);
     }
   }
 
@@ -277,15 +287,19 @@ export function schemaToJsonSchema(schema: unknown): unknown | null {
   // permanently "unprojectableSchemas" and excluded from Cloud's Validate
   // picker. Read the hint verbatim; never attempt to reverse-engineer the
   // validator function itself.
-  const declaredJsonSchema = (schema as { jsonSchema?: unknown }).jsonSchema;
-  if (
-    declaredJsonSchema &&
-    typeof declaredJsonSchema === "object" &&
-    !Array.isArray(declaredJsonSchema)
-  ) {
-    return declaredJsonSchema;
-  }
+  return declaredJsonSchemaOrNull(schema as Record<string, unknown>);
+}
 
+/**
+ * Read the `SchemaLike.jsonSchema` companion hint (GLU-90). Returns it
+ * verbatim when it's a non-null, non-array object; null otherwise (absent,
+ * or a non-object value that can't be a JSON Schema fragment).
+ */
+function declaredJsonSchemaOrNull(schema: Record<string, unknown>): unknown | null {
+  const declared = (schema as { jsonSchema?: unknown }).jsonSchema;
+  if (declared && typeof declared === "object" && !Array.isArray(declared)) {
+    return declared;
+  }
   return null;
 }
 

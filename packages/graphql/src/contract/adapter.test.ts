@@ -986,3 +986,32 @@ test("normalizeGraphql records unprojectable schemas, omits clean/absent (sentin
   expect(ext.unprojectableSchemas).not.toContain("cases.ok.response");
   expect((ext.cases[0].schemas as any)?.response).toEqual({ type: "object" });
 });
+
+// GLU-90 — a hand-rolled (safeParse-only) SchemaLike declaring the
+// `jsonSchema` companion now projects instead of landing in
+// unprojectableSchemas (mirrors the same fix in the HTTP adapter).
+test("normalizeGraphql: a jsonSchema hint on an opaque SchemaLike projects (GLU-90)", () => {
+  const opaqueWithHint = {
+    safeParse: (d: unknown) => ({ success: true as const, data: d }),
+    jsonSchema: { type: "object", properties: { ok: { type: "boolean" } } },
+  };
+  const ext = graphqlAdapter.normalize!({
+    id: "c1",
+    protocol: "graphql",
+    target: "POST /graphql",
+    cases: [
+      {
+        key: "ok",
+        lifecycle: "active",
+        severity: "warning",
+        schemas: { response: opaqueWithHint },
+      },
+    ],
+  } as any);
+
+  expect(ext.unprojectableSchemas).toBeUndefined();
+  expect((ext.cases[0].schemas as any)?.response).toEqual({
+    type: "object",
+    properties: { ok: { type: "boolean" } },
+  });
+});

@@ -599,6 +599,35 @@ test("GLU-90: a jsonSchema hint that is an array (malformed) is ignored, not pas
   expect((c._extracted.cases[0].schemas as any)?.response?.body).toBeUndefined();
 });
 
+test("GLU-90: a jsonSchema hint recovers projection when toJSONSchema() throws (codex round-1 P3)", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  // A schema-library instance whose toJSONSchema() throws (e.g. z.date(), a
+  // custom refinement zod can't represent) — but the author also declared a
+  // jsonSchema hint as a manual override. Must NOT fall through to the
+  // `"type" in schema` shortcut (that would leak whatever partial shape the
+  // throwing instance carries); must use the declared hint instead.
+  const throwingWithHint: SchemaLike<unknown> & { toJSONSchema(): unknown } = {
+    safeParse: (data: unknown) => ({ success: true as const, data }),
+    toJSONSchema: () => {
+      throw new Error("unrepresentable");
+    },
+    jsonSchema: { type: "string", format: "date-time" },
+  };
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: throwingWithHint as any } },
+    },
+  });
+
+  expect(c._extracted.unprojectableSchemas).toBeUndefined();
+  expect((c._extracted.cases[0].schemas as any)?.response?.body).toEqual({
+    type: "string",
+    format: "date-time",
+  });
+});
+
 test("a schema-lib instance that carries a `type` field (zod v4 shape) projects to JSON Schema, not raw", () => {
   const client = makeMockClient();
   const api = contract.http.with("api", { client });
