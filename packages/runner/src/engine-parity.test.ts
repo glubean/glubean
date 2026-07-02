@@ -164,10 +164,12 @@ async function assertParity(content: string, testId: string, ctx: RunCtx = {}, e
   expect(engine).toEqual(legacy);
 }
 
-// Each case spawns the harness subprocess TWICE (flag off/on), so give it generous
-// headroom — the default 5s flakes when the machine is loaded (many subprocess-
-// spawning test files in parallel).
-const ptest = (name: string, fn: () => Promise<void>) => test(name, fn, 20_000);
+// Each case spawns the harness subprocess TWICE (flag off/on), so it needs
+// generous headroom — the old vitest default 5s flaked when the machine was
+// loaded (many subprocess-spawning test files in parallel). GLU-79: rely on
+// the package-wide testTimeout: 30_000 (vitest.config.ts) instead of a local
+// 20s override that would tighten it back down.
+const ptest = (name: string, fn: () => Promise<void>) => test(name, fn);
 
 const MODULE = `
 import { test, configure, defineClientFactory } from "@glubean/sdk";

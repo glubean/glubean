@@ -121,7 +121,7 @@ export default defineSession({
   expect(statuses).toContainEqual(
     expect.objectContaining({ status: "completed" }),
   );
-}, 15_000);
+});
 
 test("session setup: fails with clear error when default export missing", async () => {
   const dir = await makeTempDir();
@@ -143,7 +143,7 @@ test("session setup: fails with clear error when default export missing", async 
       error: expect.stringContaining("SessionDefinition"),
     }),
   );
-}, 15_000);
+});
 
 test("session setup: setup error emits failed status", async () => {
   const dir = await makeTempDir();
@@ -176,7 +176,7 @@ export default defineSession({
       error: "auth server down",
     }),
   );
-}, 15_000);
+});
 
 // ── Session teardown execution ───────────────────────────────────────────────
 
@@ -222,7 +222,7 @@ export default defineSession({
   expect(statuses).toContainEqual(
     expect.objectContaining({ status: "completed" }),
   );
-}, 15_000);
+});
 
 // ── Session + test integration ───────────────────────────────────────────────
 
@@ -259,7 +259,7 @@ export const checkSession = test("check-session", async (ctx) => {
   expect(statuses).toContainEqual(
     expect.objectContaining({ status: "completed" }),
   );
-}, 15_000);
+});
 
 // ── session:set NOT in execute() results ─────────────────────────────────────
 
@@ -294,7 +294,7 @@ export const writeSession = test("write-session", async (ctx) => {
 
   // But the test should still pass
   expect(result.success).toBe(true);
-}, 15_000);
+});
 
 // ── ctx.interactive in session setup ────────────────────────────────────────
 
@@ -326,7 +326,7 @@ export default defineSession({
   expect(sessionSets).toContainEqual(
     expect.objectContaining({ key: "wasInteractive", value: "false" }),
   );
-}, 15_000);
+});
 
 test("session setup receives interactive=true when passed in context", async () => {
   const dir = await makeTempDir();
@@ -356,11 +356,11 @@ export default defineSession({
   expect(sessionSets).toContainEqual(
     expect.objectContaining({ key: "wasInteractive", value: "true" }),
   );
-}, 15_000);
+});
 
 // ── Session → {{KEY}} template resolution (integration) ────────────────────
 
-test("session values resolve in configure() {{KEY}} templates", { timeout: 15_000, retry: 3 }, async () => {
+test("session values resolve in configure() {{KEY}} templates", { retry: 3 }, async () => {
   const dir = await makeTempDir();
 
   // session.ts sets AUTH_TOKEN
@@ -428,9 +428,9 @@ export const checkHeader = test("check-header", async (ctx) => {
   expect(assertions).toContainEqual(
     expect.objectContaining({ passed: true, message: "session token resolved in header" }),
   );
-}, 15_000);
+});
 
-test("session values resolve in configure() prefixUrl template", { timeout: 15_000, retry: 3 }, async () => {
+test("session values resolve in configure() prefixUrl template", { retry: 3 }, async () => {
   const dir = await makeTempDir();
 
   const testFile = join(dir, "prefix.test.ts");
@@ -468,7 +468,7 @@ export const checkPrefix = test("check-prefix", async (ctx) => {
   expect(assertions).toContainEqual(
     expect.objectContaining({ passed: true }),
   );
-}, 15_000);
+});
 
 test("global session accessor works in subprocess", async () => {
   const dir = await makeTempDir();
@@ -503,7 +503,7 @@ export const checkGlobal = test("check-global", async (ctx) => {
   const assertions = events.filter((e) => e.type === "assertion");
   expect(assertions).toHaveLength(4);
   expect(assertions.every((a) => (a as any).passed)).toBe(true);
-}, 15_000);
+});
 
 // ── withSession() + finalize() ──────────────────────────────────────────────
 
@@ -571,7 +571,7 @@ export const check = test("check-session", (ctx) => {
     (e) => e.type === "log" && e.message.includes("teardown"),
   );
   expect(teardownLogs.length).toBeGreaterThan(0);
-}, 15_000);
+});
 
 test("withSession works when no session.ts exists", async () => {
   const dir = await makeTempDir();
@@ -615,7 +615,7 @@ export const simple = test("simple", (ctx) => {
     teardownEvents.push(event);
   }
   expect(teardownEvents).toHaveLength(0);
-}, 15_000);
+});
 
 test("finalize is safe to call multiple times", async () => {
   const dir = await makeTempDir();
@@ -660,4 +660,4 @@ export const t = test("t", (ctx) => { ctx.assert(true, "ok"); });
   let count2 = 0;
   for await (const _event of executor.finalize()) { count2++; }
   expect(count2).toBe(0);
-}, 15_000);
+});
