@@ -237,10 +237,17 @@ export function createWrappedLocator(
     get(target, prop, receiver) {
       if (prop === "count") {
         // Non-async so the filtered guard throws synchronously (like nth()),
-        // not as a rejected promise.
+        // not as a rejected promise. Dispose the handles `$$` returns — we only
+        // want the count, and undisposed handles leak remote objects in Chrome.
         return (): Promise<number> => {
           if (filtered) throw new Error(COUNT_NTH_FILTERED_MSG("count"));
-          return page.$$(selector).then((els) => els.length);
+          return page.$$(selector).then(async (handles) => {
+            try {
+              return handles.length;
+            } finally {
+              await Promise.all(handles.map((h) => h.dispose()));
+            }
+          });
         };
       }
 

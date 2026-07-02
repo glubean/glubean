@@ -760,8 +760,18 @@ export class GlubeanPage {
         reject(new Error(`waitForPopup: no popup opened after ${timeout}ms`));
       }, timeout);
       onPopup = (popup: Page | null) => {
-        if (popup) resolve(popup);
-        else reject(new Error("waitForPopup: popup event fired with no page"));
+        if (popup) {
+          // Register the popup in the owning browser's open-page accounting
+          // SYNCHRONOUSLY on the open event — before awaiting `action()` to
+          // settle. Otherwise a popup that opens and closes within `action()`
+          // would fire its `close` before `_track()` wired the decrementing
+          // listener, permanently pinning `_openPages` above zero and
+          // suppressing browser auto-close.
+          this._owner?._track(popup);
+          resolve(popup);
+        } else {
+          reject(new Error("waitForPopup: popup event fired with no page"));
+        }
       };
       this.raw.once("popup", onPopup);
     });
@@ -773,10 +783,6 @@ export class GlubeanPage {
     try {
       const [rawPopup] = await Promise.all([popupPromise, action()]);
       cleanup();
-      // Register the popup in the owning browser's open-page accounting so
-      // the parent closing doesn't schedule a browser shutdown while the
-      // popup wrapper is still in use (popups are real pages).
-      this._owner?._track(rawPopup);
       this._ctx.action({
         category: "browser:waitForPopup",
         target: rawPopup.url(),
