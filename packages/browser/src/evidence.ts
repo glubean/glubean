@@ -333,15 +333,26 @@ export function matchMock(
     return false;
   }
   if (typeof rule.url === "string") return req.url.includes(rule.url);
-  // Test against a stateless clone: a user-supplied global/sticky regex
-  // (`/g`, `/y`) carries `lastIndex` state, so `.test()` on the original would
-  // flip-flop matches for the same URL across repeated requests (and would also
-  // mutate the caller's regex). Strip `g`/`y` on a copy to keep matching pure.
-  const stateless = new RegExp(
-    rule.url.source,
-    rule.url.flags.replace(/[gy]/g, ""),
-  );
-  return stateless.test(req.url);
+  // Test against a freshly-constructed clone that carries the SAME flags as
+  // `rule.url`, including `g`/`y`: a global/sticky regex carries `lastIndex`
+  // state, so `.test()` on the caller's own object would flip-flop matches
+  // for the same URL across repeated requests (and would mutate the caller's
+  // regex). A same-flags clone fixes that statelessness — it always starts
+  // at `lastIndex: 0` and is discarded after this call, so no state ever
+  // crosses requests or leaks back into `rule.url`.
+  //
+  // Earlier this also *stripped* `g`/`y` on the clone, which went further
+  // than the statelessness fix required: dropping `y` silently discards a
+  // sticky regex's anchoring semantics — `.test()` on a `/y` regex only
+  // matches when the pattern occurs starting exactly at `lastIndex` (0 here,
+  // i.e. the start of the string), whereas a plain (non-sticky) regex
+  // matches anywhere in the string. Stripping `y` therefore turned an
+  // anchored mock pattern into an unanchored substring search, which could
+  // make a sticky mock rule match URLs it was never meant to (GLU-73).
+  // Preserving the original flags on the clone keeps `.test()` behaving
+  // exactly as it would on a fresh copy of the caller's own regex.
+  const clone = new RegExp(rule.url.source, rule.url.flags);
+  return clone.test(req.url);
 }
 
 /** @internal Find the first matching mock rule, or `undefined`. */
