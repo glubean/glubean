@@ -229,7 +229,10 @@ export async function readJsonBody(res: {
 /**
  * Try to convert a SchemaLike (Zod v4, Valibot, etc.) to JSON Schema.
  * Uses the schema's own `toJSONSchema` method if present. Falls back to
- * passing through as-is if already plain or unrecognized.
+ * passing through as-is if already plain, or to the author-declared
+ * `SchemaLike.jsonSchema` companion for hand-rolled (safeParse-only)
+ * validators (GLU-90). Returns null (unprojectable) only when none of
+ * those three sources yield a shape.
  */
 export function schemaToJsonSchema(schema: unknown): unknown | null {
   if (schema == null) return null;
@@ -262,6 +265,25 @@ export function schemaToJsonSchema(schema: unknown): unknown | null {
   // JSON Schema object has no toJSONSchema method, so it lands here.
   if ("type" in (schema as Record<string, unknown>) || "$ref" in (schema as Record<string, unknown>)) {
     return schema;
+  }
+
+  // Hand-rolled SchemaLike (safeParse/parse-only, no schema-library backing —
+  // e.g. a zod-free validator) declaring an explicit `jsonSchema` companion
+  // (GLU-90). Structurally this is the ONE schema shape schemaToJsonSchema
+  // could never derive on its own: a `{ safeParse }` object has no `type`/
+  // `$ref` key and no `toJSONSchema()` method, so every prior branch falls
+  // through to `null` regardless of how well-documented the validator is —
+  // that's what made contracts like `inventory-items-shape` (public-demo)
+  // permanently "unprojectableSchemas" and excluded from Cloud's Validate
+  // picker. Read the hint verbatim; never attempt to reverse-engineer the
+  // validator function itself.
+  const declaredJsonSchema = (schema as { jsonSchema?: unknown }).jsonSchema;
+  if (
+    declaredJsonSchema &&
+    typeof declaredJsonSchema === "object" &&
+    !Array.isArray(declaredJsonSchema)
+  ) {
+    return declaredJsonSchema;
   }
 
   return null;

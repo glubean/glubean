@@ -410,6 +410,11 @@ export interface ExtractedContractProjection<
    * a snapshot consumer uses to compute `projectionComplete` (false when
    * non-empty) and warn about the specific holes. Undefined/omitted when every
    * declared schema projected cleanly.
+   *
+   * A hand-rolled `SchemaLike` (safeParse/parse-only, no schema-library
+   * backing) has no structural information to project — declare
+   * `SchemaLike.jsonSchema` alongside `safeParse` to give the projector the
+   * shape explicitly (GLU-90); otherwise the path lands here every time.
    */
   unprojectableSchemas?: string[];
 }
