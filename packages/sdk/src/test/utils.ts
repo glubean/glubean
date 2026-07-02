@@ -9,7 +9,68 @@
  * - `selectPickExamples` — picks examples from a named map (respects `GLUBEAN_PICK` env)
  * - `globToRegExp` — converts `*` glob patterns to RegExp (used by selectPickExamples)
  */
-import type { TestMeta } from "../types.js";
+import type { EachRowMeta, TestMeta } from "../types.js";
+
+/**
+ * Single-pass `$placeholder` tokenizer shared by `interpolateTemplate` and
+ * `interpolateRowKey` so the interpolated id and the row key NEVER disagree on
+ * how a data field is substituted (the `rowKey === id` contract for stable
+ * templates depends on this).
+ *
+ * Semantics (matching the documented template contract, but collision-safe):
+ * - The reserved positional `$index` placeholder wins at every `$` position
+ *   where the placeholder word is EXACTLY `index` (word-boundary checked, so
+ *   `$indexed` is a normal data placeholder). It shadows a data field
+ *   literally named `index`. `index === undefined` leaves it literal (the
+ *   row-key mode).
+ * - Data keys match LONGEST-FIRST, so a key that is a prefix of another
+ *   (`$id` vs `$id2`) or of a later placeholder can never corrupt it.
+ * - Substituted values are emitted verbatim in one pass — a value containing
+ *   `$something` is never re-scanned (no value injection).
+ * - A `$` matching nothing stays literal.
+ */
+/** Placeholder-name character class — used only to word-boundary the reserved
+ *  `$index` token (data keys themselves may contain any characters). */
+const PLACEHOLDER_WORD = /[A-Za-z0-9_]/;
+
+function interpolatePlaceholders(
+  template: string,
+  data: Record<string, unknown>,
+  index: number | undefined,
+): string {
+  // Longest-first so a key that prefixes another key never wins the match.
+  const keys = Object.keys(data)
+    .filter((k) => k.length > 0 && k !== "index")
+    .sort((a, b) => b.length - a.length);
+  let out = "";
+  let i = 0;
+  while (i < template.length) {
+    const ch = template[i]!;
+    if (ch !== "$") {
+      out += ch;
+      i++;
+      continue;
+    }
+    const rest = template.slice(i + 1);
+    // Reserved positional placeholder — wins over data keys (documented
+    // shadowing), but only when the placeholder word is exactly `index`
+    // (word-boundary: `$indexed` is a data placeholder, not `$index` + "ed").
+    if (rest.startsWith("index") && !PLACEHOLDER_WORD.test(rest.charAt("index".length))) {
+      out += index === undefined ? "$index" : String(index);
+      i += "$index".length;
+      continue;
+    }
+    const key = keys.find((k) => rest.startsWith(k));
+    if (key !== undefined) {
+      out += String(data[key]);
+      i += 1 + key.length;
+    } else {
+      out += "$";
+      i++;
+    }
+  }
+  return out;
+}
 
 /**
  * Interpolate `$key` placeholders in a template string with data values.
@@ -22,11 +83,60 @@ export function interpolateTemplate(
   data: Record<string, unknown>,
   index: number,
 ): string {
-  let result = template.replace(/\$index/g, String(index));
-  for (const [key, value] of Object.entries(data)) {
-    result = result.replaceAll(`$${key}`, String(value));
-  }
-  return result;
+  return interpolatePlaceholders(template, data, index);
+}
+
+/**
+ * True when an id/name template references the positional `$index` placeholder.
+ * `$index` makes the interpolated id reorder-unstable; this is the SDK's
+ * authoritative check (it owns interpolation, where the reserved `$index`
+ * shadows a data field literally named `index`). Word-boundary checked so
+ * `$indexed` (a data placeholder) does NOT count — mirrors the tokenizer.
+ *
+ * @internal
+ */
+export function templateUsesIndex(template: string): boolean {
+  return /\$index(?![A-Za-z0-9_])/.test(template);
+}
+
+/**
+ * Build the reorder-stable per-row key: `interpolateTemplate` with the data
+ * fields ONLY, leaving the positional `$index` placeholder literal so an
+ * `$index`-based template stays detectable downstream. Same tokenizer as
+ * `interpolateTemplate` (a data field named `index` is shadowed by the
+ * reserved `$index` placeholder), minus the index substitution — so for a
+ * template that never references `$index`, `rowKey === id` exactly.
+ *
+ * @internal
+ */
+export function interpolateRowKey(
+  template: string,
+  data: Record<string, unknown>,
+): string {
+  return interpolatePlaceholders(template, data, undefined);
+}
+
+/**
+ * Build the data-driven row provenance (`EachRowMeta`) for one generated
+ * per-row test — `idTemplate` + a reorder-stable `rowKey` + the `$index`
+ * stability flag — so Cloud derive can resolve a stable cross-run identity
+ * instead of only the final interpolated id. Shared by `test.each`,
+ * `test.pick`, and `EachBuilder`. `index` MUST be the same row index passed to
+ * `interpolateTemplate` for this row (i.e. the index into the filtered table).
+ *
+ * @internal
+ */
+export function buildEachRowMeta(
+  idTemplate: string,
+  data: Record<string, unknown>,
+  index: number,
+): EachRowMeta {
+  return {
+    idTemplate,
+    index,
+    rowKey: interpolateRowKey(idTemplate, data),
+    stable: !templateUsesIndex(idTemplate),
+  };
 }
 
 /**

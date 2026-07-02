@@ -20,7 +20,7 @@ import type {
 } from "../types.js";
 import { registerTest } from "../internal.js";
 import { toArray } from "../data.js";
-import { interpolateTemplate } from "./utils.js";
+import { buildEachRowMeta, interpolateTemplate } from "./utils.js";
 
 /**
  * Step function for data-driven builder tests.
@@ -394,6 +394,7 @@ export class EachBuilder<
         hasSetup: !!this._setup,
         hasTeardown: !!this._teardown,
         rowIndex: i,
+        each: buildEachRowMeta(this._baseMeta.id, row, i),
         ...(hasGroup ? { groupId: this._baseMeta.id } : {}),
         ...(this._parallel ? { parallel: true } : {}),
       });
@@ -436,6 +437,7 @@ export class EachBuilder<
           meta: s.meta,
           fn: ((ctx: TestContext, state: S) => s.fn(ctx as Ctx, state, row)) as StepFunction<S>,
         })),
+        each: buildEachRowMeta(this._baseMeta.id, row, index),
         ...(this._fixtures ? { fixtures: this._fixtures } : {}),
       };
     });

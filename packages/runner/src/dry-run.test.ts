@@ -483,3 +483,48 @@ vtest("ctx.skip inside a when arm is branch-local — sibling arm still projects
     { kind: "assert", branch: "when#0:else" },
   ]);
 });
+
+// ==================== B3 T1.5 — row provenance rides the shape ====================
+
+vtest("shape carries `each` row provenance for test.each rows", async () => {
+  const rows = glubeanTest.each([{ userId: 1 }, { userId: 2 }])(
+    "user-$userId",
+    async (ctx, _data) => {
+      ctx.assert(true, "ok");
+    },
+  );
+  const shape0 = await dryRunTest(rows[0]!, { exportName: "rows" });
+  expect(shape0.each).toEqual({
+    idTemplate: "user-$userId",
+    index: 0,
+    rowKey: "user-1",
+    stable: true,
+  });
+  const shape1 = await dryRunTest(rows[1]!, { exportName: "rows" });
+  expect(shape1.each!.rowKey).toBe("user-2");
+});
+
+vtest("shape has no `each` for a plain test()", async () => {
+  const t = glubeanTest("plain", async (ctx) => {
+    ctx.assert(true, "ok");
+  });
+  const shape = await dryRunTest(t, { exportName: "t" });
+  expect(shape.each).toBeUndefined();
+});
+
+vtest("non-simple (builder) row keeps `each` on its incomplete shape", async () => {
+  const tests = glubeanTest
+    .each([{ userId: 7 }])("flow-$userId")
+    .step("fetch", async () => {})
+    .build();
+  const shape = await dryRunTest(tests[0]!, { exportName: "flow" });
+  // Builder tests are not dry-runnable (shape comes from static scan), but the
+  // row provenance must still ride the projection upload.
+  expect(shape.projectionComplete).toBe(false);
+  expect(shape.each).toEqual({
+    idTemplate: "flow-$userId",
+    index: 0,
+    rowKey: "flow-7",
+    stable: true,
+  });
+});

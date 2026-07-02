@@ -20,7 +20,7 @@ import { registerTest } from "../internal.js";
 import { toArray } from "../data.js";
 import { TestBuilder } from "./builder.js";
 import { EachBuilder } from "./each-builder.js";
-import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, selectPickExamples } from "./utils.js";
+import { normalizeEachTable, resolveBaseMeta, interpolateTemplate, buildEachRowMeta, selectPickExamples } from "./utils.js";
 
 /** Keys that cannot be used as extension names (they shadow core TestContext). */
 export const EXTEND_RESERVED_KEYS = new Set(["vars", "secrets", "http"]);
@@ -182,11 +182,14 @@ export function createExtendedTest<Ctx extends TestContext>(
           rowIndex: index,
         };
 
+        const eachMeta = buildEachRowMeta(baseMeta.id, row, index);
+
         const testDef: Test = {
           meta,
           type: "simple",
           fn: (async (ctx) => await fn(ctx as unknown as Ctx, row)) as SimpleTestFunction,
           fixtures: allFixtures,
+          each: eachMeta,
         };
 
         registerTest({
@@ -196,6 +199,7 @@ export function createExtendedTest<Ctx extends TestContext>(
           tags: allTags.length > 0 ? allTags : undefined,
           description: meta.description,
           rowIndex: index,
+          each: eachMeta,
           ...(hasGroup ? { groupId: baseMeta.id } : {}),
           ...(parallel ? { parallel: true } : {}),
         });

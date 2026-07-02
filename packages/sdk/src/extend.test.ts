@@ -174,6 +174,32 @@ test("extended test .each() simple mode creates tests with fixtures", () => {
   expect(registry.length).toBe(2);
 });
 
+test("extended test .each() registers row meta (B3 T1)", () => {
+  clearRegistry();
+
+  const myTest = glubeanTest.extend({
+    auth: (_ctx: TestContext) => ({ token: "abc" }),
+  });
+
+  const tests = myTest.each([{ userId: 1 }, { userId: 2 }])(
+    "user-$userId",
+    async (_ctx, _row) => {},
+  );
+
+  const registry = getRegistry();
+  expect(registry[0].each).toEqual({
+    idTemplate: "user-$userId",
+    index: 0,
+    rowKey: "user-1",
+    stable: true,
+  });
+  expect(registry[1].each!.index).toBe(1);
+  expect(registry[1].each!.rowKey).toBe("user-2");
+  // Runnable Test objects carry the same provenance (run-path source).
+  expect(tests[0].each).toEqual(registry[0].each);
+  expect(tests[1].each).toEqual(registry[1].each);
+});
+
 test("extended test .each() builder mode returns EachBuilder with fixtures", async () => {
   clearRegistry();
 
