@@ -1890,7 +1890,16 @@ server.registerTool(
         "The last local run produced no results — nothing to upload.",
       );
     }
-    const check = await requireOpenToolAuth(input, lastLocalRunSnapshot.projectRoot);
+    // Credential resolution AND the environment label default to the env file
+    // the RUN was executed with — sourcing upload credentials from a different
+    // env than the run (e.g. run with `.env.staging`, upload with `.env`)
+    // could misroute the upload (codex GLU-77 R2 P2). An explicit `envFile`
+    // argument overrides BOTH consistently.
+    const effectiveEnvFile = input.envFile ?? lastLocalRunSnapshot.envFile;
+    const check = await requireOpenToolAuth(
+      { ...input, envFile: effectiveEnvFile },
+      lastLocalRunSnapshot.projectRoot,
+    );
     if (!check.ok) return errorContent(check.error);
     const { apiUrl, token, projectId, targetId } = check.auth;
 
@@ -1898,10 +1907,7 @@ server.registerTool(
     // explicit arg > GLUBEAN_ENV > derived from the env file the RUN used
     // (`.env.staging` → "staging"; resolveEnvPath honors .glubean/active-env).
     const snapshotRoot = lastLocalRunSnapshot.projectRoot;
-    const runEnvPath = await resolveEnvPath(
-      snapshotRoot,
-      lastLocalRunSnapshot.envFile ?? input.envFile,
-    );
+    const runEnvPath = await resolveEnvPath(snapshotRoot, effectiveEnvFile);
     const environment =
       input.environment ||
       process.env.GLUBEAN_ENV?.trim() ||
