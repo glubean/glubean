@@ -14,7 +14,7 @@ import { stat, readdir, readFile, writeFile, mkdir, rm } from "node:fs/promises"
 import { glob } from "node:fs/promises";
 import { CONFIG_DEFAULTS, mergeRunOptions, toSharedRunConfig } from "../lib/config.js";
 import { loadProjectEnv } from "@glubean/runner";
-import { resolveEnvFileName } from "../lib/active_env.js";
+import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 import { shouldSkipTest, type CapabilityProfile } from "../lib/skip.js";
 import type { RunIngestMetric, RunIngestTest, UploadRunInput } from "../lib/upload.js";
 import { extractContractCases, extractFromSource } from "@glubean/scanner/static";
@@ -980,10 +980,25 @@ export async function runCommand(
   }
 
   // Resolve env file: --env-file flag > .glubean/active-env > config default > .env
+  // GLU-88: resolveEnvFileName throws SensitiveActiveEnvError instead of
+  // silently returning a prod-like active-env file — surface it as a clear,
+  // actionable CLI error rather than let it propagate as an unhandled
+  // rejection.
   const userSpecifiedEnvFile = !!options.envFile;
-  const envFileName = userSpecifiedEnvFile
-    ? effectiveRun.envFile!
-    : await resolveEnvFileName(rootDir);
+  let envFileName: string;
+  if (userSpecifiedEnvFile) {
+    envFileName = effectiveRun.envFile!;
+  } else {
+    try {
+      envFileName = await resolveEnvFileName(rootDir);
+    } catch (err) {
+      if (err instanceof SensitiveActiveEnvError) {
+        console.error(`\n${colors.red}Error: ${err.message}${colors.reset}\n`);
+        process.exit(1);
+      }
+      throw err;
+    }
+  }
   const envPath = resolve(rootDir, envFileName);
 
   if (userSpecifiedEnvFile) {

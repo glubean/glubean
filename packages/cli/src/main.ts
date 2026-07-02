@@ -93,7 +93,7 @@ program
   .option("-t, --tag <tag>", "Run only tests with matching tag (comma-separated or repeatable)", collect, [])
   .option("--tag-mode <mode>", 'Tag match logic: "or" (any tag) or "and" (all tags)', "or")
   .option("--exclude-tag <tag>", "Exclude tests with matching tag (comma-separated or repeatable; always OR-mode — any match drops the test)", collect, [])
-  .option("--env-file <path>", "Path to .env file (default: .env if it exists)")
+  .option("--env-file <path>", "Path to .env file (default: active env set via 'glubean env use', else .env; prod-like active envs are refused implicitly — pass this flag explicitly)")
   .option("-l, --log-file", "Write logs to file (<testfile>.log)")
   .option("--pretty", "Pretty-print JSON in log file (2-space indent)")
   .option("--verbose", "Show all output (traces, assertions) in console")
@@ -653,7 +653,7 @@ ciCmd
   .option("-t, --tag <tag>", "Run only tests with matching tag (comma-separated or repeatable)", collect, [])
   .option("--tag-mode <mode>", 'Tag match logic: "or" (any tag) or "and" (all tags)', "or")
   .option("--exclude-tag <tag>", "Exclude tests with matching tag (comma-separated or repeatable; always OR-mode — any match drops the test)", collect, [])
-  .option("--env-file <path>", "Path to .env file (default: .env if it exists)")
+  .option("--env-file <path>", "Path to .env file (default: active env set via 'glubean env use', else .env; prod-like active envs are refused implicitly — pass this flag explicitly)")
   .option("-l, --log-file", "Write logs to file (<testfile>.log)")
   .option("--pretty", "Pretty-print JSON in log file (2-space indent)")
   .option("--verbose", "Show all output (traces, assertions) in console")
@@ -757,7 +757,7 @@ program
   .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
   .option("--token-env <name>", "Read the token from this env var instead of GLUBEAN_TOKEN")
   .option("--api-url <url>", "Glubean API server URL (or GLUBEAN_API_URL env)")
-  .option("--env-file <name>", "Env file basename to load (default: active env, else .env)")
+  .option("--env-file <name>", "Env file basename to load (default: active env, else .env; prod-like active envs are refused implicitly)")
   .option("--allow-empty", "Allow clearing the project's projections when no tests are found")
   .action(async (options) => {
     await syncCommand({
@@ -777,7 +777,7 @@ program
 program
   .command("load [target]")
   .description("Run loadRunner() performance plans (.load.ts) and write LoadArtifacts")
-  .option("--env-file <name>", "Env file basename (default: active env, else .env)")
+  .option("--env-file <name>", "Env file basename (default: active env, else .env; prod-like active envs are refused implicitly)")
   .option("--upload", "Upload each plan's LoadArtifact to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt(s) JSON after --upload")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")

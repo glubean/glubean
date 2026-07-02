@@ -343,13 +343,53 @@ async function readActiveEnv(projectRoot: string): Promise<string | undefined> {
   }
 }
 
+// GLU-88: mirrors packages/cli/src/lib/active_env.ts's SENSITIVE_ENV_NAMES
+// guard. `.glubean/active-env` is a persistent, un-TTL'd, un-warned sticky
+// file — an agent (or a human) that once ran `glubean env use prod` here
+// leaves every subsequent MCP tool call silently pointed at prod until
+// someone runs `glubean env reset`. Kept as a small local duplicate (not a
+// cross-package import) because @glubean/mcp does not depend on
+// @glubean/cli and shouldn't gain that dependency just for this helper.
+const SENSITIVE_ENV_NAMES = new Set(["prod", "production"]);
+
+function isSensitiveEnvName(name: string): boolean {
+  return SENSITIVE_ENV_NAMES.has(name.trim().toLowerCase());
+}
+
+/**
+ * Thrown by `resolveEnvPath` when the active env resolves to a sensitive
+ * (prod-like) name and no explicit `envFile` was given. Callers should let
+ * this propagate — the MCP SDK surfaces thrown errors as a tool error
+ * response, which is exactly the "loud failure instead of silent prod
+ * upload" behavior GLU-88 requires.
+ */
+export class SensitiveActiveEnvError extends Error {
+  constructor(public readonly envName: string) {
+    super(
+      `Active environment is "${envName}" (set via \`glubean env use ${envName}\`, ` +
+        `recorded in .glubean/active-env), which looks like a production ` +
+        `environment. Refusing to load it implicitly — pass an explicit envFile ` +
+        `(.env.${envName}) to use it, or run \`glubean env reset\` to clear the ` +
+        `active environment and fall back to .env.`,
+    );
+    this.name = "SensitiveActiveEnvError";
+  }
+}
+
 /**
  * Resolve the env file path, checking `.glubean/active-env` when no explicit envFile is given.
+ * Throws `SensitiveActiveEnvError` instead of silently resolving a prod-like
+ * active-env (GLU-88) — explicit `envFile` always bypasses this check.
  */
-async function resolveEnvPath(projectRoot: string, envFile?: string): Promise<string> {
+export async function resolveEnvPath(projectRoot: string, envFile?: string): Promise<string> {
   if (envFile) return resolve(envFile);
   const activeEnv = await readActiveEnv(projectRoot);
-  if (activeEnv) return resolve(projectRoot, `.env.${activeEnv}`);
+  if (activeEnv) {
+    if (isSensitiveEnvName(activeEnv)) {
+      throw new SensitiveActiveEnvError(activeEnv);
+    }
+    return resolve(projectRoot, `.env.${activeEnv}`);
+  }
   return resolve(projectRoot, ".env");
 }
 

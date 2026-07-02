@@ -67,7 +67,7 @@ Useful flags:
 
 | Flag | Effect |
 |------|--------|
-| `--env-file <path>` | Load a specific `.env` file |
+| `--env-file <path>` | Load a specific `.env` file (default: the active env set via `glubean env use`, else `.env` — see [`env`](#env)) |
 | `--config <paths>` | One or more config files (comma-separated or repeatable) |
 | `--verbose` | Show traces and assertions inline |
 | `--log-file` | Write per-test logs to disk |
@@ -187,7 +187,7 @@ glubean config mcp
 
 ### `env`
 
-Manage which `.env.<name>` file is active for `glubean run`.
+Manage which `.env.<name>` file is active for `glubean run` (and `sync`/`load`) when no explicit `--env-file` is given. The active env is sticky — it's written to `.glubean/active-env` and stays in effect for every future run in that directory until you `glubean env reset` or pass `--env-file` explicitly.
 
 ```bash
 glubean env list                # show available environments
@@ -195,6 +195,8 @@ glubean env use staging         # activate .env.staging
 glubean env                     # print current active env
 glubean env reset               # clear active env (use default .env)
 ```
+
+**Prod-like active envs are refused implicitly.** If the active env is named `prod` or `production`, `glubean run`/`sync`/`load` will error instead of silently loading `.env.prod` — that stickiness is exactly what caused a run to be misdirected to a production project in the past (GLU-88). Pass `--env-file .env.prod` explicitly when you really mean it, or `glubean env reset` to fall back to `.env`.
 
 ### `upgrade`
 

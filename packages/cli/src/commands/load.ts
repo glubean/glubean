@@ -21,7 +21,7 @@ import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
 import { loadProjectEnv, runLoadFileInSubprocess } from "@glubean/runner";
 import type { LoadArtifact } from "@glubean/sdk/load";
-import { resolveEnvFileName } from "../lib/active_env.js";
+import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 import { findProjectConfig } from "./run.js";
 import type { UploadReceipt, UploadRunInput } from "../lib/upload.js";
 import type { RedactionConfig } from "@glubean/redaction";
@@ -544,8 +544,24 @@ export async function loadCommand(
   // silently running with empty env could send load to the wrong target / run
   // without credentials. Validate the env file up front so a missing one fails
   // fast. A resolved default/active env file may be absent.
+  // GLU-88: resolveEnvFileName throws SensitiveActiveEnvError instead of
+  // silently returning a prod-like active-env file — surface it as a clear,
+  // actionable error (mirrors `glubean run`).
   const userSpecifiedEnvFile = options.envFile !== undefined;
-  const envFileName = userSpecifiedEnvFile ? options.envFile! : await resolveEnvFileName(rootDir);
+  let envFileName: string;
+  if (userSpecifiedEnvFile) {
+    envFileName = options.envFile!;
+  } else {
+    try {
+      envFileName = await resolveEnvFileName(rootDir);
+    } catch (err) {
+      if (err instanceof SensitiveActiveEnvError) {
+        console.log(`${colors.red}Error: ${err.message}${colors.reset}`);
+        process.exit(1);
+      }
+      throw err;
+    }
+  }
   if (userSpecifiedEnvFile && !existsSync(resolve(rootDir, envFileName))) {
     console.log(`${colors.red}Error: env file '${envFileName}' not found in ${rootDir}${colors.reset}`);
     process.exit(1);
