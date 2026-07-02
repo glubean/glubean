@@ -348,6 +348,68 @@ test("execute/executeMany surface rowIndex for .each rows (B2 M3)", async () => 
 }, 60_000);
 
 // ---------------------------------------------------------------------------
+// B3 T3 (`run-evidence-identity-model.md` §7/§14) — execute()/executeMany()
+// surface `each` row-identity provenance (idTemplate/rowKey/stable) on
+// ExecutionResult, sourced from the runtime "start" event (harness.ts /
+// engine.ts both emit it — see engine-parity.test.ts for the dual-leg check).
+// This is the run-events channel carrying row identity WITHOUT depending on a
+// projection join (the gap B3 T1.5/T3 closes).
+// ---------------------------------------------------------------------------
+
+const EACH_INDEX_TEMPLATE_CONTENT = `
+import { test } from "@glubean/sdk";
+
+export const rows = test.each([
+  { label: "a" },
+  { label: "b" },
+])("case-$index", async (ctx, _data) => {
+  ctx.assert(true, "ok");
+});
+`;
+
+test("execute/executeMany surface `each` row-identity provenance for .each rows (B3 T3)", async () => {
+  const testFile = await makeTempFile(EACH_ROWINDEX_CONTENT);
+  const executor = new TestExecutor();
+
+  // execute() — a stable (non-$index) template: rowKey equals the interpolated
+  // id, stable:true.
+  const r0 = await executor.execute(`file://${testFile}`, "row-10", { vars: {}, secrets: {} });
+  expect(r0.each).toEqual({ idTemplate: "row-$id", index: 0, rowKey: "row-10", stable: true });
+  const r2 = await executor.execute(`file://${testFile}`, "row-30", { vars: {}, secrets: {} });
+  expect(r2.each).toEqual({ idTemplate: "row-$id", index: 2, rowKey: "row-30", stable: true });
+
+  // A plain (non-each) test carries no `each` — backward compatible (old runs
+  // simply omit the field; nothing regresses for non-data-driven tests).
+  const plain = await executor.execute(`file://${testFile}`, "plain", { vars: {}, secrets: {} });
+  expect(plain.each).toBeUndefined();
+
+  // executeMany() preserves `each` per returned result.
+  const batch = await executor.executeMany(
+    `file://${testFile}`,
+    ["row-10", "row-20", "row-30"],
+    { vars: {}, secrets: {} },
+    { concurrency: 1 },
+  );
+  const byId = new Map(batch.results.map((r) => [r.testId, r.each]));
+  expect(byId.get("row-10")).toEqual({ idTemplate: "row-$id", index: 0, rowKey: "row-10", stable: true });
+  expect(byId.get("row-20")).toEqual({ idTemplate: "row-$id", index: 1, rowKey: "row-20", stable: true });
+  expect(byId.get("row-30")).toEqual({ idTemplate: "row-$id", index: 2, rowKey: "row-30", stable: true });
+}, 60_000);
+
+test("execute() flags a $index-based template as unstable (each.stable=false) — B3 T3 / §7", async () => {
+  const testFile = await makeTempFile(EACH_INDEX_TEMPLATE_CONTENT);
+  const executor = new TestExecutor();
+
+  // A `$index`-based template: rowKey retains the literal `$index` token (NOT
+  // interpolated to the positional value) and `stable` is false, so Cloud
+  // derive can truthfully flag reorder-unstable ids (§7).
+  const r0 = await executor.execute(`file://${testFile}`, "case-0", { vars: {}, secrets: {} });
+  expect(r0.each).toEqual({ idTemplate: "case-$index", index: 0, rowKey: "case-$index", stable: false });
+  const r1 = await executor.execute(`file://${testFile}`, "case-1", { vars: {}, secrets: {} });
+  expect(r1.each).toEqual({ idTemplate: "case-$index", index: 1, rowKey: "case-$index", stable: false });
+}, 60_000);
+
+// ---------------------------------------------------------------------------
 // ctx.fail tests
 // ---------------------------------------------------------------------------
 

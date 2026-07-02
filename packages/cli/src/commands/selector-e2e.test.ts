@@ -56,7 +56,16 @@ async function prepare(name: string): Promise<string> {
 }
 
 interface LastRun {
-  tests: Array<{ testId: string; rowIndex?: number; filePath?: string; success: boolean }>;
+  tests: Array<{
+    testId: string;
+    rowIndex?: number;
+    filePath?: string;
+    success: boolean;
+    /** B3 T3 (`run-evidence-identity-model.md` §7/§14) — row-identity
+     *  provenance, persisted so the run blob self-describes row identity
+     *  without a projection join. */
+    each?: { idTemplate: string; index: number; rowKey: string; stable: boolean };
+  }>;
 }
 
 async function readLastRun(dir: string): Promise<LastRun> {
@@ -160,3 +169,26 @@ test("--rerun-failed works across a different cwd (rootDir-stable filePath)", as
   expect(afterRerun.tests.map((t) => t.testId)).toEqual(["user-20"]);
   expect(afterRerun.tests[0]?.success).toBe(false);
 }, 90_000);
+
+// ---------------------------------------------------------------------------
+// B3 T3 (`run-evidence-identity-model.md` §7/§14) — the run-events channel
+// (harness/engine "start" event → executor → CLI) carries `.each` row-identity
+// provenance all the way into the persisted run blob (`last-run.result.json`
+// today; the SAME `tests[].each` shape is what `uploadToCloud` embeds in the
+// uploaded `result` blob — see `packages/cli/src/lib/upload.ts`). This closes
+// the gap the T1.5 cloud-side comment flagged: row identity travels WITH the
+// run, not only via a separate projection-channel join.
+// ---------------------------------------------------------------------------
+
+test("a real `glubean run` persists `.each` row-identity provenance in last-run.result.json", async () => {
+  const dir = await prepare("each-provenance");
+  const { code } = await runCli(["run", "tests/", "--no-session"], { cwd: dir });
+  expect(code).toBe(1); // user-20 fails by fixture design
+
+  const last = await readLastRun(dir);
+  const byId = new Map(last.tests.map((t) => [t.testId, t.each]));
+
+  expect(byId.get("user-10")).toEqual({ idTemplate: "user-$id", index: 0, rowKey: "user-10", stable: true });
+  expect(byId.get("user-20")).toEqual({ idTemplate: "user-$id", index: 1, rowKey: "user-20", stable: true });
+  expect(byId.get("user-30")).toEqual({ idTemplate: "user-$id", index: 2, rowKey: "user-30", stable: true });
+}, 60_000);

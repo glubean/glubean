@@ -2086,6 +2086,13 @@ async function executeNewTest(test: Test<unknown>): Promise<void> {
     // rowIndex (B2 M3): persist the `.each` row index on the start event so the
     // CLI can record it in last-run.result.json for `--rerun-failed`.
     ...(test.meta.rowIndex !== undefined && { rowIndex: test.meta.rowIndex }),
+    // each (B3 T3, `run-evidence-identity-model.md` §7/§14): persist the row's
+    // idTemplate/rowKey/stable provenance on the start event so the run-events
+    // channel — and the uploaded run blob — carry row identity WITHOUT depending
+    // on a projection join. `test.each` is the runtime SDK Test's top-level field
+    // (sibling to `meta`, set by test.each/test.pick — B3 T1, glubean b739fe5);
+    // undefined for non-each tests (backward compatible: old runs simply omit it).
+    ...(test.each !== undefined && { each: test.each }),
   });
 
   // Start memory monitoring

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
-import type { Trace, GlubeanAction, GlubeanEvent, RunContext } from "@glubean/sdk";
+import type { Trace, GlubeanAction, GlubeanEvent, RunContext, EachRowMeta } from "@glubean/sdk";
 import type { SharedRunConfig } from "./config.js";
 import { generateSummary } from "./generate_summary.js";
 import { buildRunContext } from "./run_context.js";
@@ -80,6 +80,13 @@ export type ExecutionEvent = { testId?: string } & (
     retryCount?: number;
     /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
     rowIndex?: number;
+    /**
+     * Data-driven row provenance (B3 T3, `run-evidence-identity-model.md` §7/§14) —
+     * `idTemplate`/reorder-stable `rowKey`/`$index` stability flag, mirrored from
+     * the SDK's `Test.each`. Present only for `test.each`/`test.pick` rows; lets
+     * the run-events channel self-describe row identity without a projection join.
+     */
+    each?: EachRowMeta;
   }
   | { type: "log"; message: string; data?: unknown; stepIndex?: number }
   | {
@@ -283,6 +290,9 @@ export interface ExecutionResult {
   testName?: string;
   /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
   rowIndex?: number;
+  /** Data-driven row provenance (B3 T3) — mirrors {@link ExecutionEvent}'s `each`
+   *  on the "start" event; undefined for non-each tests. */
+  each?: EachRowMeta;
   suiteId?: string;
   suiteName?: string;
   events: TimelineEvent[];
@@ -927,6 +937,7 @@ export class TestExecutor {
     let success = false;
     let testName: string | undefined;
     let rowIndex: number | undefined;
+    let each: EachRowMeta | undefined;
     let suiteId: string | undefined;
     let suiteName: string | undefined;
     let error: string | undefined;
@@ -948,6 +959,9 @@ export class TestExecutor {
           // result so programmatic consumers (not the CLI event stream) can
           // reconstruct a row-pinned selector. undefined for non-each tests.
           rowIndex = event.rowIndex;
+          // each (B3 T3): surface the row-identity provenance the same way, so
+          // programmatic consumers see it without a projection join.
+          each = event.each;
           suiteId = event.suiteId;
           suiteName = event.suiteName;
           retryCount = event.retryCount;
@@ -1037,7 +1051,7 @@ export class TestExecutor {
     if (!summary.success) success = false;
 
     return {
-      success, testId, testName, rowIndex, suiteId, suiteName, events, error, stack,
+      success, testId, testName, rowIndex, each, suiteId, suiteName, events, error, stack,
       duration: Date.now() - startTime, retryCount, assertionCount, failedAssertionCount,
       peakMemoryBytes, peakMemoryMB,
       context: buildRunContext(),
