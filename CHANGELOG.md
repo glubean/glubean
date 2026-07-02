@@ -15,6 +15,23 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ---
 
+## [0.8.2] — 2026-07-02
+
+> Scope: `@glubean/sdk` republish only (F31). Other packages stay at their current published versions; `@glubean/cli` had already moved ahead independently (0.8.3). Published manually via `pnpm --filter @glubean/sdk publish` — the `v*` tag workflow is intentionally NOT used here, because its final gate verifies all 13 packages at the tag version and would go red on a single-package release.
+
+### Fixed
+- **F31 — zod contracts now emit real JSON Schema** (`@glubean/sdk`) — `schemaToJsonSchema` tested `"type" in schema` *before* trying the schema's own `toJSONSchema()`. Zod v4 instances expose a `type` getter, so zod schemas were misclassified as already-plain JSON Schema and their raw internals (`def`, `checks`, `shape`, `format: null`) leaked verbatim into the contract projection and the generated OpenAPI document — downstream consumers (MCP `glubean_openapi`, the designer) rendered empty/garbage objects. The `toJSONSchema()` conversion now runs first, and the per-document `$schema` key zod emits is stripped (OpenAPI 3.1 pins the dialect at the document level). Unrepresentable schemas (`z.date()`, `z.bigint()`, transforms) still throw and land in `unprojectableSchemas`, so dry-run/sync keep reporting the hole.
+
+### Added (sdk authoring/API surface riding along from `main` since 0.8.1)
+
+These land in the published `@glubean/sdk` because 0.8.2 is cut from `main`; the matching runner/CLI runtime support is on `main` but NOT yet in any published `@glubean/runner`/`@glubean/cli` (the last CLI publish, 0.8.3, predates them — 2026-06-27).
+
+- **`ctx.when` / `ctx.switch` / `ctx.while` authoring API + projection support** (`@glubean/sdk`) — test-shape dry-run projection of conditional test bodies.
+- **`ctx.http.track(pattern)`** (`@glubean/sdk`) — pin a raw HTTP call to its canonical endpoint.
+- **`{id, rowIndex}` "only" selector protocol, sdk side** — the CLI flags `--only-id`/`--row`/`--rerun-failed` ship with the next `@glubean/cli` release.
+
+---
+
 ## [0.8.1] — 2026-06-24
 
 ### Fixed
@@ -92,7 +109,8 @@ Changes prior to `v0.7.0` are not captured in this CHANGELOG. Use `git log v0.2.
 - `v0.3.x`–`v0.5.x` — config profiles, multi-suite, `--ci` flag, demo template, per-profile multi-project upload.
 - `v0.2.x` — initial Node.js port from Deno; `@glubean/engine` spike, inbound contract receivers, workflow vNext (S2 series).
 
-[Unreleased]: https://github.com/glubean/glubean/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/glubean/glubean/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/glubean/glubean/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/glubean/glubean/compare/v0.7.0...v0.8.1
 [0.8.0]: https://github.com/glubean/glubean/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/glubean/glubean/compare/v0.2.10...v0.7.0
