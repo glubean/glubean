@@ -947,7 +947,7 @@ test("step retries - backoff delays between retries", async () => {
   );
   expect(logs.some((l) => l.message.includes("waiting 200ms"))).toBe(true);
   expect(logs.some((l) => l.message.includes("waiting 400ms"))).toBe(true);
-}, 10_000);
+});
 
 test("ctx.skip() inside a step skips the test (not failed)", async () => {
   const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
@@ -1758,7 +1758,7 @@ export const httpResponseHeadersSchemaFailTest = test(
 );
 `;
 
-test("HTTP schema - query validation passes with valid params", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - query validation passes with valid params", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1775,7 +1775,7 @@ test("HTTP schema - query validation passes with valid params", { timeout: 15_00
   expect(queryValidation!.success).toBe(true);
 });
 
-test("HTTP schema - query validation fails with invalid params", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - query validation fails with invalid params", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1794,7 +1794,7 @@ test("HTTP schema - query validation fails with invalid params", { timeout: 15_0
   expect(queryValidation!.success).toBe(false);
 });
 
-test("HTTP schema - request body validation passes", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - request body validation passes", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1810,7 +1810,7 @@ test("HTTP schema - request body validation passes", { timeout: 15_000, retry: 3
   expect(bodyValidation!.success).toBe(true);
 });
 
-test("HTTP schema - request body validation fails", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - request body validation fails", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1829,7 +1829,7 @@ test("HTTP schema - request body validation fails", { timeout: 15_000, retry: 3 
   expect(bodyValidation!.success).toBe(false);
 });
 
-test("HTTP schema - severity: warn does not fail test", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - severity: warn does not fail test", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1848,7 +1848,7 @@ test("HTTP schema - severity: warn does not fail test", { timeout: 15_000, retry
   expect(queryValidation!.severity).toBe("warn");
 });
 
-test("HTTP schema - request headers validation passes", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - request headers validation passes", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1864,7 +1864,7 @@ test("HTTP schema - request headers validation passes", { timeout: 15_000, retry
   expect(headersValidation!.success).toBe(true);
 });
 
-test("HTTP schema - request headers validation fails", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - request headers validation fails", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1883,7 +1883,7 @@ test("HTTP schema - request headers validation fails", { timeout: 15_000, retry:
   expect(headersValidation!.success).toBe(false);
 });
 
-test("HTTP schema - response headers validation passes", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - response headers validation passes", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1899,7 +1899,7 @@ test("HTTP schema - response headers validation passes", { timeout: 15_000, retr
   expect(headersValidation!.success).toBe(true);
 });
 
-test("HTTP schema - response headers validation fails", { timeout: 15_000, retry: 3 }, async () => {
+test("HTTP schema - response headers validation fails", { retry: 3 }, async () => {
   const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
   const executor = new TestExecutor();
 
@@ -1961,6 +1961,10 @@ export const test5 = test(
 );
 `;
 
+// GLU-79: this group does 2-5 SEQUENTIAL real tsx subprocess spawns per test
+// and flaked at vitest's old 5000ms default under contended load (0.8.4
+// release CI first-run red). Now covered by the package-wide
+// testTimeout: 30_000 in vitest.config.ts — don't re-tighten below that.
 test("executeMany - stopOnFailure stops after first failure", async () => {
   const testFile = await makeTempFile(FAILFAST_TEST_CONTENT);
   const executor = new TestExecutor();

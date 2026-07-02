@@ -5,8 +5,11 @@
 
 import { test, expect, vi } from "vitest";
 
-// Init tests spawn the CLI which runs `npm install` — allow generous timeout
-vi.setConfig({ testTimeout: 60_000 });
+// Init tests spawn the CLI which runs `npm install` — allow generous timeout.
+// GLU-79: 60s → 90s; contended load (full-monorepo `pnpm -r test`) pushed init
+// runs past the old budget. Must stay BELOW runCli's 120s execFile kill-net
+// (test-helpers.ts) so a slow run surfaces as a vitest timeout, not SIGTERM 143.
+vi.setConfig({ testTimeout: 90_000 });
 import { join } from "node:path";
 import { mkdtemp, writeFile, readFile, rm, stat, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";

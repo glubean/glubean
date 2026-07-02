@@ -18,6 +18,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+// GLU-79: each test here spawns a real tsx subprocess (via execFile) and
+// flaked at vitest's old 5000ms default under contended load (0.8.4 release
+// CI: 4x5s timeouts). Now covered by the package-wide testTimeout: 30_000 in
+// vitest.config.ts — don't re-tighten below that.
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const tsxBin = resolve(
@@ -78,7 +83,10 @@ console.log(JSON.stringify(tests));
       execFile(
         "node",
         [tsxBin, tempFile],
-        { encoding: "utf-8", timeout: 15_000 },
+        // GLU-79: hung-process kill-net only — must sit ABOVE the package's
+        // 30s vitest testTimeout so slow-under-load spawns surface as vitest
+        // timeouts, not opaque execFile SIGTERMs.
+        { encoding: "utf-8", timeout: 60_000 },
         (error, stdout, stderr) => {
           if (error) {
             rej(new Error(`Discovery failed: ${stderr}`));
