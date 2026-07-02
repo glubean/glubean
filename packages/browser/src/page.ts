@@ -14,6 +14,7 @@
 
 import type {
   Browser,
+  Dialog,
   ElementHandle,
   HTTPRequest,
   HTTPResponse,
@@ -25,6 +26,7 @@ import {
   type MockRule,
   type ScreenshotMode,
   type ScreenshotTrigger,
+  type StorageState,
 } from "./evidence.js";
 import { collectNavigationMetrics } from "./metrics.js";
 import { createWrappedLocator, type WrappedLocator } from "./locator.js";
@@ -107,6 +109,16 @@ export interface ResponseChecks {
   headerContains?: Record<string, string>;
 }
 
+/**
+ * How an unhandled native dialog (`alert`/`confirm`/`prompt`/`beforeunload`)
+ * is auto-resolved when no {@link GlubeanPage.onDialog} handler is registered.
+ * @default "dismiss"
+ */
+export type DialogMode = "accept" | "dismiss";
+
+/** A handler registered via {@link GlubeanPage.onDialog}. Must resolve the dialog. */
+export type DialogHandler = (dialog: Dialog) => void | Promise<void>;
+
 interface BrowserOptionsBase {
   /**
    * Custom puppeteer-compatible instance (e.g. `puppeteer-extra` with plugins).
@@ -184,6 +196,25 @@ interface BrowserOptionsBase {
    * ```
    */
   emulate?: EmulationOptions;
+  /**
+   * Cookies / localStorage to restore before the page's first script runs —
+   * a thin "login once, reuse the session" primitive. Capture the current
+   * state with `page.getStorageState()`.
+   *
+   * @example
+   * ```ts
+   * const state = await loggedInPage.getStorageState();
+   * const chrome2 = browser({ launch: true, storageState: state });
+   * ```
+   */
+  storageState?: StorageState;
+  /**
+   * How an unhandled native dialog (`alert`/`confirm`/`prompt`/`beforeunload`)
+   * is auto-resolved. Every dialog (handled or not) emits a `browser:dialog`
+   * evidence event first. Override per-dialog with `page.onDialog(handler)`.
+   * @default "dismiss"
+   */
+  dialogMode?: DialogMode;
   /** Emit `ctx.metric()` for navigation timing. Default: true. */
   metrics?: boolean;
   /** Forward browser console output to `ctx.log()`/`ctx.warn()`. Default: true. */
@@ -407,7 +438,10 @@ export class GlubeanPage {
   private readonly _ctx: BrowserTestContext;
   private readonly _metricsEnabled: boolean;
   private readonly _actionTimeout: number;
+  private readonly _options: BrowserOptions;
+  private readonly _testId: string;
   private _evidence: EvidenceSession | null = null;
+  private _dialogHandler: DialogHandler | null = null;
 
   private constructor(
     page: Page,
@@ -415,12 +449,16 @@ export class GlubeanPage {
     ctx: BrowserTestContext,
     metricsEnabled: boolean,
     actionTimeout: number,
+    options: BrowserOptions,
+    testId: string,
   ) {
     this.raw = page;
     this._baseUrl = baseUrl;
     this._ctx = ctx;
     this._metricsEnabled = metricsEnabled;
     this._actionTimeout = actionTimeout;
+    this._options = options;
+    this._testId = testId;
   }
 
   /** @internal */
@@ -438,6 +476,7 @@ export class GlubeanPage {
     const screenshotDir = options.screenshotDir ?? ".glubean/screenshots";
     const testId = runtimeTestId ?? ctx.testId ?? "unknown";
     const actionTimeout = options.actionTimeout ?? 30_000;
+    const dialogMode: DialogMode = options.dialogMode ?? "dismiss";
 
     const gp = new GlubeanPage(
       page,
@@ -445,7 +484,46 @@ export class GlubeanPage {
       ctx,
       metricsEnabled,
       actionTimeout,
+      options,
+      testId,
     );
+
+    // Native dialogs (alert/confirm/prompt/beforeunload) always emit evidence.
+    // Puppeteer auto-dismisses unhandled dialogs UNLESS a 'dialog' listener is
+    // registered — once we register one, WE are responsible for resolving
+    // every dialog (custom handler via onDialog(), else `dialogMode`).
+    page.on("dialog", (dialog) => {
+      ctx.event({
+        type: "browser:dialog",
+        data: {
+          dialogType: dialog.type(),
+          message: dialog.message(),
+          defaultValue: dialog.defaultValue(),
+        },
+      });
+      const handle = async (): Promise<void> => {
+        if (gp._dialogHandler) {
+          await gp._dialogHandler(dialog);
+          return;
+        }
+        if (dialogMode === "accept") await dialog.accept();
+        else await dialog.dismiss();
+      };
+      handle().catch((err) => {
+        ctx.warn(false, `[browser:dialog] failed to resolve dialog: ${String(err)}`);
+      });
+    });
+
+    // Popups (window.open / target=_blank) always emit evidence. Use
+    // page.waitForPopup() to also get a fully-instrumented handle to the
+    // popup itself (own evidence session: network/console/screenshots).
+    page.on("popup", (popup) => {
+      if (!popup) return;
+      ctx.event({
+        type: "browser:popup",
+        data: { url: popup.url() },
+      });
+    });
 
     if (consoleForward) {
       page.on("console", (msg) => {
@@ -531,6 +609,7 @@ export class GlubeanPage {
       },
       mocks: options.mock,
       emulate: options.emulate,
+      storageState: options.storageState,
       screenshots: screenshotsOpt,
     });
 
@@ -586,6 +665,108 @@ export class GlubeanPage {
    */
   async captureScreenshot(label = "manual"): Promise<void> {
     await this._evidence?.captureShot(label, "manual");
+  }
+
+  // ── Storage state (cookies + localStorage) ──────────────────────────
+
+  /**
+   * Capture the current page's cookies + localStorage — a thin "login once,
+   * reuse the session" primitive. Pass the result to `browser({ storageState })`
+   * on a fresh page to skip a UI login flow.
+   *
+   * @example
+   * ```ts
+   * await page.fill('[data-testid="username"]', "ada");
+   * await page.click('[data-testid="login-btn"]');
+   * const state = await page.getStorageState();
+   * ```
+   */
+  async getStorageState(): Promise<StorageState> {
+    if (!this._evidence) return {};
+    return await this._evidence.captureStorageState(this.raw);
+  }
+
+  // ── Dialog & popup ───────────────────────────────────────────────────
+
+  /**
+   * Register a handler for the next native dialogs (`alert`/`confirm`/`prompt`/
+   * `beforeunload`) on this page, overriding the plugin's `dialogMode` default.
+   * The handler MUST resolve the dialog itself (`dialog.accept()` /
+   * `dialog.dismiss()`) — Glubean will not also auto-resolve it.
+   *
+   * A `browser:dialog` evidence event is emitted for every dialog regardless
+   * of whether a handler is registered.
+   *
+   * @example
+   * ```ts
+   * page.onDialog((dialog) => dialog.accept());
+   * await page.click('[data-testid="clear-cart-btn"]'); // triggers confirm()
+   * ```
+   */
+  onDialog(handler: DialogHandler): void {
+    this._dialogHandler = handler;
+  }
+
+  /**
+   * Run `action`, wait for it to open a popup (`window.open()` / `target="_blank"`),
+   * and return the popup as a fully-instrumented page (its own evidence session —
+   * network trace, console forwarding, screenshots — just like the parent).
+   *
+   * A `browser:popup` evidence event is emitted for every popup regardless of
+   * whether `waitForPopup()` is used to capture it.
+   *
+   * @example
+   * ```ts
+   * const popup = await page.waitForPopup(() => page.click('[data-testid="policy-link"]'));
+   * await popup.expectText("body", "Return Policy");
+   * await popup.close();
+   * ```
+   */
+  async waitForPopup(
+    action: () => Promise<void>,
+    options?: { timeout?: number },
+  ): Promise<InstrumentedPage> {
+    const timeout = options?.timeout ?? this._actionTimeout;
+    const start = Date.now();
+    try {
+      const [rawPopup] = await Promise.all([
+        new Promise<Page>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error(`waitForPopup: no popup opened after ${timeout}ms`));
+          }, timeout);
+          this.raw.once("popup", (popup: Page | null) => {
+            clearTimeout(timer);
+            if (popup) resolve(popup);
+            else reject(new Error("waitForPopup: popup event fired with no page"));
+          });
+        }),
+        action(),
+      ]);
+      const duration = Date.now() - start;
+      this._ctx.action({
+        category: "browser:waitForPopup",
+        target: rawPopup.url(),
+        duration,
+        status: "ok",
+      });
+      return await GlubeanPage._create(
+        rawPopup,
+        this._baseUrl,
+        this._ctx,
+        this._options,
+        this._testId,
+      );
+    } catch (err) {
+      const duration = Date.now() - start;
+      this._ctx.action({
+        category: "browser:waitForPopup",
+        target: "(popup)",
+        duration,
+        status: "timeout",
+        detail: { error: String(err) },
+      });
+      throw err;
+    }
   }
 
   // ── Navigation & interaction ────────────────────────────────────────
@@ -671,7 +852,7 @@ export class GlubeanPage {
       action: (e) => this._ctx.action(e),
       captureStep: (label) => this._evidence?.captureShot(label, "step") ?? Promise.resolve(),
       captureFailure: (label) => this._evidence?.captureShot(label, "failure") ?? Promise.resolve(),
-    }, selector);
+    }, selector, this.raw);
   }
 
   /**
@@ -1619,6 +1800,112 @@ export class GlubeanPage {
         duration: Date.now() - start,
         status: "timeout",
         detail: { expected, actual: lastCount, error: String(err) },
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Assert that a checkbox/radio's `.checked` state matches `expected`.
+   * Retries until match or timeout.
+   *
+   * @param expected — desired `.checked` value. @default true
+   */
+  async expectChecked(
+    selector: string,
+    expected = true,
+    options?: { timeout?: number },
+  ): Promise<void> {
+    const start = Date.now();
+    let lastVal: boolean | null = null;
+    try {
+      lastVal = await this._retryUntil(
+        () =>
+          this.raw.$eval(
+            selector,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (el: any) => Boolean(el.checked),
+          ).catch(() => null as unknown as boolean),
+        (val) => val === expected,
+        (lv) =>
+          `expectChecked("${selector}"): expected checked=${expected} ` +
+          `but received checked=${JSON.stringify(lv)} after ${
+            options?.timeout ?? 5_000
+          }ms`,
+        options,
+      );
+      this._ctx.action({
+        category: "browser:assert",
+        target: `expectChecked("${selector}")`,
+        duration: Date.now() - start,
+        status: "ok",
+        detail: { expected, actual: lastVal },
+      });
+    } catch (err) {
+      await this._evidence?.captureShot(`expectChecked-${selector}`, "failure");
+      this._ctx.action({
+        category: "browser:assert",
+        target: `expectChecked("${selector}")`,
+        duration: Date.now() - start,
+        status: "timeout",
+        detail: { expected, actual: lastVal, error: String(err) },
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Assert that an input/textarea/select's `.value` matches `expected`.
+   * Retries until match or timeout. For text content of non-form elements,
+   * use `expectText()` instead.
+   */
+  async expectValue(
+    selector: string,
+    expected: string | RegExp,
+    options?: { timeout?: number },
+  ): Promise<void> {
+    const matches = (val: string | null) => {
+      if (val === null) return false;
+      return expected instanceof RegExp ? expected.test(val) : val === expected;
+    };
+
+    const start = Date.now();
+    let lastVal: string | null = null;
+    try {
+      lastVal = await this._retryUntil(
+        () =>
+          this.raw.$eval(
+            selector,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (el: any) => (el.value ?? "") as string,
+          ).catch(() => null),
+        matches,
+        (lv) =>
+          `expectValue("${selector}"): expected ${JSON.stringify(expected)} ` +
+          `but received ${JSON.stringify(lv)} after ${
+            options?.timeout ?? 5_000
+          }ms`,
+        options,
+      );
+      this._ctx.action({
+        category: "browser:assert",
+        target: `expectValue("${selector}")`,
+        duration: Date.now() - start,
+        status: "ok",
+        detail: { expected: String(expected), actual: lastVal },
+      });
+    } catch (err) {
+      await this._evidence?.captureShot(`expectValue-${selector}`, "failure");
+      this._ctx.action({
+        category: "browser:assert",
+        target: `expectValue("${selector}")`,
+        duration: Date.now() - start,
+        status: "timeout",
+        detail: {
+          expected: String(expected),
+          actual: lastVal,
+          error: String(err),
+        },
       });
       throw err;
     }

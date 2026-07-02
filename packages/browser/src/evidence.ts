@@ -8,7 +8,10 @@
  *   trace event (see {@link ./network.ts}).
  * - **Request mock** (`Fetch` domain) — fulfill matching requests with a canned
  *   response; non-matching requests are continued untouched.
- * - **Emulation** (`Emulation` domain) — timezone / geolocation / viewport.
+ * - **Emulation** (`Emulation` domain) — timezone / geolocation / viewport / user agent.
+ * - **Storage state** (`Network` + `Page` domains) — restore cookies /
+ *   localStorage before the page's first script runs, and capture them back
+ *   out on demand (a thin "login once, reuse the session" primitive).
  *
  * The keystone spike disproved the "Fetch is near-exclusive" hypothesis: a
  * self-opened session running `Fetch.enable`/`fulfillRequest` is stable **as
@@ -153,8 +156,8 @@ export interface ViewportOverride {
 /**
  * Environment emulation applied on the shared evidence session.
  *
- * Timezone and geolocation are pure overrides with no Puppeteer conflict.
- * Viewport is special: see guardrail ① — do **not** also call
+ * Timezone, geolocation, and user agent are pure overrides with no Puppeteer
+ * conflict. Viewport is special: see guardrail ① — do **not** also call
  * `page.setViewport()`, it will race with this override.
  */
 export interface EmulationOptions {
@@ -164,6 +167,41 @@ export interface EmulationOptions {
   geolocation?: GeolocationOverride;
   /** Viewport / device metrics. Glubean becomes the sole viewport owner. */
   viewport?: ViewportOverride;
+  /** User-agent string override (`Emulation.setUserAgentOverride`). */
+  userAgent?: string;
+}
+
+/**
+ * A cookie as accepted by {@link EvidenceSession.attach}'s `storageState.cookies`
+ * and returned by {@link EvidenceSession.captureStorageState}. Mirrors the CDP
+ * `Network.CookieParam` / `Network.Cookie` shapes closely enough to round-trip:
+ * a captured cookie can be fed straight back in as an applied one.
+ */
+export interface StorageCookie {
+  name: string;
+  value: string;
+  /** Either `domain` or `url` must be resolvable for CDP to place the cookie. */
+  domain?: string;
+  path?: string;
+  url?: string;
+  /** Unix time in seconds, or `-1` for a session cookie. */
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+}
+
+/**
+ * Cookies + localStorage for one page — a thin "login once, reuse the
+ * session" primitive (à la Playwright's `storageState`). Cookies apply via
+ * CDP `Network.setCookies`; localStorage applies via
+ * `Page.addScriptToEvaluateOnNewDocument` so it is present before the page's
+ * own scripts run on every navigation of this page.
+ */
+export interface StorageState {
+  cookies?: StorageCookie[];
+  /** Key/value pairs seeded into `localStorage` on every new document. */
+  localStorage?: Record<string, string>;
 }
 
 /** Options for {@link EvidenceSession.attach}. */
@@ -177,8 +215,15 @@ export interface EvidenceSessionOptions {
   network?: Pick<NetworkTracerOptions, "include" | "excludePaths" | "filter">;
   /** Request-mock rules. When non-empty, the `Fetch` domain is enabled (guardrail ②). */
   mocks?: MockRule[];
-  /** Environment emulation (timezone / geolocation / viewport). */
+  /** Environment emulation (timezone / geolocation / viewport / user agent). */
   emulate?: EmulationOptions;
+  /**
+   * Cookies / localStorage to restore before the page's first script runs
+   * (`storageState.cookies` via `Network.setCookies`, `storageState.localStorage`
+   * via `Page.addScriptToEvaluateOnNewDocument`). Capture the current state with
+   * {@link EvidenceSession.captureStorageState}.
+   */
+  storageState?: StorageState;
   /**
    * Screenshot capture policy and I/O delegate.
    *
@@ -272,8 +317,9 @@ export function buildFulfillParams(
 /**
  * @internal Build the ordered list of `Emulation.*` CDP calls.
  *
- * Timezone and geolocation come first; the viewport override is applied **last**
- * (guardrail ①) so it is the final word on device metrics at setup time.
+ * Timezone, geolocation, and user agent come first (order-independent among
+ * themselves); the viewport override is applied **last** (guardrail ①) so it
+ * is the final word on device metrics at setup time.
  */
 export function buildEmulationCalls(emulate: EmulationOptions): CdpCall[] {
   const calls: CdpCall[] = [];
@@ -290,6 +336,12 @@ export function buildEmulationCalls(emulate: EmulationOptions): CdpCall[] {
       params: { latitude, longitude, accuracy: accuracy ?? 0 },
     });
   }
+  if (emulate.userAgent !== undefined) {
+    calls.push({
+      method: "Emulation.setUserAgentOverride",
+      params: { userAgent: emulate.userAgent },
+    });
+  }
   if (emulate.viewport) {
     const { width, height, deviceScaleFactor, mobile } = emulate.viewport;
     calls.push({
@@ -303,6 +355,34 @@ export function buildEmulationCalls(emulate: EmulationOptions): CdpCall[] {
     });
   }
   return calls;
+}
+
+/**
+ * @internal Build the `Page.addScriptToEvaluateOnNewDocument` source that
+ * seeds `localStorage` before any page script runs. Each entry is emitted as
+ * an individually-guarded `localStorage.setItem` call (one bad key/value
+ * pair — e.g. storage quota exceeded — must not blank out the rest).
+ */
+export function buildLocalStorageSeedScript(
+  entries: Record<string, string>,
+): string {
+  const sets = Object.entries(entries)
+    .map(([k, v]) =>
+      `try { localStorage.setItem(${JSON.stringify(k)}, ${JSON.stringify(v)}); } catch (e) {}`
+    )
+    .join(" ");
+  return `(() => { ${sets} })();`;
+}
+
+/**
+ * @internal Build `Network.setCookies` params from `storageState.cookies`.
+ * Returns `undefined` when there is nothing to set (caller skips the call).
+ */
+export function buildSetCookiesParams(
+  cookies: StorageCookie[] | undefined,
+): { cookies: StorageCookie[] } | undefined {
+  if (!cookies || cookies.length === 0) return undefined;
+  return { cookies };
 }
 
 /**
@@ -414,10 +494,10 @@ export class EvidenceSession {
 
   /**
    * Open one CDP session on `page` and wire up the requested capabilities:
-   * Network trace, Fetch mock (guardrail ②), and Emulation (guardrail ① for
-   * viewport). Capabilities are only enabled when their config is present, so a
-   * page with no mocks never enables `Fetch` and leaves the user's own request
-   * interception untouched.
+   * Network trace, Fetch mock (guardrail ②), Emulation (guardrail ① for
+   * viewport), and storage state (cookies + localStorage). Capabilities are
+   * only enabled when their config is present, so a page with no mocks never
+   * enables `Fetch` and leaves the user's own request interception untouched.
    */
   static async attach(
     page: Page,
@@ -450,7 +530,7 @@ export class EvidenceSession {
         await session._installMocks(page, mocks);
       }
 
-      // 3. Emulation (timezone / geolocation) + viewport last (guardrail ①).
+      // 3. Emulation (timezone / geolocation / user agent) + viewport last (guardrail ①).
       if (options.emulate) {
         for (const call of buildEmulationCalls(options.emulate)) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -459,6 +539,12 @@ export class EvidenceSession {
         if (options.emulate.viewport) {
           session._guardViewport(page);
         }
+      }
+
+      // 4. Storage state — cookies + localStorage restored before the page's
+      // first script runs. Order-independent from the other capabilities.
+      if (options.storageState) {
+        await session._applyStorageState(options.storageState);
       }
     } catch (err) {
       // Roll back any partial wiring so we never leak a half-open session.
@@ -516,6 +602,70 @@ export class EvidenceSession {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this._cdp.off("Fetch.requestPaused", onPaused as any);
     });
+  }
+
+  private async _applyStorageState(state: StorageState): Promise<void> {
+    const cookieParams = buildSetCookiesParams(state.cookies);
+    if (cookieParams) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await this._cdp.send("Network.setCookies", cookieParams as any);
+    }
+    if (state.localStorage && Object.keys(state.localStorage).length > 0) {
+      await this._cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+        source: buildLocalStorageSeedScript(state.localStorage),
+      });
+    }
+  }
+
+  /**
+   * Capture the current page's cookies + localStorage as a {@link StorageState}
+   * snapshot — the counterpart to {@link EvidenceSessionOptions.storageState}.
+   * Cookies are scoped to the page's current URL (`Network.getCookies`), not
+   * every cookie the browser holds, so unrelated tabs/origins never leak in.
+   *
+   * @example
+   * ```ts
+   * await page.goto("/login");
+   * // ... perform login ...
+   * const state = await page.getStorageState();
+   * // Reuse on a fresh page to skip the login flow:
+   * const chrome2 = browser({ launch: true, storageState: state });
+   * ```
+   */
+  async captureStorageState(page: Page): Promise<StorageState> {
+    const { cookies } = (await this._cdp.send("Network.getCookies", {
+      urls: [page.url()],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)) as { cookies: StorageCookie[] };
+
+    const localStorage = await page.evaluate(() => {
+      const out: Record<string, string> = {};
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ls = (globalThis as any).localStorage;
+        for (let i = 0; i < ls.length; i++) {
+          const key = ls.key(i);
+          if (key !== null) out[key] = ls.getItem(key) ?? "";
+        }
+      } catch {
+        // localStorage may be inaccessible (e.g. sandboxed/about:blank) — best-effort.
+      }
+      return out;
+    });
+
+    return {
+      cookies: (cookies ?? []).map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        expires: c.expires,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+        sameSite: c.sameSite,
+      })),
+      localStorage,
+    };
   }
 
   private _guardViewport(page: Page): void {
