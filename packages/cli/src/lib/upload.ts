@@ -11,7 +11,7 @@
  *    the inline cap are skipped (presigned R2 upload is an M6 follow-up).
  */
 
-import { readdir, stat, readFile, realpath } from "node:fs/promises";
+import { readdir, stat, lstat, readFile, realpath, unlink } from "node:fs/promises";
 import { basename, extname, join, relative, sep } from "node:path";
 import { CLI_VERSION } from "../version.js";
 import { detectCiContext } from "./ci.js";
@@ -243,6 +243,20 @@ export interface UploadOptions {
   screenshotPaths?: string[];
 }
 
+/** A file the server confirmed receiving, with the stat identity it had when
+ *  its bytes were read into the upload form. Cleanup (ART1-B) re-checks this
+ *  identity immediately before unlinking so it never deletes a file that was
+ *  recreated at the same path after the upload (different content the server
+ *  never saw). */
+export interface UploadedArtifactFile {
+  /** Absolute (realpath'd for whitelist screenshots) path of the posted file. */
+  path: string;
+  size: number;
+  mtimeMs: number;
+  ino: number;
+  dev: number;
+}
+
 export interface UploadReceipt {
   schemaVersion: "glubean.upload-receipt.v1";
   uploadedAt: string;
@@ -267,6 +281,15 @@ export interface UploadReceipt {
     sizeBytes?: number;
     statusCode?: number;
     error?: string;
+    /** The files that actually entered the multipart form (absolute path +
+     *  stat identity captured at upload time), set only when the server
+     *  confirmed the batch (`status: "uploaded"`). Excludes over-cap skips.
+     *  Mixed set: `.glubean/artifacts` walk entries AND whitelist screenshots
+     *  — a caller cleaning up local screenshots must intersect with its own
+     *  run's screenshot list (ART1-B), never delete this list wholesale. The
+     *  identity lets cleanup verify the on-disk file is still the exact file
+     *  the server received (a concurrent run may have recreated the path). */
+    uploadedFiles?: UploadedArtifactFile[];
   };
 }
 
@@ -450,6 +473,83 @@ async function collectRunScreenshots(
 }
 
 /**
+ * ART1-B — delete this run's screenshots locally once the Cloud confirmed it
+ * received them. Deletes ONLY the intersection of:
+ *   - `screenshotPaths`: this run's screenshot list (from the event stream), and
+ *   - `uploadedFiles`: what `uploadToCloud` actually posted in a server-confirmed
+ *     batch (`receipt.artifactUpload.uploadedFiles`).
+ * plus the same realpath containment guard as the upload whitelist: a path is
+ * only unlinked when it resolves strictly inside `.glubean/screenshots`. On top
+ * of path membership, the file's stat identity (dev/ino/size/mtimeMs) must still
+ * match what was uploaded — a concurrent run that recreated the same path put
+ * bytes there the server never received, and those must survive. (The check is
+ * re-done immediately before each unlink; POSIX offers no unlink-by-fd, so a
+ * recreation landing in the sub-ms window between lstat and unlink is the one
+ * residual race — codex r2 P3, accepted.) So a partial
+ * upload (over-cap skip) keeps its file, a failed batch keeps everything, and
+ * nothing outside the screenshots dir (e.g. `.glubean/artifacts`, or an escapee
+ * event path) is ever touched. Idempotent: already-missing files are skipped
+ * silently. Returns how many files were removed.
+ */
+export async function removeUploadedScreenshots(
+  rootDir: string,
+  screenshotPaths: string[],
+  uploadedFiles: UploadedArtifactFile[],
+): Promise<{ removed: number }> {
+  let realRoot: string;
+  try {
+    realRoot = await realpath(join(rootDir, ".glubean", "screenshots"));
+  } catch {
+    return { removed: 0 }; // dir gone — nothing local to clean
+  }
+
+  // uploadedFiles screenshot entries are keyed by realpath (the whitelist
+  // resolver emits realpaths), so realpath'd screenshotPaths compare directly.
+  const uploaded = new Map(uploadedFiles.map((f) => [f.path, f]));
+  const seen = new Set<string>();
+  let removed = 0;
+
+  for (const p of screenshotPaths) {
+    let real: string;
+    try {
+      real = await realpath(p);
+    } catch {
+      continue; // already gone (idempotent) or never existed
+    }
+    if (seen.has(real)) continue; // dedupe repeats in the list
+    seen.add(real);
+    // Containment guard (strictly inside the root — never the root itself):
+    // an event path that resolved elsewhere must not be deleted even if a
+    // same-string entry was uploaded via the `.glubean/artifacts` walk.
+    if (!real.startsWith(realRoot + sep)) continue;
+    const identity = uploaded.get(real);
+    if (!identity) continue; // not confirmed uploaded — keep it
+    // Identity check immediately before unlink: the on-disk file must still be
+    // the exact file whose bytes the server received. lstat (not stat) so a
+    // symlink swapped in at this path can't borrow its target's identity.
+    try {
+      const s = await lstat(real);
+      if (
+        !s.isFile() ||
+        s.dev !== identity.dev ||
+        s.ino !== identity.ino ||
+        s.size !== identity.size ||
+        s.mtimeMs !== identity.mtimeMs
+      ) {
+        continue; // recreated/replaced since upload — the server never saw it
+      }
+      await unlink(real);
+      removed += 1;
+    } catch {
+      // Vanished concurrently or not deletable — keeping a local file is
+      // always safe; never fail the run over cleanup.
+    }
+  }
+
+  return { removed };
+}
+
+/**
  * Upload a run (test or load) + optionally its artifacts to Glubean Cloud under
  * a target (ADR 0007). The caller assembles the run-level `UploadRunInput` from
  * the runner result; this builds the `RunIngest` wire body from it + CI/env
@@ -626,6 +726,11 @@ export async function uploadToCloud(
     let uploadedCount = 0;
     let skippedCount = 0;
     let totalSize = 0;
+    // Files that actually enter the form — NOT the over-cap skips — with their
+    // upload-time stat identity. Reported on the receipt (uploadedFiles) only
+    // once the server confirms the batch, so local cleanup (ART1-B) can never
+    // delete a file the Cloud never received.
+    const postedFiles: UploadedArtifactFile[] = [];
     for (const file of candidates) {
       const s = await stat(file.path);
       if (s.size > INLINE_THRESHOLD) {
@@ -647,6 +752,13 @@ export async function uploadToCloud(
       );
       uploadedCount += 1;
       totalSize += s.size;
+      postedFiles.push({
+        path: file.path,
+        size: s.size,
+        mtimeMs: s.mtimeMs,
+        ino: s.ino,
+        dev: s.dev,
+      });
     }
 
     if (uploadedCount === 0) {
@@ -670,6 +782,9 @@ export async function uploadToCloud(
       sizeBytes: totalSize,
       ...(outcome.statusCode !== undefined ? { statusCode: outcome.statusCode } : {}),
       ...(outcome.error ? { error: outcome.error } : {}),
+      // Only a server-confirmed batch exposes what was posted — a failed POST
+      // must never feed the local cleanup path.
+      ...(outcome.ok ? { uploadedFiles: postedFiles } : {}),
     };
     if (!outcome.ok) return receipt;
 

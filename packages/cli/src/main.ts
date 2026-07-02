@@ -115,6 +115,7 @@ program
   .option("-M, --meta <key=value>", "Custom run metadata (repeatable)", collect, [])
   .option("--upload", "Upload run results and artifacts to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt JSON after --upload")
+  .option("--keep-local", "Keep local screenshot files after --upload (skip post-upload cleanup)")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
@@ -561,6 +562,8 @@ async function executeRun(
         : undefined,
       upload: options.upload ?? resolvedPlan?.upload?.enabled,
       uploadReceiptJson: options.uploadReceiptJson,
+      // ART1-B escape hatch: keep local screenshots after a successful upload.
+      keepLocal: options.keepLocal,
       // When the profile declares upload.projectId and CLI didn't pass
       // --project, forward it as the project identifier so the upload
       // preflight doesn't exit with "no project ID found". The value may be
@@ -672,6 +675,7 @@ ciCmd
   .option("-M, --meta <key=value>", "Custom run metadata (repeatable)", collect, [])
   .option("--upload", "Upload run results and artifacts to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt JSON after --upload")
+  .option("--keep-local", "Keep local screenshot files after --upload (skip post-upload cleanup)")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")

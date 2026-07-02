@@ -95,6 +95,10 @@ interface RunOptions {
   includeOptIn?: boolean;
   upload?: boolean;
   uploadReceiptJson?: string;
+  /** ART1-B escape hatch — keep this run's local screenshot files after a
+   *  successful `--upload` instead of the default post-upload cleanup
+   *  (which unlinks only server-confirmed, whitelist-contained files). */
+  keepLocal?: boolean;
   project?: string;
   /**
    * Upload TARGET (the API/system under test the runs belong to). Resolved from
@@ -2618,7 +2622,7 @@ export async function runCommand(
   // ── Cloud upload ────────────────────────────────────────────────────────
   if (options.upload) {
     const { resolveToken, resolveProjectId, resolveApiUrl } = await import("../lib/auth.js");
-    const { uploadToCloud } = await import("../lib/upload.js");
+    const { uploadToCloud, removeUploadedScreenshots } = await import("../lib/upload.js");
 
     const authOpts = {
       token: options.token,
@@ -2785,6 +2789,31 @@ export async function runCommand(
           // shared `.glubean/screenshots` dir which accumulates prior runs.
           screenshotPaths,
         });
+        // ART1-B — the shared screenshots dir only ever grows, so once the
+        // Cloud confirmed it received this run's screenshots, delete the local
+        // copies. Deletes ONLY uploadedFiles ∩ screenshotPaths (both server-
+        // confirmed and provably this run's), realpath-contained to
+        // `.glubean/screenshots`, and only while the on-disk file still has
+        // its upload-time stat identity (re-checked just before each unlink)
+        // — a failed/partial upload keeps its files, and a concurrently
+        // recreated path is kept.
+        if (
+          !options.keepLocal &&
+          uploadReceipt.artifactUpload.status === "uploaded" &&
+          uploadReceipt.artifactUpload.uploadedFiles?.length &&
+          screenshotPaths.length > 0
+        ) {
+          const { removed } = await removeUploadedScreenshots(
+            rootDir,
+            screenshotPaths,
+            uploadReceipt.artifactUpload.uploadedFiles,
+          );
+          if (removed > 0) {
+            console.log(
+              `${colors.dim}Cleaned up ${removed} uploaded screenshot(s) from .glubean/screenshots (use --keep-local to keep them)${colors.reset}`,
+            );
+          }
+        }
         if (options.uploadReceiptJson) {
           const receiptPath = resolveOutputPath(options.uploadReceiptJson, process.cwd());
           await mkdir(dirname(receiptPath), { recursive: true });
