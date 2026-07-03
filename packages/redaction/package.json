@@ -1,6 +1,6 @@
 {
   "name": "@glubean/redaction",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "engines": { "node": ">=22" },
   "type": "module",
   "main": "./dist/index.js",

@@ -1,6 +1,6 @@
 {
   "name": "glubean",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "engines": { "node": ">=22" },
   "description": "Glubean CLI — test automation for APIs, browsers, and more",
   "type": "module",
