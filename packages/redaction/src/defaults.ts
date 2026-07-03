@@ -346,6 +346,50 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "name",
     handler: "raw-string",
   },
+  {
+    // GLU-105: `browser:download` evidence (packages/browser/src/page.ts) is
+    // emitted via ctx.event as an ExecutionEvent of type "event" wrapping
+    // { type, data:{ url, … } }. A download can start from a signed/
+    // credentialed URL (an S3 pre-signed link: `?X-Amz-Signature=…` /
+    // `?token=…`), which would otherwise persist to the local result JSON +
+    // upload in plaintext. url-query masks only the sensitive query params.
+    id: "browser.download.url",
+    name: "Browser download URL query",
+    event: "event",
+    target: "data.data.url",
+    handler: "url-query",
+    rules: {
+      sensitiveKeys: [
+        ...CREDENTIAL_KEYS,
+        "signature",
+        "sig",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+      ],
+    },
+  },
+  {
+    // GLU-105: `page.waitForDownload()` (packages/browser/src/page.ts) emits an
+    // action whose `detail.url` copies the same download URL as the
+    // browser:download event above — redact its query the same way so the
+    // action sink doesn't leak what the event sink masks.
+    id: "browser.waitForDownload.url",
+    name: "Browser waitForDownload action URL query",
+    event: "action",
+    target: "data.detail.url",
+    handler: "url-query",
+    rules: {
+      sensitiveKeys: [
+        ...CREDENTIAL_KEYS,
+        "signature",
+        "sig",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+      ],
+    },
+  },
 ];
 
 // ── Built-in pattern source strings ──────────────────────────────────────────

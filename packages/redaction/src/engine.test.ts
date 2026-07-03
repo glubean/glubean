@@ -917,6 +917,67 @@ describe("redactEvent", () => {
     expect(headers.authorization).toBe("[REDACTED]");
   });
 
+  // GLU-105: `browser:download` evidence is emitted as an ExecutionEvent of
+  // type "event" wrapping { type, data:{ url } }; a signed/credentialed
+  // download URL must not persist to disk/upload in plaintext.
+  test("redacts secret query params in a browser:download event url", () => {
+    const scopes = compileDefaults();
+    const result = redactEvent(
+      {
+        type: "event",
+        data: {
+          type: "browser:download",
+          data: {
+            guid: "d1",
+            url: "https://files.example.com/r.pdf?X-Amz-Signature=abc&token=zzz",
+            filename: "r.pdf",
+            state: "completed",
+          },
+        },
+      },
+      scopes,
+      "simple",
+    );
+    const inner = (result.data as Record<string, unknown>).data as Record<string, unknown>;
+    const url = String(inner.url);
+    expect(url).not.toContain("zzz");
+    const params = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+    expect(params.get("token")).toBe("[REDACTED]");
+    expect(params.get("X-Amz-Signature")).toBe("[REDACTED]");
+    // Non-secret parts of the URL preserved.
+    expect(url.startsWith("https://files.example.com/r.pdf?")).toBe(true);
+  });
+
+  // GLU-105: `page.waitForDownload()` emits an action whose detail.url copies
+  // the same download URL — the action sink must mask what the event sink does.
+  test("redacts secret query params in a waitForDownload action detail.url", () => {
+    const scopes = compileDefaults();
+    const result = redactEvent(
+      {
+        type: "action",
+        data: {
+          category: "browser:waitForDownload",
+          target: "r.pdf",
+          duration: 5,
+          status: "ok",
+          detail: { url: "https://files.example.com/r.pdf?token=zzz", path: "/tmp/r.pdf" },
+        },
+      },
+      scopes,
+      "simple",
+    );
+    const detail = (result.data as Record<string, unknown>).detail as Record<string, unknown>;
+    expect(String(detail.url)).not.toContain("zzz");
+    // A non-download action with no detail.url is a no-op (get returns undefined).
+    const passthrough = redactEvent(
+      { type: "action", data: { category: "http:request", target: "GET /x", duration: 1, status: "ok", detail: { status: 200 } } },
+      scopes,
+      "simple",
+    );
+    const pd = (passthrough.data as Record<string, unknown>).detail as Record<string, unknown>;
+    expect(pd.status).toBe(200);
+  });
+
   test("redacts secrets in branch decision error (mirrors status.error)", () => {
     const scopes = compileDefaults();
     const errStr = "predicate threw: Authorization Bearer abc123secretToken";
