@@ -560,6 +560,21 @@ describe("headersHandler", () => {
     expect(JSON.stringify(arr)).not.toContain("OBJ-SECRET");
   });
 
+  // codex confirmation review: a cyclic object in a set-cookie array must not
+  // stack-overflow — the depth guard drops the subtree instead.
+  test("does not crash on a cyclic non-string set-cookie element", () => {
+    const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
+    const cyclic: Record<string, unknown> = { value: "DEEP-SECRET" };
+    cyclic.self = cyclic; // cycle
+    expect(() =>
+      headersHandler.process(
+        { "set-cookie": [cyclic as unknown as string] },
+        { scopeId: "test", scopeName: "Test" },
+        engine,
+      ),
+    ).not.toThrow();
+  });
+
   // codex R3 P3: a trailing `;` must not become a masked pseudo-attribute.
   test("drops a trailing empty Set-Cookie fragment", () => {
     const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });

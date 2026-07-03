@@ -446,6 +446,12 @@ function maskCookieValue(value: string, engine: RedactionEngineInterface): strin
   return engine.maskValue ? engine.maskValue(value) : "[REDACTED]";
 }
 
+/** Max recursion depth for `maskAllStringLeaves` — bounds a pathological /
+ *  cyclic manual-trace object so it can't stack-overflow (codex GLU-104
+ *  confirmation review). `structuredClone` (used upstream by redactEvent)
+ *  preserves cycles, so a depth guard is the safe stop condition. */
+const MASK_LEAVES_MAX_DEPTH = 64;
+
 /**
  * Mask EVERY string leaf of a value, preserving structure and non-string
  * scalars. Used for a non-string element found in a `set-cookie` array
@@ -453,17 +459,26 @@ function maskCookieValue(value: string, engine: RedactionEngineInterface): strin
  * so key-based redaction is insufficient — the secret often sits under a
  * non-sensitive key name like `value` in `{ name, value }` (codex GLU-104 R6).
  */
-function maskAllStringLeaves(value: unknown, engine: RedactionEngineInterface): unknown {
+function maskAllStringLeaves(
+  value: unknown,
+  engine: RedactionEngineInterface,
+  depth = 0,
+): unknown {
   if (typeof value === "string") {
     return maskCookieValue(value, engine);
   }
+  // Fail closed on excessive depth (cyclic / pathological input): drop the
+  // subtree rather than emit it or recurse unbounded.
+  if (depth >= MASK_LEAVES_MAX_DEPTH) {
+    return "[REDACTED: too deep]";
+  }
   if (Array.isArray(value)) {
-    return value.map((v) => maskAllStringLeaves(v, engine));
+    return value.map((v) => maskAllStringLeaves(v, engine, depth + 1));
   }
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = maskAllStringLeaves(v, engine);
+      out[k] = maskAllStringLeaves(v, engine, depth + 1);
     }
     return out;
   }
