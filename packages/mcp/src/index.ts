@@ -467,13 +467,9 @@ function scanBracketRunForMessage(
   return scanBracketRun(text, start, Math.min(text.length, start + INSPECT_MAX_LEN));
 }
 
-// Best-effort repair of a truncated JSON fragment: strip inspect()'s literal
-// `"..."` suffix (if present), close a string left open mid-value, then
-// close any still-open `{`/`[` in LIFO order. Returns `undefined` (not
-// throws) if the result still isn't valid JSON — callers must treat that as
-// "couldn't recover," not as "nothing sensitive here."
-function repairTruncatedJson(fragment: string): unknown {
-  let s = fragment.endsWith("...") ? fragment.slice(0, -3) : fragment;
+// Close a dangling open string (odd number of unescaped quotes) and any
+// still-open `{`/`[` in LIFO order. Pure string transform — does not parse.
+function closeDanglingJson(s: string): string {
   let quoteCount = 0;
   let escape = false;
   for (const c of s) {
@@ -481,11 +477,11 @@ function repairTruncatedJson(fragment: string): unknown {
     if (c === "\\") { escape = true; continue; }
     if (c === '"') quoteCount++;
   }
-  if (quoteCount % 2 === 1) s += '"'; // close a dangling open string
+  let out = quoteCount % 2 === 1 ? s + '"' : s;
   const stack: string[] = [];
   let inString = false;
   escape = false;
-  for (const c of s) {
+  for (const c of out) {
     if (inString) {
       if (escape) escape = false;
       else if (c === "\\") escape = true;
@@ -497,12 +493,62 @@ function repairTruncatedJson(fragment: string): unknown {
     else if (c === "[") stack.push("]");
     else if (c === "}" || c === "]") stack.pop();
   }
-  while (stack.length > 0) s += stack.pop();
-  try {
-    return JSON.parse(s);
-  } catch {
-    return undefined;
+  while (stack.length > 0) out += stack.pop();
+  return out;
+}
+
+// Scan BACKWARD from `end` for the last top-level (depth-1, outside any
+// string) `,` — the boundary right before the final, possibly-incomplete
+// property/element. Depth is tracked forward from the start of `s` up to
+// each backward candidate position (fragments here are inspect()-bounded,
+// ≤ ~64 chars, so re-deriving depth per candidate is cheap, not an issue at
+// this size). Returns -1 if there is no earlier top-level comma to trim to.
+function findPrecedingTopLevelComma(s: string, end: number): number {
+  for (let cut = end - 1; cut > 0; cut--) {
+    if (s[cut] !== ",") continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let isTopLevel = false;
+    for (let k = 0; k < cut; k++) {
+      const c = s[k];
+      if (inString) {
+        if (escape) escape = false;
+        else if (c === "\\") escape = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') { inString = true; continue; }
+      if (c === "{" || c === "[") depth++;
+      else if (c === "}" || c === "]") depth--;
+    }
+    isTopLevel = depth === 1 && !inString;
+    if (isTopLevel) return cut;
   }
+  return -1;
+}
+
+// Best-effort repair of a truncated JSON fragment: strip inspect()'s literal
+// `"..."` suffix (if present), then try to recover valid JSON by closing a
+// dangling string/brackets — and, if that STILL doesn't parse (codex R7 P1:
+// truncation can land mid-KEY-NAME, e.g. `{"token":"secret","veryLongFiel`,
+// which closes to a syntactically-invalid trailing property with no `:value`
+// — no amount of closing brackets fixes a missing colon), progressively trim
+// back to the last COMPLETE top-level property/element and retry. Returns
+// `undefined` (not throws) if nothing recoverable remains — callers must
+// treat that as "couldn't recover," not as "nothing sensitive here."
+function repairTruncatedJson(fragment: string): unknown {
+  const base = fragment.endsWith("...") ? fragment.slice(0, -3) : fragment;
+  for (let cut = base.length; cut > 0; ) {
+    try {
+      return JSON.parse(closeDanglingJson(base.slice(0, cut)));
+    } catch {
+      const prevComma = findPrecedingTopLevelComma(base, cut);
+      if (prevComma === -1) return undefined;
+      cut = prevComma;
+    }
+  }
+  return undefined;
 }
 
 function redactMessageJsonSubstrings(text: string): string {

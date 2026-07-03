@@ -786,6 +786,42 @@ export const t = test("custom-message", async (ctx) => {
   expect(parsedMessage.token).not.toBe(LONG_MESSAGE_SECRET);
 }, 15_000);
 
+// codex R7 P1: truncation can land mid-KEY-NAME of the field AFTER a
+// complete, credential-bearing pair (e.g. `{"token":"secret","veryLongFiel`)
+// — closing the dangling string/brackets alone produces a syntactically
+// INVALID trailing property (a bare string with no `:value`), which
+// `JSON.parse` rejects. The repair must trim back to the last COMPLETE
+// top-level property (dropping the incomplete trailing one) rather than
+// giving up and leaving the fragment — including the credential — verbatim.
+test("runLocalTestsFromFile redacts a secret when truncation lands mid-key-name of a LATER field (GLU-129 codex R7 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const MID_KEY_SECRET = "MID-KEY-TRUNCATION-SECRET";
+  await writeFile(
+    join(dir, "tests", "mid-key.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("mid-key-truncation", async (ctx) => {
+  ctx.expect({
+    token: "${MID_KEY_SECRET}",
+    veryLongFieldNameThatPushesTruncation: "filler",
+  }).toEqual({
+    token: "${MID_KEY_SECRET}",
+    veryLongFieldNameThatPushesTruncation: "filler",
+  });
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "mid-key.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(MID_KEY_SECRET);
+  expect(assertion.message).toContain("token");
+  expect((assertion.actual as Record<string, unknown>).token).not.toBe(MID_KEY_SECRET);
+}, 15_000);
+
 test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
   const trace = {
     method: "POST",
