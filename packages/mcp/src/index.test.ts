@@ -889,6 +889,67 @@ export const t = test("orfail-secret", async (ctx) => {
   expect(error!.stack).toContain("ExpectFailError");
 }, 15_000);
 
+// codex R9 P1: `ctx.log(JSON.stringify({token:"secret"}))` puts the
+// JSON-shaped credential in `message` itself (not `data`) — `log.message`
+// is a `raw-string` scope (pattern-scan only, no key awareness).
+test("runLocalTestsFromFile redacts a secret inside a JSON-shaped log message (GLU-129 codex R9 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const LOG_MESSAGE_SECRET = "LOG-MESSAGE-OPAQUE-SECRET";
+  await writeFile(
+    join(dir, "tests", "log-message-secret.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("log-message-secret", async (ctx) => {
+  ctx.log(JSON.stringify({ token: "${LOG_MESSAGE_SECRET}" }));
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "log-message-secret.test.ts"),
+    includeLogs: true,
+  });
+  expect(result.summary.passed).toBe(1);
+  const log = result.results[0].logs[0];
+  expect(log).toBeDefined();
+  expect(log.message).not.toContain(LOG_MESSAGE_SECRET);
+  expect(log.message).toContain("token");
+}, 15_000);
+
+// codex R9 P2: a bootstrap/session-setup/run failure can throw
+// `new Error(JSON.stringify({token:"secret"}))` — the orchestration-error
+// path (`redactMcpMessage`, used for `bootstrap:failed`/
+// `session:setup:failed`/`run:failed`) only ran the baseline pattern-scan
+// before this fix, leaking the same class of key-shaped credential.
+test("runLocalTestsFromFile redacts a secret from a session-setup failure's orchestration error (GLU-129 codex R9 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  const SETUP_FAILURE_SECRET = "SESSION-SETUP-OPAQUE-SECRET";
+  await writeFile(
+    join(dir, "tests", "session.ts"),
+    `import { defineSession } from "@glubean/sdk";
+export default defineSession({
+  async setup(ctx) {
+    throw new Error(JSON.stringify({ token: "${SETUP_FAILURE_SECRET}" }));
+  },
+});`,
+  );
+  await writeFile(
+    join(dir, "tests", "check.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("unreachable", (ctx) => {
+  ctx.assert(true, "never runs — session setup fails first");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "check.test.ts"),
+  });
+  expect(result.error).toBeDefined();
+  expect(result.error).not.toContain(SETUP_FAILURE_SECRET);
+  expect(result.error).toContain("token");
+}, 15_000);
+
 test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
   const trace = {
     method: "POST",

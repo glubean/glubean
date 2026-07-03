@@ -670,12 +670,21 @@ function redactMcpLogFields(fields: {
   message: string;
   data?: unknown;
 }): { message: string; data?: unknown } {
-  return redactEvent(
+  const redacted = redactEvent(
     { type: "log", ...fields },
     MCP_TRACE_REDACTION_SCOPES,
     "partial",
     64,
   ) as unknown as typeof fields;
+  // GLU-129 (codex R9 P1): `ctx.log(JSON.stringify({token:"secret"}))` puts
+  // the JSON-shaped credential in `message` itself (not `data`) — `log.message`
+  // is a `raw-string` scope (pattern-scan only, no key awareness), the same
+  // gap `assertion.message`/`status.error`/`error.message` all had before
+  // their own JSON-substring-scrubber fixes. Same scrub, same reasoning.
+  return {
+    ...redacted,
+    message: redactMessageJsonSubstrings(redacted.message),
+  };
 }
 
 // GLU-129 (codex R8 P2): `ctx.expect(...).orFail()` promotes a failed
@@ -738,7 +747,11 @@ function redactMcpMessage(message: string): string {
     "partial",
     64,
   ) as unknown as { message: string };
-  return redacted.message;
+  // GLU-129 (codex R9 P2): a bootstrap/session-setup/run failure can throw
+  // `new Error(JSON.stringify({token:"secret"}))` — same JSON-shaped
+  // key-based leak class as every other message field in this file; same
+  // scrub applies before it reaches `safe.error`.
+  return redactMessageJsonSubstrings(redacted.message);
 }
 
 export async function findProjectRoot(startDir: string): Promise<string> {
