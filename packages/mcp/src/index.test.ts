@@ -430,6 +430,556 @@ export const httpTest = test("http-test", async (ctx) => {
   }
 }, 15_000);
 
+// GLU-129 regression: dogfood on glubean-dogfood reproduced that
+// `glubean_run_local_file`/`glubean_get_local_events` returned secrets in
+// PLAINTEXT via `assertion.actual`/`assertion.expected` and `log.data` even
+// though GLU-104 had already wired trace header/body redaction. An
+// email/password sign-in contract's assertion on the response body copies
+// the raw login email into the assertion's `actual`/`expected`, and a
+// `ctx.log(...)` of the response echoes the session token again — neither
+// went through ANY redaction before this fix (only the `trace` event type
+// did). This test drives the same shape end-to-end (real local HTTP server,
+// real assertion, real log — a JWT-shaped token for key+pattern coverage,
+// the login email for global pattern coverage, matching the dogfood repro's
+// "assertion actual/expected values containing the login email") and
+// asserts the secret is masked everywhere it now surfaces: the
+// `runLocalTestsFromFile` result AND the `toLocalDebugEvents` projection
+// that backs `glubean_get_local_events`.
+test("runLocalTestsFromFile redacts secrets from assertion.actual/expected and log.data (GLU-129)", async () => {
+  const LOGIN_EMAIL = "victim@example.com";
+  const SESSION_JWT =
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ2aWN0aW0ifQ.dummy-signature-part-not-real";
+  // codex R1 P1: an opaque credential that matches NO global value pattern
+  // (not JWT/bearer/AWS/GitHub/email/etc shaped) — only reachable via
+  // KEY-based masking (`log.data` scope's `sensitiveKeys`), which the first
+  // fix pass omitted. Proves the scope-level fix, not just the pattern one.
+  const OPAQUE_SESSION_ID = "opaque-session-id-no-known-pattern";
+  // codex R3 P1: short enough that the SDK's auto-generated assertion
+  // `message` (`inspect()`, packages/sdk/src/expect.ts, caps embedded JSON
+  // at 64 chars) embeds it as INTACT, parseable JSON — proving the
+  // message-scrubbing fix, not just actual/expected redaction. (The bigger
+  // `body` object above gets truncated mid-JSON by `inspect()`'s cap before
+  // it ever reaches the message, so it can't exercise this path.)
+  const COMPACT_OPAQUE_SECRET = "opaque-secret-nopattern";
+  // codex R4 P1: `inspect()` TRUNCATES a long object mid-string
+  // (`json.slice(0, 61) + "..."`) rather than omitting it. Crafted so the
+  // `token` key/value pair completes well inside that 61-char window (it's
+  // the FIRST field) while a large `filler` field pushes the WHOLE object
+  // past 64 chars — the embedded fragment is syntactically-INVALID JSON (no
+  // closing brace), which is exactly the case a bracket-balanced
+  // `JSON.parse()` attempt fails on and falls back to copying verbatim.
+  const TRUNCATION_SECRET = "TRUNCATED-SECRET-DO-NOT-LEAK";
+  const server = createServer((req, res) => {
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "set-cookie": "session=SUPER-SECRET-SESSION-COOKIE; Path=/; HttpOnly",
+    });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        token: SESSION_JWT,
+        email: LOGIN_EMAIL,
+        sessionId: OPAQUE_SESSION_ID,
+      }),
+    );
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const addr = server.address();
+  const baseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+
+  try {
+    const dir = await makeSessionTempDir();
+    await mkdir(join(dir, "tests"), { recursive: true });
+    await writeFile(join(dir, "package.json"), "{}");
+
+    await writeFile(
+      join(dir, "tests", "auth.test.ts"),
+      `import { test } from "@glubean/sdk";
+export const loginTest = test("login-test", async (ctx) => {
+  const res = await ctx.http.post("${baseUrl}/login", {
+    json: { email: "${LOGIN_EMAIL}", password: "hunter2" },
+  });
+  const body = await res.json<{ ok: boolean; token: string; email: string; sessionId: string }>();
+  // Mirrors the dogfood repro: the assertion's actual/expected duplicate the
+  // raw login email from the response body, and a log echoes the session
+  // token/opaque session id again.
+  ctx.expect(body.email).toBe("${LOGIN_EMAIL}");
+  // codex R2 P1: an OBJECT-shaped assertion — actual/expected carry the
+  // opaque, non-pattern-matching credential under a recognized key, not
+  // just a scalar email.
+  ctx.expect(body).toEqual({
+    ok: true,
+    token: "${SESSION_JWT}",
+    email: "${LOGIN_EMAIL}",
+    sessionId: "${OPAQUE_SESSION_ID}",
+  });
+  ctx.log("login response", body);
+  // codex R2 P2: log data as a JSON-encoded STRING (e.g. \`ctx.log("raw", await res.text())\`)
+  // — the credential sits under a recognized key but the whole payload is a
+  // string, not an object.
+  ctx.log("login response raw text", JSON.stringify(body));
+  // codex R3 P1: a COMPACT object-shaped assertion whose auto-generated
+  // \`message\` embeds the credential as intact JSON (small enough to survive
+  // inspect()'s 64-char cap unmangled).
+  ctx.expect({ token: "${COMPACT_OPAQUE_SECRET}" }).toEqual({ token: "${COMPACT_OPAQUE_SECRET}" });
+  // codex R4 P1: a LONG object-shaped assertion whose auto-generated
+  // \`message\` gets TRUNCATED mid-object by inspect()'s 64-char cap — the
+  // credential pair itself stays intact (it's the first field), but the
+  // surrounding JSON is left syntactically invalid (no closing brace).
+  ctx.expect({ token: "${TRUNCATION_SECRET}", filler: "y".repeat(20) }).toEqual({
+    token: "${TRUNCATION_SECRET}",
+    filler: "y".repeat(20),
+  });
+});`,
+    );
+
+    const result = await runLocalTestsFromFile({
+      filePath: join(dir, "tests", "auth.test.ts"),
+      includeLogs: true,
+      includeTraces: true,
+    });
+
+    expect(result.summary.total).toBe(1);
+    expect(result.summary.passed).toBe(1);
+
+    const allAssertions = result.results.flatMap((r) => r.assertions);
+    const allLogs = result.results.flatMap((r) => r.logs);
+    expect(allAssertions.length).toBeGreaterThan(0);
+    expect(allLogs.length).toBeGreaterThan(0);
+
+    const assertionSerialized = JSON.stringify(allAssertions);
+    const logSerialized = JSON.stringify(allLogs);
+
+    // ── No plaintext secret in either channel ────────────────────────────
+    expect(assertionSerialized).not.toContain(LOGIN_EMAIL);
+    expect(assertionSerialized).not.toContain(SESSION_JWT);
+    // codex R2 P1: the opaque, non-pattern-matching credential inside an
+    // OBJECT-shaped `actual`/`expected` (the `ctx.expect(body).toEqual(...)`
+    // assertion below) is ONLY caught by key-based masking on the
+    // `assertion.actual`/`assertion.expected` scopes.
+    expect(assertionSerialized).not.toContain(OPAQUE_SESSION_ID);
+    // codex R3 P1: the SAME opaque credential embedded in the SDK's
+    // auto-generated `message` (not just `actual`/`expected`).
+    expect(assertionSerialized).not.toContain(COMPACT_OPAQUE_SECRET);
+    // codex R4 P1: the credential pair survives intact even when inspect()
+    // TRUNCATES the surrounding object (invalid JSON — no closing brace).
+    expect(assertionSerialized).not.toContain(TRUNCATION_SECRET);
+    expect(logSerialized).not.toContain(SESSION_JWT);
+    expect(logSerialized).not.toContain(LOGIN_EMAIL);
+    // codex R1 P1: the opaque, non-pattern-matching credential is ONLY
+    // caught by key-based masking (`log.data` scope's `sensitiveKeys`) —
+    // this is the assertion that would have failed before that fix.
+    expect(logSerialized).not.toContain(OPAQUE_SESSION_ID);
+
+    const passedAssertions = allAssertions.filter((a) => a.passed === true);
+    expect(passedAssertions.length).toBeGreaterThanOrEqual(4);
+
+    // ── Structure/pass-state survives (not a blanket wipe): the assertion
+    //    that compared the login email still shows as passed, and both its
+    //    `actual` (from the response) and `expected` (the literal email
+    //    written in the test source) are masked, not merely one side.
+    const emailAssertion = passedAssertions[0];
+    expect(emailAssertion.actual).not.toBe(LOGIN_EMAIL);
+    expect(emailAssertion.expected).not.toBe(LOGIN_EMAIL);
+
+    // ── codex R2 P1: the object-shaped `ctx.expect(body).toEqual(...)`
+    //    assertion masks the credential-shaped KEYS inside actual/expected,
+    //    while the non-sensitive `ok` field survives untouched.
+    const bodyAssertion = passedAssertions[1];
+    const bodyActual = bodyAssertion.actual as Record<string, unknown>;
+    const bodyExpected = bodyAssertion.expected as Record<string, unknown>;
+    expect(bodyActual.ok).toBe(true);
+    expect(bodyActual.token).not.toBe(SESSION_JWT);
+    expect(bodyActual.email).not.toBe(LOGIN_EMAIL);
+    expect(bodyActual.sessionId).not.toBe(OPAQUE_SESSION_ID);
+    expect(bodyExpected.token).not.toBe(SESSION_JWT);
+    expect(bodyExpected.sessionId).not.toBe(OPAQUE_SESSION_ID);
+
+    // ── codex R3 P1: the COMPACT assertion's auto-generated `message` embeds
+    //    the actual/expected as intact JSON (small enough to survive
+    //    inspect()'s cap) — must be scrubbed there too, not just in
+    //    actual/expected. The `token` KEY itself isn't secret and still
+    //    appears in the message; only the VALUE is masked.
+    const compactAssertion = passedAssertions[2];
+    expect(compactAssertion.message).not.toContain(COMPACT_OPAQUE_SECRET);
+    expect(compactAssertion.message).toContain("token");
+    expect((compactAssertion.actual as Record<string, unknown>).token).not.toBe(
+      COMPACT_OPAQUE_SECRET,
+    );
+
+    // ── codex R4 P1: the TRUNCATED assertion's message contains an early,
+    //    syntactically-INVALID JSON fragment (inspect() cut it off with
+    //    "..." before the closing brace) — the credential pair inside that
+    //    fragment must still be masked, not just skipped because the
+    //    overall substring fails JSON.parse. `toEqual` renders the SAME
+    //    truncated fragment TWICE (`expected {actual} to equal {expected}`)
+    //    — `.not.toContain` below covers both occurrences.
+    const truncatedAssertion = passedAssertions[3];
+    expect(truncatedAssertion.message).not.toContain(TRUNCATION_SECRET);
+    expect(truncatedAssertion.message).toContain("token");
+    // Sanity: the fixture actually exercised the truncation path (otherwise
+    // this assertion would be vacuous).
+    expect(truncatedAssertion.message).toContain("...");
+    // A greedy (vs. lazy) value-matching regex, when the FIRST truncated
+    // fragment's value has no real closing quote, can run past it and
+    // erroneously consume the SECOND fragment's opening quote as if it were
+    // this one's closing quote — corrupting the splice with a doubled `""`.
+    // Regression for exactly that bug (caught during this fix's own
+    // self-review, not by codex).
+    expect(truncatedAssertion.message).not.toContain('""');
+    expect((truncatedAssertion.actual as Record<string, unknown>).token).not.toBe(
+      TRUNCATION_SECRET,
+    );
+
+    // ── Log data: key-based masking (token/sessionId) survives structure —
+    //    `ok` stays visible, only the credential-shaped fields are replaced.
+    const loginLog = allLogs.find((l) => l.message === "login response");
+    expect(loginLog).toBeDefined();
+    const loginLogData = loginLog!.data as Record<string, unknown>;
+    expect(loginLogData.ok).toBe(true);
+    expect(loginLogData.token).not.toBe(SESSION_JWT);
+    expect(loginLogData.email).not.toBe(LOGIN_EMAIL);
+    expect(loginLogData.sessionId).not.toBe(OPAQUE_SESSION_ID);
+
+    // ── codex R2 P2: log data as a JSON-ENCODED STRING is also key-redacted
+    //    (parsed, masked, re-serialized) — not just pattern-scanned.
+    const rawTextLog = allLogs.find((l) => l.message === "login response raw text");
+    expect(rawTextLog).toBeDefined();
+    expect(typeof rawTextLog!.data).toBe("string");
+    const rawTextData = rawTextLog!.data as string;
+    expect(rawTextData).not.toContain(SESSION_JWT);
+    expect(rawTextData).not.toContain(LOGIN_EMAIL);
+    expect(rawTextData).not.toContain(OPAQUE_SESSION_ID);
+    expect(rawTextData).toContain('"ok":true'); // non-sensitive field survives
+
+    // codex R1 P2: the redacted log entry must keep the EXACT
+    // `LocalRunResult.logs[]` shape (`{ message, data }`) — no extra `type`
+    // key leaking in from the internal `redactEvent` clone.
+    expect(Object.keys(loginLog!).sort()).toEqual(["data", "message"]);
+
+    // ── glubean_get_local_events (toLocalDebugEvents) inherits the same
+    //    redacted data — it's built directly from `result.results`, so a
+    //    fix only at that accumulation point closes BOTH MCP tool surfaces.
+    const snapshot: LocalRunSnapshot = {
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      clientRunId: "test-run",
+      fileUrl: result.fileUrl,
+      projectRoot: result.projectRoot,
+      summary: result.summary,
+      results: result.results,
+      includeLogs: true,
+      includeTraces: true,
+    };
+    const events = toLocalDebugEvents(snapshot);
+    const eventsSerialized = JSON.stringify(events);
+    expect(eventsSerialized).not.toContain(SESSION_JWT);
+    expect(eventsSerialized).not.toContain(LOGIN_EMAIL);
+    expect(eventsSerialized).not.toContain(OPAQUE_SESSION_ID);
+    expect(eventsSerialized).not.toContain(COMPACT_OPAQUE_SECRET);
+    expect(eventsSerialized).not.toContain(TRUNCATION_SECRET);
+    expect(events.some((e) => e.type === "assertion")).toBe(true);
+    expect(events.some((e) => e.type === "log")).toBe(true);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+}, 15_000);
+
+// codex R5 P1: a sensitive KEY whose value is a nested object/array
+// (`{"credentials":{"value":"secret"}}`) is masked STRUCTURALLY in
+// `actual`/`expected` (the whole subtree under "credentials" gets replaced),
+// but a flat "key":"value" pair-matcher only ever sees the INNER
+// `"value":"secret"` pair — a non-credential key name — and never learns the
+// OUTER key was sensitive, so the nested secret survived in `message`. Only
+// a structural (bracket-scan + real engine.redact) approach catches this.
+test("runLocalTestsFromFile redacts a NESTED secret under a sensitive-key container from the assertion message (GLU-129 codex R5 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const NESTED_SECRET = "opaque-nested-session-id";
+  await writeFile(
+    join(dir, "tests", "nested.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("nested-secret", async (ctx) => {
+  ctx.expect({ credentials: { value: "${NESTED_SECRET}" } }).toEqual({
+    credentials: { value: "${NESTED_SECRET}" },
+  });
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "nested.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(NESTED_SECRET);
+  expect(assertion.message).toContain("credentials");
+  const actual = assertion.actual as Record<string, unknown>;
+  expect(JSON.stringify(actual)).not.toContain(NESTED_SECRET);
+}, 15_000);
+
+// codex R5 P2: a literal `...` INSIDE a genuine, fully-quoted (untruncated)
+// secret value must not be mistaken for inspect()'s truncation marker — the
+// whole value (including the part after the dots) must still be masked.
+test("runLocalTestsFromFile redacts a secret containing a literal ellipsis in the assertion message (GLU-129 codex R5 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const ELLIPSIS_SECRET = "abc...opaque-session-id";
+  await writeFile(
+    join(dir, "tests", "ellipsis.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("ellipsis-secret", async (ctx) => {
+  ctx.expect({ token: "${ELLIPSIS_SECRET}" }).toEqual({ token: "${ELLIPSIS_SECRET}" });
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "ellipsis.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  // Neither the whole value nor just the post-ellipsis suffix may leak.
+  expect(assertion.message).not.toContain(ELLIPSIS_SECRET);
+  expect(assertion.message).not.toContain("opaque-session-id");
+  expect(assertion.message).toContain("token");
+}, 15_000);
+
+// codex R6 P2: `message` isn't ALWAYS SDK-generated via `inspect()` (capped
+// at 64 chars) — `ctx.assert(cond, customMessage)` lets an author write an
+// arbitrary string, which can legitimately be valid JSON far longer than 64
+// chars. The R5 fix's 64-char scan bound must NOT corrupt (truncate/repair)
+// a genuinely long, well-formed, author-authored JSON message — it should
+// only kick in as a fallback when a real balanced close can't be found at
+// all. This proves both halves: the secret (past byte 64) IS masked, and
+// the surrounding non-secret content is NOT mangled.
+test("runLocalTestsFromFile does not corrupt a long, valid, author-authored JSON assertion message (GLU-129 codex R6 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const LONG_MESSAGE_SECRET = "LONG-CUSTOM-MESSAGE-SECRET-VALUE";
+  const padding = "x".repeat(80); // pushes the credential well past byte 64
+  await writeFile(
+    join(dir, "tests", "custom-assert.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("custom-message", async (ctx) => {
+  const payload = { padding: "${padding}", token: "${LONG_MESSAGE_SECRET}", ok: true };
+  ctx.assert(true, JSON.stringify(payload));
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "custom-assert.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  // Secret past byte 64 is still masked.
+  expect(assertion.message).not.toContain(LONG_MESSAGE_SECRET);
+  // The message is NOT corrupted: the (long, non-sensitive) padding field
+  // survives intact, `ok` survives, and the message parses back as valid
+  // JSON with the credential value replaced, not truncated mid-object.
+  expect(assertion.message).toContain(padding);
+  expect(assertion.message).toContain('"ok":true');
+  const parsedMessage = JSON.parse(assertion.message) as Record<string, unknown>;
+  expect(parsedMessage.padding).toBe(padding);
+  expect(parsedMessage.ok).toBe(true);
+  expect(parsedMessage.token).not.toBe(LONG_MESSAGE_SECRET);
+}, 15_000);
+
+// codex R7 P1: truncation can land mid-KEY-NAME of the field AFTER a
+// complete, credential-bearing pair (e.g. `{"token":"secret","veryLongFiel`)
+// — closing the dangling string/brackets alone produces a syntactically
+// INVALID trailing property (a bare string with no `:value`), which
+// `JSON.parse` rejects. The repair must trim back to the last COMPLETE
+// top-level property (dropping the incomplete trailing one) rather than
+// giving up and leaving the fragment — including the credential — verbatim.
+test("runLocalTestsFromFile redacts a secret when truncation lands mid-key-name of a LATER field (GLU-129 codex R7 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const MID_KEY_SECRET = "MID-KEY-TRUNCATION-SECRET";
+  await writeFile(
+    join(dir, "tests", "mid-key.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("mid-key-truncation", async (ctx) => {
+  ctx.expect({
+    token: "${MID_KEY_SECRET}",
+    veryLongFieldNameThatPushesTruncation: "filler",
+  }).toEqual({
+    token: "${MID_KEY_SECRET}",
+    veryLongFieldNameThatPushesTruncation: "filler",
+  });
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "mid-key.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(MID_KEY_SECRET);
+  expect(assertion.message).toContain("token");
+  expect((assertion.actual as Record<string, unknown>).token).not.toBe(MID_KEY_SECRET);
+}, 15_000);
+
+// codex R8 P1: `ctx.expect(await res.text()).toBe(rawJsonString)` asserts on
+// a raw STRING whose CONTENT is JSON. `inspect()`'s string branch wraps it
+// with `JSON.stringify`, producing a DOUBLY-encoded fragment in the message
+// (`"{\"token\":\"secret\"}"`) — the `{`/`[` bracket-scanner never fires
+// since the first structural character is `"`, not `{`.
+test("runLocalTestsFromFile redacts a secret inside a JSON-shaped raw-text assertion message (GLU-129 codex R8 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const TEXT_SECRET = "OPAQUE-TEXT-SECRET-VALUE";
+  await writeFile(
+    join(dir, "tests", "text-secret.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("text-secret", async (ctx) => {
+  const raw = JSON.stringify({ token: "${TEXT_SECRET}" });
+  ctx.expect(raw).toBe(JSON.stringify({ token: "${TEXT_SECRET}" }));
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "text-secret.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(TEXT_SECRET);
+  expect(assertion.message).toContain("token");
+  expect(assertion.actual).not.toContain(TEXT_SECRET);
+  // The masked value is still a JSON-encoded string (structurally intact,
+  // not just wiped) — round-trips back to an object with `token` masked.
+  const roundTripped = JSON.parse(assertion.actual as string) as Record<string, unknown>;
+  expect(roundTripped.token).not.toBe(TEXT_SECRET);
+}, 15_000);
+
+// codex R10 P1: the OUTER string wrapper around a long raw-JSON-text
+// assertion is always well-terminated (inspect()'s string truncation
+// re-appends a closing quote), but the DECODED inner content can itself be
+// truncated mid-object (the object-level truncation happened FIRST, then
+// the whole already-truncated result got string-wrapped). A straight
+// `JSON.parse` of the decoded content fails; the fix must fall back to the
+// SAME truncation-repair used for the bracket-run case, not give up.
+test("runLocalTestsFromFile redacts a secret inside a TRUNCATED JSON-shaped raw-text assertion message (GLU-129 codex R10 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const TEXT_SECRET = "OPAQUE-TEXT-SECRET-VALUE";
+  await writeFile(
+    join(dir, "tests", "text-secret-truncated.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("text-secret-truncated", async (ctx) => {
+  const raw = JSON.stringify({ token: "${TEXT_SECRET}", filler: "y".repeat(100) });
+  ctx.expect(raw).toBe(raw);
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "text-secret-truncated.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(TEXT_SECRET);
+  expect(assertion.message).toContain("token");
+}, 15_000);
+
+// codex R8 P2: `.orFail()` promotes a failed assertion into a THROWN
+// `ExpectFailError` — its `.message` (and `.stack`, whose first line is
+// `${ErrorName}: ${message}`) carry the SAME inspect()-embedded credential
+// an `assertion` event's `message` does, but surface via the `status`/
+// `error` event path (`redactMcpStatusFields`/`redactMcpErrorFields`),
+// which only ran the baseline pattern-scan, not the JSON-substring scrubber.
+test("runLocalTestsFromFile redacts a secret from an orFail() hard-failure's error.message and error.stack (GLU-129 codex R8 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const ORFAIL_SECRET = "ORFAIL-OPAQUE-SECRET";
+  await writeFile(
+    join(dir, "tests", "orfail-secret.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("orfail-secret", async (ctx) => {
+  ctx.expect({ token: "${ORFAIL_SECRET}" }).toEqual({ token: "different-value" }).orFail();
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "orfail-secret.test.ts"),
+  });
+  expect(result.summary.total).toBe(1);
+  expect(result.summary.failed).toBe(1); // orFail() intentionally fails this test
+  const error = result.results[0].error;
+  expect(error).toBeDefined();
+  expect(error!.message).not.toContain(ORFAIL_SECRET);
+  expect(error!.message).toContain("token");
+  expect(error!.stack).toBeDefined();
+  expect(error!.stack).not.toContain(ORFAIL_SECRET);
+  // The stack's non-sensitive call-frame lines survive — not a blanket wipe.
+  expect(error!.stack).toContain("ExpectFailError");
+}, 15_000);
+
+// codex R9 P1: `ctx.log(JSON.stringify({token:"secret"}))` puts the
+// JSON-shaped credential in `message` itself (not `data`) — `log.message`
+// is a `raw-string` scope (pattern-scan only, no key awareness).
+test("runLocalTestsFromFile redacts a secret inside a JSON-shaped log message (GLU-129 codex R9 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const LOG_MESSAGE_SECRET = "LOG-MESSAGE-OPAQUE-SECRET";
+  await writeFile(
+    join(dir, "tests", "log-message-secret.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("log-message-secret", async (ctx) => {
+  ctx.log(JSON.stringify({ token: "${LOG_MESSAGE_SECRET}" }));
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "log-message-secret.test.ts"),
+    includeLogs: true,
+  });
+  expect(result.summary.passed).toBe(1);
+  const log = result.results[0].logs[0];
+  expect(log).toBeDefined();
+  expect(log.message).not.toContain(LOG_MESSAGE_SECRET);
+  expect(log.message).toContain("token");
+}, 15_000);
+
+// codex R9 P2: a bootstrap/session-setup/run failure can throw
+// `new Error(JSON.stringify({token:"secret"}))` — the orchestration-error
+// path (`redactMcpMessage`, used for `bootstrap:failed`/
+// `session:setup:failed`/`run:failed`) only ran the baseline pattern-scan
+// before this fix, leaking the same class of key-shaped credential.
+test("runLocalTestsFromFile redacts a secret from a session-setup failure's orchestration error (GLU-129 codex R9 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  const SETUP_FAILURE_SECRET = "SESSION-SETUP-OPAQUE-SECRET";
+  await writeFile(
+    join(dir, "tests", "session.ts"),
+    `import { defineSession } from "@glubean/sdk";
+export default defineSession({
+  async setup(ctx) {
+    throw new Error(JSON.stringify({ token: "${SETUP_FAILURE_SECRET}" }));
+  },
+});`,
+  );
+  await writeFile(
+    join(dir, "tests", "check.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("unreachable", (ctx) => {
+  ctx.assert(true, "never runs — session setup fails first");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "check.test.ts"),
+  });
+  expect(result.error).toBeDefined();
+  expect(result.error).not.toContain(SETUP_FAILURE_SECRET);
+  expect(result.error).toContain("token");
+}, 15_000);
+
 test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
   const trace = {
     method: "POST",

@@ -350,6 +350,417 @@ export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown 
   return (redacted as Record<string, unknown>).data;
 }
 
+// GLU-129: GLU-104 only wired redaction for the `trace` event type
+// (`redactMcpTrace` above). But `glubean_run_local_file`/`glubean_get_local_events`
+// also return `assertion` (actual/expected — which duplicate raw request/
+// response material a test asserted on, e.g. a login test's
+// `expect(res.body.token)` copies the session token straight into
+// `actual`), `log` (`ctx.log(...)` can echo a response verbatim), `status`,
+// and `error` events completely unredacted — the SAME dogfood repro that
+// exercises a trace (which WAS masked) also exercises these sibling event
+// types (which were NOT), so the secret still reached the agent. `BUILTIN_SCOPES`
+// already declares `assertion.*`/`log.*`/`status.*`/`error.*` scopes (used by
+// the CLI's `glubean run` path, packages/cli/src/commands/run.ts) and
+// `MCP_TRACE_REDACTION_SCOPES` already compiles them (it's built from the FULL
+// `BUILTIN_SCOPES`, not just the trace subset) — these helpers just call
+// `redactEvent` at the accumulation points that were missing it, matching the
+// scope-per-event-type dispatch `redactEvent` already does internally.
+// GLU-129 (codex R3 P1, hardened R4 P1 → R5 P1/P2): `ctx.expect(...)`
+// auto-generates `message` by JSON-stringifying `actual`/`expected` INTO the
+// message text itself (`Expectation._report()`/`inspect()`,
+// packages/sdk/src/expect.ts — `inspect()` uses real `JSON.stringify` for
+// non-primitive values, so an object embeds as JSON: `expected
+// {"token":"secret"} to equal {"token":"secret"}`). Redacting `actual`/
+// `expected` alone leaves that SAME credential sitting in plaintext inside
+// `message` — `assertion.message`'s `raw-string` handler only pattern-scans,
+// it has no notion of keys, and `message` isn't independently-authored free
+// text (unlike a `ctx.log(message, ...)` label) — it's an SDK-derived
+// rendering of the same values.
+//
+// History (why this isn't a regex pair-matcher): R3 tried bracket-balanced
+// `JSON.parse()` on the embedded substring; R4 found `inspect()` TRUNCATES a
+// long object mid-string (`json.slice(0, 61) + "..."`, invalid JSON), which
+// made `JSON.parse` throw and fall back to copying the fragment verbatim.
+// The R4 fix switched to matching individual `"key":"value"` pairs via
+// regex — but R5 found that approach can only ever see FLAT pairs: a
+// sensitive KEY whose value is a nested object/array (`{"credentials":
+// {"value":"secret"}}`) masks correctly in `actual`/`expected` (the engine
+// masks the whole subtree once "credentials" matches), but the pair-regex
+// only inspects the INNER `"value":"secret"` pair — a non-credential key
+// name — and never learns the outer key was sensitive, so the nested secret
+// stayed in `message`. R5 also found the truncation lookahead treated a
+// literal `...` INSIDE a genuine (non-truncated, fully-quoted) secret value
+// as the end of the value, only masking the prefix.
+//
+// This version goes back to STRUCTURAL redaction (bracket-scan + real
+// `engine.redact` via `redactEvent`, same as R3) — which correctly masks
+// whole subtrees under nested sensitive keys and has no opinion about `...`
+// appearing INSIDE a property-quoted string (`JSON.parse` handles that
+// fine) — and adds a TRUNCATION REPAIR step for the R4 case: when the
+// bracket-scan runs off the end of `text` without balancing (truncated),
+// close the dangling string/brackets and retry `JSON.parse` before giving
+// up. `scanBracketRun` is quote/escape-aware so a literal `{`/`}`/`"`
+// *inside* a string value doesn't miscount depth.
+// `inspect()` (packages/sdk/src/expect.ts) NEVER renders a single value past
+// 64 characters — `json.slice(0, maxLen - 3) + "..."` when truncating, or
+// the untruncated `json` (≤ maxLen) otherwise — so 64 is a hard upper bound
+// on any ONE inspect() call's output, whether or not it got cut off.
+const INSPECT_MAX_LEN = 64;
+
+function scanBracketRun(
+  text: string,
+  start: number,
+  limit: number,
+): { end: number; balanced: boolean } {
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let j = start;
+  for (; j < limit; j++) {
+    const c = text[j];
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === open) depth++;
+    else if (c === close) {
+      depth--;
+      if (depth === 0) return { end: j + 1, balanced: true };
+    }
+  }
+  return { end: j, balanced: false };
+}
+
+// GLU-129 (codex R6 P2): a naive UNCONDITIONAL 64-char scan bound (the R5
+// fix) treats ANY assertion message's embedded JSON as if it came from
+// `inspect()` — but `message` isn't always SDK-generated; `ctx.assert(cond,
+// customMessage)` lets an author write an arbitrary string, which could
+// legitimately contain valid JSON far longer than 64 chars. Capping that
+// scan corrupts otherwise-well-formed diagnostic output (treats a real,
+// balanced closing bracket past char 64 as "never found," repairs a
+// needlessly-truncated prefix, and resumes scanning from the middle of what
+// was actually one intact value).
+//
+// Two-pass strategy: first scan UNBOUNDED — if a real balanced close exists
+// ANYWHERE (however far away), that's authoritative and correct regardless
+// of length (this is what makes an arbitrarily long author-written JSON
+// blob redact cleanly). Only when the unbounded scan can't balance (reaches
+// end of text) do we re-scan bounded to `INSPECT_MAX_LEN` specifically to
+// avoid the R5-self-caught cross-object-swallowing bug (`toEqual`'s
+// "expected {X} to equal {Y}" — an unbounded, unbalanced scan of a
+// TRUNCATED X silently treats " to equal {Y}" as more of X's dangling
+// string and absorbs Y's `{` too). `inspect()` never emits past
+// `INSPECT_MAX_LEN` for one call, so bounding ONLY the truncation-recovery
+// path can never cut into legitimate longer content — it's only reached
+// when the input already couldn't be balanced any other way.
+function scanBracketRunForMessage(
+  text: string,
+  start: number,
+): { end: number; balanced: boolean } {
+  const full = scanBracketRun(text, start, text.length);
+  if (full.balanced) return full;
+  return scanBracketRun(text, start, Math.min(text.length, start + INSPECT_MAX_LEN));
+}
+
+// Close a dangling open string (odd number of unescaped quotes) and any
+// still-open `{`/`[` in LIFO order. Pure string transform — does not parse.
+function closeDanglingJson(s: string): string {
+  let quoteCount = 0;
+  let escape = false;
+  for (const c of s) {
+    if (escape) { escape = false; continue; }
+    if (c === "\\") { escape = true; continue; }
+    if (c === '"') quoteCount++;
+  }
+  let out = quoteCount % 2 === 1 ? s + '"' : s;
+  const stack: string[] = [];
+  let inString = false;
+  escape = false;
+  for (const c of out) {
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === "{") stack.push("}");
+    else if (c === "[") stack.push("]");
+    else if (c === "}" || c === "]") stack.pop();
+  }
+  while (stack.length > 0) out += stack.pop();
+  return out;
+}
+
+// Scan BACKWARD from `end` for the last top-level (depth-1, outside any
+// string) `,` — the boundary right before the final, possibly-incomplete
+// property/element. Depth is tracked forward from the start of `s` up to
+// each backward candidate position (fragments here are inspect()-bounded,
+// ≤ ~64 chars, so re-deriving depth per candidate is cheap, not an issue at
+// this size). Returns -1 if there is no earlier top-level comma to trim to.
+function findPrecedingTopLevelComma(s: string, end: number): number {
+  for (let cut = end - 1; cut > 0; cut--) {
+    if (s[cut] !== ",") continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let isTopLevel = false;
+    for (let k = 0; k < cut; k++) {
+      const c = s[k];
+      if (inString) {
+        if (escape) escape = false;
+        else if (c === "\\") escape = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') { inString = true; continue; }
+      if (c === "{" || c === "[") depth++;
+      else if (c === "}" || c === "]") depth--;
+    }
+    isTopLevel = depth === 1 && !inString;
+    if (isTopLevel) return cut;
+  }
+  return -1;
+}
+
+// Best-effort repair of a truncated JSON fragment: strip inspect()'s literal
+// `"..."` suffix (if present), then try to recover valid JSON by closing a
+// dangling string/brackets — and, if that STILL doesn't parse (codex R7 P1:
+// truncation can land mid-KEY-NAME, e.g. `{"token":"secret","veryLongFiel`,
+// which closes to a syntactically-invalid trailing property with no `:value`
+// — no amount of closing brackets fixes a missing colon), progressively trim
+// back to the last COMPLETE top-level property/element and retry. Returns
+// `undefined` (not throws) if nothing recoverable remains — callers must
+// treat that as "couldn't recover," not as "nothing sensitive here."
+function repairTruncatedJson(fragment: string): unknown {
+  const base = fragment.endsWith("...") ? fragment.slice(0, -3) : fragment;
+  for (let cut = base.length; cut > 0; ) {
+    try {
+      return JSON.parse(closeDanglingJson(base.slice(0, cut)));
+    } catch {
+      const prevComma = findPrecedingTopLevelComma(base, cut);
+      if (prevComma === -1) return undefined;
+      cut = prevComma;
+    }
+  }
+  return undefined;
+}
+
+// GLU-129 (codex R8 P1): `ctx.expect(await res.text()).toBe('{"token":"secret"}')`
+// asserts on a raw STRING whose CONTENT happens to be JSON — `inspect()`'s
+// string branch (`typeof value === "string"`) wraps it with `JSON.stringify`,
+// producing a DOUBLY-encoded fragment: `"{\"token\":\"secret\"}"` (an outer
+// quoted string literal whose escaped content is itself a JSON object). The
+// `{`/`[` bracket-scanner above never fires here — the first structural
+// character is `"`, not `{` — so this is a second, distinct trigger: scan a
+// top-level STRING LITERAL, and if its DECODED content ALSO parses as JSON,
+// redact that inner value and re-encode both layers.
+function scanStringLiteral(text: string, start: number, limit: number): number | undefined {
+  let escape = false;
+  for (let j = start + 1; j < limit; j++) {
+    const c = text[j];
+    if (escape) { escape = false; continue; }
+    if (c === "\\") { escape = true; continue; }
+    if (c === '"') return j + 1; // exclusive end, past the closing quote
+  }
+  return undefined;
+}
+
+function redactMessageJsonSubstrings(text: string): string {
+  let result = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "{" || ch === "[") {
+      const { end, balanced } = scanBracketRunForMessage(text, i);
+      const candidate = text.slice(i, end);
+      let parsed: unknown;
+      if (balanced) {
+        try {
+          parsed = JSON.parse(candidate);
+        } catch {
+          parsed = undefined;
+        }
+      } else {
+        parsed = repairTruncatedJson(candidate);
+      }
+      if (parsed !== null && typeof parsed === "object") {
+        const redacted = redactEvent(
+          { type: "assertion", actual: parsed },
+          MCP_TRACE_REDACTION_SCOPES,
+          "partial",
+          64,
+        ) as unknown as { actual: unknown };
+        result += JSON.stringify(redacted.actual);
+        // Truncation happened (bracket run never balanced) — the repaired
+        // reconstruction above is now a COMPLETE object, which is a
+        // different (safe) rendering than the original abbreviated one;
+        // keep signaling "there was more" so this doesn't read as exhaustive.
+        if (!balanced) result += "...";
+        i = end;
+        continue;
+      }
+    } else if (ch === '"') {
+      // inspect()'s STRING truncation always re-appends a closing quote
+      // (`escaped.slice(0, maxLen - 4) + '..."'`), unlike the object case —
+      // so an unbounded scan for the closing quote is safe (a truncated
+      // string is still properly terminated); no repair step is needed here.
+      const end = scanStringLiteral(text, i, text.length);
+      if (end !== undefined) {
+        const candidate = text.slice(i, end);
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(candidate);
+        } catch {
+          decoded = undefined;
+        }
+        if (typeof decoded === "string") {
+          // codex R10 P1: the OUTER string wrapper is always well-terminated
+          // (inspect()'s string truncation re-appends a closing quote), but
+          // its DECODED CONTENT can itself be truncated mid-object — the
+          // truncation happened at the object level, then the whole
+          // (already-truncated) result got string-wrapped. A straight parse
+          // fails on that inner truncation; fall back to the SAME repair
+          // used for the bracket-run case above.
+          let inner: unknown;
+          try {
+            inner = JSON.parse(decoded);
+          } catch {
+            inner = repairTruncatedJson(decoded);
+          }
+          if (inner !== null && typeof inner === "object") {
+            const redacted = redactEvent(
+              { type: "assertion", actual: inner },
+              MCP_TRACE_REDACTION_SCOPES,
+              "partial",
+              64,
+            ) as unknown as { actual: unknown };
+            // Re-encode BOTH layers: the inner value back to a JSON string,
+            // then that string back to an escaped, quoted string literal —
+            // the inverse of how inspect() built the original fragment.
+            result += JSON.stringify(JSON.stringify(redacted.actual));
+            i = end;
+            continue;
+          }
+        }
+      }
+    }
+    result += ch;
+    i++;
+  }
+  return result;
+}
+
+function redactMcpAssertionFields(fields: {
+  message: string;
+  actual?: unknown;
+  expected?: unknown;
+}): { message: string; actual?: unknown; expected?: unknown } {
+  const redacted = redactEvent(
+    { type: "assertion", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+  return {
+    ...redacted,
+    message: redactMessageJsonSubstrings(redacted.message),
+  };
+}
+
+function redactMcpLogFields(fields: {
+  message: string;
+  data?: unknown;
+}): { message: string; data?: unknown } {
+  const redacted = redactEvent(
+    { type: "log", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+  // GLU-129 (codex R9 P1): `ctx.log(JSON.stringify({token:"secret"}))` puts
+  // the JSON-shaped credential in `message` itself (not `data`) — `log.message`
+  // is a `raw-string` scope (pattern-scan only, no key awareness), the same
+  // gap `assertion.message`/`status.error`/`error.message` all had before
+  // their own JSON-substring-scrubber fixes. Same scrub, same reasoning.
+  return {
+    ...redacted,
+    message: redactMessageJsonSubstrings(redacted.message),
+  };
+}
+
+// GLU-129 (codex R8 P2): `ctx.expect(...).orFail()` promotes a failed
+// assertion into a THROWN `ExpectFailError` whose `.message` is the SAME
+// SDK-generated, `inspect()`-embedding text an `assertion` event's
+// `message` carries (packages/sdk/src/expect.ts) — but it surfaces via the
+// `status`/`error` events (a hard test failure), not `assertion`. The
+// `status.error`/`error.message` scopes are `raw-string` (pattern-scan
+// only, same as `assertion.message` before this whole fix) — masking the
+// SAME kind of embedded key-shaped credential requires the SAME JSON-
+// substring scrubber, not just the baseline `redactEvent` pattern pass.
+function redactMcpStatusFields(fields: {
+  error?: string;
+  stack?: string;
+}): { error?: string; stack?: string } {
+  const redacted = redactEvent(
+    { type: "status", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+  return {
+    error: redacted.error !== undefined ? redactMessageJsonSubstrings(redacted.error) : undefined,
+    // `stack`'s first line is `${ErrorName}: ${message}` (Node/V8 default
+    // `Error.stack` format) — the SAME embedded-JSON message text, so it
+    // needs the SAME scrub, not just `error`. The scanner only looks for
+    // `{`/`[`/`"` characters; the rest of the multi-line "at ..." trace is
+    // passed through untouched.
+    stack: redacted.stack !== undefined ? redactMessageJsonSubstrings(redacted.stack) : undefined,
+  };
+}
+
+function redactMcpErrorFields(fields: {
+  message: string;
+  stack?: string;
+}): { message: string; stack?: string } {
+  const redacted = redactEvent(
+    { type: "error", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+  return {
+    message: redactMessageJsonSubstrings(redacted.message),
+    stack: redacted.stack !== undefined ? redactMessageJsonSubstrings(redacted.stack) : undefined,
+  };
+}
+
+// GLU-129: `bootstrap:failed`/`session:setup:failed`/`run:failed` are
+// ProjectRunner-level orchestration failures (a different event namespace
+// than the per-test `ExecutionEvent`s above — no `testId`, no accumulator),
+// but their `.message`/`.error` text still reaches the MCP caller verbatim
+// via `orchestrationError` → `safe.error`. Pattern-scan it through the same
+// `error.message` scope (raw-string handler — no key-based masking needed
+// for a free-text message, just JWT/Bearer/AWS-key/email/etc pattern scan).
+function redactMcpMessage(message: string): string {
+  const redacted = redactEvent(
+    { type: "error", message },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as { message: string };
+  // GLU-129 (codex R9 P2): a bootstrap/session-setup/run failure can throw
+  // `new Error(JSON.stringify({token:"secret"}))` — same JSON-shaped
+  // key-based leak class as every other message field in this file; same
+  // scrub applies before it reaches `safe.error`.
+  return redactMessageJsonSubstrings(redacted.message);
+}
+
 export async function findProjectRoot(startDir: string): Promise<string> {
   let dir = startDir;
   while (true) {
@@ -1251,17 +1662,21 @@ export async function runLocalTestsFromFile(args: {
     // Surface non-file failure events so callers can distinguish them from
     // "clean empty run" outcomes.
     if (evt.type === "bootstrap:failed") {
-      orchestrationError = `Bootstrap failed: ${evt.error.message}`;
+      orchestrationError = redactMcpMessage(`Bootstrap failed: ${evt.error.message}`);
       continue;
     }
     if (evt.type === "session:setup:failed") {
-      orchestrationError = `Session setup failed${evt.error ? `: ${evt.error}` : ""}`;
+      orchestrationError = redactMcpMessage(
+        `Session setup failed${evt.error ? `: ${evt.error}` : ""}`,
+      );
       continue;
     }
     if (evt.type === "run:failed") {
       // Prefer the more specific earlier error if we already captured one.
       if (!orchestrationError) {
-        orchestrationError = `Run failed (${evt.reason})${evt.error ? `: ${evt.error}` : ""}`;
+        orchestrationError = redactMcpMessage(
+          `Run failed (${evt.reason})${evt.error ? `: ${evt.error}` : ""}`,
+        );
       }
       continue;
     }
@@ -1291,18 +1706,33 @@ export async function runLocalTestsFromFile(args: {
       case "log": {
         if (!includeLogs || !eventTestId) break;
         const acc = accumulators.get(eventTestId);
-        if (acc) acc.logs.push({ message: event.message, data: event.data });
+        if (acc) {
+          // codex R1 P2: `redactMcpLogFields` returns the full cloned
+          // `redactEvent` event (which carries `type: "log"` alongside
+          // `message`/`data`) — pick only the two fields `LocalRunResult.logs`
+          // declares, so the MCP result shape doesn't grow an extra `type` key.
+          const redactedLog = redactMcpLogFields({
+            message: event.message,
+            data: event.data,
+          });
+          acc.logs.push({ message: redactedLog.message, data: redactedLog.data });
+        }
         break;
       }
       case "assertion": {
         if (!eventTestId) break;
         const acc = accumulators.get(eventTestId);
         if (acc) {
-          acc.assertions.push({
-            passed: event.passed,
+          const redacted = redactMcpAssertionFields({
             message: event.message,
             actual: event.actual,
             expected: event.expected,
+          });
+          acc.assertions.push({
+            passed: event.passed,
+            message: redacted.message,
+            actual: redacted.actual,
+            expected: redacted.expected,
           });
         }
         break;
@@ -1318,8 +1748,14 @@ export async function runLocalTestsFromFile(args: {
         const acc = accumulators.get(eventTestId);
         if (!acc) break;
         acc.statusSuccess = event.status === "completed";
-        if (event.error) acc.errorMessage = event.error;
-        if (event.stack) acc.errorStack = event.stack;
+        if (event.error || event.stack) {
+          const redactedStatus = redactMcpStatusFields({
+            error: event.error,
+            stack: event.stack,
+          });
+          if (redactedStatus.error) acc.errorMessage = redactedStatus.error;
+          if (redactedStatus.stack) acc.errorStack = redactedStatus.stack;
+        }
 
         // Finalize this test's result.
         const allAssertionsPassed = acc.assertions.every((a) => a.passed);
@@ -1351,16 +1787,20 @@ export async function runLocalTestsFromFile(args: {
         break;
       }
       case "error": {
+        const redactedError = redactMcpErrorFields({
+          message: event.message,
+          stack: event.stack,
+        });
         if (!eventTestId) {
           // Subprocess crashed before starting any test (e.g. tsx failed to
           // start, syntax error before first `start` event). Capture as an
           // orchestration error so the caller sees a non-empty error field
           // instead of total:0 which looks like "no tests found" success.
-          if (!orchestrationError) orchestrationError = event.message;
+          if (!orchestrationError) orchestrationError = redactedError.message;
           break;
         }
         const acc = accumulators.get(eventTestId);
-        if (acc && !acc.errorMessage) acc.errorMessage = event.message;
+        if (acc && !acc.errorMessage) acc.errorMessage = redactedError.message;
         break;
       }
       case "warning": {
@@ -1370,7 +1810,13 @@ export async function runLocalTestsFromFile(args: {
         // code and are intentionally NOT surfaced at the run level since
         // they're per-test concerns, not project-wide).
         if (event.code && event.message) {
-          warningSet.add(event.message);
+          const redactedWarning = redactEvent(
+            { type: "warning", message: event.message },
+            MCP_TRACE_REDACTION_SCOPES,
+            "partial",
+            64,
+          ) as unknown as { message: string };
+          warningSet.add(redactedWarning.message);
         }
         break;
       }

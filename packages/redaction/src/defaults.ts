@@ -225,8 +225,29 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     id: "log.data",
     name: "Log data",
     event: "log",
+    // GLU-129 (codex R1 P1): `ctx.log(message, data)` lets a test echo ANY
+    // structured value — including a raw credential under an opaque-looking
+    // key (`{ token: "opaque-session-id" }`) that matches no global VALUE
+    // pattern (jwt/bearer/email/etc). Without a `sensitiveKeys` list this
+    // scope only ever ran global pattern plugins (confirmed empirically: a
+    // non-JWT-shaped token/password/cookie value passed through untouched),
+    // even though the sibling HTTP body scopes have carried a credential-key
+    // list since GLU-104. Mirrors `http.metadata` (includes `cookie` — a log
+    // can carry an object shaped like headers, not just an HTTP body).
+    //
+    // GLU-129 (codex R2 P2): `handler: "json"` only key-redacts an already
+    // OBJECT `data` — `ctx.log("response", await res.text())` logs the body
+    // as a STRING, and the `json` handler treats any string as an opaque
+    // scalar (value-pattern scan only, same gap `assertion.*` had). Switched
+    // to `handler: "body"` (same handler `http.request/response.body` has
+    // used since GLU-104 R2) — it JSON/form-parses a string payload first so
+    // KEY rules apply, then falls back to plain pattern scanning for
+    // genuinely free-text strings.
     target: "data",
-    handler: "json",
+    handler: "body",
+    rules: {
+      sensitiveKeys: [...CREDENTIAL_KEYS, "cookie"],
+    },
   },
   {
     id: "error.message",
@@ -264,18 +285,35 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     handler: "raw-string",
   },
   {
+    // GLU-129 (codex R2 P1): `ctx.expect(body).toEqual(...)` copies a
+    // FULL parsed response value (object, or the raw text if the caller
+    // asserted on `res.text()`) into `actual`/`expected` — the same shape
+    // `http.response.body` already handles. Without `sensitiveKeys` here,
+    // an opaque credential under a recognized key (`{ token: "..." }`) that
+    // matches no global value pattern passed through in plaintext even
+    // after the R1 fix (which only wired `log.data`, not `assertion.*`).
+    // `handler: "body"` (not "json") so a string actual/expected value
+    // (`res.text()`) is also JSON/form-parsed for key-based masking before
+    // falling back to plain pattern scanning — same reasoning as the
+    // `log.data` R2 P2 fix above and `http.request/response.body` (GLU-104).
     id: "assertion.actual",
     name: "Assertion actual",
     event: "assertion",
     target: "actual",
-    handler: "json",
+    handler: "body",
+    rules: {
+      sensitiveKeys: [...CREDENTIAL_KEYS, "cookie"],
+    },
   },
   {
     id: "assertion.expected",
     name: "Assertion expected",
     event: "assertion",
     target: "expected",
-    handler: "json",
+    handler: "body",
+    rules: {
+      sensitiveKeys: [...CREDENTIAL_KEYS, "cookie"],
+    },
   },
   {
     id: "warning.message",
