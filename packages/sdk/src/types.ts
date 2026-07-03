@@ -983,10 +983,10 @@ export interface TestContext {
  * @example
  * ```ts
  * const { vars, secrets, http } = configure({
- *   vars: { baseUrl: "BASE_URL", orgId: "ORG_ID" },
- *   secrets: { apiKey: "API_KEY" },
+ *   vars: { baseUrl: "{{BASE_URL}}", orgId: "{{ORG_ID}}" },
+ *   secrets: { apiKey: "{{API_KEY}}" },
  *   http: {
- *     prefixUrl: "BASE_URL",
+ *     prefixUrl: "{{BASE_URL}}",
  *     headers: { Authorization: "Bearer {{API_KEY}}" },
  *   },
  * });
@@ -994,14 +994,14 @@ export interface TestContext {
  */
 export interface ConfigureOptions {
   /**
-   * Map of friendly property names to var keys.
+   * Map of friendly property names to `{{key}}` templates.
    * Each key becomes a property on the returned `vars` object.
    * All declared vars are **required** — missing values throw at runtime.
    *
    * @example
    * ```ts
    * const { vars } = configure({
-   *   vars: { baseUrl: "BASE_URL", orgId: "ORG_ID" },
+   *   vars: { baseUrl: "{{BASE_URL}}", orgId: "{{ORG_ID}}" },
    * });
    * vars.baseUrl; // string (required, never undefined)
    * ```
@@ -1009,14 +1009,14 @@ export interface ConfigureOptions {
   vars?: Record<string, string>;
 
   /**
-   * Map of friendly property names to secret keys.
+   * Map of friendly property names to `{{key}}` templates.
    * Each key becomes a property on the returned `secrets` object.
    * All declared secrets are **required** — missing values throw at runtime.
    *
    * @example
    * ```ts
    * const { secrets } = configure({
-   *   secrets: { apiKey: "API_KEY" },
+   *   secrets: { apiKey: "{{API_KEY}}" },
    * });
    * secrets.apiKey; // string (required, never undefined)
    * ```
@@ -1026,7 +1026,7 @@ export interface ConfigureOptions {
   /**
    * Pre-configure an HTTP client with shared defaults.
    *
-   * - `prefixUrl`: A var key (string) whose runtime value becomes the base URL.
+   * - `prefixUrl`: Can use `{{key}}` syntax to interpolate a var/secret as the base URL.
    * - `headers`: Header values can use `{{key}}` syntax to interpolate secrets.
    * - `timeout`, `retry`, `throwHttpErrors`: Passed through to ky.
    *
@@ -1037,7 +1037,7 @@ export interface ConfigureOptions {
    * ```ts
    * const { http } = configure({
    *   http: {
-   *     prefixUrl: "base_url",
+   *     prefixUrl: "{{base_url}}",
    *     headers: { Authorization: "Bearer {{api_key}}" },
    *   },
    * });
@@ -1057,10 +1057,10 @@ export interface ConfigureOptions {
    * import { graphql } from "@glubean/graphql";
    *
    * const { http, graphql: gql } = configure({
-   *   http: { prefixUrl: "base_url" },
+   *   http: { prefixUrl: "{{base_url}}" },
    *   plugins: {
    *     graphql: graphql({
-   *       endpoint: "graphql_url",
+   *       endpoint: "{{graphql_url}}",
    *       headers: { Authorization: "Bearer {{api_key}}" },
    *     }),
    *   },
@@ -1075,16 +1075,21 @@ export interface ConfigureOptions {
 /**
  * HTTP configuration for `configure()`.
  *
- * `prefixUrl` is a **var key** (resolved at runtime), not a literal URL.
- * Header values can contain `{{key}}` placeholders that are resolved from
- * the combined vars + secrets at runtime.
+ * `prefixUrl` goes through the same `{{key}}` template resolution as
+ * `headers` and `searchParams`: any `{{key}}` placeholders are resolved from
+ * vars + secrets + session at runtime, and a string with no placeholders is
+ * used as-is (so a literal URL works). A **bare key name** with no `{{...}}`
+ * (e.g. `"BASE_URL"`) is NOT resolved against vars/secrets — it is used as
+ * a literal string, which is very unlikely to be a valid URL.
  */
 export interface ConfigureHttpOptions {
   /**
-   * Var key whose runtime value is used as the base URL (ky `prefixUrl`).
-   * This is a var key name, not the URL itself.
+   * Base URL used as ky's `prefixUrl`. Either a literal URL, or a string
+   * containing `{{key}}` placeholder(s) resolved from vars, secrets, or
+   * session at runtime.
    *
-   * @example "BASE_URL" → resolved to ctx.vars.require("BASE_URL")
+   * @example "{{BASE_URL}}" → resolves to the value of var/secret "BASE_URL"
+   * @example "https://api.example.com" → used as-is (no placeholder to resolve)
    */
   prefixUrl?: string;
 
@@ -1157,10 +1162,10 @@ export interface ConfigureHttpOptions {
    *
    * const { http } = configure({
    *   http: oauth2.clientCredentials({
-   *     prefixUrl: "base_url",
-   *     tokenUrl: "token_url",
-   *     clientId: "client_id",
-   *     clientSecret: "client_secret",
+   *     prefixUrl: "{{base_url}}",
+   *     tokenUrl: "{{token_url}}",
+   *     clientId: "{{client_id}}",
+   *     clientSecret: "{{client_secret}}",
    *   }),
    * });
    * ```
@@ -1180,9 +1185,9 @@ export interface ConfigureHttpOptions {
  * @example
  * ```ts
  * const { vars, secrets, http } = configure({
- *   vars: { baseUrl: "BASE_URL" },
- *   secrets: { apiKey: "API_KEY" },
- *   http: { prefixUrl: "BASE_URL", headers: { Authorization: "Bearer {{API_KEY}}" } },
+ *   vars: { baseUrl: "{{BASE_URL}}" },
+ *   secrets: { apiKey: "{{API_KEY}}" },
+ *   http: { prefixUrl: "{{BASE_URL}}", headers: { Authorization: "Bearer {{API_KEY}}" } },
  * });
  *
  * export const myTest = test("my-test", async (ctx) => {
