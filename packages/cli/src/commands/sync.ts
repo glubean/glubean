@@ -257,6 +257,19 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // (not in the built-in pattern set) upload in cleartext. So the projection now
   // reuses the SAME `globalRules` (project sensitiveKeys + built-in scope keys)
   // as every other redacted field — one redaction policy, not a second weaker one.
+  //
+  // KNOWN BOUNDARY (documented, not new — shared by every redactValue/redactEvent
+  // call site in the CLI, e.g. run.ts's live event redaction): a secret nested
+  // under a sensitive key but itself keyed by a NON-sensitive inner name (e.g.
+  // `extensions: { cookie: { value: "sid=…" } }` instead of the natural
+  // `extensions: { cookie: "sid=…" }`) is NOT auto-masked — only the direct
+  // scalar under the sensitive key is. Closing this would require the engine to
+  // treat every descendant of a sensitive key as sensitive too, which would ALSO
+  // re-mask the `properties.password: { type: "string" }` schema metadata this
+  // fix just stopped corrupting — the two goals conflict without a schema-vs-
+  // free-form distinction the engine doesn't have today. Out of scope for this
+  // Urgent fix (which closes the confirmed direct-value leak); tracked as a
+  // follow-up if an author is found wrapping extension/meta secrets this way.
   const redactStructure = redactField;
   // Redact ONLY the secret-bearing/free-text fields — NEVER `testId` (the stable
   // join key with run evidence; redacting an id that matches a built-in pattern
@@ -295,11 +308,11 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     projectionComplete: w.projectionComplete,
     incompleteReason: w.incompleteReason ?? null,
   }));
-  // The OpenAPI doc is purely structural (paths + schemas). Redact it pattern-ONLY
-  // (same as the normalized projection): mask secret-LOOKING example/default values
-  // but PRESERVE schema field names — masking a `password`/`token` field name (a
-  // type, not a secret) would corrupt the schema. `null` when there are no HTTP
-  // contracts, so a full-replace clears any stale doc.
+  // The OpenAPI doc is purely structural (paths + schemas) but, like the
+  // normalized projection above, can carry real secrets in examples/default
+  // values — same `redactStructure` (full key + pattern policy), same
+  // shape-preserving guarantee for schema field names. `null` when there are
+  // no HTTP contracts, so a full-replace clears any stale doc.
   const safeOpenapi = openapi ? (redactStructure(openapi) as Record<string, unknown>) : null;
 
   const base = `${apiUrl.replace(/\/+$/, "")}/v1/projects/${projectId}/projections`;

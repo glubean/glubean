@@ -239,6 +239,21 @@ export class RedactionEngine {
           }
           continue;
         }
+        // GLU-123 codex round: in schema-preserving mode a BOOLEAN scalar
+        // under a sensitive key is left untouched. `true`/`false` is a valid
+        // JSON-Schema node on its own (`properties.password: true` means
+        // "any value accepted") — masking it to a redaction STRING corrupts
+        // the schema's type, exactly the corruption `sensitiveKeyRecurse`
+        // exists to prevent for objects/arrays. A boolean also carries no
+        // real secret entropy (1 bit), so skipping it costs nothing
+        // security-wise. Only applies in `sensitiveKeyRecurse` mode — the
+        // non-recurse (event) path still nukes sensitive-keyed booleans
+        // wholesale, unchanged.
+        if (this.sensitiveKeyRecurse && typeof value === "boolean") {
+          const redacted = this.walkValue(value, scope, keyPath, details, depth + 1);
+          result[key] = redacted.value;
+          continue;
+        }
         if (this.replacementFormat === "partial") {
           const str =
             value === null || value === undefined ? "" : String(value);

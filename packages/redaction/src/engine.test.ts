@@ -1403,6 +1403,59 @@ describe("redactValue", () => {
     expect(result.schemas.request.headers.authorization).toBe("[REDACTED]");
   });
 
+  // GLU-123 codex round: a JSON-Schema BOOLEAN node (`properties.password:
+  // true` — valid JSON Schema meaning "any value accepted") under a
+  // sensitive property name must survive as a boolean, not get flattened to
+  // a redaction STRING. Same "preserve schema shape" contract as the object
+  // case above, just for the boolean-schema shorthand. A boolean also
+  // carries no real secret entropy, so leaving it alone costs nothing
+  // security-wise.
+  test("preserves boolean JSON-Schema nodes under sensitive property names", () => {
+    const projection = {
+      schemas: {
+        request: {
+          body: {
+            type: "object",
+            properties: {
+              password: true, // "any value accepted" — a valid schema node
+              cookie: false, // "no value accepted"
+              name: { type: "string" },
+            },
+          },
+        },
+      },
+    };
+
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: [], patterns: [], customPatterns: [] },
+      replacementFormat: "partial",
+    }) as typeof projection;
+
+    expect(result.schemas.request.body.properties.password).toBe(true);
+    expect(result.schemas.request.body.properties.cookie).toBe(false);
+    expect(result.schemas.request.body.properties.name).toEqual({ type: "string" });
+  });
+
+  // GLU-123: the direct leak this fix closes — a scalar SECRET VALUE (not a
+  // schema node) directly under a sensitive key must still be masked, string
+  // or otherwise. Guards the boolean exemption above from over-reaching.
+  test("still masks a real scalar secret directly under a sensitive key (not a schema context)", () => {
+    const projection = {
+      extensions: {
+        cookie: "sessid=REAL_SECRET_VALUE_abc123",
+        "set-cookie": "sessid=REAL_SECRET_VALUE_abc123; HttpOnly",
+      },
+    };
+
+    const result = redactValue(projection, {
+      globalRules: { sensitiveKeys: ["cookie", "set-cookie"], patterns: [], customPatterns: [] },
+      replacementFormat: "partial",
+    }) as typeof projection;
+
+    expect(result.extensions.cookie).not.toBe("sessid=REAL_SECRET_VALUE_abc123");
+    expect(result.extensions["set-cookie"]).not.toContain("REAL_SECRET_VALUE_abc123");
+  });
+
   test("masks array-valued sensitive keys element-wise (codex 0.6 P1)", () => {
     // Multi-value headers/cookies arrive as ARRAYS under a sensitive key. Each
     // element is values-of-the-secret and must be masked, even when it matches
