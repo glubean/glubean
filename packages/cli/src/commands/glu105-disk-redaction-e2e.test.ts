@@ -69,7 +69,7 @@ function pkgJson(name: string): string {
 
 /** Real local HTTP server — the secrets genuinely travel over the wire. */
 function startSecretServer(): Promise<{ baseUrl: string; close: () => void }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server: Server = createServer((req, res) => {
       let raw = "";
       req.on("data", (chunk) => {
@@ -91,10 +91,13 @@ function startSecretServer(): Promise<{ baseUrl: string; close: () => void }> {
         );
       });
     });
-    server.listen(0, () => {
+    // Reject on a bind failure so a restricted CI/sandbox runner fails fast
+    // with the real error instead of hanging until the Vitest timeout.
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
-      resolve({ baseUrl: `http://localhost:${port}`, close: () => server.close() });
+      resolve({ baseUrl: `http://127.0.0.1:${port}`, close: () => server.close() });
     });
   });
 }
