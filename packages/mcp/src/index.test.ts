@@ -489,7 +489,20 @@ export const loginTest = test("login-test", async (ctx) => {
   // raw login email from the response body, and a log echoes the session
   // token/opaque session id again.
   ctx.expect(body.email).toBe("${LOGIN_EMAIL}");
+  // codex R2 P1: an OBJECT-shaped assertion — actual/expected carry the
+  // opaque, non-pattern-matching credential under a recognized key, not
+  // just a scalar email.
+  ctx.expect(body).toEqual({
+    ok: true,
+    token: "${SESSION_JWT}",
+    email: "${LOGIN_EMAIL}",
+    sessionId: "${OPAQUE_SESSION_ID}",
+  });
   ctx.log("login response", body);
+  // codex R2 P2: log data as a JSON-encoded STRING (e.g. \`ctx.log("raw", await res.text())\`)
+  // — the credential sits under a recognized key but the whole payload is a
+  // string, not an object.
+  ctx.log("login response raw text", JSON.stringify(body));
 });`,
     );
 
@@ -512,6 +525,12 @@ export const loginTest = test("login-test", async (ctx) => {
 
     // ── No plaintext secret in either channel ────────────────────────────
     expect(assertionSerialized).not.toContain(LOGIN_EMAIL);
+    expect(assertionSerialized).not.toContain(SESSION_JWT);
+    // codex R2 P1: the opaque, non-pattern-matching credential inside an
+    // OBJECT-shaped `actual`/`expected` (the `ctx.expect(body).toEqual(...)`
+    // assertion below) is ONLY caught by key-based masking on the
+    // `assertion.actual`/`assertion.expected` scopes.
+    expect(assertionSerialized).not.toContain(OPAQUE_SESSION_ID);
     expect(logSerialized).not.toContain(SESSION_JWT);
     expect(logSerialized).not.toContain(LOGIN_EMAIL);
     // codex R1 P1: the opaque, non-pattern-matching credential is ONLY
@@ -519,14 +538,29 @@ export const loginTest = test("login-test", async (ctx) => {
     // this is the assertion that would have failed before that fix.
     expect(logSerialized).not.toContain(OPAQUE_SESSION_ID);
 
+    const passedAssertions = allAssertions.filter((a) => a.passed === true);
+    expect(passedAssertions.length).toBeGreaterThanOrEqual(2);
+
     // ── Structure/pass-state survives (not a blanket wipe): the assertion
     //    that compared the login email still shows as passed, and both its
     //    `actual` (from the response) and `expected` (the literal email
     //    written in the test source) are masked, not merely one side.
-    const emailAssertion = allAssertions.find((a) => a.passed === true);
-    expect(emailAssertion).toBeDefined();
-    expect(emailAssertion!.actual).not.toBe(LOGIN_EMAIL);
-    expect(emailAssertion!.expected).not.toBe(LOGIN_EMAIL);
+    const emailAssertion = passedAssertions[0];
+    expect(emailAssertion.actual).not.toBe(LOGIN_EMAIL);
+    expect(emailAssertion.expected).not.toBe(LOGIN_EMAIL);
+
+    // ── codex R2 P1: the object-shaped `ctx.expect(body).toEqual(...)`
+    //    assertion masks the credential-shaped KEYS inside actual/expected,
+    //    while the non-sensitive `ok` field survives untouched.
+    const bodyAssertion = passedAssertions[1];
+    const bodyActual = bodyAssertion.actual as Record<string, unknown>;
+    const bodyExpected = bodyAssertion.expected as Record<string, unknown>;
+    expect(bodyActual.ok).toBe(true);
+    expect(bodyActual.token).not.toBe(SESSION_JWT);
+    expect(bodyActual.email).not.toBe(LOGIN_EMAIL);
+    expect(bodyActual.sessionId).not.toBe(OPAQUE_SESSION_ID);
+    expect(bodyExpected.token).not.toBe(SESSION_JWT);
+    expect(bodyExpected.sessionId).not.toBe(OPAQUE_SESSION_ID);
 
     // ── Log data: key-based masking (token/sessionId) survives structure —
     //    `ok` stays visible, only the credential-shaped fields are replaced.
@@ -537,6 +571,17 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(loginLogData.token).not.toBe(SESSION_JWT);
     expect(loginLogData.email).not.toBe(LOGIN_EMAIL);
     expect(loginLogData.sessionId).not.toBe(OPAQUE_SESSION_ID);
+
+    // ── codex R2 P2: log data as a JSON-ENCODED STRING is also key-redacted
+    //    (parsed, masked, re-serialized) — not just pattern-scanned.
+    const rawTextLog = allLogs.find((l) => l.message === "login response raw text");
+    expect(rawTextLog).toBeDefined();
+    expect(typeof rawTextLog!.data).toBe("string");
+    const rawTextData = rawTextLog!.data as string;
+    expect(rawTextData).not.toContain(SESSION_JWT);
+    expect(rawTextData).not.toContain(LOGIN_EMAIL);
+    expect(rawTextData).not.toContain(OPAQUE_SESSION_ID);
+    expect(rawTextData).toContain('"ok":true'); // non-sensitive field survives
 
     // codex R1 P2: the redacted log entry must keep the EXACT
     // `LocalRunResult.logs[]` shape (`{ message, data }`) — no extra `type`
