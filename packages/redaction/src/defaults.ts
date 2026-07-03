@@ -278,6 +278,20 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     handler: "raw-string",
   },
   {
+    // GLU-142 — a status:"skipped" event's `reason` carries `ctx.skip(reason)`,
+    // a free-text string the test author computed at runtime (may embed a
+    // secret, e.g. `ctx.skip(\`disabled: API_KEY=${key} missing\`)`). Now that
+    // the CLI persists/uploads this value (last-run.result.json, --result-json,
+    // --upload's test_result row), it needs the same raw-string scrub as
+    // status.error/status.stack — without this scope it silently bypassed
+    // redaction end to end.
+    id: "status.reason",
+    name: "Status reason",
+    event: "status",
+    target: "reason",
+    handler: "raw-string",
+  },
+  {
     id: "assertion.message",
     name: "Assertion message",
     event: "assertion",

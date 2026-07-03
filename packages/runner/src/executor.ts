@@ -298,6 +298,18 @@ export interface ExecutionResult {
   events: TimelineEvent[];
   error?: string;
   stack?: string;
+  /**
+   * Runtime skip reason (GLU-142) — the string passed to `ctx.skip(reason)`,
+   * threaded through from the harness's "status" wire event (`ExecutionEvent`'s
+   * "status" member's `reason` field — NOT present in this `events` array,
+   * which is `TimelineEvent[]` and has no "status" variant). Set if and only
+   * if `success` is true AND the run was a skip (never a pass, and never a
+   * fail even if the harness briefly reported "skipped" before a recorded
+   * assertion failure flipped the final verdict — see the `if (!success)
+   * reason = undefined;` guard in execute()). undefined for a reason-less
+   * `ctx.skip()` call.
+   */
+  reason?: string;
   duration: number;
   retryCount?: number;
   assertionCount: number;
@@ -942,6 +954,7 @@ export class TestExecutor {
     let suiteName: string | undefined;
     let error: string | undefined;
     let stack: string | undefined;
+    let reason: string | undefined;
     let peakMemoryBytes: number | undefined;
     let peakMemoryMB: string | undefined;
     let retryCount: number | undefined;
@@ -999,6 +1012,15 @@ export class TestExecutor {
           success = event.status === "completed" || event.status === "skipped";
           if (event.error) error = event.error;
           if (event.stack) stack = event.stack;
+          // GLU-142 — carry the runtime `ctx.skip(reason)` text through to
+          // ExecutionResult. Gated strictly on status === "skipped": a
+          // "failed" status event can ALSO carry a `reason` (harness.ts's
+          // wildcard-mode classifyErrorReason() — a distinct concept, the
+          // failure classification, not skip text) that must never be
+          // confused with the skip reason here. `!== undefined` (not
+          // truthy) so an explicit `ctx.skip("")` is preserved rather than
+          // silently coerced to "no reason".
+          if (event.status === "skipped" && event.reason !== undefined) reason = event.reason;
           if (event.peakMemoryBytes !== undefined) peakMemoryBytes = event.peakMemoryBytes;
           if (event.peakMemoryMB !== undefined) peakMemoryMB = event.peakMemoryMB;
           break;
@@ -1049,9 +1071,17 @@ export class TestExecutor {
     // status/error events from the harness are authoritative for hard failures.
     const summary = generateSummary(events);
     if (!summary.success) success = false;
+    // GLU-142 — a status:"skipped" event (skip is terminal, so it always wins
+    // the RACE against later events) can still be overridden back to failure
+    // here by an EARLIER soft assertion failure recorded in `events` (mirrors
+    // the CLI's `skippedClean = testSkipped && allAssertionsPassed` rule —
+    // see run.ts). `reason` must not survive onto a failed result: clear it
+    // in lockstep with the success flip so `reason` is only ever set when
+    // `success` is true (a genuinely clean skip).
+    if (!success) reason = undefined;
 
     return {
-      success, testId, testName, rowIndex, each, suiteId, suiteName, events, error, stack,
+      success, testId, testName, rowIndex, each, suiteId, suiteName, events, error, stack, reason,
       duration: Date.now() - startTime, retryCount, assertionCount, failedAssertionCount,
       peakMemoryBytes, peakMemoryMB,
       context: buildRunContext(),

@@ -81,6 +81,16 @@ export interface RunIngestTest {
   durationMs: number;
   tags?: string[];
   eventCount?: number;
+  /**
+   * GLU-142 — run-time `ctx.skip(reason)` text (only set when status ===
+   * "skipped"). Distinct from the spec's *declared* skip reason (the scanner's
+   * static `deferred`/`deprecated` projection, which GLU-136's dashboard falls
+   * back to): this is what THIS run actually carried. The cloud `test_result`
+   * schema (apps/platform-api/src/run/schemas.ts, packages/core/src/run/
+   * service.ts — separate repo) needs a companion column/field to persist it;
+   * until that lands, the server should tolerate/ignore this extra field.
+   */
+  reason?: string;
 }
 
 /** A time-series metric point → server `run_metric` (latency/rps/percentile trends). */

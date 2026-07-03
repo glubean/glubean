@@ -1087,6 +1087,23 @@ describe("redactEvent", () => {
     expect(branchOut.error).toBe(statusOut.error);
   });
 
+  test("redacts secrets in status.reason (GLU-142 — runtime ctx.skip(reason))", () => {
+    const scopes = compileDefaults();
+    const reasonStr = "disabled: Authorization Bearer abc123secretToken required";
+    const skippedOut = redactEvent(
+      { type: "status", status: "skipped", reason: reasonStr },
+      scopes,
+      "simple",
+    );
+    // The bearer token embedded in a runtime-computed ctx.skip(reason) string
+    // must be masked before it reaches disk (last-run.result.json) or the
+    // cloud upload (test_result row) — same scrub as status.error/status.stack.
+    expect(skippedOut.reason).not.toContain("abc123secretToken");
+    expect(skippedOut.reason).toBe(
+      redactEvent({ type: "status", status: "failed", error: reasonStr }, scopes, "simple").error,
+    );
+  });
+
   test("redacts secrets in branch takenValue; passes non-string scalars through", () => {
     const scopes = compileDefaults();
     // String value-switch key carrying a secret → masked.

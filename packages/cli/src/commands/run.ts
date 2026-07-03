@@ -203,6 +203,13 @@ interface CollectedTestRun {
   success: boolean;
   durationMs: number;
   groupId?: string;
+  /**
+   * Runtime skip reason (GLU-142) — the string passed to `ctx.skip(reason)`,
+   * or a capability-skip's synthesized reason. Set only on a clean skip
+   * (mirrors the `status`/`skipped` entry already in `events`); undefined for
+   * passed/failed runs and for a reason-less skip.
+   */
+  reason?: string;
   /** 0-based `.each` row index (post-filter); undefined for non-each tests. */
   rowIndex?: number;
   /**
@@ -1667,7 +1674,10 @@ export async function runCommand(
       testEvents.push({
         type: "status",
         status: "skipped",
-        ...(skipReason && { reason: skipReason }),
+        // GLU-142 — `!== undefined` (not truthy) so an explicit `ctx.skip("")`
+        // is preserved rather than silently coerced to "no reason", matching
+        // the top-level `reason` field on the pushed CollectedTestRun below.
+        ...(skipReason !== undefined && { reason: skipReason }),
       } as ExecutionEvent);
     }
 
@@ -1700,6 +1710,9 @@ export async function runCommand(
       groupId: testItem?.meta.groupId,
       rowIndex: testRowIndex,
       each: testEach,
+      // GLU-142 — `!== undefined` (not truthy) preserves an explicit
+      // `ctx.skip("")` instead of silently coercing it to "no reason".
+      ...(skippedClean && skipReason !== undefined && { reason: skipReason }),
     });
 
     addLogEntry(
@@ -1854,6 +1867,31 @@ export async function runCommand(
   // gets file:start is a fail-fast skip — handled post run:complete.
   const startedFiles = new Set<string>();
 
+  // Redaction (GLU-105): compile scopes ONCE, unconditionally, and redact
+  // every harness event as it arrives — BEFORE it reaches any sink. Every
+  // sink that touches this run's data (`.glubean/last-run.result.json`,
+  // `--result-json`, `.glubean/traces.json`, `--log-file`, `--verbose`
+  // console output, `--emit-full-trace` trace files) must consume the same
+  // redacted stream. Previously redaction only ran on a clone built for
+  // `--upload`, so every local-disk sink got the raw, secret-bearing event
+  // regardless of whether `--upload` was even passed.
+  //
+  // Hoisted above `emitAllSkippedFilesUpTo` below (GLU-142 codex R2 P0): a
+  // capability-skip's synthesized reason (`meta.deferred`/`meta.deprecated`
+  // free text, or the requires-capability strings) is itself redaction-
+  // relevant now that it's promoted into a top-level `reason` field
+  // (`CollectedTestRun.reason` → result JSON / upload `test_result` row).
+  // Compiling scopes here — instead of after this const's original position
+  // just before the runner-stream loop — ensures they exist even for the
+  // "every selected test was capability-skipped" short-circuit, which calls
+  // `emitAllSkippedFilesUpTo` before the runner stream ever starts.
+  const effectiveRedaction = options.redactionConfig ?? glubeanConfig.redaction;
+  const compiledScopes = compileScopes({
+    builtinScopes: BUILTIN_SCOPES,
+    globalRules: effectiveRedaction.globalRules,
+    replacementFormat: effectiveRedaction.replacementFormat,
+  });
+
   // Files that are 100% capability-skipped need ⊘ rows emitted manually
   // because ProjectRunner never starts a file with zero runnable tests
   // (file:start, which normally renders inline skip rows, won't fire).
@@ -1880,18 +1918,31 @@ export async function runCommand(
       for (const { ft, reason } of skips) {
         skipped++;
         const name = ft.test.meta.name || ft.test.meta.id;
+        // GLU-142 (codex R2 P0) — a capability-skip's synthesized reason
+        // (meta.deferred/meta.deprecated free text) is redaction-relevant
+        // too now that it's promoted into a persisted/uploaded top-level
+        // field; scrub it through the status.reason scope the same way a
+        // runtime ctx.skip(reason) is, before it reaches console/disk/upload.
+        const redactedReason = (
+          redactEvent(
+            { type: "status", status: "skipped", reason } as ExecutionEvent,
+            compiledScopes,
+            effectiveRedaction.replacementFormat,
+          ) as { type: "status"; status: "skipped"; reason?: string }
+        ).reason;
         console.log(
-          `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${reason})${colors.reset}`,
+          `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${redactedReason})${colors.reset}`,
         );
         collectedRuns.push({
           testId: ft.test.meta.id,
           testName: name,
           tags: ft.test.meta.tags as string[] | undefined,
           filePath,
-          events: [{ type: "status", status: "skipped", reason } as ExecutionEvent],
+          events: [{ type: "status", status: "skipped", reason: redactedReason } as ExecutionEvent],
           success: true,
           durationMs: 0,
           groupId: ft.test.meta.groupId,
+          reason: redactedReason,
         });
       }
       fileCapabilitySkips.delete(filePath);
@@ -1927,21 +1978,6 @@ export async function runCommand(
     interactive,
     ...(options.inspectBrk !== undefined && { inspectBrk: options.inspectBrk }),
     metricCollector,
-  });
-
-  // Redaction (GLU-105): compile scopes ONCE, unconditionally, and redact
-  // every harness event as it arrives — BEFORE it reaches any sink. Every
-  // sink that touches this run's data (`.glubean/last-run.result.json`,
-  // `--result-json`, `.glubean/traces.json`, `--log-file`, `--verbose`
-  // console output, `--emit-full-trace` trace files) must consume the same
-  // redacted stream. Previously redaction only ran on a clone built for
-  // `--upload`, so every local-disk sink got the raw, secret-bearing event
-  // regardless of whether `--upload` was even passed.
-  const effectiveRedaction = options.redactionConfig ?? glubeanConfig.redaction;
-  const compiledScopes = compileScopes({
-    builtinScopes: BUILTIN_SCOPES,
-    globalRules: effectiveRedaction.globalRules,
-    replacementFormat: effectiveRedaction.replacementFormat,
   });
 
   // Only walk the runner stream when there are runnable tests. The empty
@@ -2061,18 +2097,28 @@ export async function runCommand(
           for (const { ft, reason } of skips) {
             skipped++;
             const name = ft.test.meta.name || ft.test.meta.id;
+            // GLU-142 (codex R2 P0) — same scrub as the other capability-skip
+            // emission site above (emitAllSkippedFilesUpTo).
+            const redactedReason = (
+              redactEvent(
+                { type: "status", status: "skipped", reason } as ExecutionEvent,
+                compiledScopes,
+                effectiveRedaction.replacementFormat,
+              ) as { type: "status"; status: "skipped"; reason?: string }
+            ).reason;
             console.log(
-              `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${reason})${colors.reset}`,
+              `  ${colors.yellow}⊘${colors.reset} ${name} ${colors.dim}— skipped (${redactedReason})${colors.reset}`,
             );
             collectedRuns.push({
               testId: ft.test.meta.id,
               testName: name,
               tags: ft.test.meta.tags as string[] | undefined,
               filePath: ev.filePath,
-              events: [{ type: "status", status: "skipped", reason } as ExecutionEvent],
+              events: [{ type: "status", status: "skipped", reason: redactedReason } as ExecutionEvent],
               success: true,
               durationMs: 0,
               groupId: ft.test.meta.groupId,
+              reason: redactedReason,
             });
           }
         }
@@ -2658,6 +2704,10 @@ export async function runCommand(
       // without depending on a projection join. Undefined for non-each tests
       // (backward compatible: old runs / old CLI builds simply omit the field).
       ...(r.each !== undefined && { each: r.each }),
+      // GLU-142 — surface the runtime skip reason at the top level (it was
+      // already reachable by scanning `events` for a status:"skipped" entry,
+      // but a top-level field lets consumers skip that reconstruction).
+      ...(r.reason !== undefined && { reason: r.reason }),
       filePath: relative(rootDir, r.filePath),
     })),
     ...(thresholdSummary && { thresholds: thresholdSummary }),
@@ -2807,6 +2857,10 @@ export async function runCommand(
           durationMs: r.durationMs,
           ...(r.tags && r.tags.length ? { tags: r.tags } : {}),
           eventCount: r.events.length,
+          // GLU-142 — run-time `ctx.skip(reason)` text, so `test_result` rows
+          // carry the actual reason from THIS run instead of only the spec's
+          // declared reason (which the dashboard falls back to).
+          ...(r.reason !== undefined && { reason: r.reason }),
         }));
 
         // Metric tags (method/path) can in rare cases embed a secret in a path

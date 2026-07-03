@@ -832,6 +832,44 @@ export const skipAfterFailedAssertion = test("skip-after-failed-assertion")
     ctx.assert(false, "real failure recorded before skip");
     ctx.skip("must not mask the failure above");
   });
+
+// GLU-142 — whole-test-level (not inside a .step()) ctx.skip(), with and
+// without a reason, to prove the runtime reason threads onto ExecutionResult.
+export const skipWholeTestWithReason = test(
+  "skip-whole-test-with-reason",
+  async (ctx) => {
+    ctx.skip("feature flag disabled");
+  },
+);
+
+export const skipWholeTestNoReason = test(
+  "skip-whole-test-no-reason",
+  async (ctx) => {
+    ctx.skip();
+  },
+);
+
+// GLU-142 (codex R1 P1) — a failed soft assertion recorded in the whole
+// test body BEFORE a terminal ctx.skip(reason): the final verdict must be
+// "failed" (assertion wins, mirrors skip-after-failed-assertion above,
+// which covers the same precedence inside a .step()) and reason must not
+// survive onto that failed ExecutionResult.
+export const skipReasonAfterFailedAssertionWholeTest = test(
+  "skip-reason-after-failed-assertion-whole-test",
+  async (ctx) => {
+    ctx.assert(false, "real failure recorded before skip");
+    ctx.skip("must not mask the failure above, and must not leak reason");
+  },
+);
+
+// GLU-142 (codex R1 P1) — an explicit empty-string reason is distinct from
+// no reason at all; it must be preserved (not coerced to undefined).
+export const skipWholeTestEmptyReason = test(
+  "skip-whole-test-empty-reason",
+  async (ctx) => {
+    ctx.skip("");
+  },
+);
 `;
 
 test("builder without .build() is auto-resolved by runner", async () => {
@@ -1092,6 +1130,102 @@ test("ctx.skip() does not mask a failed assertion recorded earlier in the same s
 
   const failedAssertions = getAssertions(result.events).filter((a) => !a.passed);
   expect(failedAssertions.length).toBe(1);
+});
+
+// =============================================================================
+// GLU-142 — runtime ctx.skip(reason) threads onto ExecutionResult.reason
+// (previously dropped between the harness's "status" wire event and the
+// ExecutionResult the executor assembles from it — see executor.ts's
+// `case "status"` handler in execute()).
+// =============================================================================
+
+test("ctx.skip(reason) at the test level threads the reason onto ExecutionResult", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-whole-test-with-reason",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(true);
+  expect(result.reason).toBe("feature flag disabled");
+});
+
+test("ctx.skip() with no reason leaves ExecutionResult.reason undefined", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-whole-test-no-reason",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(true);
+  expect(result.reason).toBeUndefined();
+});
+
+test("ctx.skip(reason) inside a step also threads the reason onto ExecutionResult", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-in-step",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(true);
+  expect(result.reason).toBe("not applicable in this environment");
+});
+
+test("a passed test never sets ExecutionResult.reason", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "auto-build-test",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(true);
+  expect(result.reason).toBeUndefined();
+});
+
+test("a failed assertion before ctx.skip(reason) in the whole test body wins — reason does not leak onto the failed ExecutionResult", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-reason-after-failed-assertion-whole-test",
+    { vars: {}, secrets: {} },
+  );
+
+  // The prior failed assertion wins — skip must not flip this to success,
+  // and `reason` must never be observable on a failed ExecutionResult.
+  expect(result.success).toBe(false);
+  expect(result.reason).toBeUndefined();
+
+  const failedAssertions = getAssertions(result.events).filter((a) => !a.passed);
+  expect(failedAssertions.length).toBe(1);
+});
+
+test("ctx.skip(\"\") — an explicit empty-string reason is preserved, not coerced to undefined", async () => {
+  const testFile = await makeTempFile(AUTO_BUILD_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "skip-whole-test-empty-reason",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(true);
+  expect(result.reason).toBe("");
 });
 
 // =============================================================================

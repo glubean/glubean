@@ -17,7 +17,7 @@
  * outside the package would fail to resolve workspace packages.
  */
 
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -520,5 +520,54 @@ export const oauthLogin = api("oauth-login", {
     expect(normalized).toContain("headlessCheck");
 
     expect(normalized).toMatchSnapshot();
+  }, 30_000);
+
+  test("GLU-142 (codex R2 P0): a capability-skip's synthesized reason (workflow skip: free text) is redacted, not just a runtime ctx.skip(reason)", async () => {
+    const dir = await prepareFixture("cap-skip-secret-reason", {
+      "package.json": workspacePackageJson("snapshot-capskip-secret"),
+      // A workflow with a static `skip:` reason (→ meta.deferred, per
+      // `discoverTests omits workflow only/deferred when unset` in
+      // run-discovery.test.ts) containing a fake credential.
+      // `shouldSkipTest()` (packages/cli/src/lib/skip.ts) turns this into a
+      // synthesized ⊘ row BEFORE the test ever reaches the runner/harness —
+      // a completely different code path from a runtime `ctx.skip(reason)`
+      // (which goes through the harness's "status" wire event and the
+      // ordinary redactEvent() call in the main event loop).
+      "tests/deferred.flow.ts": `
+import { workflow } from "@glubean/sdk";
+
+export const deferredWithSecret = workflow({
+  id: "deferred-with-secret",
+  skip: "blocked: Authorization Bearer abc123secretToken pending fix",
+})
+  .action("noop", async () => {})
+  .build();
+`,
+    });
+
+    const { code, stdout, stderr } = await runCli(
+      ["run", "tests/", "--no-session", "--result-json", "out.result.json"],
+      { cwd: dir },
+    );
+    const normalized = normalizeOutput(stdout + stderr);
+
+    expect(code).toBe(0);
+    expect(normalized).toContain("⊘");
+    // The bearer token must never reach console output...
+    expect(normalized).not.toContain("abc123secretToken");
+    expect(normalized).toMatch(/skipped \(.*deferred/);
+
+    // ...or the persisted result JSON (both the buried events[] entry AND
+    // the new top-level `reason` field this GLU-142 change added).
+    const resultJson = JSON.parse(
+      await readFile(join(dir, "out.result.json"), "utf-8"),
+    );
+    const resultText = JSON.stringify(resultJson);
+    expect(resultText).not.toContain("abc123secretToken");
+    const deferredTest = resultJson.tests.find(
+      (t: { testId: string }) => t.testId === "deferred-with-secret",
+    );
+    expect(deferredTest.reason).toBeDefined();
+    expect(deferredTest.reason).not.toContain("abc123secretToken");
   }, 30_000);
 });
