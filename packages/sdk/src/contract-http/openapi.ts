@@ -694,80 +694,134 @@ function canonicalizeForDedup(value: unknown, isRoot = true): unknown {
  * duplicate — this is what turns the shared `ErrorResponse` envelope in two
  * different contracts' error cases into ONE component with two `$ref`s.
  *
+ * Two-phase by design (codex R2 P2): naming can't be decided the moment a
+ * schema is first seen, because an EARLIER occurrence of a shared shape
+ * might carry no explicit title while a LATER occurrence does (or vice
+ * versa) — deciding eagerly would make the winning name depend on
+ * traversal order. So `collect()` only records occurrences (grouped by
+ * content key) during the walk; `finalize()` — called once, after every
+ * operation has been walked — picks ONE name per group and back-fills
+ * every `$ref` in that group with it.
+ *
  * Naming precedence (GLU-127 design notes):
  *   1. Explicit — the schema's own JSON Schema `title` (from a user's
  *      `zod.meta({ title: "ErrorResponse" })` or equivalent), sanitized.
+ *      Honored no matter which occurrence in the group carries it.
  *   2. Derived — PascalCase(contractId) + "Request"/"Response", with an
  *      optional status-code suffix (`altName`) to disambiguate a contract
  *      with more than one distinct response body shape.
  *   3. Numeric fallback (`_2`, `_3`, ...) — only reached if two DIFFERENT
- *      schemas want the exact same name (rare: e.g. two contracts whose
- *      ids collide after PascalCasing, or two explicit titles collide).
+ *      groups want the exact same name (rare: e.g. two contracts whose ids
+ *      collide after PascalCasing, or two explicit titles collide).
  * Naming is a pure function of contract id + kind + status — not of
  * iteration order — so names are stable across runs (the whole point is a
  * diffable projection); the numeric fallback is the only path where
  * processing order can matter, and callers walk paths/statuses in sorted
- * order specifically to keep even that deterministic.
+ * order (and `finalize()` walks groups in first-seen order) specifically to
+ * keep even that deterministic.
  */
 class ComponentSchemaRegistry {
-  private readonly schemas: Record<string, unknown> = {};
+  // Object.create(null) (codex R2 P3): a plain `{}` lets a sanitized title
+  // of `__proto__` (or `constructor`, ...) silently mutate the object's
+  // prototype instead of creating an enumerable entry — the operation would
+  // still get a `$ref` to a component that `components.schemas` never
+  // actually contains. A null-prototype map has no inherited accessors to
+  // hijack, so every sanitized name — however hostile — lands as a normal
+  // own property.
+  private readonly schemas: Record<string, unknown> = Object.create(null);
   private readonly nameToContentKey = new Map<string, string>();
-  private readonly contentKeyToName = new Map<string, string>();
+  private readonly groups = new Map<
+    string,
+    {
+      representative: Record<string, unknown>;
+      explicitName: string | null;
+      preferredName: string;
+      altName?: string;
+      entries: Array<{ schema?: unknown }>;
+    }
+  >();
 
-  register(
+  /** Phase 1 — record one occurrence of `schema` at `entry.schema`. Does
+   * NOT assign a component name or mutate `entry` yet. */
+  collect(
+    entry: { schema?: unknown },
     schema: Record<string, unknown>,
     preferredName: string,
     altName?: string,
-  ): Record<string, unknown> {
+  ): void {
     const contentKey = JSON.stringify(canonicalizeForDedup(schema));
-    const existingName = this.contentKeyToName.get(contentKey);
-    if (existingName) return { $ref: `#/components/schemas/${existingName}` };
-
     const explicitTitle =
       typeof schema.title === "string" && schema.title.trim().length > 0
         ? sanitizeComponentName(schema.title.trim())
         : null;
 
-    let candidate = explicitTitle ?? preferredName;
-    // Preferred name already taken by a DIFFERENT schema — try the
-    // caller-supplied disambiguator (e.g. status-suffixed name) before
-    // falling back to numeric suffixes.
-    if (
-      this.nameToContentKey.has(candidate) &&
-      this.nameToContentKey.get(candidate) !== contentKey &&
-      altName
-    ) {
-      candidate = altName;
+    const existing = this.groups.get(contentKey);
+    if (!existing) {
+      this.groups.set(contentKey, {
+        representative: schema,
+        explicitName: explicitTitle,
+        preferredName,
+        altName,
+        entries: [entry],
+      });
+      return;
     }
-    const stem = candidate;
-    let n = 2;
-    while (
-      this.nameToContentKey.has(candidate) &&
-      this.nameToContentKey.get(candidate) !== contentKey
-    ) {
-      candidate = `${stem}_${n}`;
-      n += 1;
+    // Promote an explicit title supplied by a LATER occurrence — the first
+    // occurrence in traversal order doesn't get to permanently decide the
+    // name just because it happened to lack a `.meta({ title })`.
+    if (explicitTitle && !existing.explicitName) {
+      existing.explicitName = explicitTitle;
+      existing.representative = schema; // keep the titled schema as the stored component
     }
-
-    this.schemas[candidate] = schema;
-    this.nameToContentKey.set(candidate, contentKey);
-    this.contentKeyToName.set(contentKey, candidate);
-    return { $ref: `#/components/schemas/${candidate}` };
+    existing.entries.push(entry);
   }
 
-  /** `components.schemas` value, or undefined if nothing was hoisted. */
+  /** Phase 2 — assign one final name per content-key group (first-seen
+   * group order, so the numeric-suffix fallback stays deterministic) and
+   * write the resulting `$ref` into every entry collected for that group. */
+  finalize(): void {
+    for (const [contentKey, group] of this.groups) {
+      let candidate = group.explicitName ?? group.preferredName;
+      // Preferred name already taken by a DIFFERENT group — try the
+      // caller-supplied disambiguator (e.g. status-suffixed name) before
+      // falling back to numeric suffixes.
+      if (
+        this.nameToContentKey.has(candidate) &&
+        this.nameToContentKey.get(candidate) !== contentKey &&
+        group.altName
+      ) {
+        candidate = group.altName;
+      }
+      const stem = candidate;
+      let n = 2;
+      while (
+        this.nameToContentKey.has(candidate) &&
+        this.nameToContentKey.get(candidate) !== contentKey
+      ) {
+        candidate = `${stem}_${n}`;
+        n += 1;
+      }
+
+      this.nameToContentKey.set(candidate, contentKey);
+      this.schemas[candidate] = group.representative;
+      const ref = { $ref: `#/components/schemas/${candidate}` };
+      for (const entry of group.entries) entry.schema = ref;
+    }
+  }
+
+  /** `components.schemas` value, or undefined if nothing was hoisted.
+   * Only meaningful after `finalize()`. */
   get componentSchemas(): Record<string, unknown> | undefined {
     return Object.keys(this.schemas).length > 0 ? this.schemas : undefined;
   }
 }
 
 /**
- * Walk one operation's request/response bodies and hoist any hoistable
- * schema through `registry`, mutating the operation in place (the `schema`
- * fields are replaced with `$ref` objects). Content-type and status keys
- * are visited in sorted order so registration order — and therefore any
- * numeric-suffix disambiguation — doesn't depend on upstream extraction
- * order.
+ * Walk one operation's request/response bodies and register any hoistable
+ * schema with `registry` (phase 1 — see `ComponentSchemaRegistry`).
+ * Content-type and status keys are visited in sorted order so group
+ * creation order — and therefore any numeric-suffix disambiguation in
+ * `finalize()` — doesn't depend on upstream extraction order.
  */
 function hoistOperationSchemas(
   registry: ComponentSchemaRegistry,
@@ -783,7 +837,7 @@ function hoistOperationSchemas(
     for (const ctype of Object.keys(requestBody.content).sort()) {
       const entry = requestBody.content[ctype];
       if (isHoistableSchema(entry.schema)) {
-        entry.schema = registry.register(entry.schema, `${pascalId}Request`);
+        registry.collect(entry, entry.schema, `${pascalId}Request`);
       }
     }
   }
@@ -798,7 +852,8 @@ function hoistOperationSchemas(
       for (const ctype of Object.keys(content).sort()) {
         const entry = content[ctype];
         if (isHoistableSchema(entry.schema)) {
-          entry.schema = registry.register(
+          registry.collect(
+            entry,
             entry.schema,
             `${pascalId}Response`,
             `${pascalId}Response${status}`,
@@ -958,6 +1013,10 @@ export function mergeOpenApiParts(
         : `${collision.method}_${collision.path}`;
     hoistOperationSchemas(schemaRegistry, contractId, operation);
   }
+  // Phase 2 — every occurrence is collected now; pick one name per shared
+  // shape (explicit title wins regardless of which occurrence carried it)
+  // and write the `$ref`s.
+  schemaRegistry.finalize();
 
   const title = options?.title ?? "API Specification";
   const version = options?.version ?? "1.0.0";

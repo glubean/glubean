@@ -364,4 +364,75 @@ describe("mergeOpenApiParts — component schema hoisting (GLU-127)", () => {
     expect(second.components).toEqual(first.components);
     expect(second.paths).toEqual(first.paths);
   });
+
+  // codex R2 P2/P3 — regression coverage for both findings.
+
+  test("an explicit title on a LATER occurrence of a shared schema still wins the component name (naming is not traversal-order-dependent)", () => {
+    const shape = { type: "object", properties: { message: { type: "string" } } };
+    const untitled = { ...shape };
+    const titled = { ...shape, title: "ErrorResponse" };
+
+    // Sorted path traversal visits "/api/auth/sign-in/email" (untitled)
+    // BEFORE "/api/auth/sign-up/email" (titled) — the untitled occurrence
+    // is collected first.
+    const partA = buildOpenApiPartForHttp(
+      contract({
+        id: "auth.sign-in.email",
+        path: "/api/auth/sign-in/email",
+        cases: [{ key: "badCreds", status: 401, responseBody: untitled }],
+      }) as any,
+    );
+    const partB = buildOpenApiPartForHttp(
+      contract({
+        id: "auth.sign-up.email",
+        path: "/api/auth/sign-up/email",
+        cases: [{ key: "badInput", status: 400, responseBody: titled }],
+      }) as any,
+    );
+    const doc = mergeOpenApiParts([partA!, partB!]);
+    const components = doc.components as { schemas: Record<string, unknown> };
+
+    // The explicit title wins regardless of which occurrence carried it —
+    // NOT the derived "AuthSignInEmailResponse401" from the first-seen part.
+    expect(Object.keys(components.schemas)).toEqual(["ErrorResponse"]);
+
+    const refA = ((doc.paths as any)["/api/auth/sign-in/email"].post.responses["401"]
+      .content["application/json"].schema) as { $ref: string };
+    const refB = ((doc.paths as any)["/api/auth/sign-up/email"].post.responses["400"]
+      .content["application/json"].schema) as { $ref: string };
+    expect(refA.$ref).toBe("#/components/schemas/ErrorResponse");
+    expect(refB.$ref).toBe("#/components/schemas/ErrorResponse");
+  });
+
+  test("a schema title that sanitizes to a dangerous key (__proto__) still lands as a real, retrievable component", () => {
+    const part = buildOpenApiPartForHttp(
+      contract({
+        id: "danger.probe",
+        path: "/danger",
+        method: "GET",
+        cases: [
+          {
+            key: "ok",
+            status: 200,
+            responseBody: {
+              type: "object",
+              title: "__proto__",
+              properties: { x: { type: "string" } },
+            },
+          },
+        ],
+      }) as any,
+    );
+    const doc = mergeOpenApiParts([part!]);
+    const components = doc.components as { schemas: Record<string, unknown> };
+
+    // An own, enumerable "__proto__" component — not a hijacked prototype.
+    expect(Object.prototype.hasOwnProperty.call(components.schemas, "__proto__")).toBe(true);
+    expect(Object.keys(components.schemas)).toEqual(["__proto__"]);
+    expect(Object.getPrototypeOf(components.schemas)).toBe(null);
+
+    const ref = (doc.paths as any)["/danger"].get.responses["200"].content["application/json"]
+      .schema as { $ref: string };
+    expect(ref.$ref).toBe("#/components/schemas/__proto__");
+  });
 });
