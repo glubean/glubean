@@ -430,6 +430,122 @@ export const httpTest = test("http-test", async (ctx) => {
   }
 }, 15_000);
 
+// GLU-129 regression: dogfood on glubean-dogfood reproduced that
+// `glubean_run_local_file`/`glubean_get_local_events` returned secrets in
+// PLAINTEXT via `assertion.actual`/`assertion.expected` and `log.data` even
+// though GLU-104 had already wired trace header/body redaction. An
+// email/password sign-in contract's assertion on the response body copies
+// the raw login email into the assertion's `actual`/`expected`, and a
+// `ctx.log(...)` of the response echoes the session token again — neither
+// went through ANY redaction before this fix (only the `trace` event type
+// did). This test drives the same shape end-to-end (real local HTTP server,
+// real assertion, real log — a JWT-shaped token for key+pattern coverage,
+// the login email for global pattern coverage, matching the dogfood repro's
+// "assertion actual/expected values containing the login email") and
+// asserts the secret is masked everywhere it now surfaces: the
+// `runLocalTestsFromFile` result AND the `toLocalDebugEvents` projection
+// that backs `glubean_get_local_events`.
+test("runLocalTestsFromFile redacts secrets from assertion.actual/expected and log.data (GLU-129)", async () => {
+  const LOGIN_EMAIL = "victim@example.com";
+  const SESSION_JWT =
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ2aWN0aW0ifQ.dummy-signature-part-not-real";
+  const server = createServer((req, res) => {
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "set-cookie": "session=SUPER-SECRET-SESSION-COOKIE; Path=/; HttpOnly",
+    });
+    res.end(JSON.stringify({ ok: true, token: SESSION_JWT, email: LOGIN_EMAIL }));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const addr = server.address();
+  const baseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+
+  try {
+    const dir = await makeSessionTempDir();
+    await mkdir(join(dir, "tests"), { recursive: true });
+    await writeFile(join(dir, "package.json"), "{}");
+
+    await writeFile(
+      join(dir, "tests", "auth.test.ts"),
+      `import { test } from "@glubean/sdk";
+export const loginTest = test("login-test", async (ctx) => {
+  const res = await ctx.http.post("${baseUrl}/login", {
+    json: { email: "${LOGIN_EMAIL}", password: "hunter2" },
+  });
+  const body = await res.json<{ ok: boolean; token: string; email: string }>();
+  // Mirrors the dogfood repro: the assertion's actual/expected duplicate the
+  // raw login email from the response body, and a log echoes the session
+  // token again.
+  ctx.expect(body.email).toBe("${LOGIN_EMAIL}");
+  ctx.log("login response", body);
+});`,
+    );
+
+    const result = await runLocalTestsFromFile({
+      filePath: join(dir, "tests", "auth.test.ts"),
+      includeLogs: true,
+      includeTraces: true,
+    });
+
+    expect(result.summary.total).toBe(1);
+    expect(result.summary.passed).toBe(1);
+
+    const allAssertions = result.results.flatMap((r) => r.assertions);
+    const allLogs = result.results.flatMap((r) => r.logs);
+    expect(allAssertions.length).toBeGreaterThan(0);
+    expect(allLogs.length).toBeGreaterThan(0);
+
+    const assertionSerialized = JSON.stringify(allAssertions);
+    const logSerialized = JSON.stringify(allLogs);
+
+    // ── No plaintext secret in either channel ────────────────────────────
+    expect(assertionSerialized).not.toContain(LOGIN_EMAIL);
+    expect(logSerialized).not.toContain(SESSION_JWT);
+    expect(logSerialized).not.toContain(LOGIN_EMAIL);
+
+    // ── Structure/pass-state survives (not a blanket wipe): the assertion
+    //    that compared the login email still shows as passed, and both its
+    //    `actual` (from the response) and `expected` (the literal email
+    //    written in the test source) are masked, not merely one side.
+    const emailAssertion = allAssertions.find((a) => a.passed === true);
+    expect(emailAssertion).toBeDefined();
+    expect(emailAssertion!.actual).not.toBe(LOGIN_EMAIL);
+    expect(emailAssertion!.expected).not.toBe(LOGIN_EMAIL);
+
+    // ── Log data: key-based masking (token) survives structure — `ok` stays
+    //    visible, only the credential-shaped fields are replaced.
+    const loginLog = allLogs.find((l) => l.message === "login response");
+    expect(loginLog).toBeDefined();
+    const loginLogData = loginLog!.data as Record<string, unknown>;
+    expect(loginLogData.ok).toBe(true);
+    expect(loginLogData.token).not.toBe(SESSION_JWT);
+    expect(loginLogData.email).not.toBe(LOGIN_EMAIL);
+
+    // ── glubean_get_local_events (toLocalDebugEvents) inherits the same
+    //    redacted data — it's built directly from `result.results`, so a
+    //    fix only at that accumulation point closes BOTH MCP tool surfaces.
+    const snapshot: LocalRunSnapshot = {
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      clientRunId: "test-run",
+      fileUrl: result.fileUrl,
+      projectRoot: result.projectRoot,
+      summary: result.summary,
+      results: result.results,
+      includeLogs: true,
+      includeTraces: true,
+    };
+    const events = toLocalDebugEvents(snapshot);
+    const eventsSerialized = JSON.stringify(events);
+    expect(eventsSerialized).not.toContain(SESSION_JWT);
+    expect(eventsSerialized).not.toContain(LOGIN_EMAIL);
+    expect(events.some((e) => e.type === "assertion")).toBe(true);
+    expect(events.some((e) => e.type === "log")).toBe(true);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+}, 15_000);
+
 test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
   const trace = {
     method: "POST",

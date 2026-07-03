@@ -350,6 +350,87 @@ export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown 
   return (redacted as Record<string, unknown>).data;
 }
 
+// GLU-129: GLU-104 only wired redaction for the `trace` event type
+// (`redactMcpTrace` above). But `glubean_run_local_file`/`glubean_get_local_events`
+// also return `assertion` (actual/expected — which duplicate raw request/
+// response material a test asserted on, e.g. a login test's
+// `expect(res.body.token)` copies the session token straight into
+// `actual`), `log` (`ctx.log(...)` can echo a response verbatim), `status`,
+// and `error` events completely unredacted — the SAME dogfood repro that
+// exercises a trace (which WAS masked) also exercises these sibling event
+// types (which were NOT), so the secret still reached the agent. `BUILTIN_SCOPES`
+// already declares `assertion.*`/`log.*`/`status.*`/`error.*` scopes (used by
+// the CLI's `glubean run` path, packages/cli/src/commands/run.ts) and
+// `MCP_TRACE_REDACTION_SCOPES` already compiles them (it's built from the FULL
+// `BUILTIN_SCOPES`, not just the trace subset) — these helpers just call
+// `redactEvent` at the accumulation points that were missing it, matching the
+// scope-per-event-type dispatch `redactEvent` already does internally.
+function redactMcpAssertionFields(fields: {
+  message: string;
+  actual?: unknown;
+  expected?: unknown;
+}): { message: string; actual?: unknown; expected?: unknown } {
+  return redactEvent(
+    { type: "assertion", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+}
+
+function redactMcpLogFields(fields: {
+  message: string;
+  data?: unknown;
+}): { message: string; data?: unknown } {
+  return redactEvent(
+    { type: "log", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+}
+
+function redactMcpStatusFields(fields: {
+  error?: string;
+  stack?: string;
+}): { error?: string; stack?: string } {
+  return redactEvent(
+    { type: "status", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+}
+
+function redactMcpErrorFields(fields: {
+  message: string;
+  stack?: string;
+}): { message: string; stack?: string } {
+  return redactEvent(
+    { type: "error", ...fields },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as typeof fields;
+}
+
+// GLU-129: `bootstrap:failed`/`session:setup:failed`/`run:failed` are
+// ProjectRunner-level orchestration failures (a different event namespace
+// than the per-test `ExecutionEvent`s above — no `testId`, no accumulator),
+// but their `.message`/`.error` text still reaches the MCP caller verbatim
+// via `orchestrationError` → `safe.error`. Pattern-scan it through the same
+// `error.message` scope (raw-string handler — no key-based masking needed
+// for a free-text message, just JWT/Bearer/AWS-key/email/etc pattern scan).
+function redactMcpMessage(message: string): string {
+  const redacted = redactEvent(
+    { type: "error", message },
+    MCP_TRACE_REDACTION_SCOPES,
+    "partial",
+    64,
+  ) as unknown as { message: string };
+  return redacted.message;
+}
+
 export async function findProjectRoot(startDir: string): Promise<string> {
   let dir = startDir;
   while (true) {
@@ -1251,17 +1332,21 @@ export async function runLocalTestsFromFile(args: {
     // Surface non-file failure events so callers can distinguish them from
     // "clean empty run" outcomes.
     if (evt.type === "bootstrap:failed") {
-      orchestrationError = `Bootstrap failed: ${evt.error.message}`;
+      orchestrationError = redactMcpMessage(`Bootstrap failed: ${evt.error.message}`);
       continue;
     }
     if (evt.type === "session:setup:failed") {
-      orchestrationError = `Session setup failed${evt.error ? `: ${evt.error}` : ""}`;
+      orchestrationError = redactMcpMessage(
+        `Session setup failed${evt.error ? `: ${evt.error}` : ""}`,
+      );
       continue;
     }
     if (evt.type === "run:failed") {
       // Prefer the more specific earlier error if we already captured one.
       if (!orchestrationError) {
-        orchestrationError = `Run failed (${evt.reason})${evt.error ? `: ${evt.error}` : ""}`;
+        orchestrationError = redactMcpMessage(
+          `Run failed (${evt.reason})${evt.error ? `: ${evt.error}` : ""}`,
+        );
       }
       continue;
     }
@@ -1291,18 +1376,27 @@ export async function runLocalTestsFromFile(args: {
       case "log": {
         if (!includeLogs || !eventTestId) break;
         const acc = accumulators.get(eventTestId);
-        if (acc) acc.logs.push({ message: event.message, data: event.data });
+        if (acc) {
+          acc.logs.push(
+            redactMcpLogFields({ message: event.message, data: event.data }),
+          );
+        }
         break;
       }
       case "assertion": {
         if (!eventTestId) break;
         const acc = accumulators.get(eventTestId);
         if (acc) {
-          acc.assertions.push({
-            passed: event.passed,
+          const redacted = redactMcpAssertionFields({
             message: event.message,
             actual: event.actual,
             expected: event.expected,
+          });
+          acc.assertions.push({
+            passed: event.passed,
+            message: redacted.message,
+            actual: redacted.actual,
+            expected: redacted.expected,
           });
         }
         break;
@@ -1318,8 +1412,14 @@ export async function runLocalTestsFromFile(args: {
         const acc = accumulators.get(eventTestId);
         if (!acc) break;
         acc.statusSuccess = event.status === "completed";
-        if (event.error) acc.errorMessage = event.error;
-        if (event.stack) acc.errorStack = event.stack;
+        if (event.error || event.stack) {
+          const redactedStatus = redactMcpStatusFields({
+            error: event.error,
+            stack: event.stack,
+          });
+          if (redactedStatus.error) acc.errorMessage = redactedStatus.error;
+          if (redactedStatus.stack) acc.errorStack = redactedStatus.stack;
+        }
 
         // Finalize this test's result.
         const allAssertionsPassed = acc.assertions.every((a) => a.passed);
@@ -1351,16 +1451,20 @@ export async function runLocalTestsFromFile(args: {
         break;
       }
       case "error": {
+        const redactedError = redactMcpErrorFields({
+          message: event.message,
+          stack: event.stack,
+        });
         if (!eventTestId) {
           // Subprocess crashed before starting any test (e.g. tsx failed to
           // start, syntax error before first `start` event). Capture as an
           // orchestration error so the caller sees a non-empty error field
           // instead of total:0 which looks like "no tests found" success.
-          if (!orchestrationError) orchestrationError = event.message;
+          if (!orchestrationError) orchestrationError = redactedError.message;
           break;
         }
         const acc = accumulators.get(eventTestId);
-        if (acc && !acc.errorMessage) acc.errorMessage = event.message;
+        if (acc && !acc.errorMessage) acc.errorMessage = redactedError.message;
         break;
       }
       case "warning": {
@@ -1370,7 +1474,13 @@ export async function runLocalTestsFromFile(args: {
         // code and are intentionally NOT surfaced at the run level since
         // they're per-test concerns, not project-wide).
         if (event.code && event.message) {
-          warningSet.add(event.message);
+          const redactedWarning = redactEvent(
+            { type: "warning", message: event.message },
+            MCP_TRACE_REDACTION_SCOPES,
+            "partial",
+            64,
+          ) as unknown as { message: string };
+          warningSet.add(redactedWarning.message);
         }
         break;
       }
