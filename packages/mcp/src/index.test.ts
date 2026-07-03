@@ -685,6 +685,66 @@ export const loginTest = test("login-test", async (ctx) => {
   }
 }, 15_000);
 
+// codex R5 P1: a sensitive KEY whose value is a nested object/array
+// (`{"credentials":{"value":"secret"}}`) is masked STRUCTURALLY in
+// `actual`/`expected` (the whole subtree under "credentials" gets replaced),
+// but a flat "key":"value" pair-matcher only ever sees the INNER
+// `"value":"secret"` pair — a non-credential key name — and never learns the
+// OUTER key was sensitive, so the nested secret survived in `message`. Only
+// a structural (bracket-scan + real engine.redact) approach catches this.
+test("runLocalTestsFromFile redacts a NESTED secret under a sensitive-key container from the assertion message (GLU-129 codex R5 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const NESTED_SECRET = "opaque-nested-session-id";
+  await writeFile(
+    join(dir, "tests", "nested.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("nested-secret", async (ctx) => {
+  ctx.expect({ credentials: { value: "${NESTED_SECRET}" } }).toEqual({
+    credentials: { value: "${NESTED_SECRET}" },
+  });
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "nested.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(NESTED_SECRET);
+  expect(assertion.message).toContain("credentials");
+  const actual = assertion.actual as Record<string, unknown>;
+  expect(JSON.stringify(actual)).not.toContain(NESTED_SECRET);
+}, 15_000);
+
+// codex R5 P2: a literal `...` INSIDE a genuine, fully-quoted (untruncated)
+// secret value must not be mistaken for inspect()'s truncation marker — the
+// whole value (including the part after the dots) must still be masked.
+test("runLocalTestsFromFile redacts a secret containing a literal ellipsis in the assertion message (GLU-129 codex R5 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const ELLIPSIS_SECRET = "abc...opaque-session-id";
+  await writeFile(
+    join(dir, "tests", "ellipsis.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("ellipsis-secret", async (ctx) => {
+  ctx.expect({ token: "${ELLIPSIS_SECRET}" }).toEqual({ token: "${ELLIPSIS_SECRET}" });
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "ellipsis.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  // Neither the whole value nor just the post-ellipsis suffix may leak.
+  expect(assertion.message).not.toContain(ELLIPSIS_SECRET);
+  expect(assertion.message).not.toContain("opaque-session-id");
+  expect(assertion.message).toContain("token");
+}, 15_000);
+
 test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
   const trace = {
     method: "POST",

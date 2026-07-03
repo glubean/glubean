@@ -365,68 +365,162 @@ export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown 
 // `BUILTIN_SCOPES`, not just the trace subset) — these helpers just call
 // `redactEvent` at the accumulation points that were missing it, matching the
 // scope-per-event-type dispatch `redactEvent` already does internally.
-// GLU-129 (codex R3 P1, hardened R4 P1): `ctx.expect(...)` auto-generates
-// `message` by JSON-stringifying `actual`/`expected` INTO the message text
-// itself (`Expectation._report()`/`inspect()`, packages/sdk/src/expect.ts —
-// `inspect()` uses real `JSON.stringify` for non-primitive values, so an
-// object embeds as JSON: `expected {"token":"secret"} to equal
-// {"token":"secret"}`). Redacting `actual`/`expected` alone leaves that SAME
-// opaque, key-shaped credential sitting in plaintext inside `message` —
-// `assertion.message`'s `raw-string` handler only pattern-scans, it has no
-// notion of keys, and `message` isn't independently-authored free text
-// (unlike a `ctx.log(message, ...)` label) — it's an SDK-derived rendering
-// of the same values.
+// GLU-129 (codex R3 P1, hardened R4 P1 → R5 P1/P2): `ctx.expect(...)`
+// auto-generates `message` by JSON-stringifying `actual`/`expected` INTO the
+// message text itself (`Expectation._report()`/`inspect()`,
+// packages/sdk/src/expect.ts — `inspect()` uses real `JSON.stringify` for
+// non-primitive values, so an object embeds as JSON: `expected
+// {"token":"secret"} to equal {"token":"secret"}`). Redacting `actual`/
+// `expected` alone leaves that SAME credential sitting in plaintext inside
+// `message` — `assertion.message`'s `raw-string` handler only pattern-scans,
+// it has no notion of keys, and `message` isn't independently-authored free
+// text (unlike a `ctx.log(message, ...)` label) — it's an SDK-derived
+// rendering of the same values.
 //
-// `inspect()` caps embedded JSON at 64 chars and TRUNCATES mid-object
-// (`json.slice(0, 61) + "..."`) rather than omitting it, so a longer
-// asserted object leaves an early key/value pair — often the FIRST field,
-// frequently the credential one — as a syntactically-INVALID JSON fragment
-// (`{"token":"secret",...`, no closing brace). An R3-round fix that first
-// tries `JSON.parse()` on a bracket-balanced substring FAILS on exactly this
-// truncated case and falls back to copying it verbatim (codex R4 P1). This
-// version instead regex-matches individual `"key":"value"` pairs directly —
-// it doesn't require balanced brackets or a fully valid JSON document, so a
-// truncated fragment is caught the same as a complete one — and re-uses the
-// SAME (now key-aware) `assertion.actual` scope to decide per-pair whether a
-// key is sensitive, so there is exactly one source of truth for "which keys
-// are credentials" (this function never hardcodes/duplicates that list).
+// History (why this isn't a regex pair-matcher): R3 tried bracket-balanced
+// `JSON.parse()` on the embedded substring; R4 found `inspect()` TRUNCATES a
+// long object mid-string (`json.slice(0, 61) + "..."`, invalid JSON), which
+// made `JSON.parse` throw and fall back to copying the fragment verbatim.
+// The R4 fix switched to matching individual `"key":"value"` pairs via
+// regex — but R5 found that approach can only ever see FLAT pairs: a
+// sensitive KEY whose value is a nested object/array (`{"credentials":
+// {"value":"secret"}}`) masks correctly in `actual`/`expected` (the engine
+// masks the whole subtree once "credentials" matches), but the pair-regex
+// only inspects the INNER `"value":"secret"` pair — a non-credential key
+// name — and never learns the outer key was sensitive, so the nested secret
+// stayed in `message`. R5 also found the truncation lookahead treated a
+// literal `...` INSIDE a genuine (non-truncated, fully-quoted) secret value
+// as the end of the value, only masking the prefix.
 //
-// Documented residual: only QUOTED STRING values are matched (a numeric/
-// boolean value under a sensitive key, e.g. `{"token":12345}`, is not this
-// function's concern) — real credential values are strings in practice, and
-// `actual`/`expected` themselves already mask a non-string credential value
-// via key-based structural redaction regardless of what `message` shows.
-//
-// The value group is a LAZY repetition that stops at the FIRST unescaped `"`
-// OR at inspect()'s literal `"..."` truncation marker (a lookahead, not
-// consumed). A GREEDY `*` here — the first version of this regex — has no
-// upper bound other than "some `"` eventually follows", so on an UNTERMINATED
-// value (inspect() cut it off mid-string with no closing quote) it runs past
-// the truncation point, through unrelated message text, and matches the
-// NEXT key's opening quote as if it were this value's closing quote —
-// silently corrupting/skipping that next pair (codex R4 P1's own fix hid a
-// second-order bug of this kind on a two-field truncated object; caught by
-// this file's regression test, not by codex). Stopping lazily at "..." keeps
-// each match bounded to its own key/value pair regardless of truncation.
-const MESSAGE_KEY_VALUE_PAIR = /"([A-Za-z0-9_.-]+)"\s*:\s*"((?:\\.|[^"\\])*?)(?="|\.\.\.)/g;
+// This version goes back to STRUCTURAL redaction (bracket-scan + real
+// `engine.redact` via `redactEvent`, same as R3) — which correctly masks
+// whole subtrees under nested sensitive keys and has no opinion about `...`
+// appearing INSIDE a property-quoted string (`JSON.parse` handles that
+// fine) — and adds a TRUNCATION REPAIR step for the R4 case: when the
+// bracket-scan runs off the end of `text` without balancing (truncated),
+// close the dangling string/brackets and retry `JSON.parse` before giving
+// up. `scanBracketRun` is quote/escape-aware so a literal `{`/`}`/`"`
+// *inside* a string value doesn't miscount depth.
+// `inspect()` (packages/sdk/src/expect.ts) NEVER renders a single value past
+// 64 characters — `json.slice(0, maxLen - 3) + "..."` when truncating, or
+// the untruncated `json` (≤ maxLen) otherwise — so 64 is a hard upper bound
+// on any ONE inspect() call's output, whether or not it got cut off.
+const INSPECT_MAX_LEN = 64;
 
-function redactMessageKeyValuePairs(text: string): string {
-  return text.replace(MESSAGE_KEY_VALUE_PAIR, (full, key: string, value: string) => {
-    if (!value) return full; // empty value — nothing to hide
-    const redacted = redactEvent(
-      { type: "assertion", actual: { [key]: value } },
-      MCP_TRACE_REDACTION_SCOPES,
-      "partial",
-      64,
-    ) as unknown as { actual: Record<string, unknown> };
-    const maskedValue = redacted.actual[key];
-    if (typeof maskedValue !== "string" || maskedValue === value) return full;
-    // No trailing `"` here: the lookahead didn't CONSUME the terminator (a
-    // real `"` or the literal `...`), so it's still sitting untouched in the
-    // surrounding text right after this match and will follow naturally —
-    // adding one here would double it up (`..."` + original `"` → `""`).
-    return `"${key}":"${maskedValue}`;
-  });
+function scanBracketRun(text: string, start: number): { end: number; balanced: boolean } {
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let j = start;
+  // Bound the scan to inspect()'s own cap (codex R5 P1/P2 follow-up, caught
+  // in self-review before it reached codex): a `toEqual` message embeds
+  // `inspect(actual)` AND `inspect(expected)` — "expected {X} to equal {Y}".
+  // If X is truncated (unterminated string, `inString` never flips back to
+  // false), an UNBOUNDED scan doesn't stop at X's own truncation point — it
+  // keeps going, through " to equal ", and absorbs Y's `{` too (silently,
+  // since scanning "inside a string" ignores bracket characters), producing
+  // ONE garbled candidate spanning both X and Y that the repair step below
+  // can't recover — X ends up completely unmasked. Capping the scan at
+  // `INSPECT_MAX_LEN` guarantees it can never reach past the end of a SINGLE
+  // inspect() call's own output, so X and Y are always scanned separately.
+  const limit = Math.min(text.length, start + INSPECT_MAX_LEN);
+  for (; j < limit; j++) {
+    const c = text[j];
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === open) depth++;
+    else if (c === close) {
+      depth--;
+      if (depth === 0) return { end: j + 1, balanced: true };
+    }
+  }
+  return { end: j, balanced: false };
+}
+
+// Best-effort repair of a truncated JSON fragment: strip inspect()'s literal
+// `"..."` suffix (if present), close a string left open mid-value, then
+// close any still-open `{`/`[` in LIFO order. Returns `undefined` (not
+// throws) if the result still isn't valid JSON — callers must treat that as
+// "couldn't recover," not as "nothing sensitive here."
+function repairTruncatedJson(fragment: string): unknown {
+  let s = fragment.endsWith("...") ? fragment.slice(0, -3) : fragment;
+  let quoteCount = 0;
+  let escape = false;
+  for (const c of s) {
+    if (escape) { escape = false; continue; }
+    if (c === "\\") { escape = true; continue; }
+    if (c === '"') quoteCount++;
+  }
+  if (quoteCount % 2 === 1) s += '"'; // close a dangling open string
+  const stack: string[] = [];
+  let inString = false;
+  escape = false;
+  for (const c of s) {
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === "{") stack.push("}");
+    else if (c === "[") stack.push("]");
+    else if (c === "}" || c === "]") stack.pop();
+  }
+  while (stack.length > 0) s += stack.pop();
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
+function redactMessageJsonSubstrings(text: string): string {
+  let result = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "{" || ch === "[") {
+      const { end, balanced } = scanBracketRun(text, i);
+      const candidate = text.slice(i, end);
+      let parsed: unknown;
+      if (balanced) {
+        try {
+          parsed = JSON.parse(candidate);
+        } catch {
+          parsed = undefined;
+        }
+      } else {
+        parsed = repairTruncatedJson(candidate);
+      }
+      if (parsed !== null && typeof parsed === "object") {
+        const redacted = redactEvent(
+          { type: "assertion", actual: parsed },
+          MCP_TRACE_REDACTION_SCOPES,
+          "partial",
+          64,
+        ) as unknown as { actual: unknown };
+        result += JSON.stringify(redacted.actual);
+        // Truncation happened (bracket run never balanced) — the repaired
+        // reconstruction above is now a COMPLETE object, which is a
+        // different (safe) rendering than the original abbreviated one;
+        // keep signaling "there was more" so this doesn't read as exhaustive.
+        if (!balanced) result += "...";
+        i = end;
+        continue;
+      }
+    }
+    result += ch;
+    i++;
+  }
+  return result;
 }
 
 function redactMcpAssertionFields(fields: {
@@ -442,7 +536,7 @@ function redactMcpAssertionFields(fields: {
   ) as unknown as typeof fields;
   return {
     ...redacted,
-    message: redactMessageKeyValuePairs(redacted.message),
+    message: redactMessageJsonSubstrings(redacted.message),
   };
 }
 
