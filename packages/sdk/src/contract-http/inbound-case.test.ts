@@ -396,18 +396,14 @@ test("OpenAPI merge: two surfaces on the same method+path both survive (GLU-116)
   ]);
 });
 
-test("OpenAPI merge: re-merging the same operationId at the same path+method is a no-op, not a collision", () => {
+test("OpenAPI merge: a single contract with only one part never produces a collision entry", () => {
   const api = makeApi();
   const health = api("shared.health", {
     endpoint: "GET /health",
     cases: { ok: { description: "ok", expect: { status: 200 } } },
   }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
 
-  // Same contract's part appears twice (e.g. overlapping project globs).
-  const doc = renderArtifact(openapiArtifact, [
-    health._extracted as never,
-    health._extracted as never,
-  ]);
+  const doc = renderArtifact(openapiArtifact, [health._extracted as never]);
   const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
   expect(Object.keys(paths)).toEqual(["/health"]);
   expect((doc as Record<string, unknown>)["x-glubean-surface-collisions"]).toBeUndefined();
@@ -452,7 +448,13 @@ test("OpenAPI merge: three-plus surfaces on the same method+path all survive", (
   ]);
 });
 
-test("OpenAPI merge: re-encountering an already-relocated loser a third time does not duplicate its collision entry", () => {
+test("OpenAPI merge: a part re-included multiple times is never silently absorbed — every occurrence after the first survives in the collision list", () => {
+  // Collision detection has NO dedup/no-op branch (codex R2 + R4 + R5 —
+  // neither operationId equality nor structural equality is a safe "same
+  // occurrence" signal; see mergeOpenApiParts' doc comment). If a caller
+  // feeds the same part multiple times (e.g. overlapping project globs),
+  // every occurrence after the first lands in the collision list — a
+  // harmless duplicate, never a silent drop.
   const dashboard = contract.http.with("glubean-dashboard", {});
   const platform = contract.http.with("glubean-platform-public", {});
   const spec = {
@@ -468,8 +470,6 @@ test("OpenAPI merge: re-encountering an already-relocated loser a third time doe
     spec,
   ) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
 
-  // platform.health's part appears twice — e.g. two overlapping project
-  // globs both matching contracts/platform/health.contract.ts.
   const doc = renderArtifact(openapiArtifact, [
     dashboardHealth._extracted as never,
     platformHealth._extracted as never,
@@ -480,10 +480,10 @@ test("OpenAPI merge: re-encountering an already-relocated loser a third time doe
       "x-glubean-surface-collisions"?: Array<{ operation: Record<string, unknown> }>;
     }
   )["x-glubean-surface-collisions"]!;
-  // Exactly one collision entry for platform.health — the third occurrence
-  // is a no-op, not a second collision-list append (codex R2 P2).
-  expect(collisions).toHaveLength(1);
-  expect(collisions[0].operation.operationId).toBe("platform.health");
+  // Two collision entries — both platform.health occurrences after the
+  // canonical dashboard.health slot survive (neither is dropped).
+  expect(collisions).toHaveLength(2);
+  expect(collisions.every((c) => c.operation.operationId === "platform.health")).toBe(true);
 });
 
 test("OpenAPI merge: two surfaces reusing the SAME contract id at the same method+path still both survive (codex R4)", () => {
@@ -525,6 +525,47 @@ test("OpenAPI merge: two surfaces reusing the SAME contract id at the same metho
   expect(collisions).toHaveLength(1);
   expect(collisions[0].operation.operationId).toBe("health");
   expect(collisions[0].operation.summary).toBe("private health");
+});
+
+test("OpenAPI merge: two DIFFERENT surfaces whose contracts render byte-identical operations still both survive (codex R5)", () => {
+  // `instanceName` never appears in the built operation object, so two
+  // genuinely different scoped surfaces with the same id/endpoint/cases
+  // render byte-IDENTICAL operations. A content-equality dedup heuristic
+  // (tried in an earlier round) would silently coalesce these — the exact
+  // class of bug GLU-116 is about — because it can't distinguish "same
+  // contract re-encountered" from "different surface, coincidentally
+  // identical". There is no dedup branch at all, so both survive.
+  const a = contract.http.with("surface-a", {});
+  const b = contract.http.with("surface-b", {});
+  const spec = {
+    endpoint: "GET /health",
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  };
+  const aHealth = a("health", spec) as ProtocolContract<
+    HttpContractSpec,
+    HttpPayloadSchemas,
+    HttpContractMeta
+  >;
+  const bHealth = b("health", spec) as ProtocolContract<
+    HttpContractSpec,
+    HttpPayloadSchemas,
+    HttpContractMeta
+  >;
+
+  const doc = renderArtifact(openapiArtifact, [
+    aHealth._extracted as never,
+    bHealth._extracted as never,
+  ]);
+  const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
+  expect(paths["/health"].get.operationId).toBe("health");
+
+  const collisions = (
+    doc as {
+      "x-glubean-surface-collisions"?: Array<{ operation: Record<string, unknown> }>;
+    }
+  )["x-glubean-surface-collisions"]!;
+  expect(collisions).toHaveLength(1);
+  expect(collisions[0].operation.operationId).toBe("health");
 });
 
 test("OpenAPI merge: non-operation Path Item fields (parameters/summary) never route through the collision list", () => {
