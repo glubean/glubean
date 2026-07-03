@@ -287,6 +287,54 @@ test("OpenAPI: an inbound-only contract emits NO path (null part, not a fake ope
 });
 
 // ---------------------------------------------------------------------------
+// OpenAPI (GLU-119): path keys must always start with "/", even when the
+// contract endpoint omits the leading slash (the HTTP adapter accepts both
+// forms at runtime, but OpenAPI `paths` keys are required to start with "/").
+// ---------------------------------------------------------------------------
+
+test("OpenAPI: endpoint without a leading slash gets normalized to a valid path key", () => {
+  const api = makeApi();
+  const c = api("auth.sign-in.email", {
+    endpoint: "POST api/auth/sign-in/email",
+    cases: { ok: { description: "signs in", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const part = buildOpenApiPartForHttp(c._extracted as never)!;
+  const paths = part.paths as Record<string, unknown>;
+  expect(Object.keys(paths)).toEqual(["/api/auth/sign-in/email"]);
+  expect(paths["api/auth/sign-in/email"]).toBeUndefined();
+});
+
+test("OpenAPI: bare-word endpoint without a leading slash (e.g. GET health) is normalized", () => {
+  const api = makeApi();
+  const c = api("health.check", {
+    endpoint: "GET health",
+    cases: { ok: { description: "reports health", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const part = buildOpenApiPartForHttp(c._extracted as never)!;
+  expect(Object.keys(part.paths as Record<string, unknown>)).toEqual(["/health"]);
+});
+
+test("OpenAPI: leading-slash endpoint is unaffected (no double slash)", () => {
+  const api = makeApi();
+  const c = api("stripe.webhooks.slash", {
+    endpoint: "POST /webhooks/stripe",
+    cases: { ack: { description: "we ACK", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const part = buildOpenApiPartForHttp(c._extracted as never)!;
+  expect(Object.keys(part.paths as Record<string, unknown>)).toEqual(["/webhooks/stripe"]);
+});
+
+test("OpenAPI: path params still convert to {param} when endpoint omits the leading slash", () => {
+  const api = makeApi();
+  const c = api("users.get", {
+    endpoint: "GET api/users/:id",
+    cases: { ok: { description: "gets a user", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const part = buildOpenApiPartForHttp(c._extracted as never)!;
+  expect(Object.keys(part.paths as Record<string, unknown>)).toEqual(["/api/users/{id}"]);
+});
+
+// ---------------------------------------------------------------------------
 // Markdown (inbound-artifact-design route C) + null-part pipeline (D6)
 // ---------------------------------------------------------------------------
 

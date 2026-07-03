@@ -261,6 +261,12 @@ export function buildOpenApiPartForHttp(
   const method = match[1].toLowerCase();
   let apiPath = match[2];
 
+  // OpenAPI requires every `paths` key to start with "/" (contract
+  // endpoints may omit it — the HTTP adapter accepts both forms at
+  // runtime, GLU-119). Normalize here so projection always emits valid
+  // OpenAPI; don't double-prefix paths that already have it.
+  if (!apiPath.startsWith("/")) apiPath = `/${apiPath}`;
+
   // Convert :param to {param} for OpenAPI
   apiPath = apiPath.replace(/:(\w+)/g, "{$1}");
 
