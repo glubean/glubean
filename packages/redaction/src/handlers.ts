@@ -133,25 +133,51 @@ function looksLikeFormUrlEncoded(str: string): boolean {
 
 /**
  * Redact a NON-object (string) HTTP body captured as raw text by the runner —
- * a form-urlencoded request body, or a `text/*` / `xml` response body (the
- * harness only parses `json` content-types into objects; everything else stays
- * a string). GLU-104: the plain `json` handler value-pattern-scans a string
- * but never applies KEY-based rules to it, so a form body `password=hunter2`
- * or `client_secret=plain` leaked. Here we:
- *   1. run the value-pattern scan (jwt/bearer/aws/etc) over the whole string;
- *   2. if it's clearly form-urlencoded, additionally mask the values of
+ * a form-urlencoded request body, or a `text/*` / `xml` / mislabelled body (the
+ * harness only parses `application/json` content-types into objects; everything
+ * else stays a string). GLU-104: the plain `json` handler value-pattern-scans a
+ * string but never applies KEY-based rules to it, so a form body
+ * `password=hunter2` or a JSON body served as `text/plain`
+ * (`{"token":"plain"}`) leaked. Here we:
+ *   0. if the string parses as a JSON object/array (a body mislabelled as text,
+ *      or any `content-type` the harness didn't treat as json — codex R2 P2),
+ *      redact it STRUCTURALLY like a real object body, then re-serialize;
+ *   1. otherwise run the value-pattern scan (jwt/bearer/aws/etc) over the whole
+ *      string;
+ *   2. and if it's clearly form-urlencoded, additionally mask the values of
  *      sensitive-NAMED params via the same key rules objects get.
  *
  * Residual (documented): a secret under a sensitive element name inside an
- * XML/text body that is NOT form-urlencoded (`<password>plain</password>`) is
- * only caught if its value matches a value-pattern — generic markup parsing is
- * out of scope. Trace bodies for such content still fare no worse than before.
+ * XML/text body that is neither JSON nor form-urlencoded
+ * (`<password>plain</password>`) is only caught if its value matches a
+ * value-pattern — generic markup parsing is out of scope.
  */
 function redactStringBody(
   raw: string,
   ctx: HandlerContext,
   engine: RedactionEngineInterface,
 ): RedactionResult {
+  // 0. JSON-as-string: a body captured as text that is actually JSON
+  //    (mislabelled content-type). Parse and redact structurally so KEY rules
+  //    apply, not just value patterns. Only attempt for `{`/`[`-led strings so
+  //    a bare number/quoted-string isn't needlessly reserialized.
+  const trimmed = raw.trim();
+  if (trimmed && (trimmed[0] === "{" || trimmed[0] === "[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed !== null && typeof parsed === "object") {
+        const r = engine.redact(parsed, { id: ctx.scopeId, name: ctx.scopeName });
+        return {
+          value: JSON.stringify(r.value),
+          redacted: r.redacted,
+          details: r.details,
+        };
+      }
+    } catch {
+      // Not valid JSON — fall through to string scanning below.
+    }
+  }
+
   // 1. Value-pattern scan over the raw string (walkString path).
   const scanned = engine.redact(raw, { id: ctx.scopeId, name: ctx.scopeName });
   let working = typeof scanned.value === "string" ? scanned.value : raw;
@@ -274,6 +300,18 @@ export const headersHandler: RedactionHandler = {
             plugin: "cookie",
             original: headerValue,
           });
+        } else if (headerValue.trim() !== "") {
+          // Non-empty but UNPARSEABLE (no `name=value` pair, e.g. a bare
+          // opaque token `Cookie: <session-token>`). Structural masking found
+          // nothing to key on, so mask the whole value — a Cookie header is a
+          // sensitive header by definition and this fails closed (codex R2 P2).
+          output[headerName] = maskCookieValue(headerValue, engine);
+          didRedact = true;
+          details.push({
+            path: headerName,
+            plugin: "cookie",
+            original: headerValue,
+          });
         } else {
           output[headerName] = headerValue;
         }
@@ -339,13 +377,32 @@ function maskCookieValue(value: string, engine: RedactionEngineInterface): strin
 }
 
 /**
+ * Standard Set-Cookie attribute names (lower-cased). Anything in attribute
+ * position that is NOT one of these is treated as a leaked fragment of a
+ * quoted/`;`-bearing cookie value and masked (codex R2 P2 edge).
+ */
+const KNOWN_COOKIE_ATTRS = new Set([
+  "path",
+  "domain",
+  "expires",
+  "max-age",
+  "samesite",
+  "secure",
+  "httponly",
+  "priority",
+  "partitioned",
+]);
+
+/**
  * Redact a Set-Cookie header value.
  *
  * GLU-104: masks the cookie value UNCONDITIONALLY (a Set-Cookie value is a
  * credential being minted — session id / auth token — and the cookie name is
  * arbitrary, so name-based selectivity leaked opaquely-named session cookies).
- * Cookie attributes (Path, Domain, HttpOnly, Secure, SameSite, Max-Age,
- * Expires) are structural, not secret, and are preserved verbatim.
+ * Standard cookie attributes (Path, Domain, HttpOnly, Secure, SameSite,
+ * Max-Age, Expires, Priority, Partitioned) are structural, not secret, and are
+ * preserved verbatim; a NON-standard token in attribute position (which a
+ * naive `;` split of a quoted value can produce) is masked, not leaked.
  */
 function redactSetCookie(
   raw: string,
@@ -353,23 +410,35 @@ function redactSetCookie(
   engine: RedactionEngineInterface,
 ): RedactionResult {
   const parts = raw.split(";").map((p) => p.trim());
-  if (parts.length === 0) {
-    return { value: raw, redacted: false, details: [] };
-  }
 
   // First part is name=value
-  const first = parts[0];
+  const first = parts[0] ?? "";
   const eq = first.indexOf("=");
   if (eq === -1) {
-    return { value: raw, redacted: false, details: [] };
+    // No `name=value` structure (malformed / bare opaque token). A Set-Cookie
+    // header is a minted credential by definition — fail closed and mask the
+    // whole value rather than return it verbatim (codex R2 P2).
+    if (raw.trim() === "") {
+      return { value: raw, redacted: false, details: [] };
+    }
+    return {
+      value: maskCookieValue(raw, engine),
+      redacted: true,
+      details: [{ path: "set-cookie", plugin: "set-cookie", original: raw }],
+    };
   }
 
   const cookieName = first.slice(0, eq).trim();
   const cookieValue = first.slice(eq + 1).trim();
   const redactedValue = maskCookieValue(cookieValue, engine);
 
-  // Reconstruct: redacted name=value + original attributes
-  const attributes = parts.slice(1);
+  // Attributes: keep standard ones verbatim; mask any non-standard token,
+  // which is most likely a leaked fragment of a `;`-bearing/quoted value.
+  const attributes = parts.slice(1).map((attr) => {
+    const attrName = attr.split("=")[0].trim().toLowerCase();
+    return KNOWN_COOKIE_ATTRS.has(attrName) ? attr : maskCookieValue(attr, engine);
+  });
+
   const reconstructed =
     attributes.length > 0
       ? `${cookieName}=${redactedValue}; ${attributes.join("; ")}`

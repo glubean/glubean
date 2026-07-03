@@ -610,6 +610,28 @@ test("redactMcpTrace keeps deeply-nested non-secret bodies intact (codex R1 P2b)
   expect(s).toContain("DEEP-LEAF-VALUE");
 });
 
+test("redactMcpTrace masks malformed cookie/set-cookie with no '=' (codex R2 P2)", () => {
+  const trace = {
+    requestHeaders: { Cookie: "OPAQUE-BARE-COOKIE-TOKEN" },
+    responseHeaders: { "set-cookie": "OPAQUE-BARE-SETCOOKIE-TOKEN" },
+  };
+  const s = JSON.stringify(redactMcpTrace(trace, {}));
+  expect(s).not.toContain("OPAQUE-BARE-COOKIE-TOKEN");
+  expect(s).not.toContain("OPAQUE-BARE-SETCOOKIE-TOKEN");
+});
+
+test("redactMcpTrace masks a JSON body mislabelled as a text string (codex R2 P2)", () => {
+  // The runner keeps a text/plain response body as a raw string; if it is
+  // actually JSON, key rules must still apply.
+  const trace = {
+    responseBody: '{"access_token":"MISLABELLED-JSON-SECRET","status":"ok"}',
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const body = redacted.responseBody as string;
+  expect(body).not.toContain("MISLABELLED-JSON-SECRET");
+  expect(body).toContain("ok");
+});
+
 // ── Contract discovery tests ──────────────────────────────────────────────
 
 const CONTRACT_SOURCE = `

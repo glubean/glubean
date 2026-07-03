@@ -395,6 +395,49 @@ describe("headersHandler", () => {
     expect(setCookie).not.toContain("secret-value");
   });
 
+  // codex R2 P2: a Cookie / Set-Cookie value with no parseable `name=value`
+  // (a bare opaque token) used to be returned verbatim — fail closed instead.
+  test("masks a malformed Cookie header with no '=' (bare opaque token)", () => {
+    const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
+    const result = headersHandler.process(
+      { cookie: "opaque-session-token-no-delim" },
+      { scopeId: "test", scopeName: "Test" },
+      engine,
+    );
+    const val = result.value as Record<string, unknown>;
+    expect(val.cookie).not.toContain("opaque-session-token-no-delim");
+    expect(result.redacted).toBe(true);
+  });
+
+  test("masks a malformed Set-Cookie header with no '='", () => {
+    const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
+    const result = headersHandler.process(
+      { "set-cookie": "opaque-setcookie-no-delim" },
+      { scopeId: "test", scopeName: "Test" },
+      engine,
+    );
+    const val = result.value as Record<string, unknown>;
+    expect(val["set-cookie"]).not.toContain("opaque-setcookie-no-delim");
+    expect(result.redacted).toBe(true);
+  });
+
+  test("masks a non-standard Set-Cookie attribute fragment (quoted ';' value)", () => {
+    const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
+    // A naive `;` split of `sid="AAA;BBB"` puts `BBB"` in attribute position;
+    // it must be masked, not preserved as an attribute — while standard
+    // attributes (Path/HttpOnly) survive.
+    const result = headersHandler.process(
+      { "set-cookie": 'sid="AAA;BBB-leak-fragment"; Path=/; HttpOnly' },
+      { scopeId: "test", scopeName: "Test" },
+      engine,
+    );
+    const val = result.value as Record<string, unknown>;
+    const setCookie = val["set-cookie"] as string;
+    expect(setCookie).not.toContain("BBB-leak-fragment");
+    expect(setCookie).toContain("Path=/");
+    expect(setCookie).toContain("HttpOnly");
+  });
+
   test("passes through non-objects", () => {
     const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
     const result = headersHandler.process(
@@ -489,6 +532,45 @@ describe("bodyHandler", () => {
     const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
     expect(bodyHandler.process(42, ctx, engine).value).toBe(42);
     expect(bodyHandler.process(null, ctx, engine).value).toBeNull();
+  });
+
+  // codex R2 P2: a JSON body captured as a raw string (mislabelled
+  // content-type) must be parsed and redacted by KEY, not only value-scanned.
+  test("redacts a JSON-as-string body structurally by key", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const result = bodyHandler.process(
+      '{"token":"plain-session-value","user":{"name":"alice"}}',
+      ctx,
+      engine,
+    );
+    const body = result.value as string;
+    expect(body).not.toContain("plain-session-value");
+    expect(body).toContain("alice");
+    expect(result.redacted).toBe(true);
+    // Still valid JSON after redaction.
+    expect(() => JSON.parse(body)).not.toThrow();
+  });
+
+  test("falls back to string scanning for an invalid-JSON '{'-led body", () => {
+    const engine = new RedactionEngine({
+      plugins: [{ name: "bearer", matchValue: () => /Bearer\s+\S+/gi }],
+      replacementFormat: "labeled",
+    });
+    // Looks JSON-ish but is not parseable — must not throw, falls through to
+    // the value-pattern scan.
+    const result = bodyHandler.process(
+      "{not json, Bearer abc123 here}",
+      ctx,
+      engine,
+    );
+    const body = result.value as string;
+    expect(body).not.toContain("Bearer abc123");
+    expect(body).toContain("[REDACTED:bearer]");
   });
 });
 
