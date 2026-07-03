@@ -676,7 +676,17 @@ test("GLU-120: a real Zod v4 instance WITHOUT the instance toJSONSchema() method
     email: z.string().email(),
     age: z.number().optional(),
   });
-  const staticOnly: SchemaLike<unknown> = { _zod: (real as unknown as { _zod: unknown })._zod } as any;
+  // Carry the real Zod `type` field ("object") alongside the internals: a real
+  // Zod v4 instance exposes it, and its presence is what makes the branch
+  // ORDER load-bearing (codex GLU-120 P2) — if the static fallback ran AFTER
+  // the `"type" in schema` plain-JSON-Schema shortcut, this fixture would leak
+  // its raw internals as if already-plain (the GLU-64 bug class) and the
+  // assertions below would fail.
+  const staticOnly: SchemaLike<unknown> = {
+    type: (real as unknown as { type: unknown }).type,
+    _zod: (real as unknown as { _zod: unknown })._zod,
+  } as any;
+  expect((staticOnly as any).type).toBe("object"); // precondition: carries the plain-shortcut trap field
   expect(typeof (staticOnly as any).toJSONSchema).toBe("undefined"); // precondition: no instance method
 
   const client = makeMockClient();
@@ -700,6 +710,62 @@ test("GLU-120: a real Zod v4 instance WITHOUT the instance toJSONSchema() method
   expect(body.properties.age).toEqual({ type: "number" });
   expect(body.required).toEqual(["email"]);
   expect(body).not.toHaveProperty("$schema"); // dialect noise stripped, same as the instance-method path
+  expect(body).not.toHaveProperty("_zod"); // GLU-64: converted, NOT the raw zod internals leaked as-is
+  expect(c._extracted.unprojectableSchemas).toBeUndefined();
+});
+
+test("GLU-120 + GLU-90: a static-only Zod v4 instance whose conversion throws recovers via the declared jsonSchema hint, not raw/plain fallback", () => {
+  // z.date() is unrepresentable — the STATIC z.toJSONSchema() throws on it,
+  // exactly like the instance-method path's z.date()/z.bigint() case. The
+  // static fallback's failure must land on the declared `.jsonSchema` hint
+  // (GLU-90 recovery), NOT fall through to the plain `"type" in schema`
+  // shortcut (which would leak the raw zod internals — GLU-64). Real zod
+  // internals are used so the throw comes from the genuine converter.
+  const throwing = z.date();
+  const staticOnlyThrows: SchemaLike<unknown> = {
+    type: (throwing as unknown as { type: unknown }).type, // "date" — plain-shortcut trap
+    _zod: (throwing as unknown as { _zod: unknown })._zod,
+    jsonSchema: { type: "string", format: "date-time" },
+  } as any;
+  expect(typeof (staticOnlyThrows as any).toJSONSchema).toBe("undefined"); // no instance method
+
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: staticOnlyThrows } },
+    },
+  });
+
+  const body = (c._extracted.cases[0].schemas as any)?.response?.body;
+  expect(body).toEqual({ type: "string", format: "date-time" }); // the declared hint, verbatim
+  expect(body).not.toHaveProperty("_zod"); // NOT the raw zod internals
+  expect(c._extracted.unprojectableSchemas).toBeUndefined();
+});
+
+test("GLU-120: an object carrying a bare `_zod` field but no `def.type` string is NOT misclassified as Zod (marker precision)", () => {
+  // codex GLU-120 P2: the v4 marker requires `_zod.def.type` to be a STRING,
+  // so a plain/non-Zod object that happens to carry a `_zod: { def }` field is
+  // treated as plain JSON Schema (its `type` honored), NOT silently dropped as
+  // an unconvertible "Zod" schema.
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  const notZod: SchemaLike<unknown> = {
+    type: "object",
+    properties: { ok: { type: "boolean" } },
+    _zod: { def: {} }, // no `type` string → below the marker threshold
+  } as any;
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: notZod } },
+    },
+  });
+
+  const body = (c._extracted.cases[0].schemas as any)?.response?.body;
+  // Honored as plain JSON Schema (passed through), not dropped as unprojectable.
+  expect(body).toMatchObject({ type: "object", properties: { ok: { type: "boolean" } } });
   expect(c._extracted.unprojectableSchemas).toBeUndefined();
 });
 

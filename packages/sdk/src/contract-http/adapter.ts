@@ -328,20 +328,27 @@ function declaredJsonSchemaOrNull(schema: Record<string, unknown>): unknown | nu
 // =============================================================================
 
 /**
- * Structural marker for a Zod v4-shaped schema instance: a `_zod.def` bag.
- * Present on every Zod v4 build (the transitional pre-4.0 `zod/v4` subpath
- * AND the stable v4.x line) regardless of whether that build also exposes
- * the instance `toJSONSchema()` method. Absent on Zod v3 (`_def.typeName`
+ * Structural marker for a Zod v4-shaped schema instance: a `_zod.def` bag
+ * whose `type` is a string (e.g. "object", "string", "date"). Present on
+ * every Zod v4 build (the transitional pre-4.0 `zod/v4` subpath AND the
+ * stable v4.x line) regardless of whether that build also exposes the
+ * instance `toJSONSchema()` method. Absent on Zod v3 (`_def.typeName`
  * shape), on other schema libraries (Valibot, ArkType, …), and on
- * hand-rolled `{ safeParse }` validators — so this never misfires on a
- * non-Zod object.
+ * hand-rolled `{ safeParse }` validators. The `def.type` string check
+ * (not just `"def" in _zod`) keeps a stray plain object that happens to
+ * carry a `_zod: { def }` field from being misclassified as Zod and
+ * silently dropped from projection (codex GLU-120 P2): a non-Zod object
+ * would need a `_zod.def.type` string to false-positive, which is
+ * effectively unique to a real Zod v4 instance.
  */
 function hasZodV4Marker(schema: Record<string, unknown>): boolean {
   const zodInternal = (schema as { _zod?: unknown })._zod;
+  if (zodInternal == null || typeof zodInternal !== "object") return false;
+  const def = (zodInternal as { def?: unknown }).def;
   return (
-    zodInternal != null &&
-    typeof zodInternal === "object" &&
-    "def" in (zodInternal as Record<string, unknown>)
+    def != null &&
+    typeof def === "object" &&
+    typeof (def as { type?: unknown }).type === "string"
   );
 }
 
