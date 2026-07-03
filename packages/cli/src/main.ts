@@ -809,12 +809,24 @@ program
     "md-outline",
   )
   .option("--title <title>", "API title (format=openapi only)")
+  .option(
+    "--projection <name>",
+    "Generate a named contract projection declared in glubean.yaml's " +
+      "`projections.contracts` (or \"all\" for every declared entry), " +
+      "writing each to its configured `output` path. Ignores --dir/--format/--title.",
+  )
+  .option(
+    "--config <path>",
+    "Path to glubean.yaml (default: ./glubean.yaml). Used with --projection.",
+  )
   .action(async (options) => {
     const { contractsCommand } = await import("./commands/contracts.js");
     await contractsCommand({
       dir: options.dir,
       format: options.format,
       title: options.title,
+      projection: options.projection,
+      config: options.config,
     });
   });
 

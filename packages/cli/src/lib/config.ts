@@ -158,6 +158,33 @@ export interface McpConfig {
   trace?: McpTraceConfig;
 }
 
+/**
+ * One named contract projection target (`projections.contracts.<name>`).
+ * Declares what `glubean contracts --projection <name>` generates: which
+ * directory of contracts to scan (`suite` name OR explicit `target` path —
+ * omitting both scans the project root, same as the CLI default), which
+ * artifact `format` to render, an optional `title` (openapi only), and the
+ * file `output` is written to (relative to the project root).
+ */
+export interface ContractProjectionConfig {
+  /** Suite name (from top-level `suites:`) whose `target` is scanned. */
+  suite?: string;
+  /** Explicit directory/glob to scan — mutually exclusive with `suite`. */
+  target?: string;
+  /** Artifact format: `openapi`, `md-outline`, `json`, or a registered kind. */
+  format: string;
+  /** OpenAPI info.title — only used when `format: openapi`. */
+  title?: string;
+  /** File path (relative to project root) the rendered output is written to. */
+  output: string;
+}
+
+/** Top-level `projections:` — declarative multi-output generation targets. */
+export interface ProjectionsConfig {
+  /** Named contract projection targets. `glubean contracts --projection <name>`. */
+  contracts?: Record<string, ContractProjectionConfig>;
+}
+
 /** Canonical v1 project config — the entire `glubean.yaml` content. */
 export interface GlubeanProjectConfigV1 {
   version: 1;
@@ -168,6 +195,8 @@ export interface GlubeanProjectConfigV1 {
   profiles: Record<string, ProfileConfig>;
   /** MCP-server settings (trace header allow-lists). Read by @glubean/mcp. */
   mcp?: McpConfig;
+  /** Declarative projection outputs (e.g. multi-surface OpenAPI). */
+  projections?: ProjectionsConfig;
 }
 
 /**
@@ -233,9 +262,11 @@ export class GlubeanConfigError extends Error {
   }
 }
 
-const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles", "mcp"]);
+const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles", "mcp", "projections"]);
 const V1_MCP_KEYS = new Set(["trace"]);
 const V1_MCP_TRACE_KEYS = new Set(["keepRequestHeaders", "keepResponseHeaders"]);
+const V1_PROJECTIONS_KEYS = new Set(["contracts"]);
+const V1_CONTRACT_PROJECTION_KEYS = new Set(["suite", "target", "format", "title", "output"]);
 const V1_SUITE_KEYS = new Set(["target", "kinds", "data"]);
 const V1_SUITE_KINDS = new Set<string>(SUITE_KINDS);
 const V1_SELECTION_KEYS = new Set([
@@ -826,6 +857,94 @@ function validateMcp(raw: unknown, configPath: string): McpConfig {
   return out;
 }
 
+function validateContractProjection(
+  name: string,
+  raw: unknown,
+  suiteNames: Set<string>,
+  configPath: string,
+): ContractProjectionConfig {
+  const context = `projections.contracts.${name}`;
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_CONTRACT_PROJECTION_KEYS, context, configPath);
+  const p = raw as Record<string, unknown>;
+
+  if (p.suite !== undefined && p.target !== undefined) {
+    throw new GlubeanConfigError(
+      `\`${context}\` cannot set both \`suite\` and \`target\` — pick one.`,
+      configPath,
+    );
+  }
+
+  let suite: string | undefined;
+  if (p.suite !== undefined) {
+    assertType(p.suite, "string", `${context}.suite`, configPath);
+    assertNonEmpty(p.suite as string, `${context}.suite`, configPath);
+    if (!suiteNames.has(p.suite as string)) {
+      throw new GlubeanConfigError(
+        `\`${context}.suite\` references undefined suite "${p.suite}". ` +
+          `Defined suites: ${[...suiteNames].join(", ") || "(none)"}.`,
+        configPath,
+      );
+    }
+    suite = p.suite as string;
+  }
+
+  let target: string | undefined;
+  if (p.target !== undefined) {
+    assertType(p.target, "string", `${context}.target`, configPath);
+    assertNonEmpty(p.target as string, `${context}.target`, configPath);
+    target = p.target as string;
+  }
+
+  if (p.format === undefined) {
+    throw new GlubeanConfigError(`Missing required field \`${context}.format\`.`, configPath);
+  }
+  assertType(p.format, "string", `${context}.format`, configPath);
+  assertNonEmpty(p.format as string, `${context}.format`, configPath);
+
+  if (p.output === undefined) {
+    throw new GlubeanConfigError(`Missing required field \`${context}.output\`.`, configPath);
+  }
+  assertType(p.output, "string", `${context}.output`, configPath);
+  assertNonEmpty(p.output as string, `${context}.output`, configPath);
+
+  let title: string | undefined;
+  if (p.title !== undefined) {
+    assertType(p.title, "string", `${context}.title`, configPath);
+    title = p.title as string;
+  }
+
+  return {
+    ...(suite !== undefined && { suite }),
+    ...(target !== undefined && { target }),
+    format: p.format as string,
+    ...(title !== undefined && { title }),
+    output: p.output as string,
+  };
+}
+
+function validateProjections(
+  raw: unknown,
+  suiteNames: Set<string>,
+  configPath: string,
+): ProjectionsConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", "projections", configPath);
+  assertOnlyKnownKeys(raw, V1_PROJECTIONS_KEYS, "projections", configPath);
+  const p = raw as Record<string, unknown>;
+  const out: ProjectionsConfig = {};
+  if (p.contracts !== undefined) {
+    assertType(p.contracts, "object", "projections.contracts", configPath);
+    const contractsIn = p.contracts as Record<string, unknown>;
+    const contracts: Record<string, ContractProjectionConfig> = {};
+    for (const name of Object.keys(contractsIn)) {
+      contracts[name] = validateContractProjection(name, contractsIn[name], suiteNames, configPath);
+    }
+    out.contracts = contracts;
+  }
+  return out;
+}
+
 /**
  * Load + validate v1 project config.
  *
@@ -936,6 +1055,9 @@ export async function loadProjectConfigV1(
     suites,
     profiles,
     ...(root.mcp !== undefined && { mcp: validateMcp(root.mcp, configPath) }),
+    ...(root.projections !== undefined && {
+      projections: validateProjections(root.projections, suiteNames, configPath),
+    }),
   };
 
   return { config, configPath };
@@ -1214,6 +1336,62 @@ export function resolveRunPlan(
     envFile,
     redaction,
     thresholds,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V1 CONTRACT PROJECTION RESOLVER — `glubean contracts --projection <name>`
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A `projections.contracts.<name>` entry, resolved to absolute paths. */
+export interface ResolvedContractProjection {
+  name: string;
+  /** Absolute directory to scan for contracts. */
+  dir: string;
+  format: string;
+  title?: string;
+  /** Absolute path the rendered output is written to. */
+  output: string;
+}
+
+/** Sorted names of every declared `projections.contracts.<name>` entry. */
+export function listContractProjectionNames(config: GlubeanProjectConfigV1): string[] {
+  return Object.keys(config.projections?.contracts ?? {}).sort();
+}
+
+/**
+ * Resolve one named contract projection against a loaded config.
+ *
+ * Throws `GlubeanConfigError` when `name` is not declared under
+ * `projections.contracts` (lists available names, mirroring
+ * `resolveRunPlan`'s unknown-profile error).
+ */
+export function resolveContractProjection(
+  config: GlubeanProjectConfigV1,
+  configPath: string,
+  rootDir: string,
+  name: string,
+): ResolvedContractProjection {
+  const entry = config.projections?.contracts?.[name];
+  if (!entry) {
+    const available = listContractProjectionNames(config);
+    throw new GlubeanConfigError(
+      `Contract projection "${name}" not found. ` +
+        `Available: ${available.length > 0 ? available.join(", ") : "(none defined)"}.`,
+      configPath,
+    );
+  }
+  const dir = entry.suite
+    ? resolve(rootDir, config.suites[entry.suite].target)
+    : entry.target
+      ? resolve(rootDir, entry.target)
+      : rootDir;
+  return {
+    name,
+    dir,
+    format: entry.format,
+    ...(entry.title !== undefined && { title: entry.title }),
+    output: resolve(rootDir, entry.output),
   };
 }
 

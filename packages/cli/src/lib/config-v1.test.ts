@@ -12,6 +12,8 @@ import { join } from "node:path";
 import {
   GlubeanConfigError,
   loadProjectConfigV1,
+  listContractProjectionNames,
+  resolveContractProjection,
 } from "./config.js";
 
 async function withTempDir<T>(
@@ -807,6 +809,185 @@ profiles:
       await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
         await expect(loadProjectConfigV1(dir)).rejects.toThrow(
           /excludeTags.*strings/,
+        );
+      });
+    });
+  });
+
+  describe("projections.contracts (GLU-117)", () => {
+    const BASE_YAML = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+  contracts: { target: ./contracts, kinds: [contract, flow] }
+profiles:
+  local: { suites: [tests] }
+`;
+
+    it("loads a suite-referencing projection and a target-referencing projection", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    merged-openapi:
+      suite: contracts
+      format: openapi
+      title: Merged Contracts
+      output: reports/projections/openapi.json
+    dashboard-openapi:
+      target: contracts/dashboard
+      format: openapi
+      title: Dashboard Contracts
+      output: reports/projections/dashboard.openapi.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config, configPath } = await loadProjectConfigV1(dir);
+        expect(listContractProjectionNames(config)).toEqual([
+          "dashboard-openapi",
+          "merged-openapi",
+        ]);
+
+        const merged = resolveContractProjection(config, configPath, dir, "merged-openapi");
+        expect(merged.dir).toBe(join(dir, "contracts"));
+        expect(merged.format).toBe("openapi");
+        expect(merged.title).toBe("Merged Contracts");
+        expect(merged.output).toBe(join(dir, "reports/projections/openapi.json"));
+
+        const dashboard = resolveContractProjection(config, configPath, dir, "dashboard-openapi");
+        expect(dashboard.dir).toBe(join(dir, "contracts/dashboard"));
+        expect(dashboard.format).toBe("openapi");
+        expect(dashboard.output).toBe(
+          join(dir, "reports/projections/dashboard.openapi.json"),
+        );
+      });
+    });
+
+    it("resolves dir to the project root when neither suite nor target is set", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    everything:
+      format: md-outline
+      output: reports/projections/everything.md
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config, configPath } = await loadProjectConfigV1(dir);
+        const resolved = resolveContractProjection(config, configPath, dir, "everything");
+        expect(resolved.dir).toBe(dir);
+      });
+    });
+
+    it("resolveContractProjection throws with available names when name is unknown", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    merged-openapi:
+      suite: contracts
+      format: openapi
+      output: reports/projections/openapi.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config, configPath } = await loadProjectConfigV1(dir);
+        expect(() =>
+          resolveContractProjection(config, configPath, dir, "nope"),
+        ).toThrow(/Contract projection "nope" not found.*merged-openapi/s);
+      });
+    });
+
+    it("listContractProjectionNames returns [] when projections is undeclared", async () => {
+      await withTempDir({ "glubean.yaml": BASE_YAML }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(listContractProjectionNames(config)).toEqual([]);
+      });
+    });
+
+    it("rejects setting both suite and target", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      target: contracts/dashboard
+      format: openapi
+      output: out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /cannot set both `suite` and `target`/,
+        );
+      });
+    });
+
+    it("rejects a suite reference that is not declared", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: does-not-exist
+      format: openapi
+      output: out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /references undefined suite "does-not-exist"/,
+        );
+      });
+    });
+
+    it("requires format", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      output: out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Missing required field `projections\.contracts\.bad\.format`/,
+        );
+      });
+    });
+
+    it("requires output", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      format: openapi
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Missing required field `projections\.contracts\.bad\.output`/,
+        );
+      });
+    });
+
+    it("rejects unknown keys inside a projection entry", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      format: openapi
+      output: out.json
+      bogus: yes
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Unknown key\(s\) at `projections\.contracts\.bad`.*bogus/s,
+        );
+      });
+    });
+
+    it("rejects unknown top-level projections keys", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  bogus: {}
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Unknown key\(s\) at `projections`/,
         );
       });
     });

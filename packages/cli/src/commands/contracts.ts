@@ -5,7 +5,8 @@
  * or machine-readable projection of all contract cases, grouped by feature.
  */
 
-import { resolve } from "node:path";
+import { resolve, dirname, relative } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
 import { bootstrap } from "@glubean/runner";
 import { extractContractsFromProject } from "@glubean/scanner";
 import type {
@@ -24,6 +25,13 @@ import type {
   ExtractedContractProjection,
   MarkdownPart,
 } from "@glubean/sdk";
+import {
+  GlubeanConfigError,
+  loadProjectConfigV1,
+  listContractProjectionNames,
+  resolveContractProjection,
+} from "../lib/config.js";
+import type { ResolvedContractProjection } from "../lib/config.js";
 
 // ── Description lint ────────────────────────────────────────────────────────
 
@@ -263,57 +271,60 @@ export interface ContractsCommandOptions {
   format?: string;
   /** OpenAPI info.title (only used when format=openapi). */
   title?: string;
+  /**
+   * Name of a `projections.contracts.<name>` entry declared in
+   * `glubean.yaml` — or `"all"` to generate every declared entry. When set,
+   * `--dir` / `--format` / `--title` are ignored (each projection carries
+   * its own); output is written to each entry's `output` path instead of
+   * stdout.
+   */
+  projection?: string;
+  /** Path to `glubean.yaml` (default: `./glubean.yaml`). Used with `--projection`. */
+  config?: string;
 }
 
-export async function contractsCommand(
-  options: ContractsCommandOptions = {},
-): Promise<void> {
-  const dir = options.dir ? resolve(options.dir) : process.cwd();
-  const format = options.format ?? "md-outline";
+/** Thrown by `renderContracts` when a scanned directory has zero contracts. */
+class NoContractsFoundError extends Error {
+  constructor(
+    dir: string,
+    public readonly importErrors: Array<{ file: string; error: string }>,
+  ) {
+    super(`No contracts found in ${dir}. Ensure .contract.ts files exist and use contract.http.with().`);
+    this.name = "NoContractsFoundError";
+  }
+}
 
+interface RenderedContracts {
+  text: string;
+  warnings: DescriptionWarning[];
+  importErrors: Array<{ file: string; error: string }>;
+}
+
+/**
+ * Bootstrap plugins, extract contracts from `dir`, and render them through
+ * `format`. Shared by the direct `--dir/--format` CLI path and the
+ * `--projection` (glubean.yaml-declared) path — both need the identical
+ * extract → map → dispatch pipeline, just different output sinks.
+ *
+ * Throws `NoContractsFoundError` when the scan yields zero contracts, and
+ * propagates `renderArtifactByName`'s "unknown format" error verbatim for
+ * unrecognized dynamic kinds. Callers decide how to present/exit on those.
+ */
+async function renderContracts(
+  dir: string,
+  format: string,
+  title: string | undefined,
+): Promise<RenderedContracts> {
   // Bootstrap plugins before contract extraction. Without this, any
   // `.contract.ts` file that uses a non-HTTP protocol (graphql, grpc, ...)
   // would fail-closed at `getAdapter(protocol)` because the adapter would
   // not yet be registered — see plugin-manifest-proposal.md D2.
   await bootstrap(dir);
 
-  // `--format list-formats`: introspection of artifact kinds. Resolves
-  // after bootstrap so plugin-contributed kinds (future proto/sdl/etc.)
-  // are visible. Output to stdout, no contract extraction needed.
-  if (format === "list-formats") {
-    const kinds = listArtifactKinds();
-    const lines: string[] = ["Registered artifact kinds:"];
-    for (const name of kinds) {
-      const cap = listArtifactCapability(name);
-      const parts: string[] = [];
-      if (cap.explicit.length > 0) parts.push(`explicit: ${cap.explicit.join(", ")}`);
-      if (cap.fallback.length > 0) parts.push(`fallback: ${cap.fallback.join(", ")}`);
-      if (cap.unsupported.length > 0) parts.push(`unsupported: ${cap.unsupported.join(", ")}`);
-      lines.push(`  ${name}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`);
-    }
-    // Plus static formats CLI handles directly
-    lines.push("  md-outline (legacy CLI formatter, not via artifact registry)");
-    lines.push("  json (legacy CLI formatter, not via artifact registry)");
-    process.stdout.write(lines.join("\n") + "\n");
-    return;
-  }
-
   const result = await extractContractsFromProject(dir);
 
-  // Surface import errors
-  if (result.errors.length > 0) {
-    for (const err of result.errors) {
-      console.error(`${colors.yellow}⚠ Import failed: ${err.file}${colors.reset}`);
-      console.error(`${colors.dim}  ${err.error}${colors.reset}`);
-    }
-  }
-
   if (result.contracts.length === 0) {
-    console.error(
-      `${colors.yellow}No contracts found.${colors.reset} ` +
-      `Ensure .contract.ts files exist and use contract.http.with().`,
-    );
-    process.exit(1);
+    throw new NoContractsFoundError(dir, result.errors);
   }
 
   // Map NormalizedContractMeta → ContractStaticMeta for formatters
@@ -362,9 +373,10 @@ export async function contractsCommand(
     }),
   }));
 
-  // Output projection
+  // Render projection
+  let text: string;
   if (format === "json") {
-    process.stdout.write(formatJson(contracts));
+    text = formatJson(contracts);
   } else if (format === "openapi") {
     // Dispatched through the artifact registry. Only HTTP contracts
     // contribute (openapi kind has no defaultRender). Non-HTTP protocols
@@ -376,57 +388,44 @@ export async function contractsCommand(
         unknown,
         unknown
       >[],
-      { title: options.title },
+      { title },
     );
-    process.stdout.write(JSON.stringify(spec, null, 2) + "\n");
+    text = JSON.stringify(spec, null, 2) + "\n";
   } else if (format === "md-outline") {
     // CAR-2: `md-outline` renders through the artifact registry
     // (`assembleMarkdownDocument`). The legacy flows section died with
     // contract.flow (Nv1-D3); workflow markdown is the agreement-markdown
     // proposal (G1).
-    const contractsMd = renderArtifact(
+    text = renderArtifact(
       markdownArtifact,
       result.contracts as unknown as ExtractedContractProjection<
         unknown,
         unknown
       >[],
     );
-    process.stdout.write(contractsMd);
   } else {
     // Dynamic dispatch via artifact registry for any other registered kind
     // name (future proto / sdl / asyncapi). Throws with a helpful error
     // when the name isn't registered — listing available formats in the
     // message.
-    try {
-      const out = renderArtifactByName(
-        format,
-        result.contracts as unknown as ExtractedContractProjection<
-          unknown,
-          unknown
-        >[],
-      );
-      const text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
-      process.stdout.write(text.endsWith("\n") ? text : text + "\n");
-    } catch (err) {
-      console.error(
-        `${colors.yellow}⚠ Unknown format "${format}".${colors.reset} ${err instanceof Error ? err.message : String(err)}`,
-      );
-      console.error(
-        `${colors.dim}  Try 'glubean contracts --format list-formats' to see available formats.${colors.reset}`,
-      );
-      process.exit(1);
-    }
+    const out = renderArtifactByName(
+      format,
+      result.contracts as unknown as ExtractedContractProjection<
+        unknown,
+        unknown
+      >[],
+    );
+    text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
+    if (!text.endsWith("\n")) text += "\n";
   }
 
-  // Lint warnings (stderr, so they don't pollute piped output)
+  // Lint warnings
   const warnings: DescriptionWarning[] = [];
   for (const c of contracts) {
-    // Lint contract-level description
     if (c.description) {
       const w = lintDescription(c.contractId, "(contract)", c.description);
       if (w) warnings.push(w);
     }
-    // Lint case-level descriptions
     for (const cas of c.cases) {
       if (cas.description) {
         const w = lintDescription(c.contractId, cas.key, cas.description);
@@ -434,13 +433,158 @@ export async function contractsCommand(
       }
     }
   }
-  if (warnings.length > 0) {
-    console.error("");
-    console.error(`${colors.yellow}⚠ Description warnings:${colors.reset}`);
-    for (const w of warnings) {
-      console.error(
-        `${colors.dim}  ${w.contractId}.${w.caseKey}: ${w.message}${colors.reset}`,
-      );
-    }
+
+  return { text, warnings, importErrors: result.errors };
+}
+
+function printImportErrors(importErrors: RenderedContracts["importErrors"]): void {
+  for (const err of importErrors) {
+    console.error(`${colors.yellow}⚠ Import failed: ${err.file}${colors.reset}`);
+    console.error(`${colors.dim}  ${err.error}${colors.reset}`);
   }
+}
+
+function printWarnings(warnings: DescriptionWarning[], label?: string): void {
+  if (warnings.length === 0) return;
+  console.error("");
+  console.error(
+    `${colors.yellow}⚠ Description warnings${label ? ` (${label})` : ""}:${colors.reset}`,
+  );
+  for (const w of warnings) {
+    console.error(`${colors.dim}  ${w.contractId}.${w.caseKey}: ${w.message}${colors.reset}`);
+  }
+}
+
+/** Generate one resolved `projections.contracts.<name>` entry, writing to its `output` path. */
+async function runNamedProjection(
+  rootDir: string,
+  resolved: ResolvedContractProjection,
+): Promise<boolean> {
+  let rendered: RenderedContracts;
+  try {
+    rendered = await renderContracts(resolved.dir, resolved.format, resolved.title);
+  } catch (err) {
+    if (err instanceof NoContractsFoundError) printImportErrors(err.importErrors);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`${colors.yellow}✗ ${resolved.name}: ${message}${colors.reset}`);
+    return false;
+  }
+
+  printImportErrors(rendered.importErrors);
+
+  await mkdir(dirname(resolved.output), { recursive: true });
+  await writeFile(resolved.output, rendered.text, "utf-8");
+  console.log(
+    `${colors.blue}✓${colors.reset} ${resolved.name} → ${relative(rootDir, resolved.output)}`,
+  );
+
+  printWarnings(rendered.warnings, resolved.name);
+  return true;
+}
+
+/** `--projection <name|all>`: resolve declared projection(s) from glubean.yaml and generate them. */
+async function runProjections(
+  cwd: string,
+  options: ContractsCommandOptions,
+): Promise<void> {
+  let loaded: Awaited<ReturnType<typeof loadProjectConfigV1>>;
+  try {
+    loaded = await loadProjectConfigV1(cwd, options.config ? { configPath: options.config } : {});
+  } catch (err) {
+    if (!(err instanceof GlubeanConfigError)) throw err;
+    console.error(`${colors.yellow}${err.message}${colors.reset}`);
+    process.exit(1);
+  }
+  const { config, configPath } = loaded;
+
+  const names =
+    options.projection === "all" ? listContractProjectionNames(config) : [options.projection as string];
+
+  if (names.length === 0) {
+    console.error(
+      `${colors.yellow}No contract projections declared in glubean.yaml (projections.contracts).${colors.reset}`,
+    );
+    process.exit(1);
+  }
+
+  let anyFailed = false;
+  for (const name of names) {
+    let resolved: ResolvedContractProjection;
+    try {
+      resolved = resolveContractProjection(config, configPath, cwd, name);
+    } catch (err) {
+      if (!(err instanceof GlubeanConfigError)) throw err;
+      console.error(`${colors.yellow}${err.message}${colors.reset}`);
+      anyFailed = true;
+      continue;
+    }
+    const ok = await runNamedProjection(cwd, resolved);
+    if (!ok) anyFailed = true;
+  }
+
+  if (anyFailed) process.exit(1);
+}
+
+export async function contractsCommand(
+  options: ContractsCommandOptions = {},
+): Promise<void> {
+  const cwd = process.cwd();
+
+  if (options.projection) {
+    await runProjections(cwd, options);
+    return;
+  }
+
+  const dir = options.dir ? resolve(options.dir) : cwd;
+  const format = options.format ?? "md-outline";
+
+  // Bootstrap plugins before contract extraction (also needed for
+  // `list-formats`, which resolves plugin-contributed artifact kinds).
+  await bootstrap(dir);
+
+  // `--format list-formats`: introspection of artifact kinds. Resolves
+  // after bootstrap so plugin-contributed kinds (future proto/sdl/etc.)
+  // are visible. Output to stdout, no contract extraction needed.
+  if (format === "list-formats") {
+    const kinds = listArtifactKinds();
+    const lines: string[] = ["Registered artifact kinds:"];
+    for (const name of kinds) {
+      const cap = listArtifactCapability(name);
+      const parts: string[] = [];
+      if (cap.explicit.length > 0) parts.push(`explicit: ${cap.explicit.join(", ")}`);
+      if (cap.fallback.length > 0) parts.push(`fallback: ${cap.fallback.join(", ")}`);
+      if (cap.unsupported.length > 0) parts.push(`unsupported: ${cap.unsupported.join(", ")}`);
+      lines.push(`  ${name}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`);
+    }
+    // Plus static formats CLI handles directly
+    lines.push("  md-outline (legacy CLI formatter, not via artifact registry)");
+    lines.push("  json (legacy CLI formatter, not via artifact registry)");
+    process.stdout.write(lines.join("\n") + "\n");
+    return;
+  }
+
+  let rendered: RenderedContracts;
+  try {
+    rendered = await renderContracts(dir, format, options.title);
+  } catch (err) {
+    if (err instanceof NoContractsFoundError) {
+      printImportErrors(err.importErrors);
+      console.error(
+        `${colors.yellow}No contracts found.${colors.reset} ` +
+        `Ensure .contract.ts files exist and use contract.http.with().`,
+      );
+      process.exit(1);
+    }
+    console.error(
+      `${colors.yellow}⚠ Unknown format "${format}".${colors.reset} ${err instanceof Error ? err.message : String(err)}`,
+    );
+    console.error(
+      `${colors.dim}  Try 'glubean contracts --format list-formats' to see available formats.${colors.reset}`,
+    );
+    process.exit(1);
+  }
+
+  printImportErrors(rendered.importErrors);
+  process.stdout.write(rendered.text);
+  printWarnings(rendered.warnings);
 }
