@@ -12,9 +12,17 @@
  * keep the precedence in sync:
  *   1. explicit tool argument
  *   2. process env (GLUBEAN_TOKEN / GLUBEAN_PROJECT_ID / GLUBEAN_TARGET_ID /
- *      GLUBEAN_API_URL)
+ *      GLUBEAN_PLATFORM_API_URL / GLUBEAN_API_URL)
  *   3. project `.env` + `.env.secrets` vars
  *   4. `~/.glubean/credentials.json` (written by `glubean login`)
+ *
+ * apiUrl specifically (GLU-139): `GLUBEAN_PLATFORM_API_URL` is checked BEFORE
+ * the legacy `GLUBEAN_API_URL`. A project that also dogfoods the Dashboard
+ * API (which is a *different* service, no `/v1/*`) legitimately sets
+ * `GLUBEAN_API_URL` for that — reusing it here for the Platform/ingest API
+ * silently 404s every open* tool call. `GLUBEAN_PLATFORM_API_URL` is the
+ * unambiguous name for "the Platform API these tools talk to"; `GLUBEAN_API_URL`
+ * remains the fallback for projects that only ever used the one var.
  *
  * NOT a direct import of `@glubean/cli`: that package exposes only its bin
  * entry (`exports: { ".": dist/main.js }` — importing it executes the CLI
@@ -109,8 +117,14 @@ export async function resolveCloudAuth(
     undefined;
   // The credentials file has no target — the target is per-project config.
   const targetId = args.targetId || fromEnv("GLUBEAN_TARGET_ID") || undefined;
+  // GLU-139: GLUBEAN_PLATFORM_API_URL outranks GLUBEAN_API_URL. The latter is
+  // ALSO used by projects (e.g. the dogfood repo) for the unrelated Dashboard
+  // API, which has no `/v1/*` — reading it here for the Platform/ingest API
+  // 404s. GLUBEAN_PLATFORM_API_URL is the unambiguous name; GLUBEAN_API_URL
+  // stays as the fallback for projects that never had the collision.
   const apiUrl = (
     args.apiUrl ||
+    fromEnv("GLUBEAN_PLATFORM_API_URL") ||
     fromEnv("GLUBEAN_API_URL") ||
     (await creds())?.apiUrl ||
     DEFAULT_API_URL

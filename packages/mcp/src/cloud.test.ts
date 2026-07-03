@@ -28,6 +28,7 @@ const GLUBEAN_ENV_KEYS = [
   "GLUBEAN_PROJECT_ID",
   "GLUBEAN_TARGET_ID",
   "GLUBEAN_API_URL",
+  "GLUBEAN_PLATFORM_API_URL",
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -118,6 +119,45 @@ describe("resolveCloudAuth", () => {
     expect(auth.apiUrl).toBe(DEFAULT_API_URL);
     expect(auth.token).toBeUndefined();
     expect(auth.projectId).toBeUndefined();
+  });
+
+  // GLU-139: a project (e.g. the dogfood repo) can legitimately set
+  // GLUBEAN_API_URL for an unrelated Dashboard API while also setting
+  // GLUBEAN_PLATFORM_API_URL for the Platform/ingest API these tools need.
+  // GLUBEAN_PLATFORM_API_URL must win so open* tools don't 404 against the
+  // Dashboard host when relying on project env resolution (no explicit
+  // apiUrl argument).
+  it("prefers GLUBEAN_PLATFORM_API_URL over GLUBEAN_API_URL for apiUrl", async () => {
+    process.env.HOME = await mkdtemp(join(tmpdir(), "glubean-mcp-nohome-"));
+    process.env.GLUBEAN_API_URL = "https://api.staging.glubean.com";
+    process.env.GLUBEAN_PLATFORM_API_URL = "https://platform.staging.glubean.com";
+    const auth = await resolveCloudAuth({});
+    expect(auth.apiUrl).toBe("https://platform.staging.glubean.com");
+  });
+
+  it("falls back to GLUBEAN_API_URL when GLUBEAN_PLATFORM_API_URL is unset (legacy projects)", async () => {
+    process.env.HOME = await mkdtemp(join(tmpdir(), "glubean-mcp-nohome-"));
+    process.env.GLUBEAN_API_URL = "https://platform.glubean.com";
+    const auth = await resolveCloudAuth({});
+    expect(auth.apiUrl).toBe("https://platform.glubean.com");
+  });
+
+  it("an explicit apiUrl argument still overrides both platform and legacy env vars", async () => {
+    process.env.HOME = await mkdtemp(join(tmpdir(), "glubean-mcp-nohome-"));
+    process.env.GLUBEAN_API_URL = "https://api.staging.glubean.com";
+    process.env.GLUBEAN_PLATFORM_API_URL = "https://platform.staging.glubean.com";
+    const auth = await resolveCloudAuth({ apiUrl: "https://explicit.test/" });
+    expect(auth.apiUrl).toBe("https://explicit.test");
+  });
+
+  it("reads GLUBEAN_PLATFORM_API_URL from .env file vars, same precedence as process env", async () => {
+    process.env.HOME = await mkdtemp(join(tmpdir(), "glubean-mcp-nohome-"));
+    process.env.GLUBEAN_API_URL = "https://api.staging.glubean.com";
+    const auth = await resolveCloudAuth(
+      {},
+      { envFileVars: { GLUBEAN_PLATFORM_API_URL: "https://platform.staging.glubean.com" } },
+    );
+    expect(auth.apiUrl).toBe("https://platform.staging.glubean.com");
   });
 });
 

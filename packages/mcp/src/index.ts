@@ -1929,7 +1929,10 @@ const OPEN_AUTH_INPUT_SCHEMA = {
     .string()
     .optional()
     .describe(
-      "Platform API base URL (default: GLUBEAN_API_URL, or https://api.glubean.com)",
+      "Platform API base URL (default: GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL, " +
+        "else https://api.glubean.com — note GLUBEAN_API_URL may point at an unrelated " +
+        "Dashboard API in projects that also dogfood it; set GLUBEAN_PLATFORM_API_URL " +
+        "to disambiguate)",
     ),
   token: z
     .string()
@@ -2017,7 +2020,8 @@ server.registerTool(
       "Upload the most recent glubean_run_local_file results to Glubean Cloud " +
       "(POST /v1/projects/{projectId}/targets/{targetId}/runs — the same ingest contract as `glubean run --upload`). " +
       "Replaces the retired glubean_open_trigger_run (/open/v1): the platform ingests locally-executed runs; there is no remote trigger. " +
-      "Credentials resolve like the CLI: explicit args > GLUBEAN_TOKEN / GLUBEAN_PROJECT_ID / GLUBEAN_TARGET_ID / GLUBEAN_API_URL " +
+      "Credentials resolve like the CLI: explicit args > GLUBEAN_TOKEN / GLUBEAN_PROJECT_ID / GLUBEAN_TARGET_ID / " +
+      "GLUBEAN_PLATFORM_API_URL (then GLUBEAN_API_URL) " +
       "(process env or project .env/.env.secrets) > ~/.glubean/credentials.json.",
     inputSchema: {
       ...OPEN_AUTH_INPUT_SCHEMA,
