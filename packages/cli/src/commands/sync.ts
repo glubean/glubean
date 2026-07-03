@@ -250,7 +250,9 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // `sensitiveKeys: []` (pattern rules only) on the theory that key-based
   // redaction would mask schema field names and corrupt the projection. That
   // theory doesn't hold: `redactValue` runs with `sensitiveKeyRecurse: true`
-  // (engine default) — an object/array under a sensitive key is recursed INTO,
+  // (the `RedactionEngine` constructor itself defaults this to false;
+  // `redactValue`/`compiler.ts` opts into true for non-event payloads like
+  // this projection) — an object/array under a sensitive key is recursed INTO,
   // never replaced wholesale, so only SCALAR leaves get masked and
   // `properties.password: { type: "string" }` keeps its exact shape. Meanwhile
   // clearing sensitiveKeys let `cookie`/`set-cookie`/`sessionid`/`session_id`
