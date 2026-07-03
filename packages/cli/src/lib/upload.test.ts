@@ -119,6 +119,54 @@ test("uploadToCloud posts a RunIngest to the target-scoped endpoint with a const
   expect(receipt.uploadedAt).toEqual(expect.any(String));
 });
 
+// ── Regression: GLU-109 — trailing-slash apiUrl must not double-slash the
+// request. A `--api-url` / `GLUBEAN_API_URL` copied with a trailing slash is
+// a common artifact; Hono's exact-segment router 404s on the resulting
+// `//v1/...` double slash instead of matching `/v1/projects/...`. ──────────
+test("uploadToCloud normalizes a trailing-slash apiUrl (no double slash in the runs endpoint)", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(runResponse());
+  vi.stubGlobal("fetch", fetchMock);
+
+  const receipt = await uploadToCloud(input, {
+    ...baseOptions,
+    apiUrl: "https://api.glubean.test/",
+    rootDir,
+  });
+
+  const [url] = fetchMock.mock.calls[0];
+  expect(url).toBe("https://api.glubean.test/v1/projects/proj_123/targets/tgt_123/runs");
+  expect(url).not.toMatch(/\/\/v1\//);
+  expect(receipt.resultUpload.status).toBe("uploaded");
+  expect(receipt.url).toBe("https://api.glubean.test/v1/projects/proj_123/targets/tgt_123/runs/run_123");
+});
+
+test("uploadToCloud normalizes a multi-trailing-slash apiUrl for the artifact endpoint too", async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(runResponse())
+    .mockResolvedValueOnce(artifactResponse());
+  vi.stubGlobal("fetch", fetchMock);
+
+  const shotsDir = join(rootDir, ".glubean", "screenshots", "mytest");
+  await mkdir(shotsDir, { recursive: true });
+  const screenshotPath = join(shotsDir, "shot.png");
+  await writeFile(screenshotPath, Buffer.from("x"));
+
+  await uploadToCloud(input, {
+    ...baseOptions,
+    apiUrl: "https://api.glubean.test///",
+    rootDir,
+    screenshotPaths: [screenshotPath],
+  });
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  const [artifactUrl] = fetchMock.mock.calls[1];
+  expect(artifactUrl).toBe(
+    "https://api.glubean.test/v1/projects/proj_123/targets/tgt_123/runs/run_123/artifacts",
+  );
+  expect(artifactUrl).not.toMatch(/\/\/v1\//);
+});
+
 test("uploadToCloud sends default environment when no env file is provided", async () => {
   const fetchMock = vi.fn().mockResolvedValueOnce(runResponse());
   vi.stubGlobal("fetch", fetchMock);

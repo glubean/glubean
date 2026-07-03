@@ -256,6 +256,86 @@ test("resolveApiUrl: defaults to DEFAULT_API_URL", async () => {
   });
 });
 
+// ── Regression: GLU-109 / GLU-61 family — trailing-slash apiUrl must not
+// double-slash `/v1/...` request URLs. A copy-pasted `--api-url` /
+// `GLUBEAN_API_URL` with a trailing slash (browser address bar, docs
+// examples) previously survived unnormalized through every preflight check
+// in this file, producing `https://host//v1/projects/...`. Hono's exact
+// segment router doesn't collapse that double slash, so it 404s instead of
+// matching `/v1/projects/:id` — even though the SAME project is a real 200
+// once the slash is stripped. `upload.ts` / `sync.ts` already normalized;
+// this brings `resolveApiUrl` (and everything that calls it) in line. ──────
+
+test("resolveApiUrl: strips a trailing slash from the --api-url flag", async () => {
+  await withTempHome(async () => {
+    const url = await resolveApiUrl({ apiUrl: "https://api.glubean.test/" });
+    expect(url).toBe("https://api.glubean.test");
+  });
+});
+
+test("resolveApiUrl: strips multiple trailing slashes from GLUBEAN_API_URL", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.glubean.test///";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://api.glubean.test");
+  });
+});
+
+test("resolveApiUrl: strips a trailing slash from envFileVars / cloudConfig / credentials.json", async () => {
+  await withTempHome(async () => {
+    expect(
+      await resolveApiUrl({}, { envFileVars: { GLUBEAN_API_URL: "https://env-file.test/" } }),
+    ).toBe("https://env-file.test");
+    expect(
+      await resolveApiUrl({}, { cloudConfig: { apiUrl: "https://config.test/" } }),
+    ).toBe("https://config.test");
+
+    await writeCredentials({ token: "gb_x", apiUrl: "https://creds.test/" });
+    expect(await resolveApiUrl({})).toBe("https://creds.test");
+  });
+});
+
+test("checkUploadAuth: a trailing-slash apiUrl still GETs the single-slash /v1/projects/:id URL (no 404)", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(JSON.stringify({ id: "proj_1", name: "Acme" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const r = await checkUploadAuth("https://api.glubean.test/", "proj_1", "glb_ok");
+  expect(fetchMock.mock.calls[0][0]).toBe("https://api.glubean.test/v1/projects/proj_1");
+  expect(r).toMatchObject({ proceed: true, status: 200 });
+});
+
+test("checkTargetInProject: a trailing-slash apiUrl still GETs the single-slash target URL (no 404)", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(JSON.stringify({ id: "tgt_1" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const r = await checkTargetInProject("https://api.glubean.test/", "proj_1", "tgt_1", "glb_ok");
+  expect(fetchMock.mock.calls[0][0]).toBe(
+    "https://api.glubean.test/v1/projects/proj_1/targets/tgt_1",
+  );
+  expect(r).toMatchObject({ proceed: true, status: 200 });
+});
+
+test("resolveDefaultTargetId: a trailing-slash apiUrl still GETs the single-slash targets URL", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(JSON.stringify([{ id: "tgt_only", slug: "prod" }]), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const id = await resolveDefaultTargetId("https://api.glubean.test/", "prj_custom", "gb");
+  expect(fetchMock.mock.calls[0][0]).toBe("https://api.glubean.test/v1/projects/prj_custom/targets");
+  expect(id).toBe("tgt_only");
+});
+
 // ── ProjectAuthSources tests ──
 
 test("resolveToken: envFileVars used when no flag or system env", async () => {
