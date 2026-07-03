@@ -30,6 +30,7 @@ import {
 } from "@glubean/scanner";
 import type { GlubeanFileKind } from "@glubean/scanner";
 import { applyEnvTemplating } from "@glubean/runner";
+import { BUILTIN_SCOPES, compileScopes, redactEvent, redactValue } from "@glubean/redaction";
 
 // ANSI color codes for pretty output
 const colors = {
@@ -1910,6 +1911,21 @@ export async function runCommand(
     metricCollector,
   });
 
+  // Redaction (GLU-105): compile scopes ONCE, unconditionally, and redact
+  // every harness event as it arrives — BEFORE it reaches any sink. Every
+  // sink that touches this run's data (`.glubean/last-run.result.json`,
+  // `--result-json`, `.glubean/traces.json`, `--log-file`, `--verbose`
+  // console output, `--emit-full-trace` trace files) must consume the same
+  // redacted stream. Previously redaction only ran on a clone built for
+  // `--upload`, so every local-disk sink got the raw, secret-bearing event
+  // regardless of whether `--upload` was even passed.
+  const effectiveRedaction = options.redactionConfig ?? glubeanConfig.redaction;
+  const compiledScopes = compileScopes({
+    builtinScopes: BUILTIN_SCOPES,
+    globalRules: effectiveRedaction.globalRules,
+    replacementFormat: effectiveRedaction.replacementFormat,
+  });
+
   // Only walk the runner stream when there are runnable tests. The empty
   // case has already emitted all capability skips above and falls
   // straight through to the summary.
@@ -2046,7 +2062,16 @@ export async function runCommand(
       }
 
       case "file:event": {
-        const event = ev.event;
+        // Redact BEFORE anything below touches `event.data` — trace/log/
+        // verbose display, addLogEntry (feeds --log-file), traceCollector
+        // (feeds .glubean/traces.json), and the testEvents.push() below
+        // (feeds resultPayload → last-run.result.json / --result-json /
+        // --emit-full-trace trace files) all read this same variable.
+        const event = redactEvent(
+          ev.event,
+          compiledScopes,
+          effectiveRedaction.replacementFormat,
+        ) as ExecutionEvent;
         switch (event.type) {
           case "start": {
             const entry =
@@ -2707,21 +2732,10 @@ export async function runCommand(
       console.error(`${colors.red}Upload failed: no project ID.${colors.reset}`);
       process.exit(1);
     } else {
-      const { compileScopes, redactEvent, redactValue, BUILTIN_SCOPES } =
-        await import("@glubean/redaction");
-      // Prefer the v1 plan's full redaction config when supplied
-      // (Phase 4 init scaffolds `defaults.redaction` in glubean.yaml,
-      // including any custom globalRules / sensitiveKeys / customPatterns).
-      // The legacy loadConfig path doesn't read glubean.yaml — without
-      // this, custom rules would be silently ignored and matching
-      // secrets could be sent to Cloud.
-      const effectiveRedaction =
-        options.redactionConfig ?? glubeanConfig.redaction;
-      const compiledScopes = compileScopes({
-        builtinScopes: BUILTIN_SCOPES,
-        globalRules: effectiveRedaction.globalRules,
-        replacementFormat: effectiveRedaction.replacementFormat,
-      });
+      // `compiledScopes`/`effectiveRedaction` are the SAME instances used
+      // above to redact every event as it was collected (GLU-105) — reused
+      // here rather than recompiled, so upload and disk never drift onto
+      // two different redaction configs.
 
       // The upload TARGET (the API/system under test runs belong to — ADR 0007)
       // was resolved + validated in the preflight (pre-run, so a misconfigured
@@ -2733,9 +2747,10 @@ export async function runCommand(
         process.exit(1);
       } else {
         // ── Result blob: the full ExecutionResult, run-data ONLY (per D7 the
-        //    contract/workflow projection is a separate c/f line). Events are
-        //    scope-redacted; the rest of the payload can ALSO carry secrets, so
-        //    scrub it too: `context.command` is raw argv (e.g. `--token glb_…`,
+        //    contract/workflow projection is a separate c/f line). `resultPayload.tests[].events`
+        //    are already scope-redacted (collected that way — see above); the
+        //    rest of the payload can ALSO carry secrets, so scrub it too:
+        //    `context.command` is raw argv (e.g. `--token glb_…`,
         //    `--input-json '{"password":…}'`) → dropped outright; `customMetadata`
         //    is user-supplied → deep-redacted. Without this the blob would store
         //    those verbatim in Cloud.
@@ -2753,12 +2768,6 @@ export async function runCommand(
           ...(resultPayload.customMetadata
             ? { customMetadata: redactNonEvent(resultPayload.customMetadata) }
             : {}),
-          tests: resultPayload.tests.map((t) => ({
-            ...t,
-            events: t.events.map((e) =>
-              redactEvent(e, compiledScopes, effectiveRedaction.replacementFormat),
-            ),
-          })),
         };
 
         // ── Analytics substrate. Server derive-on-ingest (plan D2) isn't built
