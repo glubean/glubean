@@ -119,7 +119,7 @@ program
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
-  .option("--api-url <url>", "Glubean API server URL")
+  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
   .option(
     "--input-json <value>",
     "Explicit case input as JSON literal or @path/to.json. Validated against the case's `needs` schema; runs raw (overlay skipped). Requires --filter to match exactly one testId.",
@@ -679,7 +679,7 @@ ciCmd
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
-  .option("--api-url <url>", "Glubean API server URL")
+  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
   .option(
     "--input-json <value>",
     "Explicit case input as JSON literal or @path/to.json. Validated against the case's `needs` schema; runs raw (overlay skipped). Requires --filter to match exactly one testId.",
@@ -756,7 +756,7 @@ program
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
   .option("--token-env <name>", "Read the token from this env var instead of GLUBEAN_TOKEN")
-  .option("--api-url <url>", "Glubean API server URL (or GLUBEAN_API_URL env)")
+  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
   .option("--env-file <name>", "Env file basename to load (default: active env, else .env; prod-like active envs are refused implicitly)")
   .option("--allow-empty", "Allow clearing the project's projections when no tests are found")
   .action(async (options) => {
@@ -783,7 +783,7 @@ program
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
-  .option("--api-url <url>", "Glubean API server URL")
+  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
   .action(async (target, options) => {
     await loadCommand(target, {
       envFile: options.envFile,
@@ -868,7 +868,7 @@ program
   .description("Authenticate with Glubean Cloud (device authorization in your browser)")
   .option("--token <token>", "Save a project token directly (skip the browser device flow)")
   .option("--project <id>", "Default project ID")
-  .option("--api-url <url>", "Platform API URL for uploads (or GLUBEAN_API_URL)")
+  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
   .option("--auth-url <url>", "Auth server URL for login (or GLUBEAN_AUTH_URL)")
   .option("--no-browser", "Don't auto-open the browser; print the URL to open manually")
   .action(async (options) => {

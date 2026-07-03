@@ -1,12 +1,19 @@
 /**
  * Shared credential resolution for Glubean Cloud auth.
  *
- * Priority order:
- *   1. CLI flag (--token / --project / --api-url)
- *   2. System environment variable (GLUBEAN_TOKEN / GLUBEAN_PROJECT_ID / GLUBEAN_API_URL)
- *   3. .env + .env.secrets file vars (project-level)
- *   4. package.json glubean.cloud config (projectId, apiUrl, token)
- *   5. ~/.glubean/credentials.json (global fallback)
+ * Priority order for token/projectId (and every OTHER field): CLI flag >
+ * system env var > .env/.env.secrets file var > package.json glubean.cloud
+ * config > ~/.glubean/credentials.json.
+ *
+ * apiUrl is the ONE exception (GLU-161, mirrors GLU-139's fix in
+ * packages/mcp/src/cloud.ts): the VAR NAME ranks above the source. The full
+ * chain is --api-url flag > GLUBEAN_PLATFORM_API_URL (system env, then .env
+ * file) > GLUBEAN_API_URL (system env, then .env file) > package.json
+ * glubean.cloud.apiUrl > ~/.glubean/credentials.json. So a `.env` file's
+ * GLUBEAN_PLATFORM_API_URL beats a system-env GLUBEAN_API_URL — see
+ * resolveApiUrl below for why: a project can legitimately set GLUBEAN_API_URL
+ * for an unrelated Dashboard API while GLUBEAN_PLATFORM_API_URL is the
+ * unambiguous name for the Platform API these commands need.
  */
 
 import { dirname, join } from "node:path";
@@ -269,16 +276,29 @@ export function checkTargetInProject(
  * preflight checks above, `upload.ts`'s real POST, `sync.ts`, `load.ts` —
  * builds its `/v1/...` request URL from the same clean base, whether or not
  * that caller remembers to normalize again itself.
+ *
+ * GLU-161 (mirrors GLU-139's fix for the MCP server, `packages/mcp/src/cloud.ts`):
+ * `GLUBEAN_PLATFORM_API_URL` is checked BEFORE the legacy `GLUBEAN_API_URL`, in
+ * BOTH process env and .env-file vars, before either source falls through to
+ * `cloudConfig`/the credentials file. A project that also dogfoods the
+ * Dashboard API (server-hono — a *different* service with no `/v1/*` routes)
+ * legitimately sets `GLUBEAN_API_URL` for that; reusing it here for the
+ * Platform/ingest API that `run --upload` / `load --upload` / `sync` all need
+ * silently 404s. `GLUBEAN_PLATFORM_API_URL` is the unambiguous name for "the
+ * Platform API these commands talk to"; `GLUBEAN_API_URL` remains the fallback
+ * for projects that only ever used the one var.
  */
 export async function resolveApiUrl(
   options: AuthOptions,
   sources?: ProjectAuthSources,
 ): Promise<string> {
   if (options.apiUrl) return normalizeApiUrl(options.apiUrl);
-  const env = process.env.GLUBEAN_API_URL;
-  if (env) return normalizeApiUrl(env);
-  const fileVar = sources?.envFileVars?.["GLUBEAN_API_URL"];
-  if (fileVar) return normalizeApiUrl(fileVar);
+  const fromEnv = (name: string): string | undefined =>
+    process.env[name] || sources?.envFileVars?.[name] || undefined;
+  const platform = fromEnv("GLUBEAN_PLATFORM_API_URL");
+  if (platform) return normalizeApiUrl(platform);
+  const legacy = fromEnv("GLUBEAN_API_URL");
+  if (legacy) return normalizeApiUrl(legacy);
   if (sources?.cloudConfig?.apiUrl) return normalizeApiUrl(sources.cloudConfig.apiUrl);
   const creds = await readCredentials();
   return normalizeApiUrl(creds?.apiUrl ?? DEFAULT_API_URL);

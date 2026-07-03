@@ -1118,7 +1118,7 @@ export async function runCommand(
           `${colors.dim}Preflight GET: ${preApiUrl}/v1/projects/${preProject}${colors.reset}`,
         );
         console.error(
-          `${colors.dim}Check that --project / GLUBEAN_PROJECT_ID is a real project id, that --api-url / GLUBEAN_API_URL has no stray trailing slash, and that it points at the platform ingest API (the token-only \`/v1/*\` service) — not a dashboard/session-auth host, which has no \`/v1\` routes and 404s here too.${colors.reset}`,
+          `${colors.dim}Check that --project / GLUBEAN_PROJECT_ID is a real project id, that --api-url / GLUBEAN_PLATFORM_API_URL / GLUBEAN_API_URL has no stray trailing slash, and that it points at the platform ingest API (the token-only \`/v1/*\` service) — not a dashboard/session-auth host, which has no \`/v1\` routes and 404s here too.${colors.reset}`,
         );
       } else if (check.status === 403) {
         console.error(`${colors.red}Error: access to project ${preProject} is forbidden (403).${colors.reset}`);
@@ -1130,7 +1130,7 @@ export async function runCommand(
       } else {
         console.error(`${colors.red}Error: upload preflight got an unexpected response (${check.status}).${colors.reset}`);
         console.error(
-          `${colors.dim}Check that --api-url / GLUBEAN_API_URL points at the Glubean platform API.${colors.reset}`,
+          `${colors.dim}Check that --api-url / GLUBEAN_PLATFORM_API_URL / GLUBEAN_API_URL points at the Glubean platform API.${colors.reset}`,
         );
       }
       process.exit(1);
@@ -1163,7 +1163,7 @@ export async function runCommand(
             `${colors.dim}Preflight GET: ${preApiUrl}/v1/projects/${preProject}/targets/${preTarget}${colors.reset}`,
           );
           console.error(
-            `${colors.dim}Check upload.targetId / GLUBEAN_TARGET_ID / --upload-target, and that --api-url / GLUBEAN_API_URL points at the platform ingest API.${colors.reset}`,
+            `${colors.dim}Check upload.targetId / GLUBEAN_TARGET_ID / --upload-target, and that --api-url / GLUBEAN_PLATFORM_API_URL / GLUBEAN_API_URL points at the platform ingest API.${colors.reset}`,
           );
         } else if (tcheck.status === 401) {
           console.error(`${colors.red}Error: authentication failed validating the target (401).${colors.reset}`);

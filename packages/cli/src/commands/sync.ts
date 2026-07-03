@@ -172,7 +172,9 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     process.exit(1);
   }
   if (!apiUrl) {
-    console.error(`${colors.red}Sync failed: no API URL (set --api-url / GLUBEAN_API_URL).${colors.reset}`);
+    console.error(
+      `${colors.red}Sync failed: no API URL (set --api-url / GLUBEAN_PLATFORM_API_URL / GLUBEAN_API_URL).${colors.reset}`,
+    );
     process.exit(1);
   }
 
@@ -343,9 +345,20 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       if (opts?.tolerateMissingRoute && res.status === 404) return { skipped: true };
       const text = await res.text().catch(() => "");
       console.error(`${colors.red}Sync failed (${kind}): ${res.status} ${text}${colors.reset}`);
+      console.error(`${colors.dim}Sync POST: ${base}/${kind}${colors.reset}`);
       if (res.status === 401 || res.status === 403) {
         console.error(
           `${colors.dim}The token is invalid/expired or lacks runs:write. Create a project token in the dashboard and 'glubean login' (or set GLUBEAN_TOKEN).${colors.reset}`,
+        );
+      } else if (res.status === 404) {
+        // GLU-161: the #1 cause is --api-url / GLUBEAN_PLATFORM_API_URL /
+        // GLUBEAN_API_URL resolving to the Dashboard/session-auth host
+        // (server-hono, no `/v1/*` routes) instead of the Platform ingest API
+        // `sync` requires — same trap `run --upload` / `load --upload`
+        // preflight already surface, but sync has no preflight GET so this is
+        // the first place it's diagnosable.
+        console.error(
+          `${colors.dim}Check that --api-url / GLUBEAN_PLATFORM_API_URL (or GLUBEAN_API_URL) points at the platform ingest API (the token-only \`/v1/*\` service) — not a dashboard/session-auth host, which has no \`/v1\` routes and 404s here too.${colors.reset}`,
         );
       }
       process.exit(1);

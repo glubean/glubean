@@ -213,7 +213,8 @@ glubean upgrade
 | `GLUBEAN_CWD` | Override the working directory (useful for shell aliases) |
 | `GLUBEAN_PROJECT_ID` | Default Cloud project for `--upload` |
 | `GLUBEAN_TOKEN` | Auth token for Cloud (alternative to `glubean login`) |
-| `GLUBEAN_API_URL` | Override the Cloud API URL |
+| `GLUBEAN_PLATFORM_API_URL` | Override the Platform API URL for `run`/`load`/`sync`/`login` uploads (preferred — see GLUBEAN_API_URL below) |
+| `GLUBEAN_API_URL` | Legacy alias for the Platform API URL; still read as a fallback when `GLUBEAN_PLATFORM_API_URL` is unset. Some projects also use this name for an unrelated Dashboard API host — set `GLUBEAN_PLATFORM_API_URL` to disambiguate |
 
 ## Exit codes
 

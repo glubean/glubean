@@ -5,8 +5,9 @@
  * saves it to ~/.glubean/credentials.json for `--upload`.
  *
  * Login talks to the AUTH url (server-hono); uploads talk to the platform API
- * (`GLUBEAN_API_URL`) — two separate planes. The open platform is token-only and
- * has no login of its own.
+ * (`GLUBEAN_PLATFORM_API_URL`, falling back to the legacy `GLUBEAN_API_URL` —
+ * see resolveApiUrl in ../lib/auth.ts / GLU-161) — two separate planes. The
+ * open platform is token-only and has no login of its own.
  */
 
 import { execFile } from "node:child_process";

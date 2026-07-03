@@ -27,6 +27,7 @@ const AUTH_ENV_KEYS = [
   "GLUBEAN_PROJECT_ID",
   "GLUBEAN_TARGET_ID",
   "GLUBEAN_API_URL",
+  "GLUBEAN_PLATFORM_API_URL",
   "GLUBEAN_AUTH_URL",
 ];
 
@@ -59,6 +60,7 @@ async function withTempHome(
     delete process.env["GLUBEAN_TOKEN"];
     delete process.env["GLUBEAN_PROJECT_ID"];
     delete process.env["GLUBEAN_API_URL"];
+    delete process.env["GLUBEAN_PLATFORM_API_URL"];
     await fn(tmpHome);
   } finally {
     restoreEnv(saved);
@@ -253,6 +255,78 @@ test("resolveApiUrl: defaults to DEFAULT_API_URL", async () => {
   await withTempHome(async () => {
     const url = await resolveApiUrl({});
     expect(url).toBe(DEFAULT_API_URL);
+  });
+});
+
+// ── GLU-161: GLUBEAN_PLATFORM_API_URL outranks the legacy GLUBEAN_API_URL.
+// Mirrors GLU-139's fix for the MCP server (packages/mcp/src/cloud.ts /
+// cloud.test.ts) — a project (e.g. the dogfood repo) can legitimately set
+// GLUBEAN_API_URL for an unrelated Dashboard API (server-hono, no `/v1/*`)
+// while also setting GLUBEAN_PLATFORM_API_URL for the Platform/ingest API
+// `run --upload` / `load --upload` / `sync` need. GLUBEAN_PLATFORM_API_URL
+// must win so those commands don't 404 against the Dashboard host when
+// relying on project env resolution (no explicit --api-url). ──────────────
+
+test("resolveApiUrl: prefers GLUBEAN_PLATFORM_API_URL over GLUBEAN_API_URL (process env)", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.staging.glubean.com";
+    process.env["GLUBEAN_PLATFORM_API_URL"] = "https://platform.staging.glubean.com";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://platform.staging.glubean.com");
+  });
+});
+
+test("resolveApiUrl: falls back to GLUBEAN_API_URL when GLUBEAN_PLATFORM_API_URL is unset (legacy projects)", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://platform.glubean.com";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://platform.glubean.com");
+  });
+});
+
+test("resolveApiUrl: an explicit --api-url flag still overrides both platform and legacy env vars", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.staging.glubean.com";
+    process.env["GLUBEAN_PLATFORM_API_URL"] = "https://platform.staging.glubean.com";
+    const url = await resolveApiUrl({ apiUrl: "https://explicit.test" });
+    expect(url).toBe("https://explicit.test");
+  });
+});
+
+test("resolveApiUrl: reads GLUBEAN_PLATFORM_API_URL from .env file vars, same precedence as process env", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.staging.glubean.com";
+    const url = await resolveApiUrl(
+      {},
+      { envFileVars: { GLUBEAN_PLATFORM_API_URL: "https://platform.staging.glubean.com" } },
+    );
+    expect(url).toBe("https://platform.staging.glubean.com");
+  });
+});
+
+test("resolveApiUrl: a process-env GLUBEAN_PLATFORM_API_URL beats a .env-file GLUBEAN_API_URL", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_PLATFORM_API_URL"] = "https://platform.staging.glubean.com";
+    const url = await resolveApiUrl(
+      {},
+      { envFileVars: { GLUBEAN_API_URL: "https://api.staging.glubean.com" } },
+    );
+    expect(url).toBe("https://platform.staging.glubean.com");
+  });
+});
+
+test("resolveApiUrl: when BOTH vars land in the same envFileVars object (run/load/sync's { ...vars, ...secrets } merge), GLUBEAN_PLATFORM_API_URL still wins", async () => {
+  await withTempHome(async () => {
+    const url = await resolveApiUrl(
+      {},
+      {
+        envFileVars: {
+          GLUBEAN_API_URL: "https://api.staging.glubean.com",
+          GLUBEAN_PLATFORM_API_URL: "https://platform.staging.glubean.com",
+        },
+      },
+    );
+    expect(url).toBe("https://platform.staging.glubean.com");
   });
 });
 
