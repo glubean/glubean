@@ -335,6 +335,68 @@ test("OpenAPI: path params still convert to {param} when endpoint omits the lead
 });
 
 // ---------------------------------------------------------------------------
+// OpenAPI (GLU-116): two surfaces sharing the same method+path must not
+// silently drop one operation in the merged projection.
+// ---------------------------------------------------------------------------
+
+test("OpenAPI merge: two surfaces on the same method+path both survive (GLU-116)", () => {
+  const dashboard = contract.http.with("glubean-dashboard", {});
+  const platform = contract.http.with("glubean-platform-public", {});
+
+  const dashboardHealth = dashboard("dashboard.health", {
+    endpoint: "GET /health",
+    feature: "health",
+    cases: { healthy: { description: "reports healthy", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const platformHealth = platform("platform.health", {
+    endpoint: "GET /health",
+    feature: "health",
+    cases: { healthy: { description: "reports healthy", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+
+  const doc = renderArtifact(openapiArtifact, [
+    dashboardHealth._extracted as never,
+    platformHealth._extracted as never,
+  ]);
+  const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
+
+  // Canonical path keeps the first-encountered operation (order-stable,
+  // matches prior first-wins semantics for the winning slot).
+  expect(paths["/health"].get.operationId).toBe("dashboard.health");
+
+  // The second surface is NOT dropped — it's relocated to a surface-qualified
+  // path key so both operations are discoverable in the merged projection.
+  const altKey = Object.keys(paths).find(
+    (k) => k !== "/health" && k.startsWith("/health#"),
+  )!;
+  expect(altKey).toBeDefined();
+  expect(paths[altKey].get.operationId).toBe("platform.health");
+  expect(paths[altKey].get["x-glubean-surface-collision"]).toBe("/health");
+
+  // Every operationId that went into the merge is present somewhere in the
+  // output — the core regression this test guards against.
+  const allOperationIds = Object.values(paths).map((methods) => methods.get.operationId);
+  expect(allOperationIds.sort()).toEqual(["dashboard.health", "platform.health"]);
+});
+
+test("OpenAPI merge: re-merging the same operationId at the same path+method is a no-op, not a collision", () => {
+  const api = makeApi();
+  const health = api("shared.health", {
+    endpoint: "GET /health",
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+
+  // Same contract's part appears twice (e.g. overlapping project globs).
+  const doc = renderArtifact(openapiArtifact, [
+    health._extracted as never,
+    health._extracted as never,
+  ]);
+  const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
+  expect(Object.keys(paths)).toEqual(["/health"]);
+  expect(paths["/health"].get["x-glubean-surface-collision"]).toBeUndefined();
+});
+
+// ---------------------------------------------------------------------------
 // Markdown (inbound-artifact-design route C) + null-part pipeline (D6)
 // ---------------------------------------------------------------------------
 
