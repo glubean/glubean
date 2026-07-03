@@ -1070,6 +1070,46 @@ export const greeter = contract.grpc("greeter", {
   }
 });
 
+// GLU-130 (static-fallback side): a pure-HTTP contract file whose runtime
+// import fails (nonexistent module) still goes through extractContractCases.
+// That static/regex extractor doesn't capture custom `tags` at all, but it
+// DOES capture `requires`/`defaultRun` — discovery must still emit the same
+// synthetic requires:/default-run: tags CLI's static fallback does, instead
+// of the old hardcoded `tags: []`.
+test("discoverTestsFromFile: static fallback emits synthetic requires/defaultRun tags (GLU-130)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-static-tags-"));
+  const filePath = join(dir, "static.contract.ts");
+  await writeFile(filePath, `
+import { contract } from "@nonexistent/sdk";
+export const getUser = contract.http("get-user", {
+  endpoint: "GET /users/:id",
+  cases: {
+    plain: { description: "found", expect: { status: 200 } },
+    browserOnly: { description: "needs OAuth", requires: "browser", expect: { status: 200 } },
+    optIn: { description: "costly", defaultRun: "opt-in", expect: { status: 200 } },
+  },
+});
+`);
+
+  try {
+    const result = await discoverTestsFromFile(filePath);
+    // Runtime import failed (nonexistent module) but the file is pure HTTP —
+    // static fallback should have extracted cases, not failed closed.
+    expect(result.tests.length).toBe(3);
+
+    const plain = result.tests.find((t) => t.id === "get-user.plain")!;
+    expect(plain.tags).toBeUndefined();
+
+    const browserOnly = result.tests.find((t) => t.id === "get-user.browserOnly")!;
+    expect(browserOnly.tags).toEqual(["requires:browser", "default-run:opt-in"]);
+
+    const optIn = result.tests.find((t) => t.id === "get-user.optIn")!;
+    expect(optIn.tags).toEqual(["default-run:opt-in"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // =============================================================================
 // OpenAPI generation regression tests (Phase 1+2 patch)
 // =============================================================================
