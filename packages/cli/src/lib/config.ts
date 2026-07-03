@@ -13,7 +13,7 @@
  * is extracted. All other files are treated as plain glubean config JSON.
  */
 
-import { resolve } from "node:path";
+import { resolve, isAbsolute, normalize } from "node:path";
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { DEFAULT_CONFIG, BUILTIN_SCOPES } from "@glubean/redaction";
@@ -379,6 +379,37 @@ function assertType(
 function assertNonEmpty(value: string, context: string, configPath: string): void {
   if (value.trim() === "") {
     throw new GlubeanConfigError(`\`${context}\` must be a non-empty string.`, configPath);
+  }
+}
+
+/**
+ * Reject a path that is absolute or escapes the project root via `..`.
+ *
+ * Projection `output`/`target` are resolved against the project root and
+ * (for `output`) written to disk. Without this check a config like
+ * `output: ../../package.json` or `output: /etc/passwd` could clobber files
+ * outside the project — the config-comment contract says these are relative
+ * to the project root, so enforce it at load time (GLU-117 codex R1 P1).
+ */
+function assertContainedRelativePath(
+  value: string,
+  context: string,
+  configPath: string,
+): void {
+  if (isAbsolute(value)) {
+    throw new GlubeanConfigError(
+      `\`${context}\` must be a relative path inside the project (got absolute path "${value}").`,
+      configPath,
+    );
+  }
+  // normalize collapses `a/../b` etc.; a leading `..` segment means the path
+  // resolves outside the project root.
+  const normalized = normalize(value);
+  if (normalized === ".." || normalized.startsWith(`..${"/"}`) || normalized.startsWith(`..${"\\"}`)) {
+    throw new GlubeanConfigError(
+      `\`${context}\` must stay inside the project — "${value}" escapes the project root.`,
+      configPath,
+    );
   }
 }
 
@@ -893,6 +924,7 @@ function validateContractProjection(
   if (p.target !== undefined) {
     assertType(p.target, "string", `${context}.target`, configPath);
     assertNonEmpty(p.target as string, `${context}.target`, configPath);
+    assertContainedRelativePath(p.target as string, `${context}.target`, configPath);
     target = p.target as string;
   }
 
@@ -907,6 +939,7 @@ function validateContractProjection(
   }
   assertType(p.output, "string", `${context}.output`, configPath);
   assertNonEmpty(p.output as string, `${context}.output`, configPath);
+  assertContainedRelativePath(p.output as string, `${context}.output`, configPath);
 
   let title: string | undefined;
   if (p.title !== undefined) {

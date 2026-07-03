@@ -236,4 +236,60 @@ profiles:
     expect(spec.info.title).toBe("Direct Flag Contracts");
     expect(Object.keys(spec.paths)).toEqual(["/dashboard/health"]);
   });
+
+  test("a write failure in one projection is labeled and does not abort the rest (GLU-117 R1 P2)", async () => {
+    // Two projections; the first writes to an output path whose parent is a
+    // FILE (not a directory), so mkdir/writeFile fails — the run must still
+    // attempt the second and exit non-zero.
+    await writeSurfaceContract("dashboard");
+    await writeSurfaceContract("platform");
+    // Pre-create `reports/blocked` as a file so `reports/blocked/x.json`'s
+    // mkdir fails (ENOTDIR).
+    await mkdir(join(fixtureDir, "reports"), { recursive: true });
+    await writeFile(join(fixtureDir, "reports/blocked"), "i am a file", "utf-8");
+    await writeFile(
+      join(fixtureDir, "glubean.yaml"),
+      `
+version: 1
+suites:
+  contracts: { target: ./contracts, kinds: [contract, flow] }
+profiles:
+  local: { suites: [contracts] }
+projections:
+  contracts:
+    aaa-broken:
+      target: contracts/dashboard
+      format: openapi
+      output: reports/blocked/x.json
+    zzz-ok:
+      target: contracts/platform
+      format: openapi
+      title: Platform Contracts
+      output: reports/projections/platform.openapi.json
+`,
+    );
+    process.chdir(fixtureDir);
+
+    const exit = vi.spyOn(process, "exit").mockImplementation(((): never => {
+      throw new Error("process.exit");
+    }) as never);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      // Names are sorted, so aaa-broken runs first (fails), zzz-ok second.
+      await expect(contractsCommand({ projection: "all" })).rejects.toThrow("process.exit");
+      // Broken projection surfaced with the ✗ label...
+      expect(errSpy.mock.calls.flat().join("\n")).toContain("✗ aaa-broken:");
+      // ...and the second projection still ran and wrote its output.
+      expect(logSpy.mock.calls.flat().join("\n")).toContain("zzz-ok");
+      const platform = JSON.parse(
+        await readFile(join(fixtureDir, "reports/projections/platform.openapi.json"), "utf-8"),
+      );
+      expect(platform.info.title).toBe("Platform Contracts");
+    } finally {
+      exit.mockRestore();
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
 });

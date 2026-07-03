@@ -294,6 +294,25 @@ class NoContractsFoundError extends Error {
   }
 }
 
+/**
+ * Thrown by `renderContracts` when a `<kind>` format is not a registered
+ * artifact kind. Carries `importErrors` so the caller can still surface
+ * import diagnostics (which the old direct path printed before formatting),
+ * and is a distinct type so genuine renderer errors for built-in formats
+ * (openapi / md-outline / json) are NOT mislabeled as "unknown format"
+ * (GLU-117 codex R1 P2).
+ */
+class UnknownFormatError extends Error {
+  constructor(
+    public readonly format: string,
+    public readonly cause: unknown,
+    public readonly importErrors: Array<{ file: string; error: string }>,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "UnknownFormatError";
+  }
+}
+
 interface RenderedContracts {
   text: string;
   warnings: DescriptionWarning[];
@@ -405,16 +424,22 @@ async function renderContracts(
     );
   } else {
     // Dynamic dispatch via artifact registry for any other registered kind
-    // name (future proto / sdl / asyncapi). Throws with a helpful error
-    // when the name isn't registered — listing available formats in the
-    // message.
-    const out = renderArtifactByName(
-      format,
-      result.contracts as unknown as ExtractedContractProjection<
-        unknown,
-        unknown
-      >[],
-    );
+    // name (future proto / sdl / asyncapi). `renderArtifactByName` throws
+    // when the name isn't registered — wrap that in a typed UnknownFormatError
+    // (carrying importErrors) so the caller can print import diagnostics first
+    // and only this branch's failures are treated as "unknown format".
+    let out: unknown;
+    try {
+      out = renderArtifactByName(
+        format,
+        result.contracts as unknown as ExtractedContractProjection<
+          unknown,
+          unknown
+        >[],
+      );
+    } catch (err) {
+      throw new UnknownFormatError(format, err, result.errors);
+    }
     text = typeof out === "string" ? out : JSON.stringify(out, null, 2);
     if (!text.endsWith("\n")) text += "\n";
   }
@@ -460,26 +485,30 @@ async function runNamedProjection(
   rootDir: string,
   resolved: ResolvedContractProjection,
 ): Promise<boolean> {
-  let rendered: RenderedContracts;
   try {
-    rendered = await renderContracts(resolved.dir, resolved.format, resolved.title);
+    const rendered = await renderContracts(resolved.dir, resolved.format, resolved.title);
+    printImportErrors(rendered.importErrors);
+
+    // Filesystem writes are inside the try so a mkdir/writeFile failure is
+    // reported with the `✗ <name>:` label and lets `--projection all`
+    // continue to the next projection, rather than aborting the whole run
+    // (GLU-117 codex R1 P2).
+    await mkdir(dirname(resolved.output), { recursive: true });
+    await writeFile(resolved.output, rendered.text, "utf-8");
+    console.log(
+      `${colors.blue}✓${colors.reset} ${resolved.name} → ${relative(rootDir, resolved.output)}`,
+    );
+
+    printWarnings(rendered.warnings, resolved.name);
+    return true;
   } catch (err) {
-    if (err instanceof NoContractsFoundError) printImportErrors(err.importErrors);
+    if (err instanceof NoContractsFoundError || err instanceof UnknownFormatError) {
+      printImportErrors(err.importErrors);
+    }
     const message = err instanceof Error ? err.message : String(err);
     console.error(`${colors.yellow}✗ ${resolved.name}: ${message}${colors.reset}`);
     return false;
   }
-
-  printImportErrors(rendered.importErrors);
-
-  await mkdir(dirname(resolved.output), { recursive: true });
-  await writeFile(resolved.output, rendered.text, "utf-8");
-  console.log(
-    `${colors.blue}✓${colors.reset} ${resolved.name} → ${relative(rootDir, resolved.output)}`,
-  );
-
-  printWarnings(rendered.warnings, resolved.name);
-  return true;
 }
 
 /** `--projection <name|all>`: resolve declared projection(s) from glubean.yaml and generate them. */
@@ -575,13 +604,22 @@ export async function contractsCommand(
       );
       process.exit(1);
     }
-    console.error(
-      `${colors.yellow}⚠ Unknown format "${format}".${colors.reset} ${err instanceof Error ? err.message : String(err)}`,
-    );
-    console.error(
-      `${colors.dim}  Try 'glubean contracts --format list-formats' to see available formats.${colors.reset}`,
-    );
-    process.exit(1);
+    if (err instanceof UnknownFormatError) {
+      // Print import diagnostics first (matches the pre-refactor ordering
+      // where errors were surfaced before formatting), then the format hint.
+      printImportErrors(err.importErrors);
+      console.error(
+        `${colors.yellow}⚠ Unknown format "${err.format}".${colors.reset} ${err.message}`,
+      );
+      console.error(
+        `${colors.dim}  Try 'glubean contracts --format list-formats' to see available formats.${colors.reset}`,
+      );
+      process.exit(1);
+    }
+    // Any other error (e.g. a genuine bug in a built-in renderer) is NOT an
+    // unknown-format condition — let it propagate to the top-level handler
+    // rather than mislabeling it.
+    throw err;
   }
 
   printImportErrors(rendered.importErrors);

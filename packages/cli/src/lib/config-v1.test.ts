@@ -991,5 +991,85 @@ projections:
         );
       });
     });
+
+    it("rejects an absolute output path (GLU-117 R1 P1 — path containment)", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      format: openapi
+      output: /tmp/escape.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.output` must be a relative path/,
+        );
+      });
+    });
+
+    it("rejects an output path that escapes the project via ..", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      format: openapi
+      output: ../../package.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.output` must stay inside the project/,
+        );
+      });
+    });
+
+    it("rejects a target path that escapes the project via ..", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      target: ../../../etc
+      format: openapi
+      output: reports/out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.target` must stay inside the project/,
+        );
+      });
+    });
+
+    it("rejects an absolute target path", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      target: /etc
+      format: openapi
+      output: reports/out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.target` must be a relative path/,
+        );
+      });
+    });
+
+    it("accepts a nested-but-contained output path with an interior ..", async () => {
+      // reports/../reports/out.json normalizes to reports/out.json — contained.
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    ok:
+      suite: contracts
+      format: openapi
+      output: reports/tmp/../out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.projections?.contracts?.ok.output).toBe("reports/tmp/../out.json");
+      });
+    });
   });
 });
