@@ -14,7 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { createHash, randomUUID } from "node:crypto";
@@ -36,9 +36,12 @@ import type { CompiledScope } from "@glubean/redaction";
 import {
   createScanner,
   extractFromSource,
+  GLUBEAN_EXTENSIONS,
   matchesTemplateFilter,
   matchesTemplateId,
+  nodeFs,
   scan,
+  suffixesForKind,
 } from "@glubean/scanner";
 import { extractContractCases } from "@glubean/scanner/static";
 import {
@@ -1239,6 +1242,95 @@ async function scanProject(
   return await scan(dir);
 }
 
+// ── Coverage file discovery (GLU-140) ───────────────────────────────────────
+//
+// `ScanResult.files` only carries files with `test()` exports — contract
+// (*.contract.ts) and flow/workflow (*.flow.ts / *.workflow.ts) files are
+// tracked separately as aggregate `contracts[]`/`workflows[]` arrays with no
+// per-file path (Scanner.scan's Phase 4/5 in @glubean/scanner). That's fine
+// for `glubean_get_metadata` and `glubean_project_contracts`, which surface
+// the aggregate content — but it made `glubean_list_test_files` blind to
+// contract/workflow files entirely in a contract-first project, so an agent
+// starting from file discovery could conclude the project has only its
+// imperative browser tests and miss the primary contract/workflow coverage.
+//
+// Approach: list contract/flow/workflow files BY NAMING CONVENTION — the same
+// `suffixesForKind` map Scanner/`glubean_discover_tests` use. Deliberately
+// filename-based, not content-based: a content check would have to import each
+// file, which (a) breaks `static` mode's "no runtime imports" contract and (b)
+// re-does the import scanProject already performed in `runtime` mode. As a
+// file INDEX (like `git ls-files`), listing a valid-but-empty or stub
+// `*.contract.ts` is the intended behavior — the agent wants to see the file
+// so it can author cases in it — so this does not claim each file currently
+// yields a runnable test, only that it is a coverage-shaped source.
+//
+// The one exclusion is a file whose runtime import HARD-FAILED during
+// scanProject (broken/mid-edit); scanProject surfaces those as
+// `"Contract import failed: <abs path> — …"` / `"Flow import failed: …"`
+// warnings (packages/scanner/src/scanner.ts, Phase 4/5). Best-effort and
+// only active in `runtime` mode (static scans emit no import warnings).
+//
+// WHY A SECOND WALK (not reusing scanProject's): @glubean/scanner's
+// `ScanResult` exposes contracts/workflows only in the AGGREGATE, dropping the
+// per-file source path — so there is no in-scope way to recover the file list
+// from the scan result. The walk is O(files), the same cost class as the scan
+// itself, and this is a discovery tool, not a hot path. Folding a per-file
+// coverage-path list into `ScanResult` would remove this walk AND the
+// warning-string parsing below, but that is a `@glubean/scanner` change; this
+// fix is scoped to `packages/mcp`.
+const COVERAGE_FILE_SUFFIXES = [
+  ...suffixesForKind("contract"),
+  ...suffixesForKind("flow"),
+];
+// Mirrors @glubean/scanner's private `DEFAULT_SKIP_DIRS` (scanner.ts). Kept
+// local because scanner does not export it; if scanner's defaults change, keep
+// this in sync so `glubean_list_test_files` agrees with `scanProject()`.
+const COVERAGE_SCAN_SKIP_DIRS = ["node_modules", ".git", "dist", "build"];
+
+function isCoverageFile(filePath: string): boolean {
+  return COVERAGE_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
+}
+
+/**
+ * True when scanProject flagged `absPath`'s runtime import as failed. Matched
+ * by EXACT path prefix rather than by extracting the path out of the warning:
+ * scanProject emits `"<Contract|Flow> import failed: ${absFile} — ${error}"`
+ * with an absolute `absFile`, and `nodeFs.walk` yields absolute paths too, so
+ * we can anchor on the known path + literal " — " separator. This is immune to
+ * a path that itself contains " — " (a non-greedy extraction regex would mis-
+ * capture there — codex R1 P2).
+ */
+function coverageImportFailed(absPath: string, scanWarnings: string[]): boolean {
+  return scanWarnings.some(
+    (w) =>
+      w.startsWith(`Contract import failed: ${absPath} — `) ||
+      w.startsWith(`Flow import failed: ${absPath} — `),
+  );
+}
+
+/**
+ * Find contract/flow/workflow source files under `dir` (by naming convention),
+ * excluding any whose runtime import hard-failed during scanProject. Returns
+ * absolute paths.
+ */
+async function findCoverageFiles(
+  dir: string,
+  scanWarnings: string[],
+): Promise<string[]> {
+  const found: string[] = [];
+  for await (
+    const filePath of nodeFs.walk(dir, {
+      extensions: [...GLUBEAN_EXTENSIONS],
+      skipDirs: COVERAGE_SCAN_SKIP_DIRS,
+    })
+  ) {
+    if (isCoverageFile(filePath) && !coverageImportFailed(filePath, scanWarnings)) {
+      found.push(filePath);
+    }
+  }
+  return found;
+}
+
 export interface LocalRunResult {
   exportName: string;
   id: string;
@@ -2215,7 +2307,13 @@ server.registerTool(
 server.registerTool(
   MCP_TOOL_NAMES.listTestFiles,
   {
-    description: "List Glubean test files in a directory (lightweight index, no file writes).",
+    description:
+      "List Glubean test + coverage source files in a directory (lightweight index, no file " +
+      "writes). Returns `testFiles` (imperative test() files) plus `coverageFiles` — files " +
+      "following the contract/flow/workflow naming convention (*.contract.ts, *.flow.ts, " +
+      "*.workflow.ts), where a contract-first project's runnable tests live. Listing is by " +
+      "naming convention (a valid-but-empty contract file is still listed); use " +
+      "glubean_discover_tests on a file for its concrete runnable cases.",
     inputSchema: {
       dir: z
         .string()
@@ -2236,6 +2334,17 @@ server.registerTool(
     const mode = input.mode ?? "static";
     const result = await scanProject(rootDir, mode);
 
+    // Contract/flow/workflow files produce runnable tests too (contract cases,
+    // vNext workflows) but aren't tracked in result.files (GLU-140) — find them
+    // separately and fold them into the listing so contract-first projects
+    // aren't misreported as having only their imperative test() files.
+    const coverageFilesAbsolute = await findCoverageFiles(rootDir, result.warnings);
+    const testFiles = Object.keys(result.files).sort();
+    const coverageFiles = coverageFilesAbsolute
+      .map((filePath) => relative(rootDir, filePath))
+      .sort();
+    const files = Array.from(new Set([...testFiles, ...coverageFiles])).sort();
+
     return {
       content: [
         {
@@ -2244,8 +2353,10 @@ server.registerTool(
             {
               rootDir,
               mode,
-              fileCount: result.fileCount,
-              files: Object.keys(result.files).sort(),
+              fileCount: files.length,
+              files,
+              testFiles,
+              coverageFiles,
               warnings: result.warnings,
             },
             null,
