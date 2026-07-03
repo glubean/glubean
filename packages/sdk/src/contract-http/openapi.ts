@@ -629,15 +629,35 @@ function sanitizeComponentName(title: string): string | null {
   return /^[a-zA-Z_]/.test(cleaned) ? cleaned : `_${cleaned}`;
 }
 
+/** Root-level JSON Schema composition keywords (`anyOf`/`oneOf`/`allOf`) —
+ * Zod emits these for `z.union([...])`/discriminated unions and for
+ * `.nullable()` at the schema root (`anyOf: [T, {type:"null"}]`). */
+const COMPOSITION_KEYS = ["anyOf", "oneOf", "allOf"] as const;
+
 /**
  * True when a JSON Schema is "structured" enough to be worth a named
- * component — an object with at least one declared property, or an array.
- * Bare primitives (`{"type":"string"}`) and property-less object wildcards
- * (`{"type":"object"}`) stay inline: hoisting them would mint a component
- * name for something that carries no shape information, which is noise
- * rather than reuse value. Already-hoisted / hand-authored `$ref`s are
- * left untouched (idempotent — a second `mergeOpenApiParts` pass over an
- * already-componentized doc is a no-op here).
+ * component:
+ *   - an object with at least one declared property (`properties`),
+ *   - an object map / record with a concrete value schema
+ *     (`additionalProperties` is a non-empty schema — Zod's
+ *     `z.record(valueSchema)` shape),
+ *   - an array,
+ *   - or a root-level `anyOf`/`oneOf`/`allOf` composition (union /
+ *     nullable-at-root).
+ * Bare primitives (`{"type":"string"}`) and property-less/wildcard object
+ * schemas (`{"type":"object"}`, `{"type":"object","additionalProperties":true}`)
+ * stay inline: hoisting them would mint a component name for something
+ * that carries no shape information, which is noise rather than reuse
+ * value. Already-hoisted / hand-authored `$ref`s are left untouched
+ * (idempotent — a second `mergeOpenApiParts` pass over an already-
+ * componentized doc is a no-op here).
+ *
+ * Codex R3 P2: the original version only recognized `type: "object"` with
+ * non-empty `properties` (plus bare arrays) — missing two common Zod root
+ * shapes: unions/nullables (root `anyOf`, no `type` key at all) and
+ * records (`type: "object"` with `additionalProperties` but no fixed
+ * `properties`). Both are structured, reusable shapes; only the truly
+ * shapeless `{"type":"object"}` wildcard is excluded.
  */
 function isHoistableSchema(schema: unknown): schema is Record<string, unknown> {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
@@ -645,12 +665,24 @@ function isHoistableSchema(schema: unknown): schema is Record<string, unknown> {
   if (typeof s.$ref === "string") return false;
   if (s.type === "array") return true;
   if (s.type === "object") {
-    return (
-      !!s.properties &&
+    if (
+      s.properties &&
       typeof s.properties === "object" &&
       !Array.isArray(s.properties) &&
       Object.keys(s.properties as object).length > 0
+    ) {
+      return true;
+    }
+    return (
+      !!s.additionalProperties &&
+      typeof s.additionalProperties === "object" &&
+      !Array.isArray(s.additionalProperties) &&
+      Object.keys(s.additionalProperties as object).length > 0
     );
+  }
+  for (const key of COMPOSITION_KEYS) {
+    const branch = s[key];
+    if (Array.isArray(branch) && branch.length > 0) return true;
   }
   return false;
 }
@@ -784,11 +816,19 @@ class ComponentSchemaRegistry {
       let candidate = group.explicitName ?? group.preferredName;
       // Preferred name already taken by a DIFFERENT group — try the
       // caller-supplied disambiguator (e.g. status-suffixed name) before
-      // falling back to numeric suffixes.
+      // falling back to numeric suffixes. Codex R3 P3: `altName` is a
+      // status-code disambiguator for DERIVED names only — reserved for
+      // `!group.explicitName`. If the user explicitly titled two
+      // DIFFERENT schemas the same name, silently substituting the alt
+      // name (e.g. "SomeContractResponse400") would bury the collision
+      // behind a name the user never chose; falling through to the
+      // numeric suffix (`ErrorResponse_2`) keeps it visible and
+      // deterministic instead.
       if (
         this.nameToContentKey.has(candidate) &&
         this.nameToContentKey.get(candidate) !== contentKey &&
-        group.altName
+        group.altName &&
+        !group.explicitName
       ) {
         candidate = group.altName;
       }

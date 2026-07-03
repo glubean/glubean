@@ -435,4 +435,108 @@ describe("mergeOpenApiParts — component schema hoisting (GLU-127)", () => {
       .schema as { $ref: string };
     expect(ref.$ref).toBe("#/components/schemas/__proto__");
   });
+
+  // codex R3 P2/P3 — regression coverage for both findings.
+
+  test("root-level union/nullable (anyOf) and record (additionalProperties) body schemas are hoisted too", () => {
+    const nullableUnion = {
+      anyOf: [
+        { type: "object", properties: { id: { type: "string" } } },
+        { type: "null" },
+      ],
+    };
+    const record = {
+      type: "object",
+      additionalProperties: { type: "number" },
+    };
+    const partUnion = buildOpenApiPartForHttp(
+      contract({
+        id: "widgets.maybeGet",
+        path: "/widgets/maybe",
+        method: "GET",
+        cases: [{ key: "ok", status: 200, responseBody: nullableUnion }],
+      }) as any,
+    );
+    const partRecord = buildOpenApiPartForHttp(
+      contract({
+        id: "widgets.counts",
+        path: "/widgets/counts",
+        method: "GET",
+        cases: [{ key: "ok", status: 200, responseBody: record }],
+      }) as any,
+    );
+    const doc = mergeOpenApiParts([partUnion!, partRecord!]);
+    const components = doc.components as { schemas: Record<string, unknown> };
+
+    expect(components.schemas).toHaveProperty("WidgetsMaybeGetResponse");
+    expect(components.schemas).toHaveProperty("WidgetsCountsResponse");
+    expect((doc.paths as any)["/widgets/maybe"].get.responses["200"].content["application/json"].schema).toEqual(
+      { $ref: "#/components/schemas/WidgetsMaybeGetResponse" },
+    );
+  });
+
+  test("a wildcard object (no properties, additionalProperties: true) still stays inline — record detection doesn't over-hoist", () => {
+    const part = buildOpenApiPartForHttp(
+      contract({
+        id: "widgets.wildcard",
+        path: "/widgets/wild",
+        method: "GET",
+        cases: [
+          {
+            key: "ok",
+            status: 200,
+            responseBody: { type: "object", additionalProperties: true },
+          },
+        ],
+      }) as any,
+    );
+    const doc = mergeOpenApiParts([part!]);
+    expect(doc.components).toBeUndefined();
+  });
+
+  test("two DIFFERENT schemas with the SAME explicit title get a deterministic numeric suffix, not a surprising alt name", () => {
+    const partA = buildOpenApiPartForHttp(
+      contract({
+        id: "auth.sign-in.email",
+        path: "/api/auth/sign-in/email",
+        cases: [
+          {
+            key: "badCreds",
+            status: 401,
+            responseBody: {
+              type: "object",
+              title: "ErrorResponse",
+              properties: { message: { type: "string" } },
+            },
+          },
+        ],
+      }) as any,
+    );
+    const partB = buildOpenApiPartForHttp(
+      contract({
+        id: "billing.charge",
+        path: "/billing/charge",
+        cases: [
+          {
+            key: "declined",
+            status: 402,
+            responseBody: {
+              type: "object",
+              title: "ErrorResponse",
+              // Deliberately a DIFFERENT shape from partA's ErrorResponse —
+              // same title, different content, so this must NOT dedupe.
+              properties: { reason: { type: "string" }, retryable: { type: "boolean" } },
+            },
+          },
+        ],
+      }) as any,
+    );
+    const doc = mergeOpenApiParts([partA!, partB!]);
+    const components = doc.components as { schemas: Record<string, unknown> };
+
+    expect(Object.keys(components.schemas).sort()).toEqual(["ErrorResponse", "ErrorResponse_2"]);
+    // NOT the status-suffixed derived alt-name ("BillingChargeResponse402") —
+    // the explicit title collision falls through to the numeric suffix.
+    expect(components.schemas).not.toHaveProperty("BillingChargeResponse402");
+  });
 });
