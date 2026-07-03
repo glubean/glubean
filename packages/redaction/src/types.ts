@@ -58,6 +58,15 @@ export interface ScopeRules {
  */
 export interface RedactionEngineInterface {
   redact(value: unknown, ctx?: ScopeContext): RedactionResult;
+  /**
+   * Mask a scalar as fully sensitive, honoring the engine's replacement
+   * format (partial → `abc***xyz`, simple/labeled → `[REDACTED]`). For
+   * handlers that decide a value is sensitive STRUCTURALLY — e.g. a cookie
+   * value, sensitive by virtue of living under a `Cookie`/`Set-Cookie`
+   * header — rather than via key/pattern plugins. Optional so third-party
+   * engine implementations of this interface need not provide it.
+   */
+  maskValue?(value: string): string;
 }
 
 export interface RedactionHandler {

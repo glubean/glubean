@@ -7,6 +7,7 @@
  * - `raw-string` — value-pattern matching only
  * - `url-query` — parse URL, redact query param names/values, serialize back
  * - `headers` — header map with case-insensitive keys, cookie/set-cookie parsing
+ * - `body` — HTTP body: object → json walk; string → form/text/xml redaction
  */
 
 import type { RedactionHandler, RedactionEngineInterface, RedactionResult, HandlerContext } from "./types.js";
@@ -113,6 +114,97 @@ export const urlQueryHandler: RedactionHandler = {
   },
 };
 
+// ── body handler ─────────────────────────────────────────────────────────────
+
+/**
+ * Does this string look like an `application/x-www-form-urlencoded` body —
+ * `k=v` or `k=v&k2=v2` with URL-safe-ish keys and no obvious JSON/XML lead-in?
+ * Strict on purpose: a false positive would round-trip an arbitrary text body
+ * through URLSearchParams and could normalize its encoding. Free-text that
+ * merely contains an `=` (`note = 3`, prose, a stack trace) must NOT match.
+ */
+const FORM_URLENCODED_RE = /^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/;
+
+function looksLikeFormUrlEncoded(str: string): boolean {
+  const s = str.trim();
+  if (!s || s[0] === "{" || s[0] === "[" || s[0] === "<") return false;
+  return FORM_URLENCODED_RE.test(s);
+}
+
+/**
+ * Redact a NON-object (string) HTTP body captured as raw text by the runner —
+ * a form-urlencoded request body, or a `text/*` / `xml` response body (the
+ * harness only parses `json` content-types into objects; everything else stays
+ * a string). GLU-104: the plain `json` handler value-pattern-scans a string
+ * but never applies KEY-based rules to it, so a form body `password=hunter2`
+ * or `client_secret=plain` leaked. Here we:
+ *   1. run the value-pattern scan (jwt/bearer/aws/etc) over the whole string;
+ *   2. if it's clearly form-urlencoded, additionally mask the values of
+ *      sensitive-NAMED params via the same key rules objects get.
+ *
+ * Residual (documented): a secret under a sensitive element name inside an
+ * XML/text body that is NOT form-urlencoded (`<password>plain</password>`) is
+ * only caught if its value matches a value-pattern — generic markup parsing is
+ * out of scope. Trace bodies for such content still fare no worse than before.
+ */
+function redactStringBody(
+  raw: string,
+  ctx: HandlerContext,
+  engine: RedactionEngineInterface,
+): RedactionResult {
+  // 1. Value-pattern scan over the raw string (walkString path).
+  const scanned = engine.redact(raw, { id: ctx.scopeId, name: ctx.scopeName });
+  let working = typeof scanned.value === "string" ? scanned.value : raw;
+  let didRedact = scanned.redacted;
+  const details: RedactionResult["details"] = [...scanned.details];
+
+  // 2. Form-urlencoded: mask sensitive-named param values by key.
+  if (looksLikeFormUrlEncoded(working)) {
+    const params = new URLSearchParams(working);
+    const out = new URLSearchParams();
+    let changed = false;
+    for (const [key, val] of params.entries()) {
+      const r = engine.redact(
+        { [key]: val },
+        { id: ctx.scopeId, name: ctx.scopeName },
+      );
+      if (r.redacted) {
+        const rv = (r.value as Record<string, unknown>)[key];
+        out.append(key, String(rv ?? val));
+        changed = true;
+        details.push(...r.details);
+      } else {
+        out.append(key, val);
+      }
+    }
+    if (changed) {
+      working = out.toString();
+      didRedact = true;
+    }
+  }
+
+  return { value: working, redacted: didRedact, details };
+}
+
+/**
+ * HTTP body handler. Objects/arrays walk like the `json` handler (key + value
+ * plugins); raw strings go through `redactStringBody` (form/text/xml). Use for
+ * `data.requestBody` / `data.responseBody`, which the runner captures as EITHER
+ * a parsed object (JSON) or a raw string (everything else).
+ */
+export const bodyHandler: RedactionHandler = {
+  name: "body",
+  process(value, ctx, engine) {
+    if (value !== null && typeof value === "object") {
+      return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
+    }
+    if (typeof value === "string") {
+      return redactStringBody(value, ctx, engine);
+    }
+    return { value, redacted: false, details: [] };
+  },
+};
+
 // ── headers handler ──────────────────────────────────────────────────────────
 
 /**
@@ -161,19 +253,29 @@ export const headersHandler: RedactionHandler = {
     for (const [headerName, headerValue] of Object.entries(input)) {
       const lower = headerName.toLowerCase();
 
-      // Cookie header: parse into key/value pairs
+      // Cookie header: parse into key/value pairs, mask EVERY value.
+      // GLU-104: a Cookie header value is credential material by default
+      // (session ids, CSRF tokens, auth cookies) and cookie NAMES are
+      // arbitrary/opaque — masking selectively by name leaked opaquely-named
+      // session cookies (`Cookie: auth=<opaque>` when "auth" wasn't a listed
+      // key). Cookie NAMES (structure) are preserved; only values are masked.
       if (lower === "cookie" && typeof headerValue === "string") {
         const parsed = parseCookieHeader(headerValue);
-        const result = engine.redact(parsed, {
-          id: ctx.scopeId,
-          name: ctx.scopeName,
-        });
-        output[headerName] = serializeCookieHeader(
-          result.value as Record<string, unknown>,
-        );
-        if (result.redacted) {
+        const cookieNames = Object.keys(parsed);
+        if (cookieNames.length > 0) {
+          const masked: Record<string, string> = {};
+          for (const [ck, cv] of Object.entries(parsed)) {
+            masked[ck] = maskCookieValue(cv, engine);
+          }
+          output[headerName] = serializeCookieHeader(masked);
           didRedact = true;
-          details.push(...result.details);
+          details.push({
+            path: headerName,
+            plugin: "cookie",
+            original: headerValue,
+          });
+        } else {
+          output[headerName] = headerValue;
         }
         continue;
       }
@@ -228,8 +330,22 @@ export const headersHandler: RedactionHandler = {
 };
 
 /**
+ * Mask a cookie VALUE as sensitive, honoring the engine's replacement format.
+ * Falls back to "[REDACTED]" for third-party engines that don't implement the
+ * optional `maskValue`.
+ */
+function maskCookieValue(value: string, engine: RedactionEngineInterface): string {
+  return engine.maskValue ? engine.maskValue(value) : "[REDACTED]";
+}
+
+/**
  * Redact a Set-Cookie header value.
- * Preserves cookie attributes (Path, Domain, HttpOnly, Secure, SameSite, Max-Age, Expires).
+ *
+ * GLU-104: masks the cookie value UNCONDITIONALLY (a Set-Cookie value is a
+ * credential being minted — session id / auth token — and the cookie name is
+ * arbitrary, so name-based selectivity leaked opaquely-named session cookies).
+ * Cookie attributes (Path, Domain, HttpOnly, Secure, SameSite, Max-Age,
+ * Expires) are structural, not secret, and are preserved verbatim.
  */
 function redactSetCookie(
   raw: string,
@@ -250,18 +366,7 @@ function redactSetCookie(
 
   const cookieName = first.slice(0, eq).trim();
   const cookieValue = first.slice(eq + 1).trim();
-
-  const result = engine.redact(
-    { [cookieName]: cookieValue },
-    { id: ctx.scopeId, name: ctx.scopeName },
-  );
-
-  if (!result.redacted) {
-    return { value: raw, redacted: false, details: [] };
-  }
-
-  const redacted = result.value as Record<string, unknown>;
-  const redactedValue = String(redacted[cookieName] ?? cookieValue);
+  const redactedValue = maskCookieValue(cookieValue, engine);
 
   // Reconstruct: redacted name=value + original attributes
   const attributes = parts.slice(1);
@@ -270,7 +375,11 @@ function redactSetCookie(
       ? `${cookieName}=${redactedValue}; ${attributes.join("; ")}`
       : `${cookieName}=${redactedValue}`;
 
-  return { value: reconstructed, redacted: true, details: result.details };
+  return {
+    value: reconstructed,
+    redacted: true,
+    details: [{ path: cookieName, plugin: "set-cookie", original: cookieValue }],
+  };
 }
 
 // ── Handler registry ─────────────────────────────────────────────────────────
@@ -281,4 +390,5 @@ export const BUILTIN_HANDLERS: Record<string, RedactionHandler> = {
   "raw-string": rawStringHandler,
   "url-query": urlQueryHandler,
   headers: headersHandler,
+  body: bodyHandler,
 };

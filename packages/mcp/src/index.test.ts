@@ -517,6 +517,99 @@ test("redactMcpTrace passes through non-object traces unchanged", () => {
   expect(redactMcpTrace("not-an-object", {})).toBe("not-an-object");
 });
 
+// ── GLU-104 codex R1 follow-ups (P1a/P1b/P1c/P2a/P2b) ──────────────────────
+
+test("redactMcpTrace masks opaquely-named cookie/set-cookie values (codex R1 P1a)", () => {
+  const trace = {
+    requestHeaders: { Cookie: "auth=OPAQUE-AUTH-VALUE-xyz; theme=dark" },
+    responseHeaders: {
+      "set-cookie": "app=OPAQUE-SESSION-987; Path=/; HttpOnly",
+    },
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const s = JSON.stringify(redacted);
+  // Neither cookie's NAME is a known sensitive key ("auth"/"app"), yet the
+  // VALUES must be masked — the pre-fix name-list approach leaked these.
+  expect(s).not.toContain("OPAQUE-AUTH-VALUE-xyz");
+  expect(s).not.toContain("OPAQUE-SESSION-987");
+  expect(s).not.toContain("dark");
+  // Names + Set-Cookie attributes preserved.
+  const reqCookie = (redacted.requestHeaders as Record<string, string>).Cookie;
+  expect(reqCookie).toContain("auth=");
+  expect(reqCookie).toContain("theme=");
+  const setCookie = (redacted.responseHeaders as Record<string, string>)["set-cookie"];
+  expect(setCookie).toContain("app=");
+  expect(setCookie).toContain("Path=/");
+  expect(setCookie).toContain("HttpOnly");
+});
+
+test("redactMcpTrace masks secrets in a form-urlencoded string body (codex R1 P1b)", () => {
+  const trace = {
+    requestBody: "username=alice&password=HUNTER2-SECRET&client_secret=CS-PLAINTEXT",
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const body = redacted.requestBody as string;
+  expect(body).not.toContain("HUNTER2-SECRET");
+  expect(body).not.toContain("CS-PLAINTEXT");
+  // Non-sensitive param preserved.
+  expect(body).toContain("username=alice");
+});
+
+test("redactMcpTrace masks gRPC call metadata auth (codex R1 P1c)", () => {
+  // gRPC traces carry auth under data.metadata.{request,response}Metadata —
+  // covered by the new BUILTIN http.metadata scope, so MCP (which compiles
+  // BUILTIN_SCOPES only) redacts it without importing @glubean/grpc.
+  const trace = {
+    protocol: "grpc",
+    target: "PaymentService/Charge",
+    metadata: {
+      service: "PaymentService",
+      method: "Charge",
+      requestMetadata: {
+        authorization: "Bearer GRPC-LIVE-TOKEN-xyz",
+        "x-api-key": "GRPC-APIKEY-999",
+      },
+      responseMetadata: { "set-cookie": "grpcsess=GRPC-OPAQUE-SESSION" },
+    },
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const s = JSON.stringify(redacted);
+  expect(s).not.toContain("GRPC-LIVE-TOKEN-xyz");
+  expect(s).not.toContain("GRPC-APIKEY-999");
+  expect(s).not.toContain("GRPC-OPAQUE-SESSION");
+  // Non-secret metadata siblings preserved.
+  const meta = redacted.metadata as Record<string, unknown>;
+  expect(meta.service).toBe("PaymentService");
+  expect(meta.method).toBe("Charge");
+});
+
+test("redactMcpTrace does NOT over-mask sid-substring field names (codex R1 P2a)", () => {
+  // `sid` substring used to mask president/residence/consideration — removed.
+  const trace = {
+    responseBody: {
+      president: "Lincoln",
+      residence: "White House",
+      consideration: "none",
+    },
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const body = redacted.responseBody as Record<string, unknown>;
+  expect(body.president).toBe("Lincoln");
+  expect(body.residence).toBe("White House");
+  expect(body.consideration).toBe("none");
+});
+
+test("redactMcpTrace keeps deeply-nested non-secret bodies intact (codex R1 P2b)", () => {
+  // With the engine default depth (10) a legitimately-deep body was replaced
+  // by a `[REDACTED: too deep]` sentinel; redactMcpTrace passes maxDepth 64.
+  let deep: Record<string, unknown> = { leaf: "DEEP-LEAF-VALUE" };
+  for (let i = 0; i < 15; i++) deep = { [`level${i}`]: deep };
+  const redacted = redactMcpTrace({ responseBody: deep }, {}) as Record<string, unknown>;
+  const s = JSON.stringify(redacted);
+  expect(s).not.toContain("too deep");
+  expect(s).toContain("DEEP-LEAF-VALUE");
+});
+
 // ── Contract discovery tests ──────────────────────────────────────────────
 
 const CONTRACT_SOURCE = `

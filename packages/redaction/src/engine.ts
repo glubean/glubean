@@ -106,6 +106,19 @@ export class RedactionEngine {
     };
   }
 
+  /**
+   * Mask a scalar as fully sensitive, honoring the configured replacement
+   * format. Mirrors the key-level masking the walker applies to a value under
+   * a sensitive key (`genericPartialMask` for "partial", `[REDACTED]`
+   * otherwise). Used by handlers that decide sensitivity structurally rather
+   * than via key/pattern plugins (e.g. cookie values under a Cookie header).
+   */
+  maskValue(value: string): string {
+    return this.replacementFormat === "partial"
+      ? genericPartialMask(value)
+      : "[REDACTED]";
+  }
+
   // ── Private recursive walker ──────────────────────────────────────────
 
   private walkValue(

@@ -342,7 +342,11 @@ export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown 
       responseHeaders: filterHeaders(t.responseHeaders as Record<string, string>, config.keepResponseHeaders),
     }),
   };
-  const redacted = redactEvent({ type: "trace", data: filtered }, MCP_TRACE_REDACTION_SCOPES, "partial");
+  // maxDepth 64 (matches cloud.ts:495): the engine default of 10 would replace
+  // legitimately-deep non-secret response bodies with a `[REDACTED: too deep]`
+  // sentinel (codex GLU-104 R1 P2). Trace bodies are already size-capped
+  // upstream, so a generous depth is safe.
+  const redacted = redactEvent({ type: "trace", data: filtered }, MCP_TRACE_REDACTION_SCOPES, "partial", 64);
   return (redacted as Record<string, unknown>).data;
 }
 

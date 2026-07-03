@@ -13,6 +13,7 @@ import {
   rawStringHandler,
   urlQueryHandler,
   headersHandler,
+  bodyHandler,
 } from "./handlers.js";
 import { sensitiveKeysPlugin } from "./plugins/sensitive-keys.js";
 import { jwtPlugin } from "./plugins/jwt.js";
@@ -343,7 +344,11 @@ describe("headersHandler", () => {
     expect(val["content-type"]).toBe("application/json");
   });
 
-  test("parses and redacts cookie header", () => {
+  // GLU-104: a Cookie header value is credential material by default and
+  // cookie names are arbitrary/opaque, so EVERY cookie value is masked
+  // (names preserved). Previously this masked only name-matched cookies,
+  // leaking opaquely-named session cookies.
+  test("masks every cookie value in a Cookie header, preserving names", () => {
     const engine = new RedactionEngine({
       plugins: [
         sensitiveKeysPlugin({ useBuiltIn: false, additional: ["session"], excluded: [] }),
@@ -352,15 +357,21 @@ describe("headersHandler", () => {
     });
 
     const result = headersHandler.process(
-      { cookie: "session=abc123; theme=dark; session_id=xyz" },
+      { cookie: "session=abc123; theme=dark; auth=opaqueOtherValue" },
       { scopeId: "test", scopeName: "Test" },
       engine,
     );
     const val = result.value as Record<string, unknown>;
     const cookie = val.cookie as string;
-    expect(cookie).toContain("theme=dark");
+    // Names preserved (structure), values masked — including "theme" and the
+    // opaquely-named "auth" cookie that no sensitive-key would have matched.
+    expect(cookie).toContain("session=");
+    expect(cookie).toContain("theme=");
+    expect(cookie).toContain("auth=");
     expect(cookie).not.toContain("abc123");
-    expect(cookie).not.toContain("xyz");
+    expect(cookie).not.toContain("dark");
+    expect(cookie).not.toContain("opaqueOtherValue");
+    expect(result.redacted).toBe(true);
   });
 
   test("parses and redacts set-cookie header preserving attributes", () => {
@@ -393,6 +404,91 @@ describe("headersHandler", () => {
     );
     expect(result.value).toBe("not-an-object");
     expect(result.redacted).toBe(false);
+  });
+});
+
+describe("bodyHandler", () => {
+  const ctx = { scopeId: "http.request.body", scopeName: "HTTP request body" };
+
+  test("redacts an object body like the json handler", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["password"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const result = bodyHandler.process(
+      { username: "alice", password: "hunter2" },
+      ctx,
+      engine,
+    );
+    const val = result.value as Record<string, unknown>;
+    expect(val.username).toBe("alice");
+    expect(val.password).toBe("[REDACTED]");
+    expect(result.redacted).toBe(true);
+  });
+
+  test("redacts sensitive params in a form-urlencoded string body by name", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({
+          useBuiltIn: false,
+          additional: ["password", "client_secret"],
+          excluded: [],
+        }),
+      ],
+      replacementFormat: "simple",
+    });
+    const result = bodyHandler.process(
+      "username=alice&password=hunter2&client_secret=plain",
+      ctx,
+      engine,
+    );
+    const body = result.value as string;
+    expect(body).toContain("username=alice");
+    expect(body).not.toContain("hunter2");
+    expect(body).not.toContain("plain");
+    expect(result.redacted).toBe(true);
+  });
+
+  test("value-pattern-scans a non-form string body (bearer token)", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        {
+          name: "bearer",
+          matchValue: () => /Bearer\s+[a-zA-Z0-9._-]+/gi,
+        },
+      ],
+      replacementFormat: "labeled",
+    });
+    const result = bodyHandler.process(
+      "denied: Bearer abc123def456 is invalid",
+      ctx,
+      engine,
+    );
+    const body = result.value as string;
+    expect(body).not.toContain("Bearer abc123def456");
+    expect(body).toContain("[REDACTED:bearer]");
+  });
+
+  test("does NOT reserialize arbitrary text that merely contains '='", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["password"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    // Prose with spaces around '=' must not be treated as urlencoded.
+    const text = "note: total = 3 items and password mentioned in passing";
+    const result = bodyHandler.process(text, ctx, engine);
+    expect(result.value).toBe(text);
+    expect(result.redacted).toBe(false);
+  });
+
+  test("passes through non-string, non-object bodies", () => {
+    const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
+    expect(bodyHandler.process(42, ctx, engine).value).toBe(42);
+    expect(bodyHandler.process(null, ctx, engine).value).toBeNull();
   });
 });
 
@@ -948,7 +1044,8 @@ describe("regressions", () => {
     const cookies = val["set-cookie"] as string[];
     expect(cookies.length).toBe(3);
 
-    // session and auth cookies should be redacted, attributes preserved
+    // All three Set-Cookie values masked, attributes preserved (GLU-104:
+    // a minted cookie is credential material regardless of its name).
     expect(cookies[0]).toContain("Path=/");
     expect(cookies[0]).toContain("HttpOnly");
     expect(cookies[0]).not.toContain("secret1");
@@ -957,8 +1054,11 @@ describe("regressions", () => {
     expect(cookies[1]).toContain("Secure");
     expect(cookies[1]).not.toContain("secret2");
 
-    // theme cookie should NOT be redacted
-    expect(cookies[2]).toBe("theme=dark; Path=/");
+    // Even the opaquely-named "theme" cookie value is masked now; the name
+    // and attributes are preserved.
+    expect(cookies[2]).toContain("theme=");
+    expect(cookies[2]).toContain("Path=/");
+    expect(cookies[2]).not.toContain("dark");
   });
 
   test("$self accessor writes back to event", () => {

@@ -29,22 +29,21 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.requestHeaders",
     handler: "headers",
     rules: {
-      // GLU-104: also covers non-standard auth headers (`x-access-token`,
-      // `x-session-id`, ...) AND — via `headersHandler`'s cookie-name-keyed
-      // nested redact call — common session cookie NAMES ("connect.sid",
-      // "JSESSIONID" [contains "session"], "PHPSESSID" [contains "sid"],
-      // "csrf-secret", ...). Sensitive-key matching is case-insensitive
-      // substring (sensitiveKeysPlugin), so "token"/"session"/"secret"/"sid"
-      // alone cover their common compounds without enumerating every variant.
+      // GLU-104: covers standard + non-standard auth/secret headers
+      // (`authorization`, `x-api-key`, `x-access-token`, `x-auth-token`, ...).
+      // Cookie VALUES no longer depend on this list — `headersHandler` masks
+      // every `Cookie:` value structurally (a cookie is credential material by
+      // default), which fixes opaquely-named session cookies AND lets us drop
+      // the over-broad `sid`/`session` substrings (codex GLU-104 R1 P2: `sid`
+      // matched `president`/`residence`). Matching is case-insensitive
+      // substring, so `token`/`secret`/`api-key` cover their compounds.
       sensitiveKeys: [
         "authorization",
         "cookie",
         "x-api-key",
         "proxy-authorization",
         "token",
-        "session",
         "secret",
-        "sid",
         "api-key",
         "apikey",
       ],
@@ -73,8 +72,11 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     id: "http.request.body",
     name: "HTTP request body",
     event: "trace",
+    // GLU-104: `body` (not `json`) so a NON-JSON request body captured as a
+    // raw string — a form-urlencoded login `password=hunter2&client_secret=x`
+    // — is redacted by param name, not just value-pattern-scanned.
     target: "data.requestBody",
-    handler: "json",
+    handler: "body",
     rules: {
       sensitiveKeys: [
         "password",
@@ -87,8 +89,8 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
         "privatekey",
         "private-key",
         // GLU-104: symmetric with the query/response-body lists below —
-        // login/session-exchange request bodies carry these too.
-        "session",
+        // login/session-exchange request bodies carry these too. `sessionid`/
+        // `session_id` are specific enough to avoid the `sid` false-positive.
         "sessionid",
         "session_id",
         "api_key",
@@ -104,31 +106,28 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.responseHeaders",
     handler: "headers",
     rules: {
-      // GLU-104: `set-cookie` alone only flags the OUTER header key — the
-      // `headersHandler` cookie branch redacts by inner COOKIE NAME, so
-      // without these, an arbitrarily-named session cookie value
-      // (`sid=...`, `connect.sid=...`) passed straight through unmasked
-      // (confirmed empirically: a Set-Cookie header with a cookie named
-      // "sid" was NOT redacted before this change). Same substring-match
-      // rationale as the request-headers scope above.
-      sensitiveKeys: ["set-cookie", "token", "session", "secret", "sid", "authorization", "api-key", "apikey"],
+      // GLU-104: `Set-Cookie` VALUES are masked structurally by
+      // `headersHandler` (a minted session cookie is credential material, its
+      // name arbitrary) — no longer name-list-dependent, so the over-broad
+      // `sid`/`session` substrings are gone (codex R1 P2). These keys still
+      // cover plain sensitive response headers (`X-Auth-Token`, ...).
+      sensitiveKeys: ["set-cookie", "token", "secret", "authorization", "api-key", "apikey"],
     },
   },
   {
     id: "http.response.body",
     name: "HTTP response body",
     event: "trace",
+    // GLU-104: `body` handler (see request body) + a real sensitiveKeys list.
+    // Previously this scope declared NO sensitiveKeys and used `json`, so only
+    // global value-PATTERN plugins ran — a plain-string secret under a
+    // recognizably-named key (`{"token":"sk_live_..."}`, `{"access_token":...}`)
+    // passed through whenever its value matched no pattern (confirmed
+    // empirically). A login/refresh response carries the same secret shapes a
+    // request does.
     target: "data.responseBody",
-    handler: "json",
+    handler: "body",
     rules: {
-      // GLU-104: this scope previously declared NO sensitiveKeys at all —
-      // only the global value-PATTERN plugins (jwt/bearer/awsKeys/...) ran
-      // against response bodies, so a plain-string secret under a
-      // recognizably-named key (`{"token": "sk_live_..."}`,
-      // `{"access_token": "..."}`) passed through unmasked whenever its
-      // value didn't happen to match one of those patterns (confirmed
-      // empirically). Mirrors `http.request.body` — a login/refresh
-      // response carries the same secret shapes a request does.
       sensitiveKeys: [
         "password",
         "passwd",
@@ -139,13 +138,42 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
         "private_key",
         "privatekey",
         "private-key",
-        "session",
         "sessionid",
         "session_id",
         "api_key",
         "api-key",
         "apikey",
         "authorization",
+      ],
+    },
+  },
+  {
+    id: "http.metadata",
+    name: "Trace metadata",
+    event: "trace",
+    // GLU-104 (codex R1 P1): the generic `Trace.metadata` field carries
+    // protocol-specific auth material — notably gRPC call metadata under
+    // `requestMetadata`/`responseMetadata` (packages/grpc emits
+    // `data.metadata.requestMetadata.authorization`). The `@glubean/grpc`
+    // plugin declares its own `grpc.metadata` scope, but that's only compiled
+    // when a caller passes it as `pluginScopes` — the MCP local-trace path
+    // compiles BUILTIN_SCOPES only, so without a baseline metadata scope gRPC
+    // auth tokens flowed into `glubean_run_local_file` output. The `json`
+    // handler recurses into the nested metadata objects; non-secret siblings
+    // (`service`/`method`/`peer`) match no key and are preserved.
+    target: "data.metadata",
+    handler: "json",
+    rules: {
+      sensitiveKeys: [
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "token",
+        "secret",
+        "api_key",
+        "api-key",
+        "apikey",
+        "x-api-key",
       ],
     },
   },
