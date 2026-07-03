@@ -1414,11 +1414,27 @@ export function resolveContractProjection(
       configPath,
     );
   }
-  const dir = entry.suite
-    ? resolve(rootDir, config.suites[entry.suite].target)
-    : entry.target
-      ? resolve(rootDir, entry.target)
-      : rootDir;
+  let dir: string;
+  if (entry.suite) {
+    // A projection's `target` is containment-checked at load time, but a
+    // `suite:` reference resolves the suite's own `target` here — which is a
+    // separate config surface that could point outside the project
+    // (`suites.x.target: ../../outside`). Apply the same containment guard on
+    // this projection resolution path so `suite:` can't be used to escape
+    // (GLU-117 codex R2 P1). Suite targets consumed by `glubean run` keep
+    // their existing behavior — this guard is scoped to projection output.
+    const suiteTarget = config.suites[entry.suite].target;
+    assertContainedRelativePath(
+      suiteTarget,
+      `suites.${entry.suite}.target (referenced by projections.contracts.${name}.suite)`,
+      configPath,
+    );
+    dir = resolve(rootDir, suiteTarget);
+  } else if (entry.target) {
+    dir = resolve(rootDir, entry.target);
+  } else {
+    dir = rootDir;
+  }
   return {
     name,
     dir,

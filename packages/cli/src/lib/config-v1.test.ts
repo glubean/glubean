@@ -1056,6 +1056,32 @@ projections:
       });
     });
 
+    it("rejects a suite: projection whose suite target escapes the project (GLU-117 R2 P1)", async () => {
+      // A projection references a suite whose target escapes the project via
+      // `..`. Direct `target` is checked at load time; the suite path is
+      // checked at resolve time (resolveContractProjection).
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+  escape: { target: ../../outside, kinds: [contract, flow] }
+profiles:
+  local: { suites: [tests] }
+projections:
+  contracts:
+    sneaky:
+      suite: escape
+      format: openapi
+      output: reports/out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config, configPath } = await loadProjectConfigV1(dir);
+        expect(() =>
+          resolveContractProjection(config, configPath, dir, "sneaky"),
+        ).toThrow(/must stay inside the project/);
+      });
+    });
+
     it("accepts a nested-but-contained output path with an interior ..", async () => {
       // reports/../reports/out.json normalizes to reports/out.json — contained.
       const yaml = `${BASE_YAML}
