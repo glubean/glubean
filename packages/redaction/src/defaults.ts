@@ -21,6 +21,53 @@ import type {
  * These are the "http-plugin" built-in contributor — they use the same
  * declaration model as any external plugin.
  */
+/**
+ * Shared credential key set for the HTTP trace scopes (headers/body/query/
+ * metadata/target/name). One source of truth so a scope can't silently omit a
+ * baseline alias (codex GLU-104 R6 P1: `credential`/`credentials`/`ssh_key`/
+ * `bearer` were missing from the per-scope lists and leaked). Matching is
+ * case-insensitive SUBSTRING (sensitiveKeysPlugin), so compounds are covered.
+ *
+ * Deliberately EXCLUDES bare `auth`: as a substring it matches — and (in event
+ * scopes, which nuke a sensitive key's whole subtree) DESTROYS — common
+ * non-secret fields like `author`, `authority`, `authored`, `unauthorized`.
+ * Real auth credentials are covered by `authorization` / the `auth_token`
+ * compounds / the `bearer` + `jwt` value-patterns instead; a bare field named
+ * exactly `auth` holding an opaque value is the accepted residual (documented,
+ * same class as the `token`/`tokenCount` tradeoff — a redaction library must
+ * not corrupt `author` to catch it).
+ */
+const CREDENTIAL_KEYS = [
+  "authorization",
+  "proxy-authorization",
+  "bearer",
+  "authtoken",
+  "auth_token",
+  "auth-token",
+  "token",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "session_token",
+  "secret",
+  "client_secret",
+  "client-secret",
+  "password",
+  "passwd",
+  "api_key",
+  "api-key",
+  "apikey",
+  "x-api-key",
+  "credential",
+  "credentials",
+  "private_key",
+  "privatekey",
+  "private-key",
+  "ssh_key",
+  "sessionid",
+  "session_id",
+];
+
 export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
   {
     id: "http.request.headers",
@@ -29,24 +76,13 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.requestHeaders",
     handler: "headers",
     rules: {
-      // GLU-104: covers standard + non-standard auth/secret headers
-      // (`authorization`, `x-api-key`, `x-access-token`, `x-auth-token`, ...).
-      // Cookie VALUES no longer depend on this list — `headersHandler` masks
-      // every `Cookie:` value structurally (a cookie is credential material by
-      // default), which fixes opaquely-named session cookies AND lets us drop
-      // the over-broad `sid`/`session` substrings (codex GLU-104 R1 P2: `sid`
-      // matched `president`/`residence`). Matching is case-insensitive
-      // substring, so `token`/`secret`/`api-key` cover their compounds.
-      sensitiveKeys: [
-        "authorization",
-        "cookie",
-        "x-api-key",
-        "proxy-authorization",
-        "token",
-        "secret",
-        "api-key",
-        "apikey",
-      ],
+      // GLU-104: covers standard + non-standard auth/secret headers. Cookie
+      // VALUES no longer depend on this list — `headersHandler` masks every
+      // `Cookie:` value structurally (a cookie is credential material by
+      // default), which fixes opaquely-named session cookies AND let us drop
+      // the over-broad `sid`/`session` substrings (R1 P2). `cookie` is kept so
+      // a `Cookie` header still routes through the structural cookie branch.
+      sensitiveKeys: [...CREDENTIAL_KEYS, "cookie"],
     },
   },
   {
@@ -56,16 +92,7 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.url",
     handler: "url-query",
     rules: {
-      sensitiveKeys: [
-        "token",
-        "access_token",
-        "refresh_token",
-        "api_key",
-        "apikey",
-        "api-key",
-        "secret",
-        "password",
-      ],
+      sensitiveKeys: [...CREDENTIAL_KEYS],
     },
   },
   {
@@ -80,16 +107,7 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.requestedUrl",
     handler: "url-query",
     rules: {
-      sensitiveKeys: [
-        "token",
-        "access_token",
-        "refresh_token",
-        "api_key",
-        "apikey",
-        "api-key",
-        "secret",
-        "password",
-      ],
+      sensitiveKeys: [...CREDENTIAL_KEYS],
     },
   },
   {
@@ -105,16 +123,7 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.target",
     handler: "url-query",
     rules: {
-      sensitiveKeys: [
-        "token",
-        "access_token",
-        "refresh_token",
-        "api_key",
-        "apikey",
-        "api-key",
-        "secret",
-        "password",
-      ],
+      sensitiveKeys: [...CREDENTIAL_KEYS],
     },
   },
   {
@@ -124,16 +133,7 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.name",
     handler: "url-query",
     rules: {
-      sensitiveKeys: [
-        "token",
-        "access_token",
-        "refresh_token",
-        "api_key",
-        "apikey",
-        "api-key",
-        "secret",
-        "password",
-      ],
+      sensitiveKeys: [...CREDENTIAL_KEYS],
     },
   },
   {
@@ -146,25 +146,7 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.requestBody",
     handler: "body",
     rules: {
-      sensitiveKeys: [
-        "password",
-        "passwd",
-        "secret",
-        "token",
-        "client_secret",
-        "client-secret",
-        "private_key",
-        "privatekey",
-        "private-key",
-        // GLU-104: symmetric with the query/response-body lists below —
-        // login/session-exchange request bodies carry these too. `sessionid`/
-        // `session_id` are specific enough to avoid the `sid` false-positive.
-        "sessionid",
-        "session_id",
-        "api_key",
-        "api-key",
-        "apikey",
-      ],
+      sensitiveKeys: [...CREDENTIAL_KEYS],
     },
   },
   {
@@ -179,7 +161,7 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
       // name arbitrary) — no longer name-list-dependent, so the over-broad
       // `sid`/`session` substrings are gone (codex R1 P2). These keys still
       // cover plain sensitive response headers (`X-Auth-Token`, ...).
-      sensitiveKeys: ["set-cookie", "token", "secret", "authorization", "api-key", "apikey"],
+      sensitiveKeys: [...CREDENTIAL_KEYS, "set-cookie", "cookie"],
     },
   },
   {
@@ -205,23 +187,7 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.responseBody",
     handler: "body",
     rules: {
-      sensitiveKeys: [
-        "password",
-        "passwd",
-        "secret",
-        "token",
-        "client_secret",
-        "client-secret",
-        "private_key",
-        "privatekey",
-        "private-key",
-        "sessionid",
-        "session_id",
-        "api_key",
-        "api-key",
-        "apikey",
-        "authorization",
-      ],
+      sensitiveKeys: [...CREDENTIAL_KEYS],
     },
   },
   {
@@ -241,30 +207,11 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.metadata",
     handler: "json",
     rules: {
-      // Superset of the auth-header keys AND the request/response body keys —
       // metadata can carry either shape (gRPC auth headers OR credential-valued
-      // fields). codex R4 P2: `password`/`private_key`/`sessionid` etc. were
-      // missing, so a `requestMetadata.password` leaked.
-      sensitiveKeys: [
-        "authorization",
-        "cookie",
-        "proxy-authorization",
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "client_secret",
-        "client-secret",
-        "private_key",
-        "privatekey",
-        "private-key",
-        "sessionid",
-        "session_id",
-        "api_key",
-        "api-key",
-        "apikey",
-        "x-api-key",
-      ],
+      // fields), so it uses the full shared credential set + `cookie`. codex
+      // R4 P2 (`password`/`private_key`/`sessionid` missing) and R6 P1
+      // (`credential`/`ssh_key`/`bearer` missing) are both covered now.
+      sensitiveKeys: [...CREDENTIAL_KEYS, "cookie"],
     },
   },
   {

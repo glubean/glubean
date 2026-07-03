@@ -397,18 +397,14 @@ export const headersHandler: RedactionHandler = {
           const redactedCookies: unknown[] = [];
           for (const cookie of headerValue) {
             if (typeof cookie !== "string") {
-              // Defensive (codex R5): a malformed/manual trace could put a
-              // non-string (e.g. an object carrying a secret) in a set-cookie
-              // array. Don't pass it through raw — deep-redact it.
-              const r = engine.redact(cookie, {
-                id: ctx.scopeId,
-                name: ctx.scopeName,
-              });
-              redactedCookies.push(r.value);
-              if (r.redacted) {
-                didRedact = true;
-                details.push(...r.details);
-              }
+              // Defensive (codex R5/R6): a malformed/manual trace could put a
+              // non-string in a set-cookie array — e.g. a cookie OBJECT
+              // `{ name: "sid", value: "<secret>" }` where the secret sits
+              // under the non-sensitive key `value`. Key-based redaction misses
+              // that; a cookie is sensitive by position, so mask ALL string
+              // leaves (structure + non-string scalars preserved).
+              redactedCookies.push(maskAllStringLeaves(cookie, engine));
+              didRedact = true;
               continue;
             }
             const redacted = redactSetCookie(cookie, ctx, engine);
@@ -448,6 +444,30 @@ export const headersHandler: RedactionHandler = {
  */
 function maskCookieValue(value: string, engine: RedactionEngineInterface): string {
   return engine.maskValue ? engine.maskValue(value) : "[REDACTED]";
+}
+
+/**
+ * Mask EVERY string leaf of a value, preserving structure and non-string
+ * scalars. Used for a non-string element found in a `set-cookie` array
+ * (a malformed/manual trace shape): a cookie is sensitive by HEADER POSITION,
+ * so key-based redaction is insufficient — the secret often sits under a
+ * non-sensitive key name like `value` in `{ name, value }` (codex GLU-104 R6).
+ */
+function maskAllStringLeaves(value: unknown, engine: RedactionEngineInterface): unknown {
+  if (typeof value === "string") {
+    return maskCookieValue(value, engine);
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => maskAllStringLeaves(v, engine));
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = maskAllStringLeaves(v, engine);
+    }
+    return out;
+  }
+  return value; // numbers/booleans/null — not credential material
 }
 
 /**

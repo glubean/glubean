@@ -654,6 +654,45 @@ test("redactMcpTrace masks query secrets in target/name and URL fragment (codex 
   expect(s).toContain("expires_in=3600");
 });
 
+test("redactMcpTrace masks credential key aliases but preserves author-like fields (codex R6 P1)", () => {
+  const trace = {
+    responseBody: {
+      credentials: "OPAQUE-CREDENTIAL-VALUE",
+      ssh_key: "OPAQUE-SSH-KEY",
+      bearer: "OPAQUE-BEARER-VALUE",
+      authToken: "OPAQUE-AUTH-TOKEN",
+      // must NOT be masked (bare `auth` deliberately excluded):
+      author: { name: "Jane Doe", email: "jane@example.com" },
+      authority: "root-ca",
+    },
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const s = JSON.stringify(redacted);
+  expect(s).not.toContain("OPAQUE-CREDENTIAL-VALUE");
+  expect(s).not.toContain("OPAQUE-SSH-KEY");
+  expect(s).not.toContain("OPAQUE-BEARER-VALUE");
+  expect(s).not.toContain("OPAQUE-AUTH-TOKEN");
+  // author/authority preserved (no `auth` substring over-mask).
+  const body = redacted.responseBody as Record<string, unknown>;
+  expect((body.author as Record<string, unknown>).name).toBe("Jane Doe");
+  expect(body.authority).toBe("root-ca");
+});
+
+test("redactMcpTrace masks an object-shaped set-cookie element by position (codex R6 P1)", () => {
+  const trace = {
+    responseHeaders: {
+      "set-cookie": [
+        "sid=STRING-SECRET; Path=/",
+        // object cookie shape — secret under non-sensitive key `value`
+        { name: "sid", value: "OBJECT-SESSION-SECRET-12345", domain: "x.com", httpOnly: true },
+      ],
+    },
+  };
+  const s = JSON.stringify(redactMcpTrace(trace, {}));
+  expect(s).not.toContain("STRING-SECRET");
+  expect(s).not.toContain("OBJECT-SESSION-SECRET-12345");
+});
+
 test("redactMcpTrace masks credential-valued gRPC metadata fields (codex R4 P2)", () => {
   const trace = {
     protocol: "grpc",
