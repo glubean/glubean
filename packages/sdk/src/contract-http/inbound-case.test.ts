@@ -486,6 +486,47 @@ test("OpenAPI merge: re-encountering an already-relocated loser a third time doe
   expect(collisions[0].operation.operationId).toBe("platform.health");
 });
 
+test("OpenAPI merge: two surfaces reusing the SAME contract id at the same method+path still both survive (codex R4)", () => {
+  // Contract ids are scoped to the factory instance, not enforced globally
+  // unique — two different `contract.http.with(...)` surfaces CAN both
+  // register a contract literally called "health" at the same endpoint.
+  // operationId string equality alone must not be treated as "same
+  // contract" in that case (it would silently coalesce two distinct
+  // operations again — the exact class of bug GLU-116 is about).
+  const a = contract.http.with("surface-a", { security: null });
+  const b = contract.http.with("surface-b", { security: "bearer" });
+  const aHealth = a("health", {
+    endpoint: "GET /health",
+    description: "public health",
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const bHealth = b("health", {
+    endpoint: "GET /health",
+    description: "private health",
+    cases: { ok: { description: "ok", expect: { status: 204 } } },
+  }) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+
+  const doc = renderArtifact(openapiArtifact, [
+    aHealth._extracted as never,
+    bHealth._extracted as never,
+  ]);
+  const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
+  expect(paths["/health"].get.operationId).toBe("health");
+  expect(paths["/health"].get.summary).toBe("public health");
+
+  const collisions = (
+    doc as {
+      "x-glubean-surface-collisions"?: Array<{ operation: Record<string, unknown> }>;
+    }
+  )["x-glubean-surface-collisions"]!;
+  // The second "health" is structurally different (different summary +
+  // response) despite the identical operationId — it must NOT be treated
+  // as a duplicate no-op. It survives in the collision list.
+  expect(collisions).toHaveLength(1);
+  expect(collisions[0].operation.operationId).toBe("health");
+  expect(collisions[0].operation.summary).toBe("private health");
+});
+
 test("OpenAPI merge: non-operation Path Item fields (parameters/summary) never route through the collision list", () => {
   // Hand-crafted parts (not producible by buildOpenApiPartForHttp today, but
   // mergeOpenApiParts is a public function over the generic OpenAPI shape —

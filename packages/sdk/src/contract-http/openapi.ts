@@ -18,6 +18,7 @@
  */
 
 import type { ExtractedContractProjection } from "../contract-types.js";
+import { deepEqual } from "../expect.js";
 import type { HttpContractMeta, HttpSafeSchemas } from "./types.js";
 
 // =============================================================================
@@ -568,46 +569,6 @@ export function buildOpenApiPartForHttp(
 // =============================================================================
 
 /**
- * Combine per-contract partials into a full OpenAPI 3.1 document.
- *
- * - `paths`: deep-merge at 2 levels (same path, different methods combine)
- * - `components.securitySchemes`: union by name (first wins on collision;
- *   name uniqueness is handled at part construction via `instanceName` suffix)
- * - `tags`: dedupe by name across parts
- * - `info`: built from options.title / options.version (defaults match MCP)
- * - `servers`: from options, if present
- *
- * **Same-path multi-surface collisions (GLU-116)**: Glubean contracts can
- * represent distinct surfaces/clients (different base URL, different auth)
- * that happen to share the same HTTP method + path — e.g. a dashboard BFF
- * and a public platform API both exposing `GET /health`. A plain OpenAPI
- * `paths` object can only hold one operation per method+path key, so a
- * second contract at the same key would silently overwrite (or, with
- * first-wins, silently drop) the first. `operationId` is contract-id-derived
- * and globally unique (enforced at registration), so it's used as the
- * collision signal: when two *different* operationIds land on the same
- * method+path, the first keeps the canonical `paths[path][method]` slot
- * (order-stable) and every subsequent one is appended to the top-level
- * `x-glubean-surface-collisions` array instead of being dropped or forced
- * into an invalid `paths` key — a `paths` key MUST be a real URL path (no
- * `#`/query-string disambiguator hacks), or spec-conformant tooling may
- * silently ignore it, recreating the exact bug this fixes one layer down.
- * Each collision entry carries the original `path`/`method` plus the full
- * operation object, so nothing about the losing operation is lost — it's
- * just addressed out-of-band instead of forced into the canonical map. This
- * is a pragmatic disambiguation, not a spec-perfect multi-server
- * representation (that would need per-operation `servers`, which isn't
- * available at projection time since base URLs are unresolved `{{VAR}}`
- * templates). Re-merging the *same* operationId at the same method+path
- * (e.g. overlapping project globs including a contract twice) is a no-op,
- * not a collision — true whether that operationId is the canonical
- * `paths` entry or an already-relocated collision-list entry, so a loser
- * seen a third time doesn't produce a duplicate collision-list entry.
- *
- * Null / non-contributing parts are filtered by the render pipeline before
- * reaching here.
- */
-/**
  * OpenAPI 3.1 Path Item Object operation keys (the fixed HTTP-verb fields).
  * Collision detection/relocation only applies to these — a Path Item can
  * also carry non-operation fields (`parameters`, `summary`, `description`,
@@ -628,6 +589,51 @@ const OPENAPI_OPERATION_KEYS = new Set([
   "trace",
 ]);
 
+/**
+ * Combine per-contract partials into a full OpenAPI 3.1 document.
+ *
+ * - `paths`: deep-merge at 2 levels (same path, different methods combine)
+ * - `components.securitySchemes`: union by name (first wins on collision;
+ *   name uniqueness is handled at part construction via `instanceName` suffix)
+ * - `tags`: dedupe by name across parts
+ * - `info`: built from options.title / options.version (defaults match MCP)
+ * - `servers`: from options, if present
+ *
+ * **Same-path multi-surface collisions (GLU-116)**: Glubean contracts can
+ * represent distinct surfaces/clients (different base URL, different auth)
+ * that happen to share the same HTTP method + path — e.g. a dashboard BFF
+ * and a public platform API both exposing `GET /health`. A plain OpenAPI
+ * `paths` object can only hold one operation per method+path key, so a
+ * second contract at the same key would silently overwrite (or, with
+ * first-wins, silently drop) the first. Contract ids are NOT enforced
+ * globally unique across scoped instances (`contract.http.with("a", ...)`
+ * and `.with("b", ...)` can each register a contract literally called
+ * `"health"` — codex R4 caught this by demonstrating it against the real
+ * SDK), so `operationId` string equality alone is not a safe "same
+ * contract" signal. The real signal is structural: `deepEqual` on the
+ * built operation object. Two operations at the same method+path are the
+ * SAME occurrence (e.g. overlapping project globs re-including one
+ * contract) iff they're deep-equal — same id AND same responses/params/
+ * cases/etc. Anything structurally different is a genuine collision, even
+ * if the id happens to match.
+ *
+ * The first operation keeps the canonical `paths[path][method]` slot
+ * (order-stable); every subsequent DIFFERENT operation is appended to the
+ * top-level `x-glubean-surface-collisions` array instead of being dropped
+ * or forced into an invalid `paths` key — a `paths` key MUST be a real URL
+ * path (no `#`/query-string disambiguator hacks), or spec-conformant
+ * tooling may silently ignore it, recreating the exact bug this fixes one
+ * layer down. Each collision entry carries the original `path`/`method`
+ * plus the full operation object, so nothing about the losing operation is
+ * lost — it's just addressed out-of-band instead of forced into the
+ * canonical map. This is a pragmatic disambiguation, not a spec-perfect
+ * multi-server representation (that would need per-operation `servers`,
+ * which isn't available at projection time since base URLs are unresolved
+ * `{{VAR}}` templates).
+ *
+ * Null / non-contributing parts are filtered by the render pipeline before
+ * reaching here.
+ */
 export function mergeOpenApiParts(
   parts: OpenApiDocument[],
   options?: OpenApiOptions,
@@ -636,12 +642,15 @@ export function mergeOpenApiParts(
   const tagsByName = new Map<string, { name: string; [k: string]: unknown }>();
   const securitySchemes: Record<string, Record<string, unknown>> = {};
   const surfaceCollisions: Array<Record<string, unknown>> = [];
-  // Every operationId already recorded (canonical `paths` slot OR a prior
-  // collision entry) for a given method+path, keyed by "<path>\0<method>".
-  // Needed so a THIRD occurrence of an already-relocated loser (overlapping
-  // project globs re-including the same non-canonical contract) is a no-op
-  // instead of appending a duplicate collision entry (codex R2 P2).
-  const seenIdsByKey = new Map<string, Set<string>>();
+  // Every DISTINCT operation already recorded for a given method+path
+  // (structurally, not just by id) — the canonical `paths` slot plus any
+  // prior collision-list entries — keyed by "<path>\0<method>". Needed so
+  // a repeated occurrence of an already-relocated loser (overlapping
+  // project globs) is a no-op instead of appending a duplicate collision
+  // entry (codex R2 P2), while a genuinely different operation that
+  // happens to reuse the same operationId string (codex R4 P2) is NOT
+  // coalesced away.
+  const recordedByKey = new Map<string, Array<Record<string, unknown>>>();
 
   for (const part of parts) {
     const partPaths = (part.paths ?? {}) as Record<
@@ -651,43 +660,43 @@ export function mergeOpenApiParts(
     for (const [apiPath, methods] of Object.entries(partPaths)) {
       if (!paths[apiPath]) paths[apiPath] = {};
       for (const [method, operation] of Object.entries(methods)) {
-        const existing = paths[apiPath][method];
-
-        if (!existing) {
-          paths[apiPath][method] = operation;
-          if (OPENAPI_OPERATION_KEYS.has(method)) {
-            const incomingId = (operation as Record<string, unknown>)
-              .operationId;
-            const key = `${apiPath}\0${method}`;
-            const seen = seenIdsByKey.get(key) ?? new Set<string>();
-            if (typeof incomingId === "string") seen.add(incomingId);
-            seenIdsByKey.set(key, seen);
-          }
+        // Non-operation Path Item fields (parameters/summary/servers/...)
+        // have no operationId and are never a "surface" — plain first-wins,
+        // untouched by collision detection.
+        if (!OPENAPI_OPERATION_KEYS.has(method)) {
+          if (!paths[apiPath][method]) paths[apiPath][method] = operation;
           continue;
         }
 
-        // Non-operation Path Item fields (parameters/summary/servers/...)
-        // have no operationId and are never a "surface" — plain first-wins,
-        // same as before this fix.
-        if (!OPENAPI_OPERATION_KEYS.has(method)) continue;
+        const existing = paths[apiPath][method];
+        if (!existing) {
+          paths[apiPath][method] = operation;
+          const key = `${apiPath}\0${method}`;
+          const recorded = recordedByKey.get(key) ?? [];
+          recorded.push(operation as Record<string, unknown>);
+          recordedByKey.set(key, recorded);
+          continue;
+        }
 
-        const incomingId = (operation as Record<string, unknown>).operationId;
         const key = `${apiPath}\0${method}`;
-        const seen = seenIdsByKey.get(key) ?? new Set<string>();
-        if (typeof incomingId === "string" && seen.has(incomingId)) {
-          // Already recorded — either the canonical operation or a prior
-          // collision entry re-encountered across overlapping parts. No-op,
+        const recorded = recordedByKey.get(key) ?? [];
+        if (recorded.some((r) => deepEqual(r, operation))) {
+          // Structurally identical to something already recorded (the
+          // canonical operation or a prior collision entry) — the same
+          // occurrence re-encountered across overlapping parts. No-op,
           // first wins (matches MCP's prior Object.assign semantics).
           continue;
         }
 
-        // Real collision: a DIFFERENT contract (surface) not yet seen for
-        // this method + path. `paths[apiPath][method]` can only hold one
-        // operation, so the loser goes to the collision list — still fully
-        // present in the document, just not under a fabricated `paths` key.
+        // Real collision: a structurally DIFFERENT operation at the same
+        // method + path (different surface — even if it happens to reuse
+        // the same operationId string). `paths[apiPath][method]` can only
+        // hold one operation, so the loser goes to the collision list —
+        // still fully present in the document, just not under a
+        // fabricated `paths` key.
         surfaceCollisions.push({ path: apiPath, method, operation });
-        if (typeof incomingId === "string") seen.add(incomingId);
-        seenIdsByKey.set(key, seen);
+        recorded.push(operation as Record<string, unknown>);
+        recordedByKey.set(key, recorded);
       }
     }
 
