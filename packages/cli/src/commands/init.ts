@@ -231,6 +231,10 @@ function makePackageJson(_baseUrl: string): string {
         },
         dependencies: {
           "@glubean/sdk": SDK_VERSION,
+          // contracts/users.contract.ts (written below) imports zod directly
+          // for its schema definitions — GLU-114 / GitHub report: without
+          // this, a fresh `glubean init` project fails to resolve zod.
+          zod: "^4.0.0",
           // Runner must be a direct dep (not only transitive via the glubean CLI).
           // pnpm does not hoist transitive deps — VSCode extension probes
           // node_modules/@glubean/runner; missing → bundled fallback runner →
