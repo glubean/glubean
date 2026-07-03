@@ -240,19 +240,24 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       maxDepth: 64,
     });
   // The normalized contract/workflow `projection` is a TYPE/STRUCTURE blob (JSON
-  // schemas, node trees) — its object KEYS are field names (e.g. a schema property
-  // literally named `password`/`token`), NOT secrets. Key-based redaction would
-  // MASK those field names and destroy the schema projection — the most important
-  // part of a contract. So redact the projection with PATTERN rules ONLY (still
-  // catches secret-LOOKING literal values, e.g. a hardcoded `sk-…` default), never
-  // sensitiveKeys.
-  const structureRules = { ...redaction.globalRules, sensitiveKeys: [] };
-  const redactStructure = (v: unknown): unknown =>
-    redactValue(v, {
-      globalRules: structureRules,
-      replacementFormat: redaction.replacementFormat,
-      maxDepth: 64,
-    });
+  // schemas, node trees) whose object KEYS are mostly field names (e.g. a schema
+  // property literally named `password`/`token`) — but it also carries free-form
+  // `extensions`/`meta` blobs (scanner's own doc comment warns these "may contain
+  // secrets") that CAN hold real credentials, e.g. a cookie-auth contract's
+  // default cookie/session-id header value.
+  //
+  // GLU-123 (Urgent, fixed): this used to redact the projection with
+  // `sensitiveKeys: []` (pattern rules only) on the theory that key-based
+  // redaction would mask schema field names and corrupt the projection. That
+  // theory doesn't hold: `redactValue` runs with `sensitiveKeyRecurse: true`
+  // (engine default) — an object/array under a sensitive key is recursed INTO,
+  // never replaced wholesale, so only SCALAR leaves get masked and
+  // `properties.password: { type: "string" }` keeps its exact shape. Meanwhile
+  // clearing sensitiveKeys let `cookie`/`set-cookie`/`sessionid`/`session_id`
+  // (not in the built-in pattern set) upload in cleartext. So the projection now
+  // reuses the SAME `globalRules` (project sensitiveKeys + built-in scope keys)
+  // as every other redacted field — one redaction policy, not a second weaker one.
+  const redactStructure = redactField;
   // Redact ONLY the secret-bearing/free-text fields — NEVER `testId` (the stable
   // join key with run evidence; redacting an id that matches a built-in pattern
   // would break correlation and collapse distinct ids) or structural fields
