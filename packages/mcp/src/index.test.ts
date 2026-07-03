@@ -822,6 +822,73 @@ export const t = test("mid-key-truncation", async (ctx) => {
   expect((assertion.actual as Record<string, unknown>).token).not.toBe(MID_KEY_SECRET);
 }, 15_000);
 
+// codex R8 P1: `ctx.expect(await res.text()).toBe(rawJsonString)` asserts on
+// a raw STRING whose CONTENT is JSON. `inspect()`'s string branch wraps it
+// with `JSON.stringify`, producing a DOUBLY-encoded fragment in the message
+// (`"{\"token\":\"secret\"}"`) — the `{`/`[` bracket-scanner never fires
+// since the first structural character is `"`, not `{`.
+test("runLocalTestsFromFile redacts a secret inside a JSON-shaped raw-text assertion message (GLU-129 codex R8 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const TEXT_SECRET = "OPAQUE-TEXT-SECRET-VALUE";
+  await writeFile(
+    join(dir, "tests", "text-secret.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("text-secret", async (ctx) => {
+  const raw = JSON.stringify({ token: "${TEXT_SECRET}" });
+  ctx.expect(raw).toBe(JSON.stringify({ token: "${TEXT_SECRET}" }));
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "text-secret.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(TEXT_SECRET);
+  expect(assertion.message).toContain("token");
+  expect(assertion.actual).not.toContain(TEXT_SECRET);
+  // The masked value is still a JSON-encoded string (structurally intact,
+  // not just wiped) — round-trips back to an object with `token` masked.
+  const roundTripped = JSON.parse(assertion.actual as string) as Record<string, unknown>;
+  expect(roundTripped.token).not.toBe(TEXT_SECRET);
+}, 15_000);
+
+// codex R8 P2: `.orFail()` promotes a failed assertion into a THROWN
+// `ExpectFailError` — its `.message` (and `.stack`, whose first line is
+// `${ErrorName}: ${message}`) carry the SAME inspect()-embedded credential
+// an `assertion` event's `message` does, but surface via the `status`/
+// `error` event path (`redactMcpStatusFields`/`redactMcpErrorFields`),
+// which only ran the baseline pattern-scan, not the JSON-substring scrubber.
+test("runLocalTestsFromFile redacts a secret from an orFail() hard-failure's error.message and error.stack (GLU-129 codex R8 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const ORFAIL_SECRET = "ORFAIL-OPAQUE-SECRET";
+  await writeFile(
+    join(dir, "tests", "orfail-secret.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("orfail-secret", async (ctx) => {
+  ctx.expect({ token: "${ORFAIL_SECRET}" }).toEqual({ token: "different-value" }).orFail();
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "orfail-secret.test.ts"),
+  });
+  expect(result.summary.total).toBe(1);
+  expect(result.summary.failed).toBe(1); // orFail() intentionally fails this test
+  const error = result.results[0].error;
+  expect(error).toBeDefined();
+  expect(error!.message).not.toContain(ORFAIL_SECRET);
+  expect(error!.message).toContain("token");
+  expect(error!.stack).toBeDefined();
+  expect(error!.stack).not.toContain(ORFAIL_SECRET);
+  // The stack's non-sensitive call-frame lines survive — not a blanket wipe.
+  expect(error!.stack).toContain("ExpectFailError");
+}, 15_000);
+
 test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
   const trace = {
     method: "POST",

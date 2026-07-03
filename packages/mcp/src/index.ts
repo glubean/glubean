@@ -551,6 +551,26 @@ function repairTruncatedJson(fragment: string): unknown {
   return undefined;
 }
 
+// GLU-129 (codex R8 P1): `ctx.expect(await res.text()).toBe('{"token":"secret"}')`
+// asserts on a raw STRING whose CONTENT happens to be JSON — `inspect()`'s
+// string branch (`typeof value === "string"`) wraps it with `JSON.stringify`,
+// producing a DOUBLY-encoded fragment: `"{\"token\":\"secret\"}"` (an outer
+// quoted string literal whose escaped content is itself a JSON object). The
+// `{`/`[` bracket-scanner above never fires here — the first structural
+// character is `"`, not `{` — so this is a second, distinct trigger: scan a
+// top-level STRING LITERAL, and if its DECODED content ALSO parses as JSON,
+// redact that inner value and re-encode both layers.
+function scanStringLiteral(text: string, start: number, limit: number): number | undefined {
+  let escape = false;
+  for (let j = start + 1; j < limit; j++) {
+    const c = text[j];
+    if (escape) { escape = false; continue; }
+    if (c === "\\") { escape = true; continue; }
+    if (c === '"') return j + 1; // exclusive end, past the closing quote
+  }
+  return undefined;
+}
+
 function redactMessageJsonSubstrings(text: string): string {
   let result = "";
   let i = 0;
@@ -584,6 +604,43 @@ function redactMessageJsonSubstrings(text: string): string {
         if (!balanced) result += "...";
         i = end;
         continue;
+      }
+    } else if (ch === '"') {
+      // inspect()'s STRING truncation always re-appends a closing quote
+      // (`escaped.slice(0, maxLen - 4) + '..."'`), unlike the object case —
+      // so an unbounded scan for the closing quote is safe (a truncated
+      // string is still properly terminated); no repair step is needed here.
+      const end = scanStringLiteral(text, i, text.length);
+      if (end !== undefined) {
+        const candidate = text.slice(i, end);
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(candidate);
+        } catch {
+          decoded = undefined;
+        }
+        if (typeof decoded === "string") {
+          let inner: unknown;
+          try {
+            inner = JSON.parse(decoded);
+          } catch {
+            inner = undefined;
+          }
+          if (inner !== null && typeof inner === "object") {
+            const redacted = redactEvent(
+              { type: "assertion", actual: inner },
+              MCP_TRACE_REDACTION_SCOPES,
+              "partial",
+              64,
+            ) as unknown as { actual: unknown };
+            // Re-encode BOTH layers: the inner value back to a JSON string,
+            // then that string back to an escaped, quoted string literal —
+            // the inverse of how inspect() built the original fragment.
+            result += JSON.stringify(JSON.stringify(redacted.actual));
+            i = end;
+            continue;
+          }
+        }
       }
     }
     result += ch;
@@ -621,28 +678,50 @@ function redactMcpLogFields(fields: {
   ) as unknown as typeof fields;
 }
 
+// GLU-129 (codex R8 P2): `ctx.expect(...).orFail()` promotes a failed
+// assertion into a THROWN `ExpectFailError` whose `.message` is the SAME
+// SDK-generated, `inspect()`-embedding text an `assertion` event's
+// `message` carries (packages/sdk/src/expect.ts) — but it surfaces via the
+// `status`/`error` events (a hard test failure), not `assertion`. The
+// `status.error`/`error.message` scopes are `raw-string` (pattern-scan
+// only, same as `assertion.message` before this whole fix) — masking the
+// SAME kind of embedded key-shaped credential requires the SAME JSON-
+// substring scrubber, not just the baseline `redactEvent` pattern pass.
 function redactMcpStatusFields(fields: {
   error?: string;
   stack?: string;
 }): { error?: string; stack?: string } {
-  return redactEvent(
+  const redacted = redactEvent(
     { type: "status", ...fields },
     MCP_TRACE_REDACTION_SCOPES,
     "partial",
     64,
   ) as unknown as typeof fields;
+  return {
+    error: redacted.error !== undefined ? redactMessageJsonSubstrings(redacted.error) : undefined,
+    // `stack`'s first line is `${ErrorName}: ${message}` (Node/V8 default
+    // `Error.stack` format) — the SAME embedded-JSON message text, so it
+    // needs the SAME scrub, not just `error`. The scanner only looks for
+    // `{`/`[`/`"` characters; the rest of the multi-line "at ..." trace is
+    // passed through untouched.
+    stack: redacted.stack !== undefined ? redactMessageJsonSubstrings(redacted.stack) : undefined,
+  };
 }
 
 function redactMcpErrorFields(fields: {
   message: string;
   stack?: string;
 }): { message: string; stack?: string } {
-  return redactEvent(
+  const redacted = redactEvent(
     { type: "error", ...fields },
     MCP_TRACE_REDACTION_SCOPES,
     "partial",
     64,
   ) as unknown as typeof fields;
+  return {
+    message: redactMessageJsonSubstrings(redacted.message),
+    stack: redacted.stack !== undefined ? redactMessageJsonSubstrings(redacted.stack) : undefined,
+  };
 }
 
 // GLU-129: `bootstrap:failed`/`session:setup:failed`/`run:failed` are
