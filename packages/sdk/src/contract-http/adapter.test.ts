@@ -9,6 +9,7 @@
  */
 
 import { test, expect, beforeEach } from "vitest";
+import { z } from "zod";
 // Import from main index so the HTTP adapter side-effect registration fires.
 import { contract } from "../index.js";
 import { readJsonBody } from "./adapter.js";
@@ -659,6 +660,72 @@ test("a schema-lib instance that carries a `type` field (zod v4 shape) projects 
   expect(body).not.toHaveProperty("safeParse"); // not the raw zod object
   expect(body).not.toHaveProperty("_zod");
   expect(c._extracted.unprojectableSchemas).toBeUndefined();
+});
+
+test("GLU-120: a real Zod v4 instance WITHOUT the instance toJSONSchema() method converts via the static z.toJSONSchema fallback", () => {
+  // Reproduces the real-world shape that the previous test's mock got wrong:
+  // Zod's pre-4.0 transitional `zod/v4` subpath (used by the 3.23-3.25.x
+  // "opt into v4 early" releases) — and any future build that drops the
+  // instance method — expose the converter as a STATIC `z.toJSONSchema()`
+  // only. Simulated here with a REAL zod schema's internals (`_zod`, built
+  // by the actual `z.object()` factory below) stripped of every instance
+  // method, so `zodV4StaticToJsonSchema`'s own module resolution
+  // (`require("zod")`) is exercised against genuine Zod v4 internal
+  // structure, not a hand-rolled approximation.
+  const real = z.object({
+    email: z.string().email(),
+    age: z.number().optional(),
+  });
+  const staticOnly: SchemaLike<unknown> = { _zod: (real as unknown as { _zod: unknown })._zod } as any;
+  expect(typeof (staticOnly as any).toJSONSchema).toBe("undefined"); // precondition: no instance method
+
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: staticOnly } },
+    },
+  });
+
+  const body = (c._extracted.cases[0].schemas as any)?.response?.body;
+  // Assert shape via the real zod converter's own output (avoids hardcoding
+  // zod's internal email regex, which is a zod implementation detail, not
+  // something this fix should pin) rather than by-value equality.
+  const expected = z.toJSONSchema(real) as Record<string, unknown>;
+  delete expected.$schema; // adapter strips the per-document dialect field
+  expect(body).toEqual(expected);
+  expect(body.type).toBe("object");
+  expect(body.properties.email.format).toBe("email");
+  expect(body.properties.age).toEqual({ type: "number" });
+  expect(body.required).toEqual(["email"]);
+  expect(body).not.toHaveProperty("$schema"); // dialect noise stripped, same as the instance-method path
+  expect(c._extracted.unprojectableSchemas).toBeUndefined();
+});
+
+test("GLU-120: a Zod v3 instance (no _zod marker, no toJSONSchema anywhere) stays unprojectable — not silently wrong", () => {
+  // Zod v3 objects (`_def.typeName` shape) ship no JSON Schema conversion at
+  // all, static or instance. The static fallback must NOT misfire on them —
+  // it should recognize "not Zod v4-shaped" and fall through to the existing
+  // unprojectable signal, exactly like before this fix (no regression: a v3
+  // schema without a declared `.jsonSchema` hint was never projectable and
+  // still isn't — this fix only adds the v4-static case, it doesn't invent a
+  // v3 converter).
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  const v3Like: SchemaLike<unknown> = {
+    safeParse: (data: unknown) => ({ success: true as const, data }),
+    _def: { typeName: "ZodObject" },
+  } as any;
+  const c = api("fetch", {
+    endpoint: "GET /x",
+    cases: {
+      ok: { description: "x", expect: { status: 200, schema: v3Like } },
+    },
+  });
+
+  expect((c._extracted.cases[0].schemas as any)?.response?.body).toBeUndefined();
+  expect(c._extracted.unprojectableSchemas).toEqual(["cases.ok.response.body"]);
 });
 
 // --- readJsonBody: ky 2-safe body read (codex ky2 P2-6) ---------------------

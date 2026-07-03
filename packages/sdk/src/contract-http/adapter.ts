@@ -54,6 +54,7 @@ import { isInboundCase } from "./types.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
 import { genericMarkdownPart } from "../contract-artifacts.js";
 import { matchInboundCaseHttp, preflightInboundCaseHttp } from "./inbound-match.js";
+import { createRequire } from "node:module";
 
 // =============================================================================
 // Helpers — endpoint, params, request body, response headers
@@ -229,7 +230,9 @@ export async function readJsonBody(res: {
 /**
  * Try to convert a SchemaLike (Zod v4, Valibot, etc.) to JSON Schema.
  * Uses the schema's own `toJSONSchema` method if present. Falls back to
- * passing through as-is if already plain, or to the author-declared
+ * the STATIC `z.toJSONSchema(schema)` API for Zod v4 instances that don't
+ * carry the instance method (GLU-120 — see `zodV4StaticToJsonSchema`), then
+ * to passing through as-is if already plain, or to the author-declared
  * `SchemaLike.jsonSchema` companion for hand-rolled (safeParse-only)
  * validators (GLU-90) — including as a recovery path when a present
  * `toJSONSchema()` throws. Returns null (unprojectable) only when none
@@ -271,6 +274,23 @@ export function schemaToJsonSchema(schema: unknown): unknown | null {
     }
   }
 
+  // GLU-120: a Zod v4 instance that has NO instance `toJSONSchema()` — every
+  // Zod v3 build and Zod's own pre-4.0 transitional `zod/v4` subpath (used
+  // by the 3.23–3.25.x "opt into v4 early" releases) shipped the converter
+  // as a STATIC `z.toJSONSchema(schema)` only; the instance method landed
+  // later. Detected via the `_zod.def` internal marker (present on every
+  // Zod v4-shaped instance, absent on Zod v3's `_def.typeName` shape and on
+  // arbitrary non-Zod objects) — MUST also run before the plain-JSON-Schema
+  // shortcut below for the same reason as the instance-method branch above.
+  const staticConverted = zodV4StaticToJsonSchema(schema as Record<string, unknown>);
+  if (staticConverted !== null) return staticConverted;
+  if (hasZodV4Marker(schema as Record<string, unknown>)) {
+    // Recognized as Zod v4-shaped but conversion failed/unavailable (zod not
+    // resolvable from here, or toJSONSchema threw) — recover via the
+    // declared hint, same rationale as the instance-method catch above.
+    return declaredJsonSchemaOrNull(schema as Record<string, unknown>);
+  }
+
   // Already plain JSON Schema (authored directly — the demos use this). A real
   // JSON Schema object has no toJSONSchema method, so it lands here.
   if ("type" in (schema as Record<string, unknown>) || "$ref" in (schema as Record<string, unknown>)) {
@@ -299,6 +319,81 @@ function declaredJsonSchemaOrNull(schema: Record<string, unknown>): unknown | nu
   const declared = (schema as { jsonSchema?: unknown }).jsonSchema;
   if (declared && typeof declared === "object" && !Array.isArray(declared)) {
     return declared;
+  }
+  return null;
+}
+
+// =============================================================================
+// GLU-120: Zod v4 static `toJSONSchema` fallback
+// =============================================================================
+
+/**
+ * Structural marker for a Zod v4-shaped schema instance: a `_zod.def` bag.
+ * Present on every Zod v4 build (the transitional pre-4.0 `zod/v4` subpath
+ * AND the stable v4.x line) regardless of whether that build also exposes
+ * the instance `toJSONSchema()` method. Absent on Zod v3 (`_def.typeName`
+ * shape), on other schema libraries (Valibot, ArkType, …), and on
+ * hand-rolled `{ safeParse }` validators — so this never misfires on a
+ * non-Zod object.
+ */
+function hasZodV4Marker(schema: Record<string, unknown>): boolean {
+  const zodInternal = (schema as { _zod?: unknown })._zod;
+  return (
+    zodInternal != null &&
+    typeof zodInternal === "object" &&
+    "def" in (zodInternal as Record<string, unknown>)
+  );
+}
+
+/**
+ * Best-effort synchronous resolution of a named module from the SDK's own
+ * install location, walking up `node_modules` exactly like a `require()`
+ * issued by the consumer's own code would — so this picks up whichever
+ * `zod` build the CONSUMER already has installed, never a bundled copy (the
+ * SDK declares no `zod` dependency; it stays schema-library-agnostic).
+ * Synchronous by design: `schemaToJsonSchema` is a sync function used from
+ * sync projection/dry-run paths, and converting the whole call chain to
+ * async for this one fallback is out of scope. Returns null on any
+ * resolution failure (zod not installed, subpath doesn't exist on this
+ * zod version, …) rather than throwing.
+ */
+function requireOptional(specifier: string): Record<string, unknown> | null {
+  try {
+    const require = createRequire(import.meta.url);
+    return require(specifier) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert a Zod v4-shaped instance (see `hasZodV4Marker`) via the STATIC
+ * `z.toJSONSchema(schema)` API (GLU-120). Tries the `zod` specifier first
+ * (covers stable Zod v4.x, whose top-level export carries `toJSONSchema`),
+ * then `zod/v4` (covers the pre-4.0 transitional releases, whose top-level
+ * `zod` export is still classic v3 but the `zod/v4` subpath has the static
+ * converter). Returns null — never throws — when the marker is absent, no
+ * zod build is resolvable from here, neither specifier exposes a static
+ * `toJSONSchema`, or the conversion itself throws (e.g. an unrepresentable
+ * node); callers fall back to the declared `jsonSchema` hint exactly like
+ * the instance-method path does.
+ */
+function zodV4StaticToJsonSchema(schema: Record<string, unknown>): unknown | null {
+  if (!hasZodV4Marker(schema)) return null;
+
+  for (const specifier of ["zod", "zod/v4"]) {
+    const mod = requireOptional(specifier);
+    const toJSONSchema = mod?.toJSONSchema;
+    if (typeof toJSONSchema !== "function") continue;
+    try {
+      const out = toJSONSchema(schema) as Record<string, unknown> | null;
+      if (out && typeof out === "object" && "$schema" in out) delete out.$schema;
+      return out;
+    } catch {
+      // This specifier resolved but couldn't convert this instance (e.g. a
+      // dual-package-hazard mismatch, or an unrepresentable node) — try the
+      // next specifier before giving up.
+    }
   }
   return null;
 }

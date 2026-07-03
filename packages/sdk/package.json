@@ -46,7 +46,8 @@
     "yaml": "^2.7.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "zod": "^4.3.6"
   },
   "repository": {
     "type": "git",
