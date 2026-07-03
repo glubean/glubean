@@ -13,7 +13,7 @@
  * is extracted. All other files are treated as plain glubean config JSON.
  */
 
-import { resolve, isAbsolute, normalize } from "node:path";
+import { resolve, isAbsolute, normalize, win32 } from "node:path";
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { DEFAULT_CONFIG, BUILTIN_SCOPES } from "@glubean/redaction";
@@ -383,6 +383,13 @@ function assertNonEmpty(value: string, context: string, configPath: string): voi
 }
 
 /**
+ * A Windows drive-qualified path prefix: `C:`, `d:`, etc. Matches both
+ * drive-relative (`C:foo`, resolved against that drive's current directory)
+ * and drive-absolute (`C:\\foo`, `C:/foo`) forms — both are rejected below.
+ */
+const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:/;
+
+/**
  * Reject a path that is absolute or escapes the project root via `..`.
  *
  * Projection `output`/`target` are resolved against the project root and
@@ -396,16 +403,43 @@ function assertContainedRelativePath(
   context: string,
   configPath: string,
 ): void {
-  if (isAbsolute(value)) {
+  // This helper is the containment boundary for config-declared projection
+  // paths, which must be portable relative paths inside the project root. The
+  // host `path` module uses POSIX semantics on glubean's primary platforms
+  // (macOS/Linux), so a value that is only meaningful under Windows path rules
+  // slips past POSIX `isAbsolute`/`normalize` yet escapes the root once
+  // `path.win32.resolve` interprets it on Windows. Validate under BOTH POSIX
+  // and Windows semantics so the guarantee holds regardless of where the
+  // config is authored or consumed (GLU-143).
+
+  // Windows drive-qualified: `C:foo` (drive-RELATIVE — resolved against that
+  // drive's current directory) and `C:\foo` / `C:/foo` (drive-absolute). The
+  // drive-relative form is not flagged by `isAbsolute` under EITHER posix or
+  // win32 semantics, so it needs this explicit prefix check.
+  if (WINDOWS_DRIVE_PATH.test(value)) {
+    throw new GlubeanConfigError(
+      `\`${context}\` must be a relative path inside the project (got a Windows drive-qualified path "${value}").`,
+      configPath,
+    );
+  }
+  // Absolute under posix (`/etc`) OR win32 (`\outside`, UNC `\\server\share`,
+  // extended-length `\\?\C:\...`). On a Windows host `isAbsolute` already IS
+  // `win32.isAbsolute`, so the extra check is a harmless no-op there.
+  if (isAbsolute(value) || win32.isAbsolute(value)) {
     throw new GlubeanConfigError(
       `\`${context}\` must be a relative path inside the project (got absolute path "${value}").`,
       configPath,
     );
   }
-  // normalize collapses `a/../b` etc.; a leading `..` segment means the path
-  // resolves outside the project root.
-  const normalized = normalize(value);
-  if (normalized === ".." || normalized.startsWith(`..${"/"}`) || normalized.startsWith(`..${"\\"}`)) {
+  // Escape via a leading `..` segment. `win32.normalize` treats both `/` and
+  // `\` as separators, so it also collapses backslash-authored escapes like
+  // `reports\..\..\package.json` that posix `normalize` leaves intact. Check
+  // both so `..` escapes written with either separator are caught.
+  const escapesRoot = (normalized: string): boolean =>
+    normalized === ".." ||
+    normalized.startsWith(`..${"/"}`) ||
+    normalized.startsWith(`..${"\\"}`);
+  if (escapesRoot(normalize(value)) || escapesRoot(win32.normalize(value))) {
     throw new GlubeanConfigError(
       `\`${context}\` must stay inside the project — "${value}" escapes the project root.`,
       configPath,

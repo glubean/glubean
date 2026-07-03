@@ -1056,6 +1056,57 @@ projections:
       });
     });
 
+    it("rejects a Windows drive-relative output path (GLU-143)", async () => {
+      // `C:outside.json` has no leading `\`/`/` so `path.isAbsolute` (POSIX
+      // semantics) doesn't flag it, but on Windows it resolves against that
+      // drive's current directory — not the project root.
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      format: openapi
+      output: C:outside.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.output` must be a relative path inside the project \(got a Windows drive-qualified path/,
+        );
+      });
+    });
+
+    it("rejects a Windows drive-absolute target path (GLU-143)", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      target: C:\\outside
+      format: openapi
+      output: reports/out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.target` must be a relative path inside the project \(got a Windows drive-qualified path/,
+        );
+      });
+    });
+
+    it("accepts a normal relative output path (regression guard, GLU-143)", async () => {
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    ok:
+      suite: contracts
+      format: openapi
+      output: reports/projections/ok.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config, configPath } = await loadProjectConfigV1(dir);
+        const resolved = resolveContractProjection(config, configPath, dir, "ok");
+        expect(resolved.output).toBe(join(dir, "reports/projections/ok.json"));
+      });
+    });
+
     it("rejects a suite: projection whose suite target escapes the project (GLU-117 R2 P1)", async () => {
       // A projection references a suite whose target escapes the project via
       // `..`. Direct `target` is checked at load time; the suite path is
@@ -1079,6 +1130,71 @@ projections:
         expect(() =>
           resolveContractProjection(config, configPath, dir, "sneaky"),
         ).toThrow(/must stay inside the project/);
+      });
+    });
+
+    it("rejects a suite: projection whose suite target is Windows drive-relative (GLU-143 — resolve-time reuse)", async () => {
+      // The drive-relative guard must also fire on the resolve-time reuse
+      // path: a projection referencing a suite whose own target is `C:outside`
+      // only hits assertContainedRelativePath inside resolveContractProjection
+      // (suite targets are not containment-checked at load time).
+      const yaml = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+  escape: { target: C:outside, kinds: [contract, flow] }
+profiles:
+  local: { suites: [tests] }
+projections:
+  contracts:
+    sneaky:
+      suite: escape
+      format: openapi
+      output: reports/out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config, configPath } = await loadProjectConfigV1(dir);
+        expect(() =>
+          resolveContractProjection(config, configPath, dir, "sneaky"),
+        ).toThrow(
+          /must be a relative path inside the project \(got a Windows drive-qualified path/,
+        );
+      });
+    });
+
+    it("rejects a Windows UNC-absolute output path (GLU-143 — win32 semantics)", async () => {
+      // `\\server\share\out.json` is not posix-absolute, but is win32-absolute
+      // (UNC). The containment check validates win32 semantics too.
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      format: openapi
+      output: \\\\server\\share\\out.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.output` must be a relative path inside the project \(got absolute path/,
+        );
+      });
+    });
+
+    it("rejects a backslash-separated .. escape (GLU-143 — win32 normalize)", async () => {
+      // `reports\..\..\package.json` collapses to a `..` escape only under
+      // win32 normalize (posix normalize leaves the backslashes intact).
+      const yaml = `${BASE_YAML}
+projections:
+  contracts:
+    bad:
+      suite: contracts
+      format: openapi
+      output: reports\\..\\..\\package.json
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`projections\.contracts\.bad\.output` must stay inside the project/,
+        );
       });
     });
 
