@@ -225,8 +225,20 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     id: "log.data",
     name: "Log data",
     event: "log",
+    // GLU-129 (codex R1 P1): `ctx.log(message, data)` lets a test echo ANY
+    // structured value — including a raw credential under an opaque-looking
+    // key (`{ token: "opaque-session-id" }`) that matches no global VALUE
+    // pattern (jwt/bearer/email/etc). Without a `sensitiveKeys` list this
+    // scope only ever ran global pattern plugins (confirmed empirically: a
+    // non-JWT-shaped token/password/cookie value passed through untouched),
+    // even though the sibling HTTP body scopes have carried a credential-key
+    // list since GLU-104. Mirrors `http.metadata` (includes `cookie` — a log
+    // can carry an object shaped like headers, not just an HTTP body).
     target: "data",
     handler: "json",
+    rules: {
+      sensitiveKeys: [...CREDENTIAL_KEYS, "cookie"],
+    },
   },
   {
     id: "error.message",

@@ -1377,9 +1377,15 @@ export async function runLocalTestsFromFile(args: {
         if (!includeLogs || !eventTestId) break;
         const acc = accumulators.get(eventTestId);
         if (acc) {
-          acc.logs.push(
-            redactMcpLogFields({ message: event.message, data: event.data }),
-          );
+          // codex R1 P2: `redactMcpLogFields` returns the full cloned
+          // `redactEvent` event (which carries `type: "log"` alongside
+          // `message`/`data`) — pick only the two fields `LocalRunResult.logs`
+          // declares, so the MCP result shape doesn't grow an extra `type` key.
+          const redactedLog = redactMcpLogFields({
+            message: event.message,
+            data: event.data,
+          });
+          acc.logs.push({ message: redactedLog.message, data: redactedLog.data });
         }
         break;
       }

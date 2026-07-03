@@ -449,12 +449,24 @@ test("runLocalTestsFromFile redacts secrets from assertion.actual/expected and l
   const LOGIN_EMAIL = "victim@example.com";
   const SESSION_JWT =
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ2aWN0aW0ifQ.dummy-signature-part-not-real";
+  // codex R1 P1: an opaque credential that matches NO global value pattern
+  // (not JWT/bearer/AWS/GitHub/email/etc shaped) — only reachable via
+  // KEY-based masking (`log.data` scope's `sensitiveKeys`), which the first
+  // fix pass omitted. Proves the scope-level fix, not just the pattern one.
+  const OPAQUE_SESSION_ID = "opaque-session-id-no-known-pattern";
   const server = createServer((req, res) => {
     res.writeHead(200, {
       "content-type": "application/json",
       "set-cookie": "session=SUPER-SECRET-SESSION-COOKIE; Path=/; HttpOnly",
     });
-    res.end(JSON.stringify({ ok: true, token: SESSION_JWT, email: LOGIN_EMAIL }));
+    res.end(
+      JSON.stringify({
+        ok: true,
+        token: SESSION_JWT,
+        email: LOGIN_EMAIL,
+        sessionId: OPAQUE_SESSION_ID,
+      }),
+    );
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
   const addr = server.address();
@@ -472,10 +484,10 @@ export const loginTest = test("login-test", async (ctx) => {
   const res = await ctx.http.post("${baseUrl}/login", {
     json: { email: "${LOGIN_EMAIL}", password: "hunter2" },
   });
-  const body = await res.json<{ ok: boolean; token: string; email: string }>();
+  const body = await res.json<{ ok: boolean; token: string; email: string; sessionId: string }>();
   // Mirrors the dogfood repro: the assertion's actual/expected duplicate the
   // raw login email from the response body, and a log echoes the session
-  // token again.
+  // token/opaque session id again.
   ctx.expect(body.email).toBe("${LOGIN_EMAIL}");
   ctx.log("login response", body);
 });`,
@@ -502,6 +514,10 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(assertionSerialized).not.toContain(LOGIN_EMAIL);
     expect(logSerialized).not.toContain(SESSION_JWT);
     expect(logSerialized).not.toContain(LOGIN_EMAIL);
+    // codex R1 P1: the opaque, non-pattern-matching credential is ONLY
+    // caught by key-based masking (`log.data` scope's `sensitiveKeys`) —
+    // this is the assertion that would have failed before that fix.
+    expect(logSerialized).not.toContain(OPAQUE_SESSION_ID);
 
     // ── Structure/pass-state survives (not a blanket wipe): the assertion
     //    that compared the login email still shows as passed, and both its
@@ -512,14 +528,20 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(emailAssertion!.actual).not.toBe(LOGIN_EMAIL);
     expect(emailAssertion!.expected).not.toBe(LOGIN_EMAIL);
 
-    // ── Log data: key-based masking (token) survives structure — `ok` stays
-    //    visible, only the credential-shaped fields are replaced.
+    // ── Log data: key-based masking (token/sessionId) survives structure —
+    //    `ok` stays visible, only the credential-shaped fields are replaced.
     const loginLog = allLogs.find((l) => l.message === "login response");
     expect(loginLog).toBeDefined();
     const loginLogData = loginLog!.data as Record<string, unknown>;
     expect(loginLogData.ok).toBe(true);
     expect(loginLogData.token).not.toBe(SESSION_JWT);
     expect(loginLogData.email).not.toBe(LOGIN_EMAIL);
+    expect(loginLogData.sessionId).not.toBe(OPAQUE_SESSION_ID);
+
+    // codex R1 P2: the redacted log entry must keep the EXACT
+    // `LocalRunResult.logs[]` shape (`{ message, data }`) — no extra `type`
+    // key leaking in from the internal `redactEvent` clone.
+    expect(Object.keys(loginLog!).sort()).toEqual(["data", "message"]);
 
     // ── glubean_get_local_events (toLocalDebugEvents) inherits the same
     //    redacted data — it's built directly from `result.results`, so a
@@ -539,6 +561,7 @@ export const loginTest = test("login-test", async (ctx) => {
     const eventsSerialized = JSON.stringify(events);
     expect(eventsSerialized).not.toContain(SESSION_JWT);
     expect(eventsSerialized).not.toContain(LOGIN_EMAIL);
+    expect(eventsSerialized).not.toContain(OPAQUE_SESSION_ID);
     expect(events.some((e) => e.type === "assertion")).toBe(true);
     expect(events.some((e) => e.type === "log")).toBe(true);
   } finally {
