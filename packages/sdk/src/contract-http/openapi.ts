@@ -607,6 +607,27 @@ export function buildOpenApiPartForHttp(
  * Null / non-contributing parts are filtered by the render pipeline before
  * reaching here.
  */
+/**
+ * OpenAPI 3.1 Path Item Object operation keys (the fixed HTTP-verb fields).
+ * Collision detection/relocation only applies to these — a Path Item can
+ * also carry non-operation fields (`parameters`, `summary`, `description`,
+ * `servers`, `$ref`) that have no `operationId` and aren't a "surface"
+ * collision when two parts both set one; those keep the pre-existing
+ * first-wins merge untouched (codex R3 P2 — routing them through the
+ * collision list produced bogus `x-glubean-surface-collisions` entries
+ * with e.g. `method: "parameters"`).
+ */
+const OPENAPI_OPERATION_KEYS = new Set([
+  "get",
+  "put",
+  "post",
+  "delete",
+  "options",
+  "head",
+  "patch",
+  "trace",
+]);
+
 export function mergeOpenApiParts(
   parts: OpenApiDocument[],
   options?: OpenApiOptions,
@@ -630,18 +651,27 @@ export function mergeOpenApiParts(
     for (const [apiPath, methods] of Object.entries(partPaths)) {
       if (!paths[apiPath]) paths[apiPath] = {};
       for (const [method, operation] of Object.entries(methods)) {
-        const incomingId = (operation as Record<string, unknown>).operationId;
         const existing = paths[apiPath][method];
 
         if (!existing) {
           paths[apiPath][method] = operation;
-          const key = `${apiPath}\0${method}`;
-          const seen = seenIdsByKey.get(key) ?? new Set<string>();
-          if (typeof incomingId === "string") seen.add(incomingId);
-          seenIdsByKey.set(key, seen);
+          if (OPENAPI_OPERATION_KEYS.has(method)) {
+            const incomingId = (operation as Record<string, unknown>)
+              .operationId;
+            const key = `${apiPath}\0${method}`;
+            const seen = seenIdsByKey.get(key) ?? new Set<string>();
+            if (typeof incomingId === "string") seen.add(incomingId);
+            seenIdsByKey.set(key, seen);
+          }
           continue;
         }
 
+        // Non-operation Path Item fields (parameters/summary/servers/...)
+        // have no operationId and are never a "surface" — plain first-wins,
+        // same as before this fix.
+        if (!OPENAPI_OPERATION_KEYS.has(method)) continue;
+
+        const incomingId = (operation as Record<string, unknown>).operationId;
         const key = `${apiPath}\0${method}`;
         const seen = seenIdsByKey.get(key) ?? new Set<string>();
         if (typeof incomingId === "string" && seen.has(incomingId)) {

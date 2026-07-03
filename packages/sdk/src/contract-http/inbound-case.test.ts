@@ -11,7 +11,7 @@ import { test, expect, beforeEach } from "vitest";
 // Main index so the HTTP adapter side-effect registration fires.
 import { contract, inboundCase, isInboundCase, workflow } from "../index.js";
 import { httpAdapter } from "./adapter.js";
-import { buildOpenApiPartForHttp } from "./openapi.js";
+import { buildOpenApiPartForHttp, mergeOpenApiParts } from "./openapi.js";
 import {
   markdownArtifact,
   openapiArtifact,
@@ -484,6 +484,49 @@ test("OpenAPI merge: re-encountering an already-relocated loser a third time doe
   // is a no-op, not a second collision-list append (codex R2 P2).
   expect(collisions).toHaveLength(1);
   expect(collisions[0].operation.operationId).toBe("platform.health");
+});
+
+test("OpenAPI merge: non-operation Path Item fields (parameters/summary) never route through the collision list", () => {
+  // Hand-crafted parts (not producible by buildOpenApiPartForHttp today, but
+  // mergeOpenApiParts is a public function over the generic OpenAPI shape —
+  // a Path Item Object can carry `parameters`/`summary`/`servers` siblings
+  // to the HTTP-verb operation keys; those have no operationId and are not
+  // a "surface" collision.
+  const partA = {
+    paths: {
+      "/health": {
+        parameters: [{ name: "x-request-id", in: "header" }],
+        get: { operationId: "dashboard.health", responses: {} },
+      },
+    },
+  };
+  const partB = {
+    paths: {
+      "/health": {
+        parameters: [{ name: "x-trace-id", in: "header" }],
+        get: { operationId: "platform.health", responses: {} },
+      },
+    },
+  };
+
+  const doc = mergeOpenApiParts([partA, partB]);
+  const paths = doc.paths as Record<string, Record<string, unknown>>;
+
+  // `get` collides on operationId (real surface collision) — relocated.
+  expect(paths["/health"].get).toMatchObject({ operationId: "dashboard.health" });
+  const collisions = (
+    doc as {
+      "x-glubean-surface-collisions"?: Array<{ method: string; operation: Record<string, unknown> }>;
+    }
+  )["x-glubean-surface-collisions"]!;
+  expect(collisions).toHaveLength(1);
+  expect(collisions[0].method).toBe("get");
+  expect(collisions[0].operation.operationId).toBe("platform.health");
+
+  // `parameters` is NOT an operation — first-wins, no bogus collision entry
+  // with method: "parameters".
+  expect(paths["/health"].parameters).toEqual([{ name: "x-request-id", in: "header" }]);
+  expect(collisions.some((c) => c.method === "parameters")).toBe(false);
 });
 
 // ---------------------------------------------------------------------------
