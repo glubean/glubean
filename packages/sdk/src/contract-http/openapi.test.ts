@@ -308,4 +308,60 @@ describe("mergeOpenApiParts — component schema hoisting (GLU-127)", () => {
       { $ref: "#/components/schemas/Foo" },
     );
   });
+
+  // codex R1 P2 — regression coverage for both findings.
+
+  test("a genuine `title` schema PROPERTY doesn't collide with a schema lacking it (dedup must not strip nested `title` fields)", () => {
+    const withTitleProperty = {
+      type: "object",
+      properties: { name: { type: "string" }, title: { type: "string" } },
+    };
+    const withoutTitleProperty = {
+      type: "object",
+      properties: { name: { type: "string" } },
+    };
+    const partA = buildOpenApiPartForHttp(
+      contract({ id: "posts.create", path: "/posts", cases: [{ key: "ok", status: 201, responseBody: withTitleProperty }] }) as any,
+    );
+    const partB = buildOpenApiPartForHttp(
+      contract({ id: "authors.create", path: "/authors", cases: [{ key: "ok", status: 201, responseBody: withoutTitleProperty }] }) as any,
+    );
+    const doc = mergeOpenApiParts([partA!, partB!]);
+    const components = doc.components as { schemas: Record<string, unknown> };
+
+    // Two DIFFERENT shapes (one has a `title` property, one doesn't) must
+    // mint two DIFFERENT components — not dedupe into one.
+    expect(Object.keys(components.schemas).length).toBe(2);
+    expect(components.schemas.PostsCreateResponse).toEqual(withTitleProperty);
+    expect(components.schemas.AuthorsCreateResponse).toEqual(withoutTitleProperty);
+  });
+
+  test("merging the same parts array twice does not mutate the caller's parts or produce dangling $refs", () => {
+    const part = buildOpenApiPartForHttp(
+      contract({
+        id: "auth.sign-in.email",
+        path: "/api/auth/sign-in/email",
+        requestBody: { type: "object", properties: { email: { type: "string" } } },
+        cases: [{ key: "ok", status: 200 }],
+      }) as any,
+    ) as Record<string, unknown>;
+    const inlineSchemaBefore = JSON.stringify(
+      (part.paths as any)["/api/auth/sign-in/email"].post.requestBody.content["application/json"].schema,
+    );
+
+    const first = mergeOpenApiParts([part]);
+    // The ORIGINAL part must be untouched by the first merge.
+    expect(
+      JSON.stringify(
+        (part.paths as any)["/api/auth/sign-in/email"].post.requestBody.content["application/json"].schema,
+      ),
+    ).toBe(inlineSchemaBefore);
+
+    // Merging the SAME parts array again must reproduce the same hoisted
+    // document — not silently degrade to a dangling $ref with no
+    // components.schemas backing it (codex R1 P2).
+    const second = mergeOpenApiParts([part]);
+    expect(second.components).toEqual(first.components);
+    expect(second.paths).toEqual(first.paths);
+  });
 });

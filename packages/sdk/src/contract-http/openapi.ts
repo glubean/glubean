@@ -655,18 +655,31 @@ function isHoistableSchema(schema: unknown): schema is Record<string, unknown> {
   return false;
 }
 
-/** Deep-sort an object's keys (recursively) and drop `title` so two
- * structurally-identical schemas hash the same regardless of property
- * insertion order or an incidental title mismatch — the basis for
- * content-based dedup ("de-dupe identical JSON Schemas to avoid duplicate
- * components", GLU-127 design notes). */
-function canonicalizeForDedup(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeForDedup);
+/**
+ * Deep-sort an object's keys (recursively) and drop the ROOT schema's own
+ * `title` annotation so two structurally-identical schemas hash the same
+ * regardless of property insertion order or an incidental title mismatch —
+ * the basis for content-based dedup ("de-dupe identical JSON Schemas to
+ * avoid duplicate components", GLU-127 design notes).
+ *
+ * `isRoot` gates the `title` drop to depth 0 ONLY. A schema's own metadata
+ * `title` (`{ type: "object", title: "ErrorResponse", properties: {...} }`)
+ * is display metadata we intentionally ignore for dedup — that's the whole
+ * point of the explicit-name feature. But a `title` that's a genuine SCHEMA
+ * PROPERTY (`{ type: "object", properties: { title: { type: "string" } } }`
+ * — e.g. a blog post's `title` field) lives one level deeper, inside
+ * `properties`, where `isRoot` is already false — so it's preserved. Codex
+ * R1 P2 caught the recursive version of this: it stripped `title` at every
+ * depth, so `{ properties: { name, title } }` and `{ properties: { name } }`
+ * canonicalized identically and dedupe-merged into the wrong shape.
+ */
+function canonicalizeForDedup(value: unknown, isRoot = true): unknown {
+  if (Array.isArray(value)) return value.map((v) => canonicalizeForDedup(v, false));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value as object).sort()) {
-      if (key === "title") continue;
-      out[key] = canonicalizeForDedup((value as Record<string, unknown>)[key]);
+      if (isRoot && key === "title") continue;
+      out[key] = canonicalizeForDedup((value as Record<string, unknown>)[key], false);
     }
     return out;
   }
@@ -907,15 +920,27 @@ export function mergeOpenApiParts(
   // GLU-127: hoist reusable request/response body schemas into
   // `components.schemas`, replacing each inline occurrence with a `$ref`.
   // Runs last (needs the fully-merged `paths` + collision list to see
-  // cross-operation duplicates) and mutates operations in place — both the
-  // canonical `paths` slots and the collision list's full operation copies
-  // are walked, so a de-prioritized surface operation still gets its
-  // schemas componentized/deduped against the rest of the document. Sorted
-  // traversal (path, then method) keeps naming deterministic across runs
-  // independent of upstream extraction/iteration order.
+  // cross-operation duplicates). `paths`/`surfaceCollisions` at this point
+  // still hold the ORIGINAL operation objects straight out of `parts` (the
+  // merge loop above assigns them by reference, never clones) — hoisting
+  // mutates the operations it walks (schema fields become `$ref`s), so it
+  // runs against a deep clone instead of the merge's own `paths`/
+  // `surfaceCollisions`. Without this, a caller that merges the same
+  // `parts` array twice (e.g. re-rendering, or a test asserting the input
+  // is untouched) would find its ORIGINAL parts silently rewritten by the
+  // first call, and the second call would see already-`$ref`'d schemas
+  // with no `components.schemas` to back them — dangling refs (codex R1
+  // P2). Both the canonical `paths` slots and the collision list's full
+  // operation copies are walked, so a de-prioritized surface operation
+  // still gets its schemas componentized/deduped against the rest of the
+  // document. Sorted traversal (path, then method) keeps naming
+  // deterministic across runs independent of upstream extraction/iteration
+  // order.
+  const hoistedPaths = structuredClone(paths);
+  const hoistedCollisions = structuredClone(surfaceCollisions);
   const schemaRegistry = new ComponentSchemaRegistry();
-  for (const apiPath of Object.keys(paths).sort()) {
-    const methods = paths[apiPath];
+  for (const apiPath of Object.keys(hoistedPaths).sort()) {
+    const methods = hoistedPaths[apiPath];
     for (const method of Object.keys(methods).sort()) {
       if (!OPENAPI_OPERATION_KEYS.has(method)) continue;
       const operation = methods[method] as Record<string, unknown>;
@@ -924,7 +949,7 @@ export function mergeOpenApiParts(
       hoistOperationSchemas(schemaRegistry, contractId, operation);
     }
   }
-  for (const collision of surfaceCollisions) {
+  for (const collision of hoistedCollisions) {
     const operation = collision.operation as Record<string, unknown> | undefined;
     if (!operation) continue;
     const contractId =
@@ -958,10 +983,10 @@ export function mergeOpenApiParts(
     };
   }
 
-  doc.paths = paths;
+  doc.paths = hoistedPaths;
 
-  if (surfaceCollisions.length > 0) {
-    doc["x-glubean-surface-collisions"] = surfaceCollisions;
+  if (hoistedCollisions.length > 0) {
+    doc["x-glubean-surface-collisions"] = hoistedCollisions;
   }
 
   return doc;
