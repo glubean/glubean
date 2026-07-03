@@ -588,6 +588,214 @@ const OPENAPI_OPERATION_KEYS = new Set([
   "trace",
 ]);
 
+// =============================================================================
+// Component schema hoisting (GLU-127)
+// =============================================================================
+//
+// `buildOpenApiPartForHttp` (above) always writes request/response body
+// schemas INLINE — it only ever sees one contract, so it has no basis for
+// deciding what's reusable. Hoisting is a document-level concern: it needs
+// the full merged `paths` map to know which schemas repeat. So it runs here,
+// as the last step of `mergeOpenApiParts`, after `paths` /
+// `x-glubean-surface-collisions` are assembled but before the document is
+// returned.
+//
+// Scope is deliberately narrow — only request/response BODY schemas
+// (`requestBody.content[ctype].schema`, `responses[status].content[ctype].schema`)
+// are candidates. Parameter schemas (path/query/header) and response header
+// schemas stay inline: they're small, rarely reused across operations, and
+// leaving them alone keeps this pass from touching code paths GLU-116/119/120
+// just finished stabilizing.
+
+/** Convert a contract id (`"auth.sign-in.email"`) into a PascalCase stem
+ * (`"AuthSignInEmail"`) for derived component names. Splits on any
+ * non-alphanumeric separator (`.`, `-`, `_`, space, `:`, ...). */
+function toPascalCase(id: string): string {
+  return id
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join("");
+}
+
+/** Sanitize a user-supplied JSON Schema `title` into a component name that
+ * matches OpenAPI's `^[a-zA-Z0-9._-]+$` component-key grammar. Returns null
+ * if nothing usable survives (e.g. title was all punctuation). */
+function sanitizeComponentName(title: string): string | null {
+  const cleaned = title.replace(/[^a-zA-Z0-9._-]/g, "");
+  if (!cleaned) return null;
+  // A leading digit/`.`/`-` is spec-legal but reads badly as a generated
+  // type name in downstream codegen — prefix with `_` instead of rejecting.
+  return /^[a-zA-Z_]/.test(cleaned) ? cleaned : `_${cleaned}`;
+}
+
+/**
+ * True when a JSON Schema is "structured" enough to be worth a named
+ * component — an object with at least one declared property, or an array.
+ * Bare primitives (`{"type":"string"}`) and property-less object wildcards
+ * (`{"type":"object"}`) stay inline: hoisting them would mint a component
+ * name for something that carries no shape information, which is noise
+ * rather than reuse value. Already-hoisted / hand-authored `$ref`s are
+ * left untouched (idempotent — a second `mergeOpenApiParts` pass over an
+ * already-componentized doc is a no-op here).
+ */
+function isHoistableSchema(schema: unknown): schema is Record<string, unknown> {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const s = schema as Record<string, unknown>;
+  if (typeof s.$ref === "string") return false;
+  if (s.type === "array") return true;
+  if (s.type === "object") {
+    return (
+      !!s.properties &&
+      typeof s.properties === "object" &&
+      !Array.isArray(s.properties) &&
+      Object.keys(s.properties as object).length > 0
+    );
+  }
+  return false;
+}
+
+/** Deep-sort an object's keys (recursively) and drop `title` so two
+ * structurally-identical schemas hash the same regardless of property
+ * insertion order or an incidental title mismatch — the basis for
+ * content-based dedup ("de-dupe identical JSON Schemas to avoid duplicate
+ * components", GLU-127 design notes). */
+function canonicalizeForDedup(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeForDedup);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as object).sort()) {
+      if (key === "title") continue;
+      out[key] = canonicalizeForDedup((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Registry that hoists schemas into `components.schemas`, returning the
+ * `$ref` that replaces each inline occurrence. Content-addressed: a second
+ * schema that's structurally identical to one already registered (same
+ * canonicalized JSON) reuses the existing component instead of minting a
+ * duplicate — this is what turns the shared `ErrorResponse` envelope in two
+ * different contracts' error cases into ONE component with two `$ref`s.
+ *
+ * Naming precedence (GLU-127 design notes):
+ *   1. Explicit — the schema's own JSON Schema `title` (from a user's
+ *      `zod.meta({ title: "ErrorResponse" })` or equivalent), sanitized.
+ *   2. Derived — PascalCase(contractId) + "Request"/"Response", with an
+ *      optional status-code suffix (`altName`) to disambiguate a contract
+ *      with more than one distinct response body shape.
+ *   3. Numeric fallback (`_2`, `_3`, ...) — only reached if two DIFFERENT
+ *      schemas want the exact same name (rare: e.g. two contracts whose
+ *      ids collide after PascalCasing, or two explicit titles collide).
+ * Naming is a pure function of contract id + kind + status — not of
+ * iteration order — so names are stable across runs (the whole point is a
+ * diffable projection); the numeric fallback is the only path where
+ * processing order can matter, and callers walk paths/statuses in sorted
+ * order specifically to keep even that deterministic.
+ */
+class ComponentSchemaRegistry {
+  private readonly schemas: Record<string, unknown> = {};
+  private readonly nameToContentKey = new Map<string, string>();
+  private readonly contentKeyToName = new Map<string, string>();
+
+  register(
+    schema: Record<string, unknown>,
+    preferredName: string,
+    altName?: string,
+  ): Record<string, unknown> {
+    const contentKey = JSON.stringify(canonicalizeForDedup(schema));
+    const existingName = this.contentKeyToName.get(contentKey);
+    if (existingName) return { $ref: `#/components/schemas/${existingName}` };
+
+    const explicitTitle =
+      typeof schema.title === "string" && schema.title.trim().length > 0
+        ? sanitizeComponentName(schema.title.trim())
+        : null;
+
+    let candidate = explicitTitle ?? preferredName;
+    // Preferred name already taken by a DIFFERENT schema — try the
+    // caller-supplied disambiguator (e.g. status-suffixed name) before
+    // falling back to numeric suffixes.
+    if (
+      this.nameToContentKey.has(candidate) &&
+      this.nameToContentKey.get(candidate) !== contentKey &&
+      altName
+    ) {
+      candidate = altName;
+    }
+    const stem = candidate;
+    let n = 2;
+    while (
+      this.nameToContentKey.has(candidate) &&
+      this.nameToContentKey.get(candidate) !== contentKey
+    ) {
+      candidate = `${stem}_${n}`;
+      n += 1;
+    }
+
+    this.schemas[candidate] = schema;
+    this.nameToContentKey.set(candidate, contentKey);
+    this.contentKeyToName.set(contentKey, candidate);
+    return { $ref: `#/components/schemas/${candidate}` };
+  }
+
+  /** `components.schemas` value, or undefined if nothing was hoisted. */
+  get componentSchemas(): Record<string, unknown> | undefined {
+    return Object.keys(this.schemas).length > 0 ? this.schemas : undefined;
+  }
+}
+
+/**
+ * Walk one operation's request/response bodies and hoist any hoistable
+ * schema through `registry`, mutating the operation in place (the `schema`
+ * fields are replaced with `$ref` objects). Content-type and status keys
+ * are visited in sorted order so registration order — and therefore any
+ * numeric-suffix disambiguation — doesn't depend on upstream extraction
+ * order.
+ */
+function hoistOperationSchemas(
+  registry: ComponentSchemaRegistry,
+  contractId: string,
+  operation: Record<string, unknown>,
+): void {
+  const pascalId = toPascalCase(contractId) || "Contract";
+
+  const requestBody = operation.requestBody as
+    | { content?: Record<string, { schema?: unknown }> }
+    | undefined;
+  if (requestBody?.content) {
+    for (const ctype of Object.keys(requestBody.content).sort()) {
+      const entry = requestBody.content[ctype];
+      if (isHoistableSchema(entry.schema)) {
+        entry.schema = registry.register(entry.schema, `${pascalId}Request`);
+      }
+    }
+  }
+
+  const responses = operation.responses as
+    | Record<string, { content?: Record<string, { schema?: unknown }> }>
+    | undefined;
+  if (responses) {
+    for (const status of Object.keys(responses).sort()) {
+      const content = responses[status].content;
+      if (!content) continue;
+      for (const ctype of Object.keys(content).sort()) {
+        const entry = content[ctype];
+        if (isHoistableSchema(entry.schema)) {
+          entry.schema = registry.register(
+            entry.schema,
+            `${pascalId}Response`,
+            `${pascalId}Response${status}`,
+          );
+        }
+      }
+    }
+  }
+}
+
 /**
  * Combine per-contract partials into a full OpenAPI 3.1 document.
  *
@@ -696,6 +904,36 @@ export function mergeOpenApiParts(
     }
   }
 
+  // GLU-127: hoist reusable request/response body schemas into
+  // `components.schemas`, replacing each inline occurrence with a `$ref`.
+  // Runs last (needs the fully-merged `paths` + collision list to see
+  // cross-operation duplicates) and mutates operations in place — both the
+  // canonical `paths` slots and the collision list's full operation copies
+  // are walked, so a de-prioritized surface operation still gets its
+  // schemas componentized/deduped against the rest of the document. Sorted
+  // traversal (path, then method) keeps naming deterministic across runs
+  // independent of upstream extraction/iteration order.
+  const schemaRegistry = new ComponentSchemaRegistry();
+  for (const apiPath of Object.keys(paths).sort()) {
+    const methods = paths[apiPath];
+    for (const method of Object.keys(methods).sort()) {
+      if (!OPENAPI_OPERATION_KEYS.has(method)) continue;
+      const operation = methods[method] as Record<string, unknown>;
+      const contractId =
+        typeof operation.operationId === "string" ? operation.operationId : `${method}_${apiPath}`;
+      hoistOperationSchemas(schemaRegistry, contractId, operation);
+    }
+  }
+  for (const collision of surfaceCollisions) {
+    const operation = collision.operation as Record<string, unknown> | undefined;
+    if (!operation) continue;
+    const contractId =
+      typeof operation.operationId === "string"
+        ? operation.operationId
+        : `${collision.method}_${collision.path}`;
+    hoistOperationSchemas(schemaRegistry, contractId, operation);
+  }
+
   const title = options?.title ?? "API Specification";
   const version = options?.version ?? "1.0.0";
 
@@ -712,8 +950,12 @@ export function mergeOpenApiParts(
     doc.tags = [...tagsByName.values()];
   }
 
-  if (Object.keys(securitySchemes).length > 0) {
-    doc.components = { securitySchemes };
+  const componentSchemas = schemaRegistry.componentSchemas;
+  if (componentSchemas || Object.keys(securitySchemes).length > 0) {
+    doc.components = {
+      ...(componentSchemas ? { schemas: componentSchemas } : {}),
+      ...(Object.keys(securitySchemes).length > 0 ? { securitySchemes } : {}),
+    };
   }
 
   doc.paths = paths;
