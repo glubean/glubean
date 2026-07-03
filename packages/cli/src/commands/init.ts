@@ -238,10 +238,13 @@ function makePackageJson(_baseUrl: string): string {
           "@glubean/runner": SDK_VERSION,
           // CLI must be a direct dep too (GLU-110 / GitHub #9). Without it,
           // node_modules/.bin has no `glubean` binary, so the bare `glubean`
-          // in the scripts below — and even `npx glubean` in CI, which
-          // checks an already-on-PATH global before fetching — silently
-          // fall back to whatever stale glubean happens to be installed
-          // globally on the machine ("unknown option '--profile'" et al).
+          // in the scripts below has nothing local to resolve to. With a
+          // stale global `glubean` on PATH, that silently runs the wrong
+          // version ("unknown option '--profile'" et al) instead of
+          // erroring; `npx glubean` in CI is not guaranteed to avoid this
+          // either without a local bin present. Installing @glubean/cli
+          // here guarantees node_modules/.bin/glubean exists and resolves
+          // first for both invocation styles.
           "@glubean/cli": SDK_VERSION,
         },
       },
