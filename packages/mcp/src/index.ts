@@ -25,7 +25,13 @@ import type { ProjectRunnerTest } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { renderArtifact, openapiArtifact } from "@glubean/sdk";
 import type { ExtractedContractProjection } from "@glubean/sdk";
-import { BUILTIN_SCOPES, compileScopes, DEFAULT_GLOBAL_RULES, redactEvent } from "@glubean/redaction";
+import {
+  BUILTIN_SCOPES,
+  compileScopes,
+  DEFAULT_GLOBAL_RULES,
+  looksLikeFormUrlEncoded,
+  redactEvent,
+} from "@glubean/redaction";
 import type { CompiledScope } from "@glubean/redaction";
 import {
   createScanner,
@@ -571,7 +577,42 @@ function scanStringLiteral(text: string, start: number, limit: number): number |
   return undefined;
 }
 
-function redactMessageJsonSubstrings(text: string): string {
+function redactMessageJsonSubstrings(rawText: string): string {
+  // GLU-129 (codex R13 P1): a message that IS ITSELF a bare
+  // form-urlencoded/key=value string (`ctx.log("token=secret&page=1")` — no
+  // wrapping quotes/braces from `inspect()`) never entered the loop below at
+  // all: it has no `{`, `[`, or `"` trigger character, so it was returned
+  // completely unscrubbed even though the identical shape is already
+  // redacted by the `body` handler when the same text reaches
+  // `assertion.actual`/`.expected`.
+  //
+  // (codex R14 P3): gate this on `looksLikeFormUrlEncoded` — the SAME
+  // strict, anchored check (`^key=val(&key=val)*$` over the WHOLE trimmed
+  // string) the `body` handler itself uses to decide whether to run its
+  // form-urlencoded step — instead of unconditionally routing every message
+  // through the full `body` handler. The `body` handler also runs an
+  // UNCONDITIONAL value-pattern scan before its form-urlencoded check; by
+  // this point the message's own `raw-string` scope has ALREADY
+  // pattern-scanned it once (see `redactMcpAssertionFields`/
+  // `redactMcpLogFields`, called before this function), so re-running that
+  // scan unconditionally on every message double-masked already-masked
+  // ordinary prose (e.g. "Bearer doc***ion", itself the pattern-masked form
+  // of "Bearer documentation", matched the Bearer pattern a SECOND time).
+  // Gating on the exact shape this fix targets makes the upfront pass a
+  // true no-op for anything that isn't a pure key=value message, eliminating
+  // the double-mask while keeping 100% of the R13 fix's coverage (the
+  // form-urlencoded step is exactly what the anchored check gates in the
+  // `body` handler too).
+  const text = looksLikeFormUrlEncoded(rawText)
+    ? ((
+        redactEvent(
+          { type: "assertion", actual: rawText },
+          MCP_TRACE_REDACTION_SCOPES,
+          "partial",
+          64,
+        ) as unknown as { actual: unknown }
+      ).actual as string)
+    : rawText;
   let result = "";
   let i = 0;
   while (i < text.length) {
@@ -646,6 +687,44 @@ function redactMessageJsonSubstrings(text: string): string {
             result += JSON.stringify(JSON.stringify(redacted.actual));
             i = end;
             continue;
+          }
+          // GLU-129 (codex R12 P1): the decoded string content is NOT
+          // itself JSON (`inner` never resolved above) — e.g.
+          // `ctx.expect("token=opaque-form-secret").toBe(...)` embeds the
+          // literal string `"token=opaque-form-secret"` in the generated
+          // message. `assertion.actual`/`.expected` catch this shape via the
+          // `body` handler (form-urlencoded key-based masking), but this
+          // message-only scrubber only understood JSON substrings until now
+          // — the message field stayed unredacted even though the sibling
+          // `actual`/`expected` fields were correctly masked. Reuse the SAME
+          // `assertion.actual` scope (handler: "body", sensitiveKeys) here
+          // so form-urlencoded / key=value content inside a quoted string
+          // literal gets the same key-based treatment, not just JSON.
+          //
+          // (codex R15 P3): gated on `looksLikeFormUrlEncoded(decoded)` —
+          // same reasoning as the R14 fix to the whole-message pass below.
+          // An UNGATED call here double-masked ordinary quoted prose: a
+          // completely normal `ctx.expect("Bearer documentation").toBe(...)`
+          // is first masked once by the message's own `raw-string` pass to
+          // `"Bearer doc***ion"`, then this branch decoded THAT already-masked
+          // string and ran it through the `body` handler's unconditional
+          // value-pattern scan again, which re-matched the Bearer pattern on
+          // the surviving "Bearer doc" prefix — producing "Bearer *******ion".
+          // Gating to the exact form-urlencoded shape this fix targets makes
+          // it a no-op for any quoted string that isn't purely `key=value`,
+          // while keeping 100% of the original R12 P1 fix's coverage.
+          if (looksLikeFormUrlEncoded(decoded)) {
+            const bodyRedacted = redactEvent(
+              { type: "assertion", actual: decoded },
+              MCP_TRACE_REDACTION_SCOPES,
+              "partial",
+              64,
+            ) as unknown as { actual: unknown };
+            if (bodyRedacted.actual !== decoded) {
+              result += JSON.stringify(bodyRedacted.actual);
+              i = end;
+              continue;
+            }
           }
         }
       }

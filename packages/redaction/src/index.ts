@@ -51,6 +51,7 @@ export {
   BUILTIN_HANDLERS,
   headersHandler,
   jsonHandler,
+  looksLikeFormUrlEncoded,
   rawStringHandler,
   urlQueryHandler,
 } from "./handlers.js";

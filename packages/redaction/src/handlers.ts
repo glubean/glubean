@@ -182,7 +182,14 @@ export const urlQueryHandler: RedactionHandler = {
  */
 const FORM_URLENCODED_RE = /^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/;
 
-function looksLikeFormUrlEncoded(str: string): boolean {
+// codex R14 P3: exported (was module-private) so `@glubean/mcp`'s message
+// scrubber can gate its whole-text form-urlencoded redaction pass on this
+// SAME strict, anchored check, instead of unconditionally re-running the
+// `body` handler's value-pattern scan on every message (which double-masked
+// already-pattern-redacted ordinary prose, e.g. "Bearer doc***ion" —
+// already partially masked by the message's own raw-string pass — matching
+// the Bearer pattern AGAIN on its second pass).
+export function looksLikeFormUrlEncoded(str: string): boolean {
   const s = str.trim();
   if (!s || s[0] === "{" || s[0] === "[" || s[0] === "<") return false;
   return FORM_URLENCODED_RE.test(s);

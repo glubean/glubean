@@ -885,6 +885,138 @@ export const t = test("text-secret-truncated", async (ctx) => {
   expect(assertion.message).toContain("token");
 }, 15_000);
 
+// codex R12 P1: `ctx.expect("token=opaque-form-secret").toBe(...)` embeds a
+// FORM-URLENCODED (`key=value`), not JSON-shaped, string literal in the
+// generated message. `assertion.actual`/`.expected` catch this shape via the
+// `body` handler's key-based form-urlencoded masking, but
+// `redactMessageJsonSubstrings` only recognized JSON substrings (bracket-run
+// objects/arrays, or a quoted string whose DECODED content parses as JSON) —
+// a quoted string literal whose content is form-urlencoded (not JSON) fell
+// straight through unredacted even though the sibling actual/expected fields
+// were correctly masked.
+test("runLocalTestsFromFile redacts a form-urlencoded secret inside a raw-text assertion message (GLU-129 codex R12 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const FORM_SECRET = "OPAQUE-FORM-SECRET-VALUE";
+  await writeFile(
+    join(dir, "tests", "form-secret.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("form-secret", async (ctx) => {
+  const raw = "token=${FORM_SECRET}&page=1";
+  ctx.expect(raw).toBe(raw);
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "form-secret.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(FORM_SECRET);
+  expect(assertion.message).toContain("token");
+  expect(assertion.actual).not.toContain(FORM_SECRET);
+}, 15_000);
+
+// codex R13 P1: a message that IS ITSELF a bare form-urlencoded/key=value
+// string (`ctx.log("token=secret&page=1")` — no wrapping quotes/braces from
+// `inspect()`, unlike the R12 P1 case above) has no `{`, `[`, or `"` trigger
+// character, so it never entered `redactMessageJsonSubstrings()`'s scan loop
+// at all and was returned completely unscrubbed even though the identical
+// shape is already redacted by the `body` handler when the same text reaches
+// `assertion.actual`/`.expected`.
+test("runLocalTestsFromFile redacts a bare form-urlencoded log message (GLU-129 codex R13 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const BARE_FORM_SECRET = "BARE-FORM-OPAQUE-SECRET";
+  await writeFile(
+    join(dir, "tests", "bare-form-log.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("bare-form-log", async (ctx) => {
+  ctx.log("token=${BARE_FORM_SECRET}&page=1");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "bare-form-log.test.ts"),
+    includeLogs: true,
+  });
+  expect(result.summary.passed).toBe(1);
+  const log = result.results[0].logs[0];
+  expect(log).toBeDefined();
+  expect(log.message).not.toContain(BARE_FORM_SECRET);
+  expect(log.message).toContain("token");
+}, 15_000);
+
+// codex R14 P3: the R13 fix (an unconditional whole-text `body`-handler pass)
+// re-ran the `body` handler's UNCONDITIONAL value-pattern scan on every
+// message — including ordinary prose already pattern-masked once by the
+// message's own `raw-string` scope — producing a double-masked artifact
+// (e.g. "Bearer doc***ion" matching the Bearer pattern a SECOND time). Not a
+// leak (over-masking, not under-masking) but a correctness regression. Fixed
+// by gating the whole-text pass on `looksLikeFormUrlEncoded` (the same
+// anchored check the `body` handler itself uses), which is a true no-op for
+// non-form-shaped prose like this repro.
+test("runLocalTestsFromFile does not double-mask ordinary Bearer-like prose in a log message (GLU-129 codex R14 P3)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  await writeFile(
+    join(dir, "tests", "bearer-prose-log.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("bearer-prose-log", async (ctx) => {
+  ctx.log("Bearer documentation");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "bearer-prose-log.test.ts"),
+    includeLogs: true,
+  });
+  expect(result.summary.passed).toBe(1);
+  const log = result.results[0].logs[0];
+  expect(log).toBeDefined();
+  // Masked once by the pre-existing Bearer pattern ("Bearer doc***ion" —
+  // expected, pre-existing behavior, not what this test is pinning), but NOT
+  // masked a SECOND time by the R13 whole-text pass. A double-mask would
+  // consume the surviving "doc" prefix too (e.g. "Bearer *******ion") — this
+  // pins that "doc" survives, proving the second pass didn't fire.
+  expect(log.message).toBe("Bearer doc***ion");
+}, 15_000);
+
+// codex R15 P3: the SAME double-mask class R14 found in the whole-message
+// pass also existed in the R12 P1 quoted-string-literal fallback — e.g.
+// `ctx.expect("Bearer documentation").toBe(...)` is a completely ordinary
+// string assertion. Its generated message is first masked once by the
+// message's own `raw-string` pass to `"Bearer doc***ion"`, then the
+// quoted-string branch decoded THAT already-masked string and (before this
+// fix) ran it through the `body` handler's unconditional value-pattern scan
+// again, re-matching the Bearer pattern on the surviving "Bearer doc" prefix
+// and producing `"Bearer *******ion"`. Fixed with the same
+// `looksLikeFormUrlEncoded` gate used for the R14 fix.
+test("runLocalTestsFromFile does not double-mask ordinary Bearer-like prose in a quoted assertion message (GLU-129 codex R15 P3)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  await writeFile(
+    join(dir, "tests", "bearer-prose-assertion.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("bearer-prose-assertion", async (ctx) => {
+  ctx.expect("Bearer documentation").toBe("Bearer documentation");
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "bearer-prose-assertion.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  // Single-masked, not double-masked — "doc" must survive.
+  expect(assertion.message).toContain('"Bearer doc***ion"');
+  expect(assertion.message).not.toContain("*******ion");
+}, 15_000);
+
 // codex R8 P2: `.orFail()` promotes a failed assertion into a THROWN
 // `ExpectFailError` — its `.message` (and `.stack`, whose first line is
 // `${ErrorName}: ${message}`) carry the SAME inspect()-embedded credential

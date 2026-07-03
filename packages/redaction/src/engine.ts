@@ -143,6 +143,57 @@ export class RedactionEngine {
     if (Array.isArray(value)) {
       let didRedact = false;
       const redactedArray = value.map((item, i) => {
+        // codex R11 P1: an "entries"-shaped 2-tuple (`["token", "secret"]`,
+        // the shape `Object.entries()`/`Map` entries/header pairs produce)
+        // carries its key as element 0, not as an object property — the
+        // normal object-key check in walkObject() never sees it, so a
+        // sensitive value reachable ONLY through this shape (no wrapping
+        // object, no recognizable value pattern) previously leaked in full.
+        // Detect the shape here and mask element 1 by the same key-sensitivity
+        // rule as a real object key, before falling back to the generic
+        // per-element recursive walk.
+        if (
+          Array.isArray(item) &&
+          item.length === 2 &&
+          typeof item[0] === "string"
+        ) {
+          const tupleKey = item[0];
+          const tuplePath = [...path, String(i)];
+          const ctx: RedactionContext = { scope, path: tuplePath, key: tupleKey };
+          let keySensitive = false;
+          let keyPluginName = "";
+          for (const plugin of this.plugins) {
+            if (plugin.isKeySensitive) {
+              const hit = plugin.isKeySensitive(tupleKey, ctx);
+              if (hit === true) {
+                keySensitive = true;
+                keyPluginName = plugin.name;
+                break;
+              }
+            }
+          }
+          if (keySensitive) {
+            // codex R12 P1: this MUST go through the exact same
+            // recurse-vs-wholesale-mask decision `walkObject()` applies to a
+            // real sensitive object key (see `maskSensitiveKeyedValue`) —
+            // an earlier version of this fix always recursed into
+            // object/array values, which in event mode (no
+            // `sensitiveKeyRecurse`) skipped the wholesale mask and let
+            // non-key-matched scalars INSIDE the container (e.g.
+            // `["token", ["opaque-secret"]]`) leak by numeric-index walk.
+            const r = this.maskSensitiveKeyedValue(
+              item[1],
+              scope,
+              path,
+              [...tuplePath, "1"],
+              details,
+              depth + 1,
+              keyPluginName,
+            );
+            if (r.didRedact) didRedact = true;
+            return [tupleKey, r.value];
+          }
+        }
         const result = this.walkValue(
           item,
           scope,
@@ -199,74 +250,17 @@ export class RedactionEngine {
       }
 
       if (keySensitive) {
-        // Recurse-mode: a sensitive key over a container keeps its structure
-        // so JSON-Schema nodes aren't flattened to a redaction string.
-        //
-        // OBJECT vs ARRAY split (codex 0.6 P1/P2): an OBJECT under a sensitive
-        // key is schema structure — recurse, and (by the documented boundary)
-        // inner scalars under NON-sensitive sub-keys are left alone.
-        //
-        // An ARRAY is ambiguous: it is values-OF-the-secret for a multi-value
-        // HTTP header/cookie/api-key (`authorization: ["dev-token"]`,
-        // `set-cookie: ["sid=abc"]`, `x-api-key: ["dev-key"]`) — whose
-        // elements, visited under "0"/"1", no plugin sees as sensitive, so
-        // plain recursion would LEAK them (P1) — but it is STRUCTURE for a
-        // JSON-Schema property-dependency keyword keyed by a sensitive property
-        // name (`dependentRequired: { password: ["mfaCode"] }`), where masking
-        // the elements would corrupt the schema (P2). We cannot tell these
-        // apart by shape, so the secure default is to MASK the elements, and
-        // only PRESERVE when the parent key is a known structural keyword
-        // (`structuralArrayParentKeys`) — a leaked secret is worse than an
-        // over-masked display array.
-        const isContainer = value !== null && typeof value === "object";
-        if (this.sensitiveKeyRecurse && isContainer) {
-          const parentKey = (path[path.length - 1] ?? "").toLowerCase();
-          if (Array.isArray(value) && !this.structuralArrayParentKeys.has(parentKey)) {
-            const r = this.maskSensitiveArray(
-              value,
-              scope,
-              keyPath,
-              details,
-              depth + 1,
-              keyPluginName,
-            );
-            result[key] = r.value;
-            if (r.didRedact) didRedact = true;
-          } else {
-            const redacted = this.walkValue(value, scope, keyPath, details, depth + 1);
-            result[key] = redacted.value;
-            if (redacted.didRedact) didRedact = true;
-          }
-          continue;
-        }
-        // GLU-123 codex round: in schema-preserving mode a BOOLEAN scalar
-        // under a sensitive key is left untouched. `true`/`false` is a valid
-        // JSON-Schema node on its own (`properties.password: true` means
-        // "any value accepted") — masking it to a redaction STRING corrupts
-        // the schema's type, exactly the corruption `sensitiveKeyRecurse`
-        // exists to prevent for objects/arrays. A boolean also carries no
-        // real secret entropy (1 bit), so skipping it costs nothing
-        // security-wise. Only applies in `sensitiveKeyRecurse` mode — the
-        // non-recurse (event) path still nukes sensitive-keyed booleans
-        // wholesale, unchanged.
-        if (this.sensitiveKeyRecurse && typeof value === "boolean") {
-          const redacted = this.walkValue(value, scope, keyPath, details, depth + 1);
-          result[key] = redacted.value;
-          continue;
-        }
-        if (this.replacementFormat === "partial") {
-          const str =
-            value === null || value === undefined ? "" : String(value);
-          result[key] = genericPartialMask(str);
-        } else {
-          result[key] = "[REDACTED]";
-        }
-        didRedact = true;
-        details.push({
-          path: keyPath.join("."),
-          plugin: keyPluginName,
-          original: typeof value === "string" ? value : undefined,
-        });
+        const r = this.maskSensitiveKeyedValue(
+          value,
+          scope,
+          path,
+          keyPath,
+          details,
+          depth + 1,
+          keyPluginName,
+        );
+        result[key] = r.value;
+        if (r.didRedact) didRedact = true;
         continue;
       }
 
@@ -283,6 +277,88 @@ export class RedactionEngine {
     }
 
     return { value: result, didRedact };
+  }
+
+  /**
+   * Decide how to mask a value that sits under a sensitive key — shared by
+   * `walkObject()` (a real object property) and the array-tuple detection in
+   * `walkValue()` (an `["key", value]` entries-shaped pair, codex R11/R12
+   * GLU-129). Extracted so both call sites apply the IDENTICAL
+   * recurse-vs-wholesale-mask decision; letting them diverge is exactly how
+   * the tuple case first shipped: an earlier version always recursed into
+   * container values regardless of `sensitiveKeyRecurse`, so in event mode
+   * (no recurse) a container's own non-key-matched scalar children leaked
+   * via plain numeric-index walk instead of being wholesale-masked like
+   * `walkObject()` would.
+   *
+   * Recurse-mode: a sensitive key over a container keeps its structure so
+   * JSON-Schema nodes aren't flattened to a redaction string.
+   *
+   * OBJECT vs ARRAY split (codex 0.6 P1/P2): an OBJECT under a sensitive key
+   * is schema structure — recurse, and (by the documented boundary) inner
+   * scalars under NON-sensitive sub-keys are left alone.
+   *
+   * An ARRAY is ambiguous: it is values-OF-the-secret for a multi-value HTTP
+   * header/cookie/api-key (`authorization: ["dev-token"]`,
+   * `set-cookie: ["sid=abc"]`, `x-api-key: ["dev-key"]`) — whose elements,
+   * visited under "0"/"1", no plugin sees as sensitive, so plain recursion
+   * would LEAK them (P1) — but it is STRUCTURE for a JSON-Schema
+   * property-dependency keyword keyed by a sensitive property name
+   * (`dependentRequired: { password: ["mfaCode"] }`), where masking the
+   * elements would corrupt the schema (P2). We cannot tell these apart by
+   * shape, so the secure default is to MASK the elements, and only PRESERVE
+   * when the parent key is a known structural keyword
+   * (`structuralArrayParentKeys`) — a leaked secret is worse than an
+   * over-masked display array.
+   *
+   * @param containerPath Path to the CONTAINER holding the sensitive key —
+   *   `walkObject()`'s own `path` param for a real object property, or the
+   *   entries-array's own path for a tuple pair. Its last segment is the
+   *   "parent key" `structuralArrayParentKeys` matches against.
+   * @param keyPath Full path including the sensitive key/index itself —
+   *   used for `details` entries and as the base path for any recursion.
+   * @param depth Depth to pass to any recursive walk — callers pass their
+   *   own depth already incremented by one.
+   */
+  private maskSensitiveKeyedValue(
+    value: unknown,
+    scope: string,
+    containerPath: string[],
+    keyPath: string[],
+    details: RedactionResult["details"],
+    depth: number,
+    keyPluginName: string,
+  ): { value: unknown; didRedact: boolean } {
+    const isContainer = value !== null && typeof value === "object";
+    if (this.sensitiveKeyRecurse && isContainer) {
+      const parentKey = (containerPath[containerPath.length - 1] ?? "").toLowerCase();
+      if (Array.isArray(value) && !this.structuralArrayParentKeys.has(parentKey)) {
+        return this.maskSensitiveArray(value, scope, keyPath, details, depth, keyPluginName);
+      }
+      return this.walkValue(value, scope, keyPath, details, depth);
+    }
+    // GLU-123 codex round: in schema-preserving mode a BOOLEAN scalar under a
+    // sensitive key is left untouched. `true`/`false` is a valid JSON-Schema
+    // node on its own (`properties.password: true` means "any value
+    // accepted") — masking it to a redaction STRING corrupts the schema's
+    // type, exactly the corruption `sensitiveKeyRecurse` exists to prevent
+    // for objects/arrays. A boolean also carries no real secret entropy
+    // (1 bit), so skipping it costs nothing security-wise. Only applies in
+    // `sensitiveKeyRecurse` mode — the non-recurse (event) path still nukes
+    // sensitive-keyed booleans wholesale, unchanged.
+    if (this.sensitiveKeyRecurse && typeof value === "boolean") {
+      return this.walkValue(value, scope, keyPath, details, depth);
+    }
+    const masked =
+      this.replacementFormat === "partial"
+        ? genericPartialMask(value === null || value === undefined ? "" : String(value))
+        : "[REDACTED]";
+    details.push({
+      path: keyPath.join("."),
+      plugin: keyPluginName,
+      original: typeof value === "string" ? value : undefined,
+    });
+    return { value: masked, didRedact: true };
   }
 
   /**

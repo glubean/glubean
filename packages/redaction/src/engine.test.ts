@@ -58,6 +58,100 @@ describe("RedactionEngine", () => {
     expect(val["access_token"]).toBe("[REDACTED]");
   });
 
+  // GLU-129 codex R11 P1: entries-shaped 2-tuple arrays (`Object.entries()`,
+  // `Map` entries, header-pair arrays: `["token", "secret"]`) carry their key
+  // as element 0, not as an object property, so the object-key sensitivity
+  // check in walkObject() never sees them. Fails against pre-fix engine.ts,
+  // which walked each array element independently by numeric index and
+  // treated "token" and "secret" as two unrelated, non-sensitive strings.
+  test("redacts sensitive values inside entries-shaped 2-tuple arrays", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+
+    const result = engine.redact([["token", "opaque-kv-pair-secret"], ["name", "alice"]]);
+    const val = result.value as unknown[];
+    expect(val[0]).toEqual(["token", "[REDACTED]"]);
+    expect(val[1]).toEqual(["name", "alice"]);
+    expect(result.redacted).toBe(true);
+    expect(JSON.stringify(result.value)).not.toContain("opaque-kv-pair-secret");
+  });
+
+  test("entries-shaped tuple with object value is recursed, not wholesale-masked", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["headers"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+
+    const result = engine.redact([["headers", { authorization: "keep-me-if-not-sensitive" }]]);
+    const val = result.value as unknown[];
+    // "headers" is sensitive and its value is an object — recursed (not
+    // wholesale-masked), same rule as a real object key would apply.
+    expect(Array.isArray(val[0])).toBe(true);
+  });
+
+  test("non-entries 2-element arrays are unaffected", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+
+    // First element is a number, not a string key — must not be treated as
+    // an entries tuple.
+    const result = engine.redact([[1, "token"]]);
+    const val = result.value as unknown[];
+    expect(val[0]).toEqual([1, "token"]);
+    expect(result.redacted).toBe(false);
+  });
+
+  // GLU-129 codex R12 P1: an earlier version of the entries-tuple fix always
+  // RECURSED into an object/array value under a sensitive tuple key,
+  // regardless of `sensitiveKeyRecurse` — in event mode (the default, no
+  // recurse) this skipped the wholesale mask `walkObject()` applies to a
+  // real sensitive object key, so a non-key-matched scalar INSIDE the
+  // container (visited by plain numeric-index walk) still leaked. Fails
+  // against that earlier version, passes once the tuple case shares
+  // `maskSensitiveKeyedValue()` with `walkObject()`.
+  test("event mode wholesale-masks a container value under a sensitive tuple key", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+      // sensitiveKeyRecurse defaults to false — this IS event mode.
+    });
+
+    const result = engine.redact([["token", ["opaque-kv-array-secret"]]]);
+    expect(JSON.stringify(result.value)).not.toContain("opaque-kv-array-secret");
+    expect(result.value).toEqual([["token", "[REDACTED]"]]);
+    expect(result.redacted).toBe(true);
+  });
+
+  test("recurse mode masks array elements under a sensitive tuple key like a real object key", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+      sensitiveKeyRecurse: true,
+    });
+
+    const viaObjectKey = engine.redact({ token: ["opaque-array-secret"] });
+    const viaTuple = engine.redact([["token", ["opaque-array-secret"]]]);
+    // Same recurse-mode decision (mask array elements, preserve array shape)
+    // whether the sensitive key is a real object property or a tuple's
+    // element 0.
+    expect((viaObjectKey.value as { token: unknown }).token).toEqual(["[REDACTED]"]);
+    expect((viaTuple.value as unknown[])[0]).toEqual(["token", ["[REDACTED]"]]);
+  });
+
   test("partial replacement format", () => {
     const engine = new RedactionEngine({
       plugins: [
