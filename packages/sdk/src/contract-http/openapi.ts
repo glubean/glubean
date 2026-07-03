@@ -586,16 +586,20 @@ export function buildOpenApiPartForHttp(
  * first-wins, silently drop) the first. `operationId` is contract-id-derived
  * and globally unique (enforced at registration), so it's used as the
  * collision signal: when two *different* operationIds land on the same
- * method+path, the first keeps the canonical path key and every subsequent
- * one is placed under a synthetic `"<path>#<operationId>"` key instead of
- * being dropped — both stay visible in the merged projection. This is a
- * pragmatic disambiguation, not a spec-perfect multi-server representation
- * (that would need per-operation `servers`, which isn't available at
- * projection time since base URLs are unresolved `{{VAR}}` templates); a
- * `x-glubean-surface-collision` marker is attached to the relocated
- * operation so tooling/readers can tell it apart from a "real" path.
- * Re-merging the *same* operationId at the same key (e.g. re-running the
- * merge over overlapping parts) is a no-op, not a collision.
+ * method+path, the first keeps the canonical `paths[path][method]` slot
+ * (order-stable) and every subsequent one is appended to the top-level
+ * `x-glubean-surface-collisions` array instead of being dropped or forced
+ * into an invalid `paths` key — a `paths` key MUST be a real URL path (no
+ * `#`/query-string disambiguator hacks), or spec-conformant tooling may
+ * silently ignore it, recreating the exact bug this fixes one layer down.
+ * Each collision entry carries the original `path`/`method` plus the full
+ * operation object, so nothing about the losing operation is lost — it's
+ * just addressed out-of-band instead of forced into the canonical map. This
+ * is a pragmatic disambiguation, not a spec-perfect multi-server
+ * representation (that would need per-operation `servers`, which isn't
+ * available at projection time since base URLs are unresolved `{{VAR}}`
+ * templates). Re-merging the *same* operationId at the same key (e.g.
+ * re-running the merge over overlapping parts) is a no-op, not a collision.
  *
  * Null / non-contributing parts are filtered by the render pipeline before
  * reaching here.
@@ -607,6 +611,7 @@ export function mergeOpenApiParts(
   const paths: Record<string, Record<string, unknown>> = {};
   const tagsByName = new Map<string, { name: string; [k: string]: unknown }>();
   const securitySchemes: Record<string, Record<string, unknown>> = {};
+  const surfaceCollisions: Array<Record<string, unknown>> = [];
 
   for (const part of parts) {
     const partPaths = (part.paths ?? {}) as Record<
@@ -631,27 +636,10 @@ export function mergeOpenApiParts(
         }
 
         // Real collision: two DIFFERENT contracts (surfaces) share the same
-        // method + path. Don't drop the loser — relocate it to a
-        // surface-qualified path so it stays visible in the projection.
-        const surfaceKey =
-          typeof incomingId === "string" && incomingId.length > 0
-            ? incomingId
-            : `surface-${Object.keys(paths).length}`;
-        let altPath = `${apiPath}#${surfaceKey}`;
-        let n = 2;
-        while (
-          paths[altPath]?.[method] &&
-          (paths[altPath][method] as Record<string, unknown>).operationId !==
-            incomingId
-        ) {
-          altPath = `${apiPath}#${surfaceKey}-${n}`;
-          n += 1;
-        }
-        if (!paths[altPath]) paths[altPath] = {};
-        paths[altPath][method] = {
-          ...(operation as Record<string, unknown>),
-          "x-glubean-surface-collision": apiPath,
-        };
+        // method + path. `paths[apiPath][method]` can only hold one
+        // operation, so the loser goes to the collision list — still fully
+        // present in the document, just not under a fabricated `paths` key.
+        surfaceCollisions.push({ path: apiPath, method, operation });
       }
     }
 
@@ -694,6 +682,10 @@ export function mergeOpenApiParts(
   }
 
   doc.paths = paths;
+
+  if (surfaceCollisions.length > 0) {
+    doc["x-glubean-surface-collisions"] = surfaceCollisions;
+  }
 
   return doc;
 }

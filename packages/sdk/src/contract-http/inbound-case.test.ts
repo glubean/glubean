@@ -360,23 +360,40 @@ test("OpenAPI merge: two surfaces on the same method+path both survive (GLU-116)
   ]);
   const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
 
+  // `paths` keeps only real, addressable URL path keys — every key is
+  // exactly the contract's normalized endpoint, never a fabricated
+  // disambiguator (spec-conformant OpenAPI tooling must be able to trust
+  // every `paths` key as a real path).
+  expect(Object.keys(paths)).toEqual(["/health"]);
+
   // Canonical path keeps the first-encountered operation (order-stable,
   // matches prior first-wins semantics for the winning slot).
   expect(paths["/health"].get.operationId).toBe("dashboard.health");
 
-  // The second surface is NOT dropped — it's relocated to a surface-qualified
-  // path key so both operations are discoverable in the merged projection.
-  const altKey = Object.keys(paths).find(
-    (k) => k !== "/health" && k.startsWith("/health#"),
-  )!;
-  expect(altKey).toBeDefined();
-  expect(paths[altKey].get.operationId).toBe("platform.health");
-  expect(paths[altKey].get["x-glubean-surface-collision"]).toBe("/health");
+  // The second surface is NOT dropped — it's appended to the top-level
+  // collision list instead of clobbering (or fabricating a key in) `paths`.
+  const collisions = (
+    doc as {
+      "x-glubean-surface-collisions"?: Array<{
+        path: string;
+        method: string;
+        operation: Record<string, unknown>;
+      }>;
+    }
+  )["x-glubean-surface-collisions"]!;
+  expect(collisions).toHaveLength(1);
+  expect(collisions[0].path).toBe("/health");
+  expect(collisions[0].method).toBe("get");
+  expect(collisions[0].operation.operationId).toBe("platform.health");
 
   // Every operationId that went into the merge is present somewhere in the
   // output — the core regression this test guards against.
-  const allOperationIds = Object.values(paths).map((methods) => methods.get.operationId);
-  expect(allOperationIds.sort()).toEqual(["dashboard.health", "platform.health"]);
+  const pathOperationIds = Object.values(paths).map((methods) => methods.get.operationId);
+  const collisionOperationIds = collisions.map((c) => c.operation.operationId);
+  expect([...pathOperationIds, ...collisionOperationIds].sort()).toEqual([
+    "dashboard.health",
+    "platform.health",
+  ]);
 });
 
 test("OpenAPI merge: re-merging the same operationId at the same path+method is a no-op, not a collision", () => {
@@ -393,7 +410,46 @@ test("OpenAPI merge: re-merging the same operationId at the same path+method is 
   ]);
   const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
   expect(Object.keys(paths)).toEqual(["/health"]);
-  expect(paths["/health"].get["x-glubean-surface-collision"]).toBeUndefined();
+  expect((doc as Record<string, unknown>)["x-glubean-surface-collisions"]).toBeUndefined();
+});
+
+test("OpenAPI merge: three-plus surfaces on the same method+path all survive", () => {
+  const a = contract.http.with("surface-a", {});
+  const b = contract.http.with("surface-b", {});
+  const c = contract.http.with("surface-c", {});
+  const spec = {
+    endpoint: "GET /health",
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  };
+  const health = [
+    a("a.health", spec) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>,
+    b("b.health", spec) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>,
+    c("c.health", spec) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>,
+  ];
+
+  const doc = renderArtifact(
+    openapiArtifact,
+    health.map((h) => h._extracted as never),
+  );
+  const paths = (doc as { paths: Record<string, Record<string, Record<string, unknown>>> }).paths;
+  expect(Object.keys(paths)).toEqual(["/health"]);
+  expect(paths["/health"].get.operationId).toBe("a.health");
+
+  const collisions = (
+    doc as {
+      "x-glubean-surface-collisions"?: Array<{
+        path: string;
+        method: string;
+        operation: Record<string, unknown>;
+      }>;
+    }
+  )["x-glubean-surface-collisions"]!;
+  // Both losers land in the collision list — no third operation clobbers
+  // the second inside `paths` or overwrites the first collision entry.
+  expect(collisions.map((coll) => coll.operation.operationId).sort()).toEqual([
+    "b.health",
+    "c.health",
+  ]);
 });
 
 // ---------------------------------------------------------------------------
