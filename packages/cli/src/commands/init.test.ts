@@ -65,6 +65,17 @@ test("init --no-interactive creates basic project files", async () => {
     expect(typeof pkgJson.scripts?.test).toBe("string");
     expect(typeof pkgJson.scripts?.["test:ci"]).toBe("string");
 
+    // GLU-110 / GitHub #9 regression: `npm test` must resolve the local
+    // `glubean` binary, not fall back to whatever stale `glubean` happens
+    // to be on the machine's global PATH. The CLI must be a direct dep
+    // (so node_modules/.bin/glubean exists after install)...
+    expect(pkgJson.dependencies?.["@glubean/cli"]).toBeDefined();
+    expect(pkgJson.devDependencies?.["@glubean/cli"]).toBeUndefined();
+    // ...and installDependencies() must have actually materialized the
+    // local binary: this is the real assertion that `npm test`'s bare
+    // `glubean` command resolves to node_modules/.bin, not the global one.
+    expect(await fileExists(join(dir, "node_modules/.bin/glubean"))).toBe(true);
+
     // Verify .env contains default base URL
     const envContent = await readFile(join(dir, ".env"), "utf-8");
     expect(envContent).toContain("https://dummyjson.com");
@@ -333,6 +344,37 @@ test("init --contract-first creates contract-first project", async () => {
     expect(pkgJson.dependencies?.zod).toBeDefined();
     expect(pkgJson.dependencies?.["@glubean/runner"]).toBeDefined();
     expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeUndefined();
+    // GLU-110 / GitHub #9 regression — see the basic-template test above
+    // for the full rationale.
+    expect(pkgJson.dependencies?.["@glubean/cli"]).toBeDefined();
+    expect(pkgJson.devDependencies?.["@glubean/cli"]).toBeUndefined();
+    expect(await fileExists(join(dir, "node_modules/.bin/glubean"))).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("init --template demo scaffolds package.json with CLI as a direct dep (GLU-110)", async () => {
+  const dir = await createTempDir();
+  try {
+    const { code } = await runCli(
+      ["init", "--template", "demo", "--no-interactive"],
+      { cwd: dir },
+    );
+    expect(code).toBe(0);
+    expect(await fileExists(join(dir, "package.json"))).toBe(true);
+
+    // GLU-110 / GitHub #9: the demo template's `npm test` is also a bare
+    // `glubean run --profile local` — it needs the same local-bin guarantee
+    // as the standard + contract-first templates. The demo scaffold does
+    // NOT run `npm install` (initDemo() never calls installDependencies()),
+    // so this only checks the generated package.json, not node_modules.
+    const pkgJson = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
+    expect(pkgJson.dependencies?.["@glubean/sdk"]).toBeDefined();
+    expect(pkgJson.dependencies?.["@glubean/runner"]).toBeDefined();
+    expect(pkgJson.dependencies?.["@glubean/cli"]).toBeDefined();
+    expect(pkgJson.devDependencies?.["@glubean/cli"]).toBeUndefined();
+    expect(pkgJson.scripts?.test).toBe("glubean run --profile local");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
