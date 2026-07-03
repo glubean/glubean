@@ -461,6 +461,14 @@ test("runLocalTestsFromFile redacts secrets from assertion.actual/expected and l
   // `body` object above gets truncated mid-JSON by `inspect()`'s cap before
   // it ever reaches the message, so it can't exercise this path.)
   const COMPACT_OPAQUE_SECRET = "opaque-secret-nopattern";
+  // codex R4 P1: `inspect()` TRUNCATES a long object mid-string
+  // (`json.slice(0, 61) + "..."`) rather than omitting it. Crafted so the
+  // `token` key/value pair completes well inside that 61-char window (it's
+  // the FIRST field) while a large `filler` field pushes the WHOLE object
+  // past 64 chars — the embedded fragment is syntactically-INVALID JSON (no
+  // closing brace), which is exactly the case a bracket-balanced
+  // `JSON.parse()` attempt fails on and falls back to copying verbatim.
+  const TRUNCATION_SECRET = "TRUNCATED-SECRET-DO-NOT-LEAK";
   const server = createServer((req, res) => {
     res.writeHead(200, {
       "content-type": "application/json",
@@ -514,6 +522,14 @@ export const loginTest = test("login-test", async (ctx) => {
   // \`message\` embeds the credential as intact JSON (small enough to survive
   // inspect()'s 64-char cap unmangled).
   ctx.expect({ token: "${COMPACT_OPAQUE_SECRET}" }).toEqual({ token: "${COMPACT_OPAQUE_SECRET}" });
+  // codex R4 P1: a LONG object-shaped assertion whose auto-generated
+  // \`message\` gets TRUNCATED mid-object by inspect()'s 64-char cap — the
+  // credential pair itself stays intact (it's the first field), but the
+  // surrounding JSON is left syntactically invalid (no closing brace).
+  ctx.expect({ token: "${TRUNCATION_SECRET}", filler: "y".repeat(20) }).toEqual({
+    token: "${TRUNCATION_SECRET}",
+    filler: "y".repeat(20),
+  });
 });`,
     );
 
@@ -545,6 +561,9 @@ export const loginTest = test("login-test", async (ctx) => {
     // codex R3 P1: the SAME opaque credential embedded in the SDK's
     // auto-generated `message` (not just `actual`/`expected`).
     expect(assertionSerialized).not.toContain(COMPACT_OPAQUE_SECRET);
+    // codex R4 P1: the credential pair survives intact even when inspect()
+    // TRUNCATES the surrounding object (invalid JSON — no closing brace).
+    expect(assertionSerialized).not.toContain(TRUNCATION_SECRET);
     expect(logSerialized).not.toContain(SESSION_JWT);
     expect(logSerialized).not.toContain(LOGIN_EMAIL);
     // codex R1 P1: the opaque, non-pattern-matching credential is ONLY
@@ -553,7 +572,7 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(logSerialized).not.toContain(OPAQUE_SESSION_ID);
 
     const passedAssertions = allAssertions.filter((a) => a.passed === true);
-    expect(passedAssertions.length).toBeGreaterThanOrEqual(3);
+    expect(passedAssertions.length).toBeGreaterThanOrEqual(4);
 
     // ── Structure/pass-state survives (not a blanket wipe): the assertion
     //    that compared the login email still shows as passed, and both its
@@ -586,6 +605,30 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(compactAssertion.message).toContain("token");
     expect((compactAssertion.actual as Record<string, unknown>).token).not.toBe(
       COMPACT_OPAQUE_SECRET,
+    );
+
+    // ── codex R4 P1: the TRUNCATED assertion's message contains an early,
+    //    syntactically-INVALID JSON fragment (inspect() cut it off with
+    //    "..." before the closing brace) — the credential pair inside that
+    //    fragment must still be masked, not just skipped because the
+    //    overall substring fails JSON.parse. `toEqual` renders the SAME
+    //    truncated fragment TWICE (`expected {actual} to equal {expected}`)
+    //    — `.not.toContain` below covers both occurrences.
+    const truncatedAssertion = passedAssertions[3];
+    expect(truncatedAssertion.message).not.toContain(TRUNCATION_SECRET);
+    expect(truncatedAssertion.message).toContain("token");
+    // Sanity: the fixture actually exercised the truncation path (otherwise
+    // this assertion would be vacuous).
+    expect(truncatedAssertion.message).toContain("...");
+    // A greedy (vs. lazy) value-matching regex, when the FIRST truncated
+    // fragment's value has no real closing quote, can run past it and
+    // erroneously consume the SECOND fragment's opening quote as if it were
+    // this one's closing quote — corrupting the splice with a doubled `""`.
+    // Regression for exactly that bug (caught during this fix's own
+    // self-review, not by codex).
+    expect(truncatedAssertion.message).not.toContain('""');
+    expect((truncatedAssertion.actual as Record<string, unknown>).token).not.toBe(
+      TRUNCATION_SECRET,
     );
 
     // ── Log data: key-based masking (token/sessionId) survives structure —
@@ -634,6 +677,7 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(eventsSerialized).not.toContain(LOGIN_EMAIL);
     expect(eventsSerialized).not.toContain(OPAQUE_SESSION_ID);
     expect(eventsSerialized).not.toContain(COMPACT_OPAQUE_SECRET);
+    expect(eventsSerialized).not.toContain(TRUNCATION_SECRET);
     expect(events.some((e) => e.type === "assertion")).toBe(true);
     expect(events.some((e) => e.type === "log")).toBe(true);
   } finally {

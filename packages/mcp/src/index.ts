@@ -365,73 +365,68 @@ export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown 
 // `BUILTIN_SCOPES`, not just the trace subset) — these helpers just call
 // `redactEvent` at the accumulation points that were missing it, matching the
 // scope-per-event-type dispatch `redactEvent` already does internally.
-// GLU-129 (codex R3 P1): `ctx.expect(...)` auto-generates `message` by
-// JSON-stringifying `actual`/`expected` INTO the message text itself
-// (`Expectation._report()`/`inspect()`, packages/sdk/src/expect.ts —
-// `inspect()` uses real `JSON.stringify` for non-primitive values, so a
-// short object embeds as valid JSON: `expected {"token":"secret"} to equal
-// {"token":"secret"}`). Redacting `actual`/`expected` alone (above) leaves
-// that SAME opaque, key-shaped credential sitting in plaintext inside
-// `message` — `assertion.message`'s `raw-string` handler only pattern-scans,
-// it has no notion of keys. `message` isn't independently-authored free text
-// here (unlike a `ctx.log(message, ...)` label): it's a rendering the SDK
-// derived FROM actual/expected, so scrubbing every JSON-object/array-shaped
-// substring through the SAME (now key-aware) `assertion.actual` scope before
-// splicing it back is a mechanical inverse of how it was built — not a new
-// redaction policy. Bounded cost: `inspect()` caps embedded JSON at 64 chars
-// and assertion messages are short, so this never scans a large body.
-function redactJsonLikeSubstrings(text: string): string {
-  let result = "";
-  let i = 0;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === "{" || ch === "[") {
-      const close = ch === "{" ? "}" : "]";
-      let depth = 0;
-      let inString = false;
-      let escape = false;
-      let j = i;
-      for (; j < text.length; j++) {
-        const c = text[j];
-        if (inString) {
-          if (escape) escape = false;
-          else if (c === "\\") escape = true;
-          else if (c === '"') inString = false;
-          continue;
-        }
-        if (c === '"') { inString = true; continue; }
-        if (c === ch) depth++;
-        else if (c === close) {
-          depth--;
-          if (depth === 0) { j++; break; }
-        }
-      }
-      const candidate = text.slice(i, j);
-      let handled = false;
-      try {
-        const parsed = JSON.parse(candidate);
-        if (parsed !== null && typeof parsed === "object") {
-          const redacted = redactEvent(
-            { type: "assertion", actual: parsed },
-            MCP_TRACE_REDACTION_SCOPES,
-            "partial",
-            64,
-          ) as unknown as { actual: unknown };
-          result += JSON.stringify(redacted.actual);
-          i = j;
-          handled = true;
-        }
-      } catch {
-        // Not valid/complete JSON (e.g. `inspect()` truncated it mid-object)
-        // — fall through and copy verbatim; still covered by the pattern
-        // scan `redactEvent` already ran over the whole message.
-      }
-      if (handled) continue;
-    }
-    result += ch;
-    i++;
-  }
-  return result;
+// GLU-129 (codex R3 P1, hardened R4 P1): `ctx.expect(...)` auto-generates
+// `message` by JSON-stringifying `actual`/`expected` INTO the message text
+// itself (`Expectation._report()`/`inspect()`, packages/sdk/src/expect.ts —
+// `inspect()` uses real `JSON.stringify` for non-primitive values, so an
+// object embeds as JSON: `expected {"token":"secret"} to equal
+// {"token":"secret"}`). Redacting `actual`/`expected` alone leaves that SAME
+// opaque, key-shaped credential sitting in plaintext inside `message` —
+// `assertion.message`'s `raw-string` handler only pattern-scans, it has no
+// notion of keys, and `message` isn't independently-authored free text
+// (unlike a `ctx.log(message, ...)` label) — it's an SDK-derived rendering
+// of the same values.
+//
+// `inspect()` caps embedded JSON at 64 chars and TRUNCATES mid-object
+// (`json.slice(0, 61) + "..."`) rather than omitting it, so a longer
+// asserted object leaves an early key/value pair — often the FIRST field,
+// frequently the credential one — as a syntactically-INVALID JSON fragment
+// (`{"token":"secret",...`, no closing brace). An R3-round fix that first
+// tries `JSON.parse()` on a bracket-balanced substring FAILS on exactly this
+// truncated case and falls back to copying it verbatim (codex R4 P1). This
+// version instead regex-matches individual `"key":"value"` pairs directly —
+// it doesn't require balanced brackets or a fully valid JSON document, so a
+// truncated fragment is caught the same as a complete one — and re-uses the
+// SAME (now key-aware) `assertion.actual` scope to decide per-pair whether a
+// key is sensitive, so there is exactly one source of truth for "which keys
+// are credentials" (this function never hardcodes/duplicates that list).
+//
+// Documented residual: only QUOTED STRING values are matched (a numeric/
+// boolean value under a sensitive key, e.g. `{"token":12345}`, is not this
+// function's concern) — real credential values are strings in practice, and
+// `actual`/`expected` themselves already mask a non-string credential value
+// via key-based structural redaction regardless of what `message` shows.
+//
+// The value group is a LAZY repetition that stops at the FIRST unescaped `"`
+// OR at inspect()'s literal `"..."` truncation marker (a lookahead, not
+// consumed). A GREEDY `*` here — the first version of this regex — has no
+// upper bound other than "some `"` eventually follows", so on an UNTERMINATED
+// value (inspect() cut it off mid-string with no closing quote) it runs past
+// the truncation point, through unrelated message text, and matches the
+// NEXT key's opening quote as if it were this value's closing quote —
+// silently corrupting/skipping that next pair (codex R4 P1's own fix hid a
+// second-order bug of this kind on a two-field truncated object; caught by
+// this file's regression test, not by codex). Stopping lazily at "..." keeps
+// each match bounded to its own key/value pair regardless of truncation.
+const MESSAGE_KEY_VALUE_PAIR = /"([A-Za-z0-9_.-]+)"\s*:\s*"((?:\\.|[^"\\])*?)(?="|\.\.\.)/g;
+
+function redactMessageKeyValuePairs(text: string): string {
+  return text.replace(MESSAGE_KEY_VALUE_PAIR, (full, key: string, value: string) => {
+    if (!value) return full; // empty value — nothing to hide
+    const redacted = redactEvent(
+      { type: "assertion", actual: { [key]: value } },
+      MCP_TRACE_REDACTION_SCOPES,
+      "partial",
+      64,
+    ) as unknown as { actual: Record<string, unknown> };
+    const maskedValue = redacted.actual[key];
+    if (typeof maskedValue !== "string" || maskedValue === value) return full;
+    // No trailing `"` here: the lookahead didn't CONSUME the terminator (a
+    // real `"` or the literal `...`), so it's still sitting untouched in the
+    // surrounding text right after this match and will follow naturally —
+    // adding one here would double it up (`..."` + original `"` → `""`).
+    return `"${key}":"${maskedValue}`;
+  });
 }
 
 function redactMcpAssertionFields(fields: {
@@ -447,7 +442,7 @@ function redactMcpAssertionFields(fields: {
   ) as unknown as typeof fields;
   return {
     ...redacted,
-    message: redactJsonLikeSubstrings(redacted.message),
+    message: redactMessageKeyValuePairs(redacted.message),
   };
 }
 
