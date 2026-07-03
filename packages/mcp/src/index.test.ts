@@ -3,12 +3,14 @@ import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import {
   buildLastRunSummary,
   contractsToOpenApi,
   diagnoseProjectConfig,
   discoverTestsFromFile,
   filterLocalDebugEvents,
+  redactMcpTrace,
   resolveEnvPath,
   runLocalTestsFromFile,
   SensitiveActiveEnvError,
@@ -318,57 +320,202 @@ export const skipAfterFail = test("skip-after-fail", async (ctx) => {
   expect(r.skipped).toBeUndefined();
 }, 15_000);
 
-// Hits the external dummyjson.com demo API — retry to absorb transient network
-// timeouts/outages so a third-party blip can't block a release (matches the
-// runner's httpbin-dependent tests).
-test("runLocalTestsFromFile strips trace headers, keeping only content-type/set-cookie/location/authorization", { retry: 3, timeout: 30_000 }, async () => {
-  const dir = await makeSessionTempDir();
-  await mkdir(join(dir, "tests"), { recursive: true });
+// GLU-104: default trace config used to ALLOW-LIST `authorization`/`set-cookie`
+// verbatim into the MCP tool return body (an LLM agent's context), and never
+// touched request/response body at all. This drives a real HTTP round-trip
+// through a local echo server (deterministic, no external network) that
+// reflects a live-looking secret in the RESPONSE HEADER (set-cookie), the
+// RESPONSE BODY (echoing the request's bearer token back), and accepts a
+// secret-bearing REQUEST BODY — the same three surfaces the vulnerability
+// report named — then asserts the trace returned by `runLocalTestsFromFile`
+// contains no plaintext copy of any of them, while non-sensitive header/body
+// content remains visible (the fix must not become a blanket wipe).
+test("runLocalTestsFromFile redacts auth header/cookie/secrets from trace headers and body", async () => {
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const authHeader = req.headers["authorization"] ?? "";
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "set-cookie": "sid=super-secret-session-value; Path=/; HttpOnly",
+        "x-request-id": "trace-me-12345",
+      });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          echoedToken: authHeader,
+          user: { note: "hello world", email: "user@example.com" },
+        }),
+      );
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const addr = server.address();
+  const baseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
 
-  // Write a package.json with NO custom mcp config — use defaults
-  await writeFile(join(dir, "package.json"), "{}");
+  try {
+    const dir = await makeSessionTempDir();
+    await mkdir(join(dir, "tests"), { recursive: true });
 
-  await writeFile(
-    join(dir, "tests", "http.test.ts"),
-    `import { test } from "@glubean/sdk";
+    // No custom mcp.trace config — exercise the DEFAULT.
+    await writeFile(join(dir, "package.json"), "{}");
+
+    await writeFile(
+      join(dir, "tests", "http.test.ts"),
+      `import { test } from "@glubean/sdk";
 export const httpTest = test("http-test", async (ctx) => {
-  const res = await ctx.http.get("https://dummyjson.com/products/1");
+  const res = await ctx.http.post("${baseUrl}/login", {
+    headers: {
+      Authorization: "Bearer LIVE-SECRET-TOKEN-abc123xyz",
+      "X-Request-Id": "trace-me-12345",
+    },
+    json: { username: "alice", password: "super-secret-body-value" },
+  });
   ctx.expect(res.status).toBe(200);
 });`,
-  );
+    );
 
-  const result = await runLocalTestsFromFile({
-    filePath: join(dir, "tests", "http.test.ts"),
-    includeTraces: true,
-  });
+    const result = await runLocalTestsFromFile({
+      filePath: join(dir, "tests", "http.test.ts"),
+      includeTraces: true,
+    });
 
-  expect(result.summary.total).toBe(1);
-  expect(result.summary.passed).toBe(1);
+    expect(result.summary.total).toBe(1);
+    expect(result.summary.passed).toBe(1);
 
-  // Should have at least one trace
-  const traces = result.results.flatMap((r) => r.traces);
-  expect(traces.length).toBeGreaterThan(0);
+    const traces = result.results.flatMap((r) => r.traces);
+    expect(traces.length).toBeGreaterThan(0);
 
-  for (const trace of traces) {
-    const t = trace as Record<string, unknown>;
-    // Response headers should only contain kept headers (if any)
-    if (t.responseHeaders) {
-      const respHeaders = Object.keys(t.responseHeaders as Record<string, string>);
-      const allowed = ["content-type", "set-cookie", "location"];
-      for (const h of respHeaders) {
-        expect(allowed).toContain(h.toLowerCase());
-      }
-    }
-    // Request headers should only contain kept headers (if any)
-    if (t.requestHeaders) {
-      const reqHeaders = Object.keys(t.requestHeaders as Record<string, string>);
-      const allowed = ["content-type", "authorization"];
-      for (const h of reqHeaders) {
-        expect(allowed).toContain(h.toLowerCase());
-      }
-    }
+    const serialized = JSON.stringify(traces);
+
+    // ── No plaintext secrets anywhere in the trace payload ──────────────
+    expect(serialized).not.toContain("LIVE-SECRET-TOKEN-abc123xyz");
+    expect(serialized).not.toContain("super-secret-session-value");
+    expect(serialized).not.toContain("super-secret-body-value");
+
+    const trace = traces[0] as Record<string, unknown>;
+
+    // ── Sensitive header keys are still visible; only the VALUE is masked ──
+    const reqHeaders = trace.requestHeaders as Record<string, string> | undefined;
+    expect(reqHeaders).toBeDefined();
+    expect(reqHeaders!["Authorization"] ?? reqHeaders!["authorization"]).toBeDefined();
+    expect(reqHeaders!["Authorization"] ?? reqHeaders!["authorization"]).not.toBe(
+      "Bearer LIVE-SECRET-TOKEN-abc123xyz",
+    );
+
+    const respHeaders = trace.responseHeaders as Record<string, string> | undefined;
+    expect(respHeaders).toBeDefined();
+    const setCookie = respHeaders!["set-cookie"];
+    expect(setCookie).toBeDefined();
+    expect(setCookie).not.toContain("super-secret-session-value");
+
+    // ── Non-sensitive header stays fully visible (no blanket wipe) ──────
+    expect(respHeaders!["x-request-id"]).toBe("trace-me-12345");
+
+    // ── Request body: sensitive key masked, non-sensitive key preserved ──
+    const reqBody = trace.requestBody as Record<string, unknown> | undefined;
+    expect(reqBody).toBeDefined();
+    expect(reqBody!.username).toBe("alice");
+    expect(reqBody!.password).not.toBe("super-secret-body-value");
+
+    // ── Response body: pattern-matched secret masked, non-sensitive text kept ──
+    const respBody = trace.responseBody as Record<string, unknown> | undefined;
+    expect(respBody).toBeDefined();
+    expect(respBody!.ok).toBe(true);
+    expect((respBody!.user as Record<string, unknown>).note).toBe("hello world");
+    expect(respBody!.echoedToken).not.toBe("Bearer LIVE-SECRET-TOKEN-abc123xyz");
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
   }
 }, 15_000);
+
+test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
+  const trace = {
+    method: "POST",
+    url: "https://api.example.com/login?token=live-query-secret",
+    status: 200,
+    requestHeaders: {
+      Authorization: "Bearer LIVE-SECRET-TOKEN-abc123xyz",
+      "Content-Type": "application/json",
+      "X-Request-Id": "trace-me-12345",
+    },
+    requestBody: { username: "alice", password: "super-secret-body-value" },
+    responseHeaders: {
+      "content-type": "application/json",
+      "set-cookie": "sid=super-secret-session-value; Path=/; HttpOnly",
+      "x-request-id": "trace-me-12345",
+    },
+    responseBody: {
+      ok: true,
+      token: "sk_live_abcdefghijklmnop",
+      user: { note: "hello world" },
+    },
+  };
+
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const serialized = JSON.stringify(redacted);
+
+  expect(serialized).not.toContain("LIVE-SECRET-TOKEN-abc123xyz");
+  expect(serialized).not.toContain("super-secret-session-value");
+  expect(serialized).not.toContain("super-secret-body-value");
+  expect(serialized).not.toContain("sk_live_abcdefghijklmnop");
+  expect(serialized).not.toContain("live-query-secret");
+
+  // Non-sensitive fields survive untouched.
+  expect((redacted.requestHeaders as Record<string, string>)["Content-Type"]).toBe(
+    "application/json",
+  );
+  expect((redacted.requestHeaders as Record<string, string>)["X-Request-Id"]).toBe(
+    "trace-me-12345",
+  );
+  expect((redacted.requestBody as Record<string, unknown>).username).toBe("alice");
+  expect((redacted.responseBody as Record<string, unknown>).ok).toBe(true);
+  expect(
+    ((redacted.responseBody as Record<string, unknown>).user as Record<string, unknown>).note,
+  ).toBe("hello world");
+
+  // The Authorization/set-cookie KEYS are still present (masked, not dropped).
+  expect((redacted.requestHeaders as Record<string, string>).Authorization).toBeDefined();
+  expect((redacted.responseHeaders as Record<string, string>)["set-cookie"]).toBeDefined();
+});
+
+test("redactMcpTrace masks a value even when a user's keepRequestHeaders config re-adds it", () => {
+  const trace = {
+    requestHeaders: { Authorization: "Bearer LIVE-SECRET-TOKEN-abc123xyz" },
+  };
+
+  // A project explicitly opting Authorization back into visibility must not
+  // be able to bypass value-level masking — breadth (this config) and depth
+  // (redactMcpTrace) are independent layers.
+  const redacted = redactMcpTrace(trace, {
+    keepRequestHeaders: ["authorization"],
+  }) as Record<string, unknown>;
+
+  const headers = redacted.requestHeaders as Record<string, string>;
+  expect(headers.Authorization).toBeDefined();
+  expect(headers.Authorization).not.toBe("Bearer LIVE-SECRET-TOKEN-abc123xyz");
+});
+
+test("redactMcpTrace drops non-allow-listed headers when a project sets an explicit keepRequestHeaders", () => {
+  const trace = {
+    requestHeaders: { Authorization: "Bearer x", "X-Debug-Only": "internal-value" },
+  };
+
+  const redacted = redactMcpTrace(trace, {
+    keepRequestHeaders: ["authorization"],
+  }) as Record<string, unknown>;
+
+  const headers = redacted.requestHeaders as Record<string, string> | undefined;
+  expect(headers).toBeDefined();
+  expect(headers!["X-Debug-Only"]).toBeUndefined();
+});
+
+test("redactMcpTrace passes through non-object traces unchanged", () => {
+  expect(redactMcpTrace(undefined, {})).toBeUndefined();
+  expect(redactMcpTrace(null, {})).toBeNull();
+  expect(redactMcpTrace("not-an-object", {})).toBe("not-an-object");
+});
 
 // ── Contract discovery tests ──────────────────────────────────────────────
 

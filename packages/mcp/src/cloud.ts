@@ -426,9 +426,14 @@ export interface SnapshotForUpload {
  *
  * - The `result` blob is shaped like the CLI's payload (`tests[].events`) so
  *   Cloud's per-test events drill-down (`extractTestEvents`) can read it.
- * - Traces are intentionally NOT uploaded: the MCP's local trace view keeps
- *   the `authorization` header for AI debugging (DEFAULT_MCP_TRACE_CONFIG) —
- *   that must never leave the machine.
+ * - Traces are intentionally NOT uploaded. Since GLU-104, the local trace
+ *   view (`redactMcpTrace` in index.ts) already masks known-sensitive
+ *   headers/body via `@glubean/redaction` — but it's a best-effort scan
+ *   (sensitive-key + pattern matching), not a guarantee, and it still
+ *   carries the FULL non-sensitive request/response body for AI debugging.
+ *   Keeping that off the wire entirely (local-only) is a stronger boundary
+ *   than trusting the redaction pass to catch every project-specific secret
+ *   shape before it reaches Cloud.
  * - The blob is deep-redacted client-side before upload (assertion
  *   actual/expected and log data can carry live secrets). The server does a
  *   baseline pass too, but the client scrubs first — same policy as the CLI.

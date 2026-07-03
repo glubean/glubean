@@ -29,7 +29,25 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.requestHeaders",
     handler: "headers",
     rules: {
-      sensitiveKeys: ["authorization", "cookie", "x-api-key", "proxy-authorization"],
+      // GLU-104: also covers non-standard auth headers (`x-access-token`,
+      // `x-session-id`, ...) AND — via `headersHandler`'s cookie-name-keyed
+      // nested redact call — common session cookie NAMES ("connect.sid",
+      // "JSESSIONID" [contains "session"], "PHPSESSID" [contains "sid"],
+      // "csrf-secret", ...). Sensitive-key matching is case-insensitive
+      // substring (sensitiveKeysPlugin), so "token"/"session"/"secret"/"sid"
+      // alone cover their common compounds without enumerating every variant.
+      sensitiveKeys: [
+        "authorization",
+        "cookie",
+        "x-api-key",
+        "proxy-authorization",
+        "token",
+        "session",
+        "secret",
+        "sid",
+        "api-key",
+        "apikey",
+      ],
     },
   },
   {
@@ -68,6 +86,14 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
         "private_key",
         "privatekey",
         "private-key",
+        // GLU-104: symmetric with the query/response-body lists below —
+        // login/session-exchange request bodies carry these too.
+        "session",
+        "sessionid",
+        "session_id",
+        "api_key",
+        "api-key",
+        "apikey",
       ],
     },
   },
@@ -78,7 +104,14 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.responseHeaders",
     handler: "headers",
     rules: {
-      sensitiveKeys: ["set-cookie"],
+      // GLU-104: `set-cookie` alone only flags the OUTER header key — the
+      // `headersHandler` cookie branch redacts by inner COOKIE NAME, so
+      // without these, an arbitrarily-named session cookie value
+      // (`sid=...`, `connect.sid=...`) passed straight through unmasked
+      // (confirmed empirically: a Set-Cookie header with a cookie named
+      // "sid" was NOT redacted before this change). Same substring-match
+      // rationale as the request-headers scope above.
+      sensitiveKeys: ["set-cookie", "token", "session", "secret", "sid", "authorization", "api-key", "apikey"],
     },
   },
   {
@@ -87,6 +120,34 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     event: "trace",
     target: "data.responseBody",
     handler: "json",
+    rules: {
+      // GLU-104: this scope previously declared NO sensitiveKeys at all —
+      // only the global value-PATTERN plugins (jwt/bearer/awsKeys/...) ran
+      // against response bodies, so a plain-string secret under a
+      // recognizably-named key (`{"token": "sk_live_..."}`,
+      // `{"access_token": "..."}`) passed through unmasked whenever its
+      // value didn't happen to match one of those patterns (confirmed
+      // empirically). Mirrors `http.request.body` — a login/refresh
+      // response carries the same secret shapes a request does.
+      sensitiveKeys: [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "client_secret",
+        "client-secret",
+        "private_key",
+        "privatekey",
+        "private-key",
+        "session",
+        "sessionid",
+        "session_id",
+        "api_key",
+        "api-key",
+        "apikey",
+        "authorization",
+      ],
+    },
   },
   {
     id: "log.message",

@@ -25,6 +25,8 @@ import type { ProjectRunnerTest } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import { renderArtifact, openapiArtifact } from "@glubean/sdk";
 import type { ExtractedContractProjection } from "@glubean/sdk";
+import { BUILTIN_SCOPES, compileScopes, DEFAULT_GLOBAL_RULES, redactEvent } from "@glubean/redaction";
+import type { CompiledScope } from "@glubean/redaction";
 import {
   createScanner,
   extractFromSource,
@@ -226,29 +228,55 @@ function toLegacyHttpContracts(
   return contracts.map(toLegacyHttpContract);
 }
 
-// ── MCP trace header stripping ──────────────────────────────────────────────
+// ── MCP trace redaction ──────────────────────────────────────────────────
+//
+// GLU-104: the return body of `glubean_run_local_file`/`glubean_get_local_events`
+// is itself a "front-end" for redaction purposes — the caller is typically an
+// LLM agent, and its context window is not a trusted boundary (it may be
+// logged/trained on by a model provider, or echoed back by a downstream
+// agent). The old design used a hand-rolled header ALLOW-LIST whose DEFAULT
+// explicitly kept `authorization`/`set-cookie` verbatim, and never touched
+// request/response BODY at all — the opposite of redaction. This is replaced
+// by the same `@glubean/redaction` scopes the Cloud upload path already uses
+// (`cloud.ts:495`, `BUILTIN_SCOPES`) — one redaction policy for the whole
+// product, not a second hand-rolled one for MCP.
+//
+// Two independent layers, in order:
+//   1. `filterHeaders` — OPTIONAL user-configured BREADTH control (which
+//      header KEYS are shown at all, via glubean.yaml `mcp.trace.keep*`).
+//      Default (`undefined` keepList) is "show all header keys" — safe
+//      because every value still passes through layer 2 below.
+//   2. `redactEvent` — MANDATORY DEPTH control: masks sensitive VALUES
+//      (authorization/cookie/set-cookie/x-api-key/proxy-authorization
+//      headers, known-sensitive body keys, and pattern-matched secrets —
+//      JWT/Bearer/AWS keys/GitHub tokens/etc — anywhere in headers or body).
+//      Runs unconditionally, even if a project's `keepRequestHeaders`
+//      config re-adds `authorization` to layer 1's allow-list: the header
+//      KEY becomes visible again, but its VALUE is still masked. This layer
+//      cannot be disabled by project config.
 
-interface McpTraceConfig {
-  keepRequestHeaders: string[];
-  keepResponseHeaders: string[];
+export interface McpTraceConfig {
+  /** Header keys to show, in addition to whatever `redactMcpTrace` decides
+   *  to mask. `undefined` (the default) means "show all keys" — there is no
+   *  security reason to hide a non-sensitive header name, since sensitive
+   *  VALUES are always masked by `redactMcpTrace` regardless of this list. */
+  keepRequestHeaders?: string[];
+  keepResponseHeaders?: string[];
 }
 
-const DEFAULT_MCP_TRACE_CONFIG: McpTraceConfig = {
-  keepRequestHeaders: ["content-type", "authorization"],
-  keepResponseHeaders: ["content-type", "set-cookie", "location"],
-};
+const DEFAULT_MCP_TRACE_CONFIG: McpTraceConfig = {};
 
 let _mcpTraceConfig: McpTraceConfig | undefined;
 
 // Accept a header allow-list only if it's an array of strings. Anything else
-// (a bare string, a non-string element) falls back to the default — the MCP
-// server must not crash `filterHeaders` on a malformed glubean.yaml. The CLI's
-// `loadProjectConfigV1` hard-errors on the same input, so the config mistake
-// still surfaces on `glubean run`.
-function asHeaderList(value: unknown, fallback: string[]): string[] {
+// (missing key, a bare string, a non-string element) falls back to `undefined`
+// ("show all keys") — the MCP server must not crash `filterHeaders` on a
+// malformed glubean.yaml. The CLI's `loadProjectConfigV1` hard-errors on the
+// same input, so the config mistake still surfaces on `glubean run`.
+function asHeaderList(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((h) => typeof h === "string")
     ? (value as string[])
-    : fallback;
+    : undefined;
 }
 
 async function loadMcpTraceConfig(projectRoot: string): Promise<McpTraceConfig> {
@@ -261,8 +289,8 @@ async function loadMcpTraceConfig(projectRoot: string): Promise<McpTraceConfig> 
     const userConfig = parsed?.mcp?.trace;
     if (userConfig) {
       _mcpTraceConfig = {
-        keepRequestHeaders: asHeaderList(userConfig.keepRequestHeaders, DEFAULT_MCP_TRACE_CONFIG.keepRequestHeaders),
-        keepResponseHeaders: asHeaderList(userConfig.keepResponseHeaders, DEFAULT_MCP_TRACE_CONFIG.keepResponseHeaders),
+        keepRequestHeaders: asHeaderList(userConfig.keepRequestHeaders),
+        keepResponseHeaders: asHeaderList(userConfig.keepResponseHeaders),
       };
     } else {
       _mcpTraceConfig = DEFAULT_MCP_TRACE_CONFIG;
@@ -275,9 +303,13 @@ async function loadMcpTraceConfig(projectRoot: string): Promise<McpTraceConfig> 
 
 function filterHeaders(
   headers: Record<string, string> | undefined,
-  keepList: string[],
+  keepList: string[] | undefined,
 ): Record<string, string> | undefined {
   if (!headers) return undefined;
+  // No allow-list configured: keep every header key. `redactMcpTrace` still
+  // masks sensitive values below — this is a breadth control, not a security
+  // boundary.
+  if (!keepList) return headers;
   const keep = new Set(keepList.map((h) => h.toLowerCase()));
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -288,10 +320,20 @@ function filterHeaders(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function stripTraceHeaders(trace: unknown, config: McpTraceConfig): unknown {
+// Compiled once at module load. `BUILTIN_SCOPES` declares the "trace" event
+// scopes (`data.requestHeaders`/`data.requestBody`/`data.responseHeaders`/
+// `data.responseBody`/`data.url`) with the same sensitive-key sets as
+// `isSensitiveKey` elsewhere in glubean — see packages/redaction/src/defaults.ts.
+const MCP_TRACE_REDACTION_SCOPES: CompiledScope[] = compileScopes({
+  builtinScopes: BUILTIN_SCOPES,
+  globalRules: DEFAULT_GLOBAL_RULES,
+  replacementFormat: "partial",
+});
+
+export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown {
   if (!trace || typeof trace !== "object") return trace;
   const t = trace as Record<string, unknown>;
-  return {
+  const filtered = {
     ...t,
     ...(t.requestHeaders !== undefined && {
       requestHeaders: filterHeaders(t.requestHeaders as Record<string, string>, config.keepRequestHeaders),
@@ -300,6 +342,8 @@ function stripTraceHeaders(trace: unknown, config: McpTraceConfig): unknown {
       responseHeaders: filterHeaders(t.responseHeaders as Record<string, string>, config.keepResponseHeaders),
     }),
   };
+  const redacted = redactEvent({ type: "trace", data: filtered }, MCP_TRACE_REDACTION_SCOPES, "partial");
+  return (redacted as Record<string, unknown>).data;
 }
 
 export async function findProjectRoot(startDir: string): Promise<string> {
@@ -1218,7 +1262,7 @@ export async function runLocalTestsFromFile(args: {
       case "trace": {
         if (!includeTraces || !eventTestId) break;
         const acc = accumulators.get(eventTestId);
-        if (acc) acc.traces.push(stripTraceHeaders(event.data, traceConfig));
+        if (acc) acc.traces.push(redactMcpTrace(event.data, traceConfig));
         break;
       }
       case "status": {
@@ -1370,7 +1414,7 @@ server.registerTool(
 server.registerTool(
   MCP_TOOL_NAMES.runLocalFile,
   {
-    description: "Run Glubean test exports from a file locally and return structured results for AI debugging/fixing. When includeTraces is true, each trace includes responseSchema (inferred JSON Schema) and truncated responseBody — use responseSchema to understand response structure without reading full data.",
+    description: "Run Glubean test exports from a file locally and return structured results for AI debugging/fixing. When includeTraces is true, each trace includes responseSchema (inferred JSON Schema) and truncated, redacted responseBody (secrets masked) — use responseSchema to understand response structure without reading full data.",
     inputSchema: {
       filePath: z.string().describe("Path to a test module file"),
       filter: z
@@ -1388,7 +1432,7 @@ server.registerTool(
       includeTraces: z
         .boolean()
         .optional()
-        .describe("Include HTTP traces with responseSchema (inferred JSON Schema) and truncated responseBody. Use this to understand API response structure. Default: false."),
+        .describe("Include HTTP traces with responseSchema (inferred JSON Schema) and truncated, redacted responseBody (secrets masked). Use this to understand API response structure. Default: false."),
       stopOnFailure: z
         .boolean()
         .optional()
