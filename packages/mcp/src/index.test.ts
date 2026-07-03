@@ -745,6 +745,47 @@ export const t = test("ellipsis-secret", async (ctx) => {
   expect(assertion.message).toContain("token");
 }, 15_000);
 
+// codex R6 P2: `message` isn't ALWAYS SDK-generated via `inspect()` (capped
+// at 64 chars) — `ctx.assert(cond, customMessage)` lets an author write an
+// arbitrary string, which can legitimately be valid JSON far longer than 64
+// chars. The R5 fix's 64-char scan bound must NOT corrupt (truncate/repair)
+// a genuinely long, well-formed, author-authored JSON message — it should
+// only kick in as a fallback when a real balanced close can't be found at
+// all. This proves both halves: the secret (past byte 64) IS masked, and
+// the surrounding non-secret content is NOT mangled.
+test("runLocalTestsFromFile does not corrupt a long, valid, author-authored JSON assertion message (GLU-129 codex R6 P2)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const LONG_MESSAGE_SECRET = "LONG-CUSTOM-MESSAGE-SECRET-VALUE";
+  const padding = "x".repeat(80); // pushes the credential well past byte 64
+  await writeFile(
+    join(dir, "tests", "custom-assert.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("custom-message", async (ctx) => {
+  const payload = { padding: "${padding}", token: "${LONG_MESSAGE_SECRET}", ok: true };
+  ctx.assert(true, JSON.stringify(payload));
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "custom-assert.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  // Secret past byte 64 is still masked.
+  expect(assertion.message).not.toContain(LONG_MESSAGE_SECRET);
+  // The message is NOT corrupted: the (long, non-sensitive) padding field
+  // survives intact, `ok` survives, and the message parses back as valid
+  // JSON with the credential value replaced, not truncated mid-object.
+  expect(assertion.message).toContain(padding);
+  expect(assertion.message).toContain('"ok":true');
+  const parsedMessage = JSON.parse(assertion.message) as Record<string, unknown>;
+  expect(parsedMessage.padding).toBe(padding);
+  expect(parsedMessage.ok).toBe(true);
+  expect(parsedMessage.token).not.toBe(LONG_MESSAGE_SECRET);
+}, 15_000);
+
 test("redactMcpTrace masks sensitive header/body values while preserving non-sensitive fields (default config)", () => {
   const trace = {
     method: "POST",

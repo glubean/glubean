@@ -407,25 +407,17 @@ export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown 
 // on any ONE inspect() call's output, whether or not it got cut off.
 const INSPECT_MAX_LEN = 64;
 
-function scanBracketRun(text: string, start: number): { end: number; balanced: boolean } {
+function scanBracketRun(
+  text: string,
+  start: number,
+  limit: number,
+): { end: number; balanced: boolean } {
   const open = text[start];
   const close = open === "{" ? "}" : "]";
   let depth = 0;
   let inString = false;
   let escape = false;
   let j = start;
-  // Bound the scan to inspect()'s own cap (codex R5 P1/P2 follow-up, caught
-  // in self-review before it reached codex): a `toEqual` message embeds
-  // `inspect(actual)` AND `inspect(expected)` — "expected {X} to equal {Y}".
-  // If X is truncated (unterminated string, `inString` never flips back to
-  // false), an UNBOUNDED scan doesn't stop at X's own truncation point — it
-  // keeps going, through " to equal ", and absorbs Y's `{` too (silently,
-  // since scanning "inside a string" ignores bracket characters), producing
-  // ONE garbled candidate spanning both X and Y that the repair step below
-  // can't recover — X ends up completely unmasked. Capping the scan at
-  // `INSPECT_MAX_LEN` guarantees it can never reach past the end of a SINGLE
-  // inspect() call's own output, so X and Y are always scanned separately.
-  const limit = Math.min(text.length, start + INSPECT_MAX_LEN);
   for (; j < limit; j++) {
     const c = text[j];
     if (inString) {
@@ -442,6 +434,37 @@ function scanBracketRun(text: string, start: number): { end: number; balanced: b
     }
   }
   return { end: j, balanced: false };
+}
+
+// GLU-129 (codex R6 P2): a naive UNCONDITIONAL 64-char scan bound (the R5
+// fix) treats ANY assertion message's embedded JSON as if it came from
+// `inspect()` — but `message` isn't always SDK-generated; `ctx.assert(cond,
+// customMessage)` lets an author write an arbitrary string, which could
+// legitimately contain valid JSON far longer than 64 chars. Capping that
+// scan corrupts otherwise-well-formed diagnostic output (treats a real,
+// balanced closing bracket past char 64 as "never found," repairs a
+// needlessly-truncated prefix, and resumes scanning from the middle of what
+// was actually one intact value).
+//
+// Two-pass strategy: first scan UNBOUNDED — if a real balanced close exists
+// ANYWHERE (however far away), that's authoritative and correct regardless
+// of length (this is what makes an arbitrarily long author-written JSON
+// blob redact cleanly). Only when the unbounded scan can't balance (reaches
+// end of text) do we re-scan bounded to `INSPECT_MAX_LEN` specifically to
+// avoid the R5-self-caught cross-object-swallowing bug (`toEqual`'s
+// "expected {X} to equal {Y}" — an unbounded, unbalanced scan of a
+// TRUNCATED X silently treats " to equal {Y}" as more of X's dangling
+// string and absorbs Y's `{` too). `inspect()` never emits past
+// `INSPECT_MAX_LEN` for one call, so bounding ONLY the truncation-recovery
+// path can never cut into legitimate longer content — it's only reached
+// when the input already couldn't be balanced any other way.
+function scanBracketRunForMessage(
+  text: string,
+  start: number,
+): { end: number; balanced: boolean } {
+  const full = scanBracketRun(text, start, text.length);
+  if (full.balanced) return full;
+  return scanBracketRun(text, start, Math.min(text.length, start + INSPECT_MAX_LEN));
 }
 
 // Best-effort repair of a truncated JSON fragment: strip inspect()'s literal
@@ -488,7 +511,7 @@ function redactMessageJsonSubstrings(text: string): string {
   while (i < text.length) {
     const ch = text[i];
     if (ch === "{" || ch === "[") {
-      const { end, balanced } = scanBracketRun(text, i);
+      const { end, balanced } = scanBracketRunForMessage(text, i);
       const candidate = text.slice(i, end);
       let parsed: unknown;
       if (balanced) {
