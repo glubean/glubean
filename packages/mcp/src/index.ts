@@ -620,11 +620,18 @@ function redactMessageJsonSubstrings(text: string): string {
           decoded = undefined;
         }
         if (typeof decoded === "string") {
+          // codex R10 P1: the OUTER string wrapper is always well-terminated
+          // (inspect()'s string truncation re-appends a closing quote), but
+          // its DECODED CONTENT can itself be truncated mid-object — the
+          // truncation happened at the object level, then the whole
+          // (already-truncated) result got string-wrapped. A straight parse
+          // fails on that inner truncation; fall back to the SAME repair
+          // used for the bracket-run case above.
           let inner: unknown;
           try {
             inner = JSON.parse(decoded);
           } catch {
-            inner = undefined;
+            inner = repairTruncatedJson(decoded);
           }
           if (inner !== null && typeof inner === "object") {
             const redacted = redactEvent(

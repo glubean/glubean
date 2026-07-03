@@ -855,6 +855,36 @@ export const t = test("text-secret", async (ctx) => {
   expect(roundTripped.token).not.toBe(TEXT_SECRET);
 }, 15_000);
 
+// codex R10 P1: the OUTER string wrapper around a long raw-JSON-text
+// assertion is always well-terminated (inspect()'s string truncation
+// re-appends a closing quote), but the DECODED inner content can itself be
+// truncated mid-object (the object-level truncation happened FIRST, then
+// the whole already-truncated result got string-wrapped). A straight
+// `JSON.parse` of the decoded content fails; the fix must fall back to the
+// SAME truncation-repair used for the bracket-run case, not give up.
+test("runLocalTestsFromFile redacts a secret inside a TRUNCATED JSON-shaped raw-text assertion message (GLU-129 codex R10 P1)", async () => {
+  const dir = await makeSessionTempDir();
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), "{}");
+  const TEXT_SECRET = "OPAQUE-TEXT-SECRET-VALUE";
+  await writeFile(
+    join(dir, "tests", "text-secret-truncated.test.ts"),
+    `import { test } from "@glubean/sdk";
+export const t = test("text-secret-truncated", async (ctx) => {
+  const raw = JSON.stringify({ token: "${TEXT_SECRET}", filler: "y".repeat(100) });
+  ctx.expect(raw).toBe(raw);
+});`,
+  );
+
+  const result = await runLocalTestsFromFile({
+    filePath: join(dir, "tests", "text-secret-truncated.test.ts"),
+  });
+  expect(result.summary.passed).toBe(1);
+  const assertion = result.results[0].assertions[0];
+  expect(assertion.message).not.toContain(TEXT_SECRET);
+  expect(assertion.message).toContain("token");
+}, 15_000);
+
 // codex R8 P2: `.orFail()` promotes a failed assertion into a THROWN
 // `ExpectFailError` — its `.message` (and `.stack`, whose first line is
 // `${ErrorName}: ${message}`) carry the SAME inspect()-embedded credential
