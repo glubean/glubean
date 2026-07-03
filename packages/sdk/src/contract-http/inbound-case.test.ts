@@ -452,6 +452,40 @@ test("OpenAPI merge: three-plus surfaces on the same method+path all survive", (
   ]);
 });
 
+test("OpenAPI merge: re-encountering an already-relocated loser a third time does not duplicate its collision entry", () => {
+  const dashboard = contract.http.with("glubean-dashboard", {});
+  const platform = contract.http.with("glubean-platform-public", {});
+  const spec = {
+    endpoint: "GET /health",
+    cases: { ok: { description: "ok", expect: { status: 200 } } },
+  };
+  const dashboardHealth = dashboard(
+    "dashboard.health",
+    spec,
+  ) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+  const platformHealth = platform(
+    "platform.health",
+    spec,
+  ) as ProtocolContract<HttpContractSpec, HttpPayloadSchemas, HttpContractMeta>;
+
+  // platform.health's part appears twice — e.g. two overlapping project
+  // globs both matching contracts/platform/health.contract.ts.
+  const doc = renderArtifact(openapiArtifact, [
+    dashboardHealth._extracted as never,
+    platformHealth._extracted as never,
+    platformHealth._extracted as never,
+  ]);
+  const collisions = (
+    doc as {
+      "x-glubean-surface-collisions"?: Array<{ operation: Record<string, unknown> }>;
+    }
+  )["x-glubean-surface-collisions"]!;
+  // Exactly one collision entry for platform.health — the third occurrence
+  // is a no-op, not a second collision-list append (codex R2 P2).
+  expect(collisions).toHaveLength(1);
+  expect(collisions[0].operation.operationId).toBe("platform.health");
+});
+
 // ---------------------------------------------------------------------------
 // Markdown (inbound-artifact-design route C) + null-part pipeline (D6)
 // ---------------------------------------------------------------------------

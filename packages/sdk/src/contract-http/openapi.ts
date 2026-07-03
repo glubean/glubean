@@ -598,8 +598,11 @@ export function buildOpenApiPartForHttp(
  * is a pragmatic disambiguation, not a spec-perfect multi-server
  * representation (that would need per-operation `servers`, which isn't
  * available at projection time since base URLs are unresolved `{{VAR}}`
- * templates). Re-merging the *same* operationId at the same key (e.g.
- * re-running the merge over overlapping parts) is a no-op, not a collision.
+ * templates). Re-merging the *same* operationId at the same method+path
+ * (e.g. overlapping project globs including a contract twice) is a no-op,
+ * not a collision — true whether that operationId is the canonical
+ * `paths` entry or an already-relocated collision-list entry, so a loser
+ * seen a third time doesn't produce a duplicate collision-list entry.
  *
  * Null / non-contributing parts are filtered by the render pipeline before
  * reaching here.
@@ -612,6 +615,12 @@ export function mergeOpenApiParts(
   const tagsByName = new Map<string, { name: string; [k: string]: unknown }>();
   const securitySchemes: Record<string, Record<string, unknown>> = {};
   const surfaceCollisions: Array<Record<string, unknown>> = [];
+  // Every operationId already recorded (canonical `paths` slot OR a prior
+  // collision entry) for a given method+path, keyed by "<path>\0<method>".
+  // Needed so a THIRD occurrence of an already-relocated loser (overlapping
+  // project globs re-including the same non-canonical contract) is a no-op
+  // instead of appending a duplicate collision entry (codex R2 P2).
+  const seenIdsByKey = new Map<string, Set<string>>();
 
   for (const part of parts) {
     const partPaths = (part.paths ?? {}) as Record<
@@ -621,25 +630,34 @@ export function mergeOpenApiParts(
     for (const [apiPath, methods] of Object.entries(partPaths)) {
       if (!paths[apiPath]) paths[apiPath] = {};
       for (const [method, operation] of Object.entries(methods)) {
+        const incomingId = (operation as Record<string, unknown>).operationId;
         const existing = paths[apiPath][method];
+
         if (!existing) {
           paths[apiPath][method] = operation;
+          const key = `${apiPath}\0${method}`;
+          const seen = seenIdsByKey.get(key) ?? new Set<string>();
+          if (typeof incomingId === "string") seen.add(incomingId);
+          seenIdsByKey.set(key, seen);
           continue;
         }
 
-        const existingId = (existing as Record<string, unknown>).operationId;
-        const incomingId = (operation as Record<string, unknown>).operationId;
-        if (existingId === incomingId) {
-          // Same contract re-encountered across overlapping parts — no-op,
+        const key = `${apiPath}\0${method}`;
+        const seen = seenIdsByKey.get(key) ?? new Set<string>();
+        if (typeof incomingId === "string" && seen.has(incomingId)) {
+          // Already recorded — either the canonical operation or a prior
+          // collision entry re-encountered across overlapping parts. No-op,
           // first wins (matches MCP's prior Object.assign semantics).
           continue;
         }
 
-        // Real collision: two DIFFERENT contracts (surfaces) share the same
-        // method + path. `paths[apiPath][method]` can only hold one
+        // Real collision: a DIFFERENT contract (surface) not yet seen for
+        // this method + path. `paths[apiPath][method]` can only hold one
         // operation, so the loser goes to the collision list — still fully
         // present in the document, just not under a fabricated `paths` key.
         surfaceCollisions.push({ path: apiPath, method, operation });
+        if (typeof incomingId === "string") seen.add(incomingId);
+        seenIdsByKey.set(key, seen);
       }
     }
 
