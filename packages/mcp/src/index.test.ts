@@ -814,6 +814,77 @@ test("discoverTestsFromFile discovers contract cases from .contract.ts files", a
   }
 });
 
+// GLU-130 repro: contract.http.with(...) instance-level defaults declare
+// tags, the contract adds its own tags, and a case requires a browser (so a
+// synthetic requires:browser tag is added too). Discovery must expose the
+// SAME resolved tags CLI discovery/run and Cloud upload show — not [].
+const TAGGED_CONTRACT_SOURCE = `
+import { contract, configure } from "@glubean/sdk";
+
+const { http: api } = configure({ http: { prefixUrl: "https://example.com" } });
+const dashboardApi = contract.http.with("dashboard", {
+  client: api,
+  tags: ["dogfood", "staging", "dashboard-api"],
+});
+
+// @contract
+export const signInEmail = dashboardApi("auth.sign-in.email", {
+  endpoint: "POST /api/auth/sign-in/email",
+  tags: ["auth"],
+  cases: {
+    validStagingCredentials: {
+      description: "Signs in with valid credentials.",
+      expect: { status: 200 },
+    },
+    caseSpecific: {
+      description: "Adds its own tag on top of the contract's.",
+      tags: ["case-only"],
+      expect: { status: 200 },
+    },
+    browserOnly: {
+      description: "Needs real OAuth.",
+      requires: "browser",
+      expect: { status: 200 },
+    },
+  },
+});
+`;
+
+test("discoverTestsFromFile resolves tags inherited from contract.http.with(...) defaults (GLU-130)", async () => {
+  const testProjectDir = join(dirname(fileURLToPath(import.meta.url)), "../../../test-project");
+  const dir = join(testProjectDir, ".tmp-contract-tags-test-" + Date.now());
+  await mkdir(dir, { recursive: true });
+  const filePath = join(dir, "auth.contract.ts");
+  await writeFile(filePath, TAGGED_CONTRACT_SOURCE);
+
+  try {
+    const { tests } = await discoverTestsFromFile(filePath);
+
+    // Instance defaults (.with tags) + contract-level tags — resolved, not [].
+    const plain = tests.find((t) => t.id === "auth.sign-in.email.validStagingCredentials")!;
+    expect(plain.tags).toEqual(["dogfood", "staging", "dashboard-api", "auth"]);
+
+    // Plus the case's own tag, same merge order the CLI/SDK use.
+    const caseSpecific = tests.find((t) => t.id === "auth.sign-in.email.caseSpecific")!;
+    expect(caseSpecific.tags).toEqual(["dogfood", "staging", "dashboard-api", "auth", "case-only"]);
+
+    // Plus the synthetic requires:/default-run: tags (mirrors CLI's
+    // discoverTests — a non-headless case with no explicit defaultRun also
+    // defaults to opt-in).
+    const browserOnly = tests.find((t) => t.id === "auth.sign-in.email.browserOnly")!;
+    expect(browserOnly.tags).toEqual([
+      "dogfood",
+      "staging",
+      "dashboard-api",
+      "auth",
+      "requires:browser",
+      "default-run:opt-in",
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("discoverTestsFromFile returns empty for contract file with no cases", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mcp-contract-empty-"));
   const filePath = join(dir, "empty.contract.ts");

@@ -591,23 +591,39 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
 
     const result = await sharedExtractFromFile(absolutePath);
     if (result.contracts.length > 0) {
-      tests = result.contracts.flatMap((c) =>
-        c.cases
+      tests = result.contracts.flatMap((c) => {
+        // Resolved tags = contract-level tags (already merged with any
+        // `.with(...)` scoped-factory defaults by the SDK's mergeHttpDefaults)
+        // + per-case tags + synthetic requires/defaultRun tags. Mirrors the
+        // CLI's discoverTests (cli/src/commands/run.ts) so MCP discovery
+        // exposes the same resolved tags as CLI run / Cloud upload — GLU-130
+        // (MCP previously hardcoded `tags: []`, dropping everything).
+        const contractTags = c.tags ?? [];
+        return c.cases
           // Non-runnable cases (direction: "inbound", design §9.5): the SDK
           // registered no Test — never advertise them as runnable (codex I2 R1).
           .filter((cas) => cas.runnable !== false)
-          .map((cas) => ({
-          exportName: c.exportName,
-          id: `${c.id}.${cas.key}`,
-          name: `${c.target} — ${cas.key}`,
-          skip: cas.lifecycle !== "active",
-          only: false,
-          tags: [],
-          requires: cas.requires,
-          defaultRun: cas.defaultRun,
-          deferred: cas.deferredReason,
-        })),
-      );
+          .map((cas) => {
+            const caseTags = cas.tags ?? [];
+            const requires = cas.requires ?? "headless";
+            const defaultRun =
+              cas.defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
+            const runtimeTags: string[] = [];
+            if (requires !== "headless") runtimeTags.push(`requires:${requires}`);
+            if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
+            return {
+              exportName: c.exportName,
+              id: `${c.id}.${cas.key}`,
+              name: `${c.target} — ${cas.key}`,
+              skip: cas.lifecycle !== "active",
+              only: false,
+              tags: [...contractTags, ...caseTags, ...runtimeTags],
+              requires: cas.requires,
+              defaultRun: cas.defaultRun,
+              deferred: cas.deferredReason,
+            };
+          });
+      });
     } else if (result.errors.length > 0) {
       // Runtime import failed — try static regex fallback only for HTTP-only files.
       // If the file contains ANY non-HTTP protocol usage, fail closed for the
@@ -626,17 +642,30 @@ export async function discoverTestsFromFile(filePath: string): Promise<{
           contract.cases
             // Static-fallback mirror of the runnable filter above.
             .filter((c) => c.direction !== "inbound")
-            .map((c) => ({
-            exportName: contract.exportName,
-            id: `${contract.contractId}.${c.key}`,
-            name: `${contract.endpoint} — ${c.key}`,
-            skip: !!c.deferred || !!c.deprecated,
-            only: false,
-            tags: [],
-            requires: c.requires,
-            defaultRun: c.defaultRun,
-            deferred: c.deferred,
-          })),
+            .map((c) => {
+              // ContractStaticMeta/ContractCaseStaticMeta (regex/AST fallback,
+              // used only when the runtime import fails) don't carry contract
+              // or case `tags` — the fallback can still emit the same
+              // synthetic requires/defaultRun tags CLI's static fallback does
+              // (cli/src/commands/run.ts), which is the resolvable subset here.
+              const requires = c.requires ?? "headless";
+              const defaultRun =
+                c.defaultRun ?? (requires !== "headless" ? "opt-in" : "always");
+              const runtimeTags: string[] = [];
+              if (requires !== "headless") runtimeTags.push(`requires:${requires}`);
+              if (defaultRun === "opt-in") runtimeTags.push("default-run:opt-in");
+              return {
+                exportName: contract.exportName,
+                id: `${contract.contractId}.${c.key}`,
+                name: `${contract.endpoint} — ${c.key}`,
+                skip: !!c.deferred || !!c.deprecated,
+                only: false,
+                tags: runtimeTags,
+                requires: c.requires,
+                defaultRun: c.defaultRun,
+                deferred: c.deferred,
+              };
+            }),
         );
       } else {
         // Neither runtime nor static found contracts — return structured errors
