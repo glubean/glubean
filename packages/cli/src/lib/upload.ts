@@ -312,6 +312,19 @@ function createUploadReceipt(options: UploadOptions): UploadReceipt {
 }
 
 /**
+ * Strip trailing slashes from `apiUrl` before appending a `/v1/...` path —
+ * an `--api-url` / `GLUBEAN_API_URL` with a trailing slash would otherwise
+ * double-slash the request (`https://host//v1/...`), which Hono's exact
+ * segment router 404s instead of matching `/v1/projects/...` (GLU-61 /
+ * GLU-109). `resolveApiUrl` (auth.ts) already normalizes its return value,
+ * so this is normally a no-op — kept here so every `/v1/...` builder in this
+ * file stays self-consistent even if called with a raw, un-normalized URL.
+ */
+function normalizeApiUrl(apiUrl: string): string {
+  return apiUrl.replace(/\/+$/, "");
+}
+
+/**
  * Canonical location of an uploaded run — its platform API resource URL
  * (`…/v1/projects/{projectId}/targets/{targetId}/runs/{runId}`). The dashboard
  * run-detail page doesn't exist yet (M2), and app-next has no URL-addressable
@@ -326,7 +339,7 @@ function buildRunUrl(
   targetId: string,
   runId: string,
 ): string {
-  const base = apiUrl.replace(/\/+$/, "");
+  const base = normalizeApiUrl(apiUrl);
   return `${base}/v1/projects/${projectId}/targets/${targetId}/runs/${runId}`;
 }
 
@@ -594,7 +607,7 @@ export async function uploadToCloud(
     environment: resolveUploadEnvironment(options.envFile),
   };
 
-  const runsEndpoint = `${apiUrl}/v1/projects/${projectId}/targets/${targetId}/runs`;
+  const runsEndpoint = `${normalizeApiUrl(apiUrl)}/v1/projects/${projectId}/targets/${targetId}/runs`;
 
   let runId: string;
   let runUrl: string;
@@ -830,7 +843,7 @@ async function uploadArtifacts(
   form: FormData,
 ): Promise<ArtifactUploadOutcome> {
   const resp = await fetchWithRetry(
-    `${apiUrl}/v1/projects/${projectId}/targets/${targetId}/runs/${runId}/artifacts`,
+    `${normalizeApiUrl(apiUrl)}/v1/projects/${projectId}/targets/${targetId}/runs/${runId}/artifacts`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },

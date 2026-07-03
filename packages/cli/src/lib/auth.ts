@@ -129,6 +129,23 @@ export async function resolveTargetId(
 const DEFAULT_PROJECT_PREFIX = "proj_default_";
 
 /**
+ * Strip trailing slashes from a resolved `apiUrl` before appending a
+ * `/v1/...` path segment. Every URL builder in this file — and the real
+ * upload POST in `upload.ts` — string-concatenates `${apiUrl}/v1/...`. An
+ * `--api-url` / `GLUBEAN_API_URL` value with a trailing slash (a common
+ * copy-paste artifact, e.g. copied from a browser address bar) would
+ * otherwise produce `https://host//v1/projects/...`. Hono's router matches
+ * path segments exactly and does NOT collapse a leading empty segment from a
+ * double slash, so that request 404s instead of matching `/v1/projects/:id`
+ * (GLU-61 / GLU-109). Matches the normalization `upload.ts`'s `buildRunUrl`
+ * and `sync.ts` already do — this makes every `/v1/*` URL builder in the
+ * package consistent, so preflight and the real upload always agree.
+ */
+function normalizeApiUrl(apiUrl: string): string {
+  return apiUrl.replace(/\/+$/, "");
+}
+
+/**
  * Resolve the project's DEFAULT target id when no explicit target is configured.
  * The ingest path is `…/targets/{targetId}/runs`, so the CLI must carry a
  * concrete id (there is no null-target ingest, plan D1).
@@ -151,7 +168,7 @@ export async function resolveDefaultTargetId(
     return `tgt_default_${projectId.slice(DEFAULT_PROJECT_PREFIX.length)}`;
   }
   try {
-    const resp = await fetch(`${apiUrl}/v1/projects/${projectId}/targets`, {
+    const resp = await fetch(`${normalizeApiUrl(apiUrl)}/v1/projects/${projectId}/targets`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) return null;
@@ -228,7 +245,7 @@ export function checkUploadAuth(
   projectId: string,
   token: string,
 ): Promise<UploadAuthResult> {
-  return checkResource(`${apiUrl}/v1/projects/${projectId}`, token);
+  return checkResource(`${normalizeApiUrl(apiUrl)}/v1/projects/${projectId}`, token);
 }
 
 /**
@@ -243,21 +260,28 @@ export function checkTargetInProject(
   targetId: string,
   token: string,
 ): Promise<UploadAuthResult> {
-  return checkResource(`${apiUrl}/v1/projects/${projectId}/targets/${targetId}`, token);
+  return checkResource(`${normalizeApiUrl(apiUrl)}/v1/projects/${projectId}/targets/${targetId}`, token);
 }
 
+/**
+ * Resolve the platform/upload API URL. The RETURNED value is already
+ * trailing-slash-normalized (see `normalizeApiUrl`) so every caller — the
+ * preflight checks above, `upload.ts`'s real POST, `sync.ts`, `load.ts` —
+ * builds its `/v1/...` request URL from the same clean base, whether or not
+ * that caller remembers to normalize again itself.
+ */
 export async function resolveApiUrl(
   options: AuthOptions,
   sources?: ProjectAuthSources,
 ): Promise<string> {
-  if (options.apiUrl) return options.apiUrl;
+  if (options.apiUrl) return normalizeApiUrl(options.apiUrl);
   const env = process.env.GLUBEAN_API_URL;
-  if (env) return env;
+  if (env) return normalizeApiUrl(env);
   const fileVar = sources?.envFileVars?.["GLUBEAN_API_URL"];
-  if (fileVar) return fileVar;
-  if (sources?.cloudConfig?.apiUrl) return sources.cloudConfig.apiUrl;
+  if (fileVar) return normalizeApiUrl(fileVar);
+  if (sources?.cloudConfig?.apiUrl) return normalizeApiUrl(sources.cloudConfig.apiUrl);
   const creds = await readCredentials();
-  return creds?.apiUrl ?? DEFAULT_API_URL;
+  return normalizeApiUrl(creds?.apiUrl ?? DEFAULT_API_URL);
 }
 
 /**

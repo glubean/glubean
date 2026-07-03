@@ -1106,7 +1106,10 @@ export async function runCommand(
       } else if (check.status === 404) {
         console.error(`${colors.red}Error: project ${preProject} not found (404).${colors.reset}`);
         console.error(
-          `${colors.dim}Check that --project / GLUBEAN_PROJECT_ID is a real project id and --api-url / GLUBEAN_API_URL points at the right server.${colors.reset}`,
+          `${colors.dim}Preflight GET: ${preApiUrl}/v1/projects/${preProject}${colors.reset}`,
+        );
+        console.error(
+          `${colors.dim}Check that --project / GLUBEAN_PROJECT_ID is a real project id, that --api-url / GLUBEAN_API_URL has no stray trailing slash, and that it points at the platform ingest API (the token-only \`/v1/*\` service) — not a dashboard/session-auth host, which has no \`/v1\` routes and 404s here too.${colors.reset}`,
         );
       } else if (check.status === 403) {
         console.error(`${colors.red}Error: access to project ${preProject} is forbidden (403).${colors.reset}`);
@@ -1148,7 +1151,10 @@ export async function runCommand(
             `${colors.red}Error: target ${preTarget} not found in project ${preProject} (404).${colors.reset}`,
           );
           console.error(
-            `${colors.dim}Check upload.targetId / GLUBEAN_TARGET_ID / --upload-target.${colors.reset}`,
+            `${colors.dim}Preflight GET: ${preApiUrl}/v1/projects/${preProject}/targets/${preTarget}${colors.reset}`,
+          );
+          console.error(
+            `${colors.dim}Check upload.targetId / GLUBEAN_TARGET_ID / --upload-target, and that --api-url / GLUBEAN_API_URL points at the platform ingest API.${colors.reset}`,
           );
         } else if (tcheck.status === 401) {
           console.error(`${colors.red}Error: authentication failed validating the target (401).${colors.reset}`);
