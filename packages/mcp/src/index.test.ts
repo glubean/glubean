@@ -454,6 +454,13 @@ test("runLocalTestsFromFile redacts secrets from assertion.actual/expected and l
   // KEY-based masking (`log.data` scope's `sensitiveKeys`), which the first
   // fix pass omitted. Proves the scope-level fix, not just the pattern one.
   const OPAQUE_SESSION_ID = "opaque-session-id-no-known-pattern";
+  // codex R3 P1: short enough that the SDK's auto-generated assertion
+  // `message` (`inspect()`, packages/sdk/src/expect.ts, caps embedded JSON
+  // at 64 chars) embeds it as INTACT, parseable JSON — proving the
+  // message-scrubbing fix, not just actual/expected redaction. (The bigger
+  // `body` object above gets truncated mid-JSON by `inspect()`'s cap before
+  // it ever reaches the message, so it can't exercise this path.)
+  const COMPACT_OPAQUE_SECRET = "opaque-secret-nopattern";
   const server = createServer((req, res) => {
     res.writeHead(200, {
       "content-type": "application/json",
@@ -503,6 +510,10 @@ export const loginTest = test("login-test", async (ctx) => {
   // — the credential sits under a recognized key but the whole payload is a
   // string, not an object.
   ctx.log("login response raw text", JSON.stringify(body));
+  // codex R3 P1: a COMPACT object-shaped assertion whose auto-generated
+  // \`message\` embeds the credential as intact JSON (small enough to survive
+  // inspect()'s 64-char cap unmangled).
+  ctx.expect({ token: "${COMPACT_OPAQUE_SECRET}" }).toEqual({ token: "${COMPACT_OPAQUE_SECRET}" });
 });`,
     );
 
@@ -531,6 +542,9 @@ export const loginTest = test("login-test", async (ctx) => {
     // assertion below) is ONLY caught by key-based masking on the
     // `assertion.actual`/`assertion.expected` scopes.
     expect(assertionSerialized).not.toContain(OPAQUE_SESSION_ID);
+    // codex R3 P1: the SAME opaque credential embedded in the SDK's
+    // auto-generated `message` (not just `actual`/`expected`).
+    expect(assertionSerialized).not.toContain(COMPACT_OPAQUE_SECRET);
     expect(logSerialized).not.toContain(SESSION_JWT);
     expect(logSerialized).not.toContain(LOGIN_EMAIL);
     // codex R1 P1: the opaque, non-pattern-matching credential is ONLY
@@ -539,7 +553,7 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(logSerialized).not.toContain(OPAQUE_SESSION_ID);
 
     const passedAssertions = allAssertions.filter((a) => a.passed === true);
-    expect(passedAssertions.length).toBeGreaterThanOrEqual(2);
+    expect(passedAssertions.length).toBeGreaterThanOrEqual(3);
 
     // ── Structure/pass-state survives (not a blanket wipe): the assertion
     //    that compared the login email still shows as passed, and both its
@@ -561,6 +575,18 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(bodyActual.sessionId).not.toBe(OPAQUE_SESSION_ID);
     expect(bodyExpected.token).not.toBe(SESSION_JWT);
     expect(bodyExpected.sessionId).not.toBe(OPAQUE_SESSION_ID);
+
+    // ── codex R3 P1: the COMPACT assertion's auto-generated `message` embeds
+    //    the actual/expected as intact JSON (small enough to survive
+    //    inspect()'s cap) — must be scrubbed there too, not just in
+    //    actual/expected. The `token` KEY itself isn't secret and still
+    //    appears in the message; only the VALUE is masked.
+    const compactAssertion = passedAssertions[2];
+    expect(compactAssertion.message).not.toContain(COMPACT_OPAQUE_SECRET);
+    expect(compactAssertion.message).toContain("token");
+    expect((compactAssertion.actual as Record<string, unknown>).token).not.toBe(
+      COMPACT_OPAQUE_SECRET,
+    );
 
     // ── Log data: key-based masking (token/sessionId) survives structure —
     //    `ok` stays visible, only the credential-shaped fields are replaced.
@@ -607,6 +633,7 @@ export const loginTest = test("login-test", async (ctx) => {
     expect(eventsSerialized).not.toContain(SESSION_JWT);
     expect(eventsSerialized).not.toContain(LOGIN_EMAIL);
     expect(eventsSerialized).not.toContain(OPAQUE_SESSION_ID);
+    expect(eventsSerialized).not.toContain(COMPACT_OPAQUE_SECRET);
     expect(events.some((e) => e.type === "assertion")).toBe(true);
     expect(events.some((e) => e.type === "log")).toBe(true);
   } finally {

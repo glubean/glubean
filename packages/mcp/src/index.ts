@@ -365,17 +365,90 @@ export function redactMcpTrace(trace: unknown, config: McpTraceConfig): unknown 
 // `BUILTIN_SCOPES`, not just the trace subset) — these helpers just call
 // `redactEvent` at the accumulation points that were missing it, matching the
 // scope-per-event-type dispatch `redactEvent` already does internally.
+// GLU-129 (codex R3 P1): `ctx.expect(...)` auto-generates `message` by
+// JSON-stringifying `actual`/`expected` INTO the message text itself
+// (`Expectation._report()`/`inspect()`, packages/sdk/src/expect.ts —
+// `inspect()` uses real `JSON.stringify` for non-primitive values, so a
+// short object embeds as valid JSON: `expected {"token":"secret"} to equal
+// {"token":"secret"}`). Redacting `actual`/`expected` alone (above) leaves
+// that SAME opaque, key-shaped credential sitting in plaintext inside
+// `message` — `assertion.message`'s `raw-string` handler only pattern-scans,
+// it has no notion of keys. `message` isn't independently-authored free text
+// here (unlike a `ctx.log(message, ...)` label): it's a rendering the SDK
+// derived FROM actual/expected, so scrubbing every JSON-object/array-shaped
+// substring through the SAME (now key-aware) `assertion.actual` scope before
+// splicing it back is a mechanical inverse of how it was built — not a new
+// redaction policy. Bounded cost: `inspect()` caps embedded JSON at 64 chars
+// and assertion messages are short, so this never scans a large body.
+function redactJsonLikeSubstrings(text: string): string {
+  let result = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "{" || ch === "[") {
+      const close = ch === "{" ? "}" : "]";
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      let j = i;
+      for (; j < text.length; j++) {
+        const c = text[j];
+        if (inString) {
+          if (escape) escape = false;
+          else if (c === "\\") escape = true;
+          else if (c === '"') inString = false;
+          continue;
+        }
+        if (c === '"') { inString = true; continue; }
+        if (c === ch) depth++;
+        else if (c === close) {
+          depth--;
+          if (depth === 0) { j++; break; }
+        }
+      }
+      const candidate = text.slice(i, j);
+      let handled = false;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed !== null && typeof parsed === "object") {
+          const redacted = redactEvent(
+            { type: "assertion", actual: parsed },
+            MCP_TRACE_REDACTION_SCOPES,
+            "partial",
+            64,
+          ) as unknown as { actual: unknown };
+          result += JSON.stringify(redacted.actual);
+          i = j;
+          handled = true;
+        }
+      } catch {
+        // Not valid/complete JSON (e.g. `inspect()` truncated it mid-object)
+        // — fall through and copy verbatim; still covered by the pattern
+        // scan `redactEvent` already ran over the whole message.
+      }
+      if (handled) continue;
+    }
+    result += ch;
+    i++;
+  }
+  return result;
+}
+
 function redactMcpAssertionFields(fields: {
   message: string;
   actual?: unknown;
   expected?: unknown;
 }): { message: string; actual?: unknown; expected?: unknown } {
-  return redactEvent(
+  const redacted = redactEvent(
     { type: "assertion", ...fields },
     MCP_TRACE_REDACTION_SCOPES,
     "partial",
     64,
   ) as unknown as typeof fields;
+  return {
+    ...redacted,
+    message: redactJsonLikeSubstrings(redacted.message),
+  };
 }
 
 function redactMcpLogFields(fields: {
