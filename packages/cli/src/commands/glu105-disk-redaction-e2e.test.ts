@@ -44,6 +44,16 @@ const BODY_PASSWORD_SECRET = "GLU105-BODY-PASSWORD-SECRET-9c1b4e7a3d";
 const COOKIE_SECRET = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
 const RESPONSE_BEARER_SECRET = "GLU105-RESPONSE-BEARER-SECRET-5e0b8a3f7d";
 
+// Non-event payload secrets (codex R3 P1): these ride NON-event fields that
+// also land on the local-disk result JSON, not the redacted event stream.
+//   • CMD_TOKEN_SECRET flows through `--token` → captured verbatim in
+//     `context.command` (raw argv). The command field is DROPPED from the
+//     result payload entirely, so the token must vanish from disk.
+//   • META_TOKEN_SECRET is a github-token-shaped `--meta` value → lands in
+//     `customMetadata`; the value-pattern redaction must mask it on disk.
+const CMD_TOKEN_SECRET = "glb_GLU105cmdtokensecret_do_not_persist_zzz";
+const META_TOKEN_SECRET = "ghp_GLU105metaSecretAAAAAAAAAAAAAAAAAAAAAAAA";
+
 function pkgJson(name: string): string {
   return JSON.stringify(
     {
@@ -164,6 +174,13 @@ test(
           "--emit-full-trace",
           "--result-json",
           "result.json",
+          // Non-event channels (codex R3 P1): --token rides context.command
+          // (raw argv), --meta rides customMetadata. Both hit the disk result
+          // JSON, which is NOT part of the redacted event stream.
+          "--token",
+          CMD_TOKEN_SECRET,
+          "--meta",
+          `authToken=${META_TOKEN_SECRET}`,
         ],
         { cwd: dir },
       );
@@ -189,6 +206,29 @@ test(
       expect(resultJsonPath, "CLI must print the --result-json output path").toBeTruthy();
       const resultJson = await readFile(resultJsonPath!, "utf-8");
       assertNoSecretsIn("--result-json output", resultJson);
+
+      // ── 2b. Non-event payload fields (codex R3 P1) — context.command /
+      //        customMetadata land on the SAME result-JSON sinks but aren't
+      //        part of the redacted event stream. ──
+      for (const [label, content] of [
+        [".glubean/last-run.result.json", lastRun],
+        ["--result-json output", resultJson],
+      ] as const) {
+        expect(content, `${label} must not contain the raw --token argv secret`)
+          .not.toContain(CMD_TOKEN_SECRET);
+        expect(content, `${label} must not contain the raw --meta value secret`)
+          .not.toContain(META_TOKEN_SECRET);
+      }
+      const parsedLastRun = JSON.parse(lastRun) as {
+        context?: { command?: unknown };
+        customMetadata?: Record<string, unknown>;
+      };
+      // `context.command` (raw argv, carries the token) is dropped entirely.
+      expect(parsedLastRun.context?.command).toBeUndefined();
+      // customMetadata IS persisted (redacted), proving --meta was captured
+      // and the assertion above isn't vacuous.
+      expect(parsedLastRun.customMetadata).toBeDefined();
+      expect(JSON.stringify(parsedLastRun.customMetadata)).not.toContain(META_TOKEN_SECRET);
 
       // ── 3. `.glubean/traces.json` (URL query-string channel) ──
       const tracesJson = await readFile(join(dir, ".glubean", "traces.json"), "utf-8");

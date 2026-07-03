@@ -2594,8 +2594,28 @@ export async function runCommand(
     ...(effectiveRun.envFile && { envFile: effectiveRun.envFile }),
   };
 
+  // GLU-105: the non-event payload fields carry secrets too, and land on the
+  // SAME local-disk sinks as the events (.glubean/last-run.result.json,
+  // --result-json) — not just the upload blob. Scrub them HERE, once, so disk
+  // and upload share one redacted payload instead of the disk file getting the
+  // raw version:
+  //   • `context.command` is raw argv (`--token glb_…`, `--input-json
+  //     '{"password":…}'`) → dropped outright (value patterns can't catch a
+  //     positional argv token, so masking is not enough — the upload path
+  //     drops it for the same reason).
+  //   • the rest of `context` + user-supplied `customMetadata` (--meta) →
+  //     deep-redacted via the shared redaction rules.
+  const redactNonEvent = (v: unknown): unknown =>
+    redactValue(v, {
+      globalRules: effectiveRedaction.globalRules,
+      replacementFormat: effectiveRedaction.replacementFormat,
+      maxDepth: 64,
+    });
+  const { command: _rawCommand, ...safeContext } =
+    (runContext as Record<string, unknown>) ?? {};
+
   const resultPayload = {
-    context: runContext,
+    context: redactNonEvent(safeContext),
     target: targetDisplay,
     files: testFiles.map((f) => relative(process.cwd(), f)),
     runAt: runStartLocal,
@@ -2628,7 +2648,9 @@ export async function runCommand(
       filePath: relative(rootDir, r.filePath),
     })),
     ...(thresholdSummary && { thresholds: thresholdSummary }),
-    ...(options.meta && Object.keys(options.meta).length > 0 && { customMetadata: options.meta }),
+    ...(options.meta && Object.keys(options.meta).length > 0
+      ? { customMetadata: redactNonEvent(options.meta) as Record<string, unknown> }
+      : {}),
   };
   const resultJson = JSON.stringify(resultPayload, null, 2);
 
@@ -2747,28 +2769,12 @@ export async function runCommand(
         process.exit(1);
       } else {
         // ── Result blob: the full ExecutionResult, run-data ONLY (per D7 the
-        //    contract/workflow projection is a separate c/f line). `resultPayload.tests[].events`
-        //    are already scope-redacted (collected that way — see above); the
-        //    rest of the payload can ALSO carry secrets, so scrub it too:
-        //    `context.command` is raw argv (e.g. `--token glb_…`,
-        //    `--input-json '{"password":…}'`) → dropped outright; `customMetadata`
-        //    is user-supplied → deep-redacted. Without this the blob would store
-        //    those verbatim in Cloud.
-        const { command: _rawCommand, ...safeContext } =
-          (runContext as Record<string, unknown>) ?? {};
-        const redactNonEvent = (v: unknown): unknown =>
-          redactValue(v, {
-            globalRules: effectiveRedaction.globalRules,
-            replacementFormat: effectiveRedaction.replacementFormat,
-            maxDepth: 64,
-          });
-        const redactedResult = {
-          ...resultPayload,
-          context: redactNonEvent(safeContext),
-          ...(resultPayload.customMetadata
-            ? { customMetadata: redactNonEvent(resultPayload.customMetadata) }
-            : {}),
-        };
+        //    contract/workflow projection is a separate c/f line). `resultPayload`
+        //    is ALREADY fully redacted — events scope-redacted at collection,
+        //    and context (command dropped) + customMetadata deep-redacted at
+        //    build (GLU-105). Upload the same payload the disk got; no second,
+        //    upload-only redaction pass that could drift from what landed on disk.
+        const redactedResult = resultPayload;
 
         // ── Analytics substrate. Server derive-on-ingest (plan D2) isn't built
         //    yet, so the CLI sends per-test rows + metric points explicitly.
