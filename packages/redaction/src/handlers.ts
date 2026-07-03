@@ -50,19 +50,18 @@ export const rawStringHandler: RedactionHandler = {
 
 // ── url-query handler ────────────────────────────────────────────────────────
 
-/** Synthetic base for parsing RELATIVE URLs (`/login?token=…`) — a host no
- *  real request can use, so it can never be mistaken for a live origin. */
-const RELATIVE_URL_BASE = "http://redaction.invalid";
-
 /**
- * Parses a URL string, redacts query parameter names/values using the engine,
- * then serializes back to a URL string.
+ * Redacts query parameter names/values in a URL string.
  *
- * GLU-104 (codex R3 P2): handles RELATIVE / query-only URLs too
- * (`/login?token=secret`, `?token=secret`). `new URL()` throws on those, so
- * key-based query redaction never ran and a relative `requestedUrl` leaked its
- * token. We retry with a synthetic base and strip it back off on output so the
- * relative form is preserved.
+ * GLU-104 (codex R3/R4): works for ANY URL shape — absolute, relative
+ * (`/login?token=…`), query-only (`?token=…`), bare-relative
+ * (`todos/1?token=…`), or protocol-relative (`//host/p?token=…`) — WITHOUT a
+ * URL parser (which throws on the relative shapes and, via reconstruct+slice,
+ * mangled query-only / protocol-relative forms). We operate purely on the
+ * ORIGINAL string: split off the `?query` component (respecting a `#fragment`),
+ * redact its params by key, and splice the result back so the prefix and
+ * fragment are preserved byte-for-byte. Only the query values are re-encoded,
+ * and only when something was actually redacted.
  */
 export const urlQueryHandler: RedactionHandler = {
   name: "url-query",
@@ -71,32 +70,31 @@ export const urlQueryHandler: RedactionHandler = {
       return { value, redacted: false, details: [] };
     }
 
-    let url: URL;
-    let relative = false;
-    try {
-      url = new URL(value);
-    } catch {
-      try {
-        url = new URL(value, RELATIVE_URL_BASE);
-        relative = true;
-      } catch {
-        // Not URL-shaped at all — fall back to raw string redaction.
-        return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
-      }
+    const qIndex = value.indexOf("?");
+    const hashIndex = value.indexOf("#");
+    // No query component (no `?`, or the `?` sits inside the fragment) — value-
+    // pattern-scan the whole string so a token embedded in the path is still
+    // caught.
+    if (qIndex === -1 || (hashIndex !== -1 && hashIndex < qIndex)) {
+      return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
     }
 
-    // Collect all entries first to preserve multiplicity (e.g., ?token=a&token=b)
-    const entries = [...url.searchParams.entries()];
+    const prefix = value.slice(0, qIndex); // scheme+host+path OR relative path OR ""
+    const afterQ = value.slice(qIndex + 1);
+    const hashInAfter = afterQ.indexOf("#");
+    const queryStr = hashInAfter === -1 ? afterQ : afterQ.slice(0, hashInAfter);
+    const fragment = hashInAfter === -1 ? "" : afterQ.slice(hashInAfter); // includes "#"
+
+    const params = new URLSearchParams(queryStr);
+    const entries = [...params.entries()];
     if (entries.length === 0) {
-      // No query params to key on — value-pattern-scan the whole string so a
-      // token embedded in the path is still caught (matches the prior
-      // no-query fallback for non-absolute inputs).
+      // `?` with no parseable params — scan the whole string instead.
       return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
     }
 
     let didRedact = false;
     const details: RedactionResult["details"] = [];
-    const redactedEntries: [string, string][] = [];
+    const out = new URLSearchParams();
 
     for (const [key, raw] of entries) {
       const result = engine.redact(
@@ -105,11 +103,11 @@ export const urlQueryHandler: RedactionHandler = {
       );
       if (result.redacted) {
         const redacted = result.value as Record<string, unknown>;
-        redactedEntries.push([key, String(redacted[key] ?? raw)]);
+        out.append(key, String(redacted[key] ?? raw));
         didRedact = true;
         details.push(...result.details);
       } else {
-        redactedEntries.push([key, raw]);
+        out.append(key, raw);
       }
     }
 
@@ -119,22 +117,11 @@ export const urlQueryHandler: RedactionHandler = {
       return { value, redacted: false, details };
     }
 
-    // Rebuild URL with redacted params, preserving multiplicity
-    const redactedUrl = new URL(url.origin + url.pathname);
-    for (const [k, v] of redactedEntries) {
-      redactedUrl.searchParams.append(k, v);
-    }
-    // Preserve hash
-    redactedUrl.hash = url.hash;
-
-    // For a relative input, strip the synthetic origin back off so the output
-    // stays relative (`/login?token=***`, not `http://redaction.invalid/...`).
-    const serialized = relative
-      ? redactedUrl.toString().slice(url.origin.length)
-      : redactedUrl.toString();
-
+    // Splice the redacted query back into the original prefix + fragment, so
+    // the URL shape (relative / query-only / protocol-relative / hash) is
+    // preserved exactly.
     return {
-      value: serialized,
+      value: `${prefix}?${out.toString()}${fragment}`,
       redacted: true,
       details,
     };

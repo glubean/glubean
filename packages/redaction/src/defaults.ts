@@ -148,7 +148,16 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     // recognizably-named key (`{"token":"sk_live_..."}`, `{"access_token":...}`)
     // passed through whenever its value matched no pattern (confirmed
     // empirically). A login/refresh response carries the same secret shapes a
-    // request does.
+    // request does — this list mirrors `http.request.body` (which has carried
+    // `token` since before GLU-104), so request/response redact symmetrically.
+    //
+    // Note on `token`: sensitive-key matching is substring (sensitiveKeysPlugin),
+    // so `token` also masks compound fields like `tokenCount`/`tokensUsed`
+    // (codex R4). This is INTENTIONAL and conservative for a redaction library:
+    // over-masking a usage counter in a redacted debug/upload view is strictly
+    // preferable to leaking an opaque `{"token":"<credential>"}` whose value
+    // matches no pattern. A precise (suffix/word-boundary) matcher would be a
+    // general redaction-engine change across all consumers, out of scope here.
     target: "data.responseBody",
     handler: "body",
     rules: {
@@ -188,12 +197,25 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     target: "data.metadata",
     handler: "json",
     rules: {
+      // Superset of the auth-header keys AND the request/response body keys —
+      // metadata can carry either shape (gRPC auth headers OR credential-valued
+      // fields). codex R4 P2: `password`/`private_key`/`sessionid` etc. were
+      // missing, so a `requestMetadata.password` leaked.
       sensitiveKeys: [
         "authorization",
         "cookie",
         "proxy-authorization",
         "token",
         "secret",
+        "password",
+        "passwd",
+        "client_secret",
+        "client-secret",
+        "private_key",
+        "privatekey",
+        "private-key",
+        "sessionid",
+        "session_id",
         "api_key",
         "api-key",
         "apikey",

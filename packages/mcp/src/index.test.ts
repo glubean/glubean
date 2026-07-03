@@ -634,6 +634,25 @@ test("redactMcpTrace masks query secrets in a relative requestedUrl (codex R3 P2
   expect((redacted.requestedUrl as string).startsWith("/login?")).toBe(true);
 });
 
+test("redactMcpTrace masks credential-valued gRPC metadata fields (codex R4 P2)", () => {
+  const trace = {
+    protocol: "grpc",
+    metadata: {
+      service: "AuthService",
+      requestMetadata: {
+        password: "META-PLAIN-PASSWORD",
+        private_key: "META-PLAIN-PRIVATE-KEY",
+        sessionid: "META-PLAIN-SESSIONID",
+      },
+    },
+  };
+  const s = JSON.stringify(redactMcpTrace(trace, {}));
+  expect(s).not.toContain("META-PLAIN-PASSWORD");
+  expect(s).not.toContain("META-PLAIN-PRIVATE-KEY");
+  expect(s).not.toContain("META-PLAIN-SESSIONID");
+  expect(s).toContain("AuthService");
+});
+
 test("redactMcpTrace masks a JSON body mislabelled as a text string (codex R2 P2)", () => {
   // The runner keeps a text/plain response body as a raw string; if it is
   // actually JSON, key rules must still apply.

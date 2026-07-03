@@ -334,8 +334,38 @@ describe("urlQueryHandler", () => {
       { scopeId: "test", scopeName: "Test" },
       engine,
     );
-    expect(result.value as string).not.toContain("secret456");
+    const out = result.value as string;
+    expect(out).not.toContain("secret456");
+    expect(out.startsWith("?")).toBe(true); // no spurious leading "/"
     expect(result.redacted).toBe(true);
+  });
+
+  // codex R4 P3: URL SHAPE must be preserved exactly across relative forms.
+  test("preserves URL shape (bare-relative, protocol-relative, fragment)", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const run = (v: string) =>
+      urlQueryHandler.process(v, { scopeId: "t", scopeName: "T" }, engine).value as string;
+
+    // Bare-relative path kept; fragment kept; page kept; token gone.
+    const bare = run("todos/1?token=secret&page=2#frag");
+    expect(bare.startsWith("todos/1?")).toBe(true);
+    expect(bare).toContain("page=2");
+    expect(bare).toContain("#frag");
+    expect(bare).not.toContain("secret");
+
+    // Protocol-relative //host preserved (not dropped).
+    const protoRel = run("//api.example.com/p?token=secret");
+    expect(protoRel.startsWith("//api.example.com/p?")).toBe(true);
+    expect(protoRel).not.toContain("secret");
+
+    // A `?` inside the fragment is NOT a query — string is scanned, not spliced.
+    const fragQ = run("/path#section?notaquery");
+    expect(fragQ).toBe("/path#section?notaquery");
   });
 
   test("falls back to engine for non-URL strings", () => {
