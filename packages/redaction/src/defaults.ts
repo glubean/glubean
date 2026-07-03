@@ -93,6 +93,50 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     },
   },
   {
+    id: "http.target",
+    name: "Trace target",
+    event: "trace",
+    // GLU-104 (codex R5 P1): browser network traces set `target`/`name` to
+    // `${method} ${shortPath(url)}` where shortPath includes `u.search`
+    // (packages/browser/src/network.ts), so a query secret leaks via these
+    // fields even though `url` is masked. `url-query` splits on `?`, so the
+    // `${method} ${path}` prefix is preserved and only the query is redacted;
+    // a non-URL target (`get_weather`, `#submit-btn`) is value-pattern-scanned.
+    target: "data.target",
+    handler: "url-query",
+    rules: {
+      sensitiveKeys: [
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "secret",
+        "password",
+      ],
+    },
+  },
+  {
+    id: "http.name",
+    name: "Trace name",
+    event: "trace",
+    target: "data.name",
+    handler: "url-query",
+    rules: {
+      sensitiveKeys: [
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "secret",
+        "password",
+      ],
+    },
+  },
+  {
     id: "http.request.body",
     name: "HTTP request body",
     event: "trace",

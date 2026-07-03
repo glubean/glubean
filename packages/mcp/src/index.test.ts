@@ -634,6 +634,26 @@ test("redactMcpTrace masks query secrets in a relative requestedUrl (codex R3 P2
   expect((redacted.requestedUrl as string).startsWith("/login?")).toBe(true);
 });
 
+test("redactMcpTrace masks query secrets in target/name and URL fragment (codex R5)", () => {
+  const trace = {
+    protocol: "http",
+    method: "GET",
+    // browser network traces embed the query in target/name via shortPath()
+    target: "GET /callback?token=TARGET-SECRET",
+    name: "[browser] GET /callback?token=NAME-SECRET",
+    // OAuth implicit-grant token in the URL fragment
+    url: "https://app.example.com/callback#access_token=FRAGMENT-SECRET&expires_in=3600",
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const s = JSON.stringify(redacted);
+  expect(s).not.toContain("TARGET-SECRET");
+  expect(s).not.toContain("NAME-SECRET");
+  expect(s).not.toContain("FRAGMENT-SECRET");
+  // Non-secret structure preserved.
+  expect((redacted.target as string).startsWith("GET /callback?")).toBe(true);
+  expect(s).toContain("expires_in=3600");
+});
+
 test("redactMcpTrace masks credential-valued gRPC metadata fields (codex R4 P2)", () => {
   const trace = {
     protocol: "grpc",

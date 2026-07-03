@@ -51,17 +51,55 @@ export const rawStringHandler: RedactionHandler = {
 // ── url-query handler ────────────────────────────────────────────────────────
 
 /**
- * Redacts query parameter names/values in a URL string.
+ * Redact the values of sensitive-named params in a `k=v&k2=v2` param string
+ * (a URL query OR an OAuth-implicit fragment). Empty values are left as-is
+ * (nothing to hide — avoids `?token=` → `?token=****`, codex R5). Returns the
+ * re-encoded param string and whether anything changed.
+ */
+function redactParamString(
+  paramStr: string,
+  ctx: HandlerContext,
+  engine: RedactionEngineInterface,
+): { value: string; redacted: boolean; details: RedactionResult["details"] } {
+  const entries = [...new URLSearchParams(paramStr).entries()];
+  if (entries.length === 0) {
+    return { value: paramStr, redacted: false, details: [] };
+  }
+  let didRedact = false;
+  const details: RedactionResult["details"] = [];
+  const out = new URLSearchParams();
+  for (const [key, raw] of entries) {
+    if (raw === "") {
+      out.append(key, ""); // empty value — no secret to mask
+      continue;
+    }
+    const r = engine.redact({ [key]: raw }, { id: ctx.scopeId, name: ctx.scopeName });
+    if (r.redacted) {
+      out.append(key, String((r.value as Record<string, unknown>)[key] ?? raw));
+      didRedact = true;
+      details.push(...r.details);
+    } else {
+      out.append(key, raw);
+    }
+  }
+  return { value: out.toString(), redacted: didRedact, details };
+}
+
+/**
+ * Redacts sensitive params in a URL string — in BOTH the `?query` AND a
+ * `#fragment` when the fragment is `k=v`-shaped (OAuth implicit-grant tokens
+ * live in the fragment: `#access_token=…`, codex R5 P2).
  *
- * GLU-104 (codex R3/R4): works for ANY URL shape — absolute, relative
+ * GLU-104 (codex R3/R4/R5): works for ANY URL shape — absolute, relative
  * (`/login?token=…`), query-only (`?token=…`), bare-relative
  * (`todos/1?token=…`), or protocol-relative (`//host/p?token=…`) — WITHOUT a
- * URL parser (which throws on the relative shapes and, via reconstruct+slice,
- * mangled query-only / protocol-relative forms). We operate purely on the
- * ORIGINAL string: split off the `?query` component (respecting a `#fragment`),
- * redact its params by key, and splice the result back so the prefix and
- * fragment are preserved byte-for-byte. Only the query values are re-encoded,
- * and only when something was actually redacted.
+ * URL parser (which throws on relative shapes and mangled query-only /
+ * protocol-relative forms). We operate purely on the ORIGINAL string: split off
+ * the `?query` and `#fragment` segments, redact each by key, and splice back so
+ * the prefix and non-param structure are preserved. Values are re-encoded only
+ * when something was actually redacted; a URL with no sensitive param is
+ * returned untouched (path/token-shaped secrets are still value-pattern-scanned
+ * via the raw-string fallback).
  */
 export const urlQueryHandler: RedactionHandler = {
   name: "url-query",
@@ -72,59 +110,64 @@ export const urlQueryHandler: RedactionHandler = {
 
     const qIndex = value.indexOf("?");
     const hashIndex = value.indexOf("#");
-    // No query component (no `?`, or the `?` sits inside the fragment) — value-
-    // pattern-scan the whole string so a token embedded in the path is still
-    // caught.
-    if (qIndex === -1 || (hashIndex !== -1 && hashIndex < qIndex)) {
-      return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
+    const hasQuery = qIndex !== -1 && (hashIndex === -1 || qIndex < hashIndex);
+
+    let prefix = value;
+    let queryStr: string | null = null;
+    let fragStr: string | null = null;
+    if (hasQuery) {
+      prefix = value.slice(0, qIndex);
+      const afterQ = value.slice(qIndex + 1);
+      const h = afterQ.indexOf("#");
+      queryStr = h === -1 ? afterQ : afterQ.slice(0, h);
+      if (h !== -1) fragStr = afterQ.slice(h + 1);
+    } else if (hashIndex !== -1) {
+      prefix = value.slice(0, hashIndex);
+      fragStr = value.slice(hashIndex + 1);
     }
 
-    const prefix = value.slice(0, qIndex); // scheme+host+path OR relative path OR ""
-    const afterQ = value.slice(qIndex + 1);
-    const hashInAfter = afterQ.indexOf("#");
-    const queryStr = hashInAfter === -1 ? afterQ : afterQ.slice(0, hashInAfter);
-    const fragment = hashInAfter === -1 ? "" : afterQ.slice(hashInAfter); // includes "#"
+    // Only a `k=v`-shaped fragment carries params worth key-redaction
+    // (`#access_token=…`); a plain anchor (`#section`) is left alone.
+    const fragIsParams = fragStr !== null && fragStr.includes("=");
 
-    const params = new URLSearchParams(queryStr);
-    const entries = [...params.entries()];
-    if (entries.length === 0) {
-      // `?` with no parseable params — scan the whole string instead.
+    // Nothing structured to redact by key → value-pattern-scan the whole
+    // string (catches a token embedded in the path or a non-param fragment).
+    if (!hasQuery && !fragIsParams) {
       return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
     }
 
     let didRedact = false;
     const details: RedactionResult["details"] = [];
-    const out = new URLSearchParams();
 
-    for (const [key, raw] of entries) {
-      const result = engine.redact(
-        { [key]: raw },
-        { id: ctx.scopeId, name: ctx.scopeName },
-      );
-      if (result.redacted) {
-        const redacted = result.value as Record<string, unknown>;
-        out.append(key, String(redacted[key] ?? raw));
+    let outQuery = queryStr;
+    if (hasQuery && queryStr !== null) {
+      const rq = redactParamString(queryStr, ctx, engine);
+      outQuery = rq.value;
+      if (rq.redacted) {
         didRedact = true;
-        details.push(...result.details);
-      } else {
-        out.append(key, raw);
+        details.push(...rq.details);
+      }
+    }
+
+    let outFrag = fragStr;
+    if (fragIsParams && fragStr !== null) {
+      const rf = redactParamString(fragStr, ctx, engine);
+      outFrag = rf.value;
+      if (rf.redacted) {
+        didRedact = true;
+        details.push(...rf.details);
       }
     }
 
     if (!didRedact) {
-      // Nothing sensitive — return the ORIGINAL string untouched (no
-      // reserialization / encoding normalization).
+      // Nothing sensitive — return the ORIGINAL string untouched.
       return { value, redacted: false, details };
     }
 
-    // Splice the redacted query back into the original prefix + fragment, so
-    // the URL shape (relative / query-only / protocol-relative / hash) is
-    // preserved exactly.
-    return {
-      value: `${prefix}?${out.toString()}${fragment}`,
-      redacted: true,
-      details,
-    };
+    let result = prefix;
+    if (hasQuery) result += `?${outQuery ?? ""}`;
+    if (fragStr !== null) result += `#${outFrag ?? ""}`;
+    return { value: result, redacted: true, details };
   },
 };
 
@@ -351,10 +394,21 @@ export const headersHandler: RedactionHandler = {
           continue;
         }
         if (Array.isArray(headerValue)) {
-          const redactedCookies: string[] = [];
+          const redactedCookies: unknown[] = [];
           for (const cookie of headerValue) {
             if (typeof cookie !== "string") {
-              redactedCookies.push(cookie);
+              // Defensive (codex R5): a malformed/manual trace could put a
+              // non-string (e.g. an object carrying a secret) in a set-cookie
+              // array. Don't pass it through raw — deep-redact it.
+              const r = engine.redact(cookie, {
+                id: ctx.scopeId,
+                name: ctx.scopeName,
+              });
+              redactedCookies.push(r.value);
+              if (r.redacted) {
+                didRedact = true;
+                details.push(...r.details);
+              }
               continue;
             }
             const redacted = redactSetCookie(cookie, ctx, engine);

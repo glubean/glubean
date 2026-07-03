@@ -368,6 +368,42 @@ describe("urlQueryHandler", () => {
     expect(fragQ).toBe("/path#section?notaquery");
   });
 
+  // codex R5 P2: OAuth implicit-grant tokens live in the fragment.
+  test("redacts credentials in a k=v URL fragment, preserving non-secret params", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["access_token", "token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const out = urlQueryHandler.process(
+      "https://app/callback#access_token=SECRETA&token=SECRETB&expires_in=3600",
+      { scopeId: "t", scopeName: "T" },
+      engine,
+    ).value as string;
+    expect(out).not.toContain("SECRETA");
+    expect(out).not.toContain("SECRETB");
+    expect(out).toContain("expires_in=3600");
+    expect(out.startsWith("https://app/callback#")).toBe(true);
+  });
+
+  // codex R5 P3: an empty sensitive query value must stay empty, not `****`.
+  test("does not over-mask an empty query value (?token=)", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const out = urlQueryHandler.process(
+      "/x?token=&page=2",
+      { scopeId: "t", scopeName: "T" },
+      engine,
+    );
+    expect(out.value).toBe("/x?token=&page=2");
+    expect(out.redacted).toBe(false);
+  });
+
   test("falls back to engine for non-URL strings", () => {
     const engine = new RedactionEngine({
       plugins: [emailPlugin],
@@ -504,6 +540,24 @@ describe("headersHandler", () => {
     expect(setCookie).not.toContain("BBB-leak-fragment");
     expect(setCookie).toContain("Path=/");
     expect(setCookie).toContain("HttpOnly");
+  });
+
+  // codex R5 defensive: a non-string element in a set-cookie array (malformed
+  // trace) must be deep-redacted, not passed through.
+  test("deep-redacts a non-string element in a set-cookie array", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["authorization"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const result = headersHandler.process(
+      { "set-cookie": ["sid=x; Path=/", { authorization: "OBJ-SECRET" } as unknown as string] },
+      { scopeId: "test", scopeName: "Test" },
+      engine,
+    );
+    const arr = (result.value as Record<string, unknown>)["set-cookie"] as unknown[];
+    expect(JSON.stringify(arr)).not.toContain("OBJ-SECRET");
   });
 
   // codex R3 P3: a trailing `;` must not become a masked pseudo-attribute.
