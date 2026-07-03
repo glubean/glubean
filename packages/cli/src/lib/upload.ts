@@ -631,17 +631,17 @@ export async function uploadToCloud(
       await collectRunScreenshots(screenshotsRoot, options.screenshotPaths);
     candidates.push(...shots);
     if (outOfBounds > 0 || outOfList > 0) {
-      const parts: string[] = [];
+      const reasons: string[] = [];
       if (outOfList > 0) {
-        parts.push(`${outOfList} on disk not in this run's screenshot list`);
+        reasons.push(`${outOfList} not produced by this run`);
       }
       if (outOfBounds > 0) {
-        parts.push(`${outOfBounds} out of bounds / unresolved`);
+        reasons.push(`${outOfBounds} out of bounds or unresolved`);
       }
       // Surfaced (not silent) so a future `saveArtifact` that omits `path`
       // can't quietly drop this run's screenshots from the upload.
       console.log(
-        `${colors.yellow}Skipped ${parts.join(", ")} screenshot file(s) — only this run's screenshots are uploaded.${colors.reset}`,
+        `${colors.yellow}Skipped ${outOfList + outOfBounds} screenshot file(s) (${reasons.join(", ")}). Only screenshots produced by this run are uploaded.${colors.reset}`,
       );
     }
   } else {
