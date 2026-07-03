@@ -1071,6 +1071,18 @@ const kyInstance = ky.create({
           traceData.name = glubeanOp;
         }
 
+        // Exact route template from a contract.http() client / a `context` option,
+        // e.g. "GET /runs/:runId". Carried via ky's NON-WIRE `context` (never a request
+        // header), so it can't leak to the SUT through any client — the dashboard's
+        // endpoint-coverage join uses it for an exact routeKey match instead of
+        // heuristic URL normalization (GLU-148, engine parity — see engine.ts
+        // createScopedKy). Both standalone contract cases and workflow `.call()` steps
+        // share this hook, so this one fix covers both.
+        const ctxRoute = (options.context as { glubeanRoute?: string } | undefined)?.glubeanRoute;
+        if (ctxRoute) {
+          traceData.routeKey = ctxRoute;
+        }
+
         // The clean pre-absolutization relative URL (GLU-81, engine parity — see
         // RAW_URL_OPTION), when the call site passed one.
         const rawUrl = (options as unknown as Record<string, unknown>)[RAW_URL_OPTION];

@@ -71,8 +71,10 @@ export function parseEndpoint(endpoint: string): { method: string; path: string 
 
 /** The contract's exact route TEMPLATE (e.g. "GET /runs/:runId") for the request's ky
  *  `context` — a NON-WIRE channel (never a request header), so it can't leak to the SUT
- *  through any client. The engine forwards it to the trace and the load runner uses it for
- *  an exact endpoint routeKey; harmless outside load (only consumed there). */
+ *  through any client. Both the engine (load runs) and the functional/workflow harness
+ *  (GLU-148) read `context.glubeanRoute` in their ky `afterResponse` hook and stamp
+ *  `trace.routeKey` from it, so a dashboard's endpoint-coverage join gets an exact
+ *  routeKey match instead of falling back to heuristic URL inference. */
 function routeContext(method: string, path: string): { glubeanRoute: string } {
   return { glubeanRoute: `${method} ${path}` };
 }

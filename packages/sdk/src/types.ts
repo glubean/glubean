@@ -2107,7 +2107,9 @@ export interface Trace {
   /** Optional EXACT route template, e.g. "GET /runs/:runId". Carried via the request's
    *  non-wire `context.glubeanRoute` option (set by a `contract.http()` client from its
    *  `endpoint`, or by a caller) — NEVER a request header, so it can't leak to the server.
-   *  The load runner uses it for an exact endpoint routeKey instead of the heuristic
+   *  Both the load runner (engine.ts) and the functional/workflow runner (harness.ts,
+   *  GLU-148) stamp this from `options.context.glubeanRoute` when present; a dashboard's
+   *  endpoint-coverage join uses it for an exact routeKey match instead of the heuristic
    *  URL-normalization fallback. Absent → fall back. */
   routeKey?: string;
   /** HTTP only. The relative URL string EXACTLY as the test author wrote it (e.g.
