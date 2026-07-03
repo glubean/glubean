@@ -50,9 +50,19 @@ export const rawStringHandler: RedactionHandler = {
 
 // ── url-query handler ────────────────────────────────────────────────────────
 
+/** Synthetic base for parsing RELATIVE URLs (`/login?token=…`) — a host no
+ *  real request can use, so it can never be mistaken for a live origin. */
+const RELATIVE_URL_BASE = "http://redaction.invalid";
+
 /**
  * Parses a URL string, redacts query parameter names/values using the engine,
  * then serializes back to a URL string.
+ *
+ * GLU-104 (codex R3 P2): handles RELATIVE / query-only URLs too
+ * (`/login?token=secret`, `?token=secret`). `new URL()` throws on those, so
+ * key-based query redaction never ran and a relative `requestedUrl` leaked its
+ * token. We retry with a synthetic base and strip it back off on output so the
+ * relative form is preserved.
  */
 export const urlQueryHandler: RedactionHandler = {
   name: "url-query",
@@ -62,17 +72,26 @@ export const urlQueryHandler: RedactionHandler = {
     }
 
     let url: URL;
+    let relative = false;
     try {
       url = new URL(value);
     } catch {
-      // Not a valid URL — fall back to raw string redaction
-      return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
+      try {
+        url = new URL(value, RELATIVE_URL_BASE);
+        relative = true;
+      } catch {
+        // Not URL-shaped at all — fall back to raw string redaction.
+        return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
+      }
     }
 
     // Collect all entries first to preserve multiplicity (e.g., ?token=a&token=b)
     const entries = [...url.searchParams.entries()];
     if (entries.length === 0) {
-      return { value, redacted: false, details: [] };
+      // No query params to key on — value-pattern-scan the whole string so a
+      // token embedded in the path is still caught (matches the prior
+      // no-query fallback for non-absolute inputs).
+      return engine.redact(value, { id: ctx.scopeId, name: ctx.scopeName });
     }
 
     let didRedact = false;
@@ -95,6 +114,8 @@ export const urlQueryHandler: RedactionHandler = {
     }
 
     if (!didRedact) {
+      // Nothing sensitive — return the ORIGINAL string untouched (no
+      // reserialization / encoding normalization).
       return { value, redacted: false, details };
     }
 
@@ -106,8 +127,14 @@ export const urlQueryHandler: RedactionHandler = {
     // Preserve hash
     redactedUrl.hash = url.hash;
 
+    // For a relative input, strip the synthetic origin back off so the output
+    // stays relative (`/login?token=***`, not `http://redaction.invalid/...`).
+    const serialized = relative
+      ? redactedUrl.toString().slice(url.origin.length)
+      : redactedUrl.toString();
+
     return {
-      value: redactedUrl.toString(),
+      value: serialized,
       redacted: true,
       details,
     };
@@ -167,9 +194,15 @@ function redactStringBody(
       const parsed = JSON.parse(trimmed);
       if (parsed !== null && typeof parsed === "object") {
         const r = engine.redact(parsed, { id: ctx.scopeId, name: ctx.scopeName });
+        // Only re-serialize when something was actually masked — otherwise
+        // return the ORIGINAL raw string so a clean body isn't silently
+        // reformatted (whitespace normalized) (codex R3 P3).
+        if (!r.redacted) {
+          return { value: raw, redacted: false, details: [] };
+        }
         return {
           value: JSON.stringify(r.value),
-          redacted: r.redacted,
+          redacted: true,
           details: r.details,
         };
       }
@@ -434,10 +467,15 @@ function redactSetCookie(
 
   // Attributes: keep standard ones verbatim; mask any non-standard token,
   // which is most likely a leaked fragment of a `;`-bearing/quoted value.
-  const attributes = parts.slice(1).map((attr) => {
-    const attrName = attr.split("=")[0].trim().toLowerCase();
-    return KNOWN_COOKIE_ATTRS.has(attrName) ? attr : maskCookieValue(attr, engine);
-  });
+  // Drop EMPTY fragments (a trailing `;` — `sid=x; Path=/;` — would otherwise
+  // become a masked pseudo-attribute) (codex R3 P3).
+  const attributes = parts
+    .slice(1)
+    .filter((attr) => attr !== "")
+    .map((attr) => {
+      const attrName = attr.split("=")[0].trim().toLowerCase();
+      return KNOWN_COOKIE_ATTRS.has(attrName) ? attr : maskCookieValue(attr, engine);
+    });
 
   const reconstructed =
     attributes.length > 0

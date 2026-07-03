@@ -300,6 +300,44 @@ describe("urlQueryHandler", () => {
     expect(result.redacted).toBe(false);
   });
 
+  // codex R3 P2: relative / query-only URLs (a trace `requestedUrl`) must
+  // redact query secrets too — `new URL()` throws on them, so key-based
+  // redaction was previously skipped.
+  test("redacts query secrets in a RELATIVE url, preserving the relative form", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const result = urlQueryHandler.process(
+      "/login?token=secret123&page=2",
+      { scopeId: "test", scopeName: "Test" },
+      engine,
+    );
+    const out = result.value as string;
+    expect(out.startsWith("/login?")).toBe(true); // stayed relative
+    expect(out).not.toContain("secret123");
+    expect(out).toContain("page=2");
+    expect(result.redacted).toBe(true);
+  });
+
+  test("redacts a query-only relative url (?token=…)", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const result = urlQueryHandler.process(
+      "?token=secret456",
+      { scopeId: "test", scopeName: "Test" },
+      engine,
+    );
+    expect(result.value as string).not.toContain("secret456");
+    expect(result.redacted).toBe(true);
+  });
+
   test("falls back to engine for non-URL strings", () => {
     const engine = new RedactionEngine({
       plugins: [emailPlugin],
@@ -438,6 +476,22 @@ describe("headersHandler", () => {
     expect(setCookie).toContain("HttpOnly");
   });
 
+  // codex R3 P3: a trailing `;` must not become a masked pseudo-attribute.
+  test("drops a trailing empty Set-Cookie fragment", () => {
+    const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
+    const result = headersHandler.process(
+      { "set-cookie": "sid=secret-x; Path=/; HttpOnly;" },
+      { scopeId: "test", scopeName: "Test" },
+      engine,
+    );
+    const setCookie = (result.value as Record<string, unknown>)["set-cookie"] as string;
+    expect(setCookie).not.toContain("secret-x");
+    expect(setCookie).toContain("Path=/");
+    expect(setCookie).toContain("HttpOnly");
+    // No stray masked attribute appended after HttpOnly.
+    expect(setCookie.trimEnd().endsWith("HttpOnly")).toBe(true);
+  });
+
   test("passes through non-objects", () => {
     const engine = new RedactionEngine({ plugins: [], replacementFormat: "simple" });
     const result = headersHandler.process(
@@ -554,6 +608,21 @@ describe("bodyHandler", () => {
     expect(result.redacted).toBe(true);
     // Still valid JSON after redaction.
     expect(() => JSON.parse(body)).not.toThrow();
+  });
+
+  // codex R3 P3: a clean JSON-as-string body must be returned VERBATIM (not
+  // re-serialized / whitespace-normalized) when nothing was redacted.
+  test("returns a clean JSON-as-string body verbatim (no normalization)", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["token"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+    const original = '  { "status" : "ok" }  ';
+    const result = bodyHandler.process(original, ctx, engine);
+    expect(result.value).toBe(original);
+    expect(result.redacted).toBe(false);
   });
 
   test("falls back to string scanning for an invalid-JSON '{'-led body", () => {

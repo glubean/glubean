@@ -84,8 +84,9 @@ Built-in handlers:
 |---------|---------|
 | `json` | Recursive JSON object/array walker |
 | `raw-string` | Value-pattern matching on plain strings |
-| `url-query` | Parse URL, redact query params, serialize back |
-| `headers` | Header map with cookie/set-cookie parsing |
+| `url-query` | Parse URL (absolute or relative), redact query params, serialize back |
+| `headers` | Header map with cookie/set-cookie parsing (cookie values masked structurally) |
+| `body` | HTTP body: object → JSON walk; string → JSON-as-text / form-urlencoded / value-pattern |
 
 ### Plugins
 

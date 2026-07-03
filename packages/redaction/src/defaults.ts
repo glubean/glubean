@@ -69,6 +69,30 @@ export const BUILTIN_SCOPES: RedactionScopeDeclaration[] = [
     },
   },
   {
+    id: "http.request.requestedUrl",
+    name: "HTTP requested (relative) URL",
+    event: "trace",
+    // GLU-104 (codex R3 P2): a trace can carry `requestedUrl` — the author's
+    // ORIGINAL relative URL (`/login?token=…`), captured before resolution.
+    // `data.url` only covers the resolved absolute URL, so without this a
+    // secret in a relative URL's query leaked. `url-query` now parses relative
+    // URLs (synthetic base).
+    target: "data.requestedUrl",
+    handler: "url-query",
+    rules: {
+      sensitiveKeys: [
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "secret",
+        "password",
+      ],
+    },
+  },
+  {
     id: "http.request.body",
     name: "HTTP request body",
     event: "trace",

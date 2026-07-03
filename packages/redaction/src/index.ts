@@ -47,6 +47,7 @@ export type { RedactionEngineOptions } from "./engine.js";
 
 // Handlers
 export {
+  bodyHandler,
   BUILTIN_HANDLERS,
   headersHandler,
   jsonHandler,

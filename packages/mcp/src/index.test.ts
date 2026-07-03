@@ -620,6 +620,20 @@ test("redactMcpTrace masks malformed cookie/set-cookie with no '=' (codex R2 P2)
   expect(s).not.toContain("OPAQUE-BARE-SETCOOKIE-TOKEN");
 });
 
+test("redactMcpTrace masks query secrets in a relative requestedUrl (codex R3 P2)", () => {
+  const trace = {
+    url: "https://api.example.com/login?token=ABS-URL-SECRET",
+    requestedUrl: "/login?token=REL-URL-SECRET&page=2",
+  };
+  const redacted = redactMcpTrace(trace, {}) as Record<string, unknown>;
+  const s = JSON.stringify(redacted);
+  expect(s).not.toContain("ABS-URL-SECRET");
+  expect(s).not.toContain("REL-URL-SECRET");
+  // Non-secret param + relative form preserved.
+  expect(redacted.requestedUrl as string).toContain("page=2");
+  expect((redacted.requestedUrl as string).startsWith("/login?")).toBe(true);
+});
+
 test("redactMcpTrace masks a JSON body mislabelled as a text string (codex R2 P2)", () => {
   // The runner keeps a text/plain response body as a raw string; if it is
   // actually JSON, key rules must still apply.
