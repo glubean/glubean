@@ -18,6 +18,7 @@ Running 1 test(s)...
 Tests:  1 passed
 Total:  1
 Memory: <MEM> peak
+Stats:  1 assertions
 
 "
 `;
@@ -39,6 +40,7 @@ Running 1 test(s)...
 Tests:  1 passed
 Total:  1
 Memory: <MEM> peak
+Stats:  1 assertions
 
 [bootstrap-fixture] setup.ts evaluated
 "
@@ -65,6 +67,7 @@ Running 2 test(s)...
 Tests:  1 failed, 1 skipped
 Total:  2
 Memory: <MEM> peak
+Stats:  1 assertions (1 failed)
 
 "
 `;
@@ -93,6 +96,7 @@ Running 3 test(s)...
 Tests:  3 failed
 Total:  3
 Memory: <MEM> peak
+Stats:  3 assertions (3 failed)
 
 "
 `;
@@ -118,6 +122,7 @@ Session: session.ts
 Tests:  1 passed
 Total:  1
 Memory: <MEM> peak
+Stats:  1 assertions
 
 "
 `;
@@ -146,6 +151,7 @@ Running 2 test(s)...
 Tests:  2 passed
 Total:  2
 Memory: <MEM> peak
+Stats:  2 assertions
 
 "
 `;
@@ -169,6 +175,7 @@ Running 2 test(s)...
 Tests:  2 passed
 Total:  2
 Memory: <MEM> peak
+Stats:  2 assertions
 
 "
 `;
@@ -191,6 +198,7 @@ Running 2 test(s)...
 Tests:  1 passed, 1 skipped
 Total:  2
 Memory: <MEM> peak
+Stats:  1 assertions
 
 "
 `;

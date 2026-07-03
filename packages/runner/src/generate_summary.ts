@@ -1,4 +1,4 @@
-import type { TimelineEvent } from "./executor.js";
+import type { ExecutionEvent, TimelineEvent } from "./executor.js";
 
 export interface Summary {
   assertionTotal: number;
@@ -33,8 +33,16 @@ export interface Summary {
  *
  * Pure function — no side effects.  Replicates the logic previously
  * scattered across harness counters + `deriveFailureFromEvents`.
+ *
+ * Accepts either the CLI/executor's TimelineEvent[] (post-processed, carries
+ * `ts`/`testId`) or the raw harness ExecutionEvent[] (pre-`ts` stream the
+ * CLI collects per-test) — the switch below only reads fields both shapes
+ * carry (GLU-128: this lets `packages/cli/src/commands/run.ts` derive
+ * `summary.stats` straight from the ExecutionEvent[] it already collects per
+ * test, instead of the "summary" event type that nothing in the codebase
+ * ever emits).
  */
-export function generateSummary(events: TimelineEvent[]): Summary {
+export function generateSummary(events: (TimelineEvent | ExecutionEvent)[]): Summary {
   let assertionTotal = 0;
   let assertionFailed = 0;
   let httpRequestTotal = 0;

@@ -2,6 +2,7 @@ import {
   bootstrap,
   evaluateThresholds,
   type ExecutionEvent,
+  generateSummary,
   MetricCollector,
   ProjectRunner,
   buildRunContext,
@@ -1670,6 +1671,23 @@ export async function runCommand(
       } as ExecutionEvent);
     }
 
+    // GLU-128: `runStats` (→ result JSON `summary.stats`) used to wait for a
+    // `type: "summary"` event on the harness stream — nothing in the
+    // codebase ever emits one, so every counter stayed at its zero-init
+    // forever even though the per-test event stream (and the console's own
+    // "N calls, N checks" line just below, computed the same way) is
+    // correct. Derive it straight from this test's finished events instead.
+    const testSummary = generateSummary(testEvents);
+    runStats.httpRequestTotal += testSummary.httpRequestTotal;
+    runStats.httpErrorTotal += testSummary.httpErrorTotal;
+    runStats.assertionTotal += testSummary.assertionTotal;
+    runStats.assertionFailed += testSummary.assertionFailed;
+    runStats.warningTotal += testSummary.warningTotal;
+    runStats.warningTriggered += testSummary.warningTriggered;
+    runStats.stepTotal += testSummary.stepTotal;
+    runStats.stepPassed += testSummary.stepPassed;
+    runStats.stepFailed += testSummary.stepFailed;
+
     collectedRuns.push({
       testId,
       testName,
@@ -2312,17 +2330,12 @@ export async function runCommand(
             break;
           }
 
-          case "summary":
-            runStats.httpRequestTotal += event.data.httpRequestTotal;
-            runStats.httpErrorTotal += event.data.httpErrorTotal;
-            runStats.assertionTotal += event.data.assertionTotal;
-            runStats.assertionFailed += event.data.assertionFailed;
-            runStats.warningTotal += event.data.warningTotal;
-            runStats.warningTriggered += event.data.warningTriggered;
-            runStats.stepTotal += event.data.stepTotal;
-            runStats.stepPassed += event.data.stepPassed;
-            runStats.stepFailed += event.data.stepFailed;
-            break;
+          // GLU-128: no current producer in the codebase ever yields a
+          // `type: "summary"` ExecutionEvent (the type union member and
+          // TestExecutor's mapper for it are unused dead paths) — this case
+          // was unreachable. `runStats` is now populated in `finalizeTest`
+          // via `generateSummary(testEvents)` once a test's event stream is
+          // complete.
 
           case "warning": {
             const warnIcon = event.condition ? `${colors.green}✓${colors.reset}` : `${colors.yellow}⚠${colors.reset}`;
