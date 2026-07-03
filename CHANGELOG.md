@@ -13,6 +13,9 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 - **Custom metrics authoring** (`@glubean/sdk/load`) — `rate()`, `trend()`, `counter()` metric builders for user-defined load signals (`A1`).
 - **Custom metrics fold + gate thresholds** (`@glubean/runner`) — custom metric values are folded into the load artifact alongside built-in metrics; threshold evaluation supports custom metric names (`A2`).
 
+### Fixed
+- **`glubean init` no longer resolves `npm test` to a stale global CLI** (`@glubean/cli`, GLU-110 / GitHub #9) — all three scaffold templates (standard, `--contract-first`, `--template demo`) now list `@glubean/cli` as a direct `dependencies` entry, same as `@glubean/runner`. Without it, `node_modules/.bin` had no local `glubean` binary, so the bare `glubean` in generated `npm test`/`npm run test:ci` scripts silently fell back to whatever `glubean` happened to be on the machine's global PATH — commonly a much older version that doesn't recognize current flags (e.g. `error: unknown option '--profile'`). Verified `npx glubean` in the generated CI workflow template has the same failure mode when a stale global exists (npx prefers an already-resolvable global binary over fetching fresh), so the CLI dependency was the fix, not a `npx`-only rewrite.
+
 ---
 
 ## [0.8.4] — 2026-07-02

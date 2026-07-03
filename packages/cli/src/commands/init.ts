@@ -236,6 +236,13 @@ function makePackageJson(_baseUrl: string): string {
           // node_modules/@glubean/runner; missing → bundled fallback runner →
           // second @glubean/sdk instance → configure() throws.
           "@glubean/runner": SDK_VERSION,
+          // CLI must be a direct dep too (GLU-110 / GitHub #9). Without it,
+          // node_modules/.bin has no `glubean` binary, so the bare `glubean`
+          // in the scripts below — and even `npx glubean` in CI, which
+          // checks an already-on-PATH global before fetching — silently
+          // fall back to whatever stale glubean happens to be installed
+          // globally on the machine ("unknown option '--profile'" et al).
+          "@glubean/cli": SDK_VERSION,
         },
       },
       null,
@@ -1121,6 +1128,10 @@ const CONTRACT_FIRST_PACKAGE_JSON = (sdkVersion: string) =>
         "@glubean/sdk": sdkVersion,
         zod: "^4.0.0",
         "@glubean/runner": sdkVersion,
+        // CLI must be a direct dep too (GLU-110 / GitHub #9) — see the
+        // comment in makePackageJson() for why the bare `glubean` in the
+        // scripts above needs a local node_modules/.bin/glubean.
+        "@glubean/cli": sdkVersion,
       },
     },
     null,
@@ -1144,6 +1155,10 @@ const DEMO_PACKAGE_JSON = (sdkVersion: string) =>
       dependencies: {
         "@glubean/sdk": sdkVersion,
         "@glubean/runner": sdkVersion,
+        // CLI must be a direct dep too (GLU-110 / GitHub #9) — see the
+        // comment in makePackageJson() for why the bare `glubean` in the
+        // scripts above needs a local node_modules/.bin/glubean.
+        "@glubean/cli": sdkVersion,
       },
     },
     null,
