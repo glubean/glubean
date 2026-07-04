@@ -1578,7 +1578,14 @@ export async function runCommand(
     options.inputJson !== undefined ||
     options.bootstrapJson !== undefined ||
     options.forceStandalone === true;
-  if (hasInputFlag) {
+  // GLU-194 (codex xhigh P3): an all-broken discovery run has no test to
+  // target — `testsToRun` is empty, so `testsToRun[0]!.test.meta.id` below
+  // would throw. Treat it like "no input flag" (clear any stale env from a
+  // prior in-process invocation) instead of validating/exiting on the
+  // exact-one-test requirement, so `--input-json`/`--bootstrap-json`/
+  // `--force-standalone` combined with an all-broken target still reaches
+  // `--result-json`/junit/`--upload` below rather than exiting here.
+  if (hasInputFlag && !allBrokenDiscovery) {
     // §5.1 invariant: explicit input always wins; overlay (and therefore
     // its bootstrap-params channel) is NOT invoked. Per the proposal's
     // "no run-bootstrap-for-side-effects-then-use-my-input mode" rule,
@@ -2946,7 +2953,7 @@ export async function runCommand(
       skipped,
       durationMs: totalDurationMs,
     };
-    const xml = toJunitXml(collectedRuns, targetDisplay, summaryData);
+    const xml = toJunitXml(collectedRuns, targetDisplay, summaryData, discoveryFailedFiles);
     await mkdir(dirname(junitPath), { recursive: true });
     await writeFile(junitPath, xml, "utf-8");
     console.log(
@@ -3209,11 +3216,33 @@ function toJunitXml(
   collectedRuns: CollectedTestRun[],
   target: string,
   summary: { total: number; passed: number; failed: number; skipped: number; durationMs: number },
+  // GLU-194 (codex xhigh P2): a file that failed to IMPORT never produces a
+  // `CollectedTestRun` (nothing was ever discovered/run), so before this
+  // param it was invisible in the JUnit output — a CI job gating on the
+  // JUnit `failures` count saw a clean 0-failure suite even though the
+  // process exits non-zero (all-broken: `summary.total/failed` are both 0).
+  // Render each as its own synthetic failing testcase, and fold it into
+  // `tests`/`failures` below, so JUnit consumers see the failure — matching
+  // the console "Discovery:" line and the result JSON's top-level
+  // `discoveryFailures`. Defaults to `[]` so every other (non-discovery-
+  // failure) call site is unaffected.
+  discoveryFailures: Array<{ filePath: string; error: string }> = [],
 ): string {
+  const totalTests = summary.total + discoveryFailures.length;
+  const totalFailures = summary.failed + discoveryFailures.length;
   const lines: string[] = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    `<testsuite name="${escapeXml(target)}" tests="${summary.total}" failures="${summary.failed}" skipped="${summary.skipped}" time="${(summary.durationMs / 1000).toFixed(3)}">`,
+    `<testsuite name="${escapeXml(target)}" tests="${totalTests}" failures="${totalFailures}" skipped="${summary.skipped}" time="${(summary.durationMs / 1000).toFixed(3)}">`,
   ];
+
+  for (const df of discoveryFailures) {
+    const classname = escapeXml(df.filePath.replace(/\\/g, "/"));
+    lines.push(`  <testcase classname="${classname}" name="import" time="0.000">`);
+    lines.push(
+      `    <failure message="Failed to import contract/test file">${escapeXml(df.error)}</failure>`,
+    );
+    lines.push(`  </testcase>`);
+  }
 
   for (const run of collectedRuns) {
     const classname = run.filePath ? escapeXml(relative(process.cwd(), run.filePath).replace(/\\/g, "/")) : "glubean";

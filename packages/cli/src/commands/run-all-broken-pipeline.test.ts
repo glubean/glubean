@@ -129,13 +129,52 @@ test(
     expect(resultJsonContent.tests).toEqual([]);
 
     // `--reporter junit` — THE OTHER GAP: same story, never written before.
+    // Codex xhigh review (P2): a CI job gating on the JUnit `failures` count
+    // must NOT see a clean 0-failure suite for a run that exited non-zero —
+    // each import failure renders as its own synthetic failing testcase.
     expect(out).toContain("JUnit XML written to");
     const junitContent = await readFile(
       join(dir, "glubean-run.junit.xml"),
       "utf-8",
     );
     expect(junitContent).toContain("<?xml");
-    expect(junitContent).toContain('tests="0"');
+    expect(junitContent).toContain('tests="2"');
+    expect(junitContent).toContain('failures="2"');
+    expect(junitContent).toContain("contracts/broken.contract.ts");
+    expect(junitContent).toContain("contracts/broken-2.contract.ts");
+    expect(junitContent.match(/<failure /g) ?? []).toHaveLength(2);
+  },
+  30_000,
+);
+
+test(
+  "glubean run: an all-broken run combined with --input-json still reaches --result-json instead of exiting on the exact-one-test check (GLU-194 codex xhigh P3)",
+  async () => {
+    const dir = await prepareAllBroken("input-json");
+
+    const { code, stdout, stderr } = await runCli(
+      [
+        "run",
+        "contracts/",
+        "--input-json",
+        '{"anything":true}',
+        "--result-json",
+        "result.json",
+      ],
+      { cwd: dir },
+    );
+    const out = stdout + stderr;
+
+    expect(code).not.toBe(0);
+    // Must NOT hit the exact-one-test validation message — that would mean
+    // the run exited before the result pipeline again.
+    expect(out).not.toContain("require --filter to match exactly one testId");
+    expect(out).toContain("Result written to");
+
+    const resultJsonContent = JSON.parse(
+      await readFile(join(dir, "result.json"), "utf-8"),
+    );
+    expect(resultJsonContent.discoveryFailures).toHaveLength(2);
   },
   30_000,
 );
