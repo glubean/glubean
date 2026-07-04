@@ -30,6 +30,10 @@ import type {
 import { clearRegistry } from "../internal.js";
 import { clearBootstrapRegistry } from "../bootstrap-registry.js";
 import { Expectation } from "../expect.js";
+import {
+  setRuntime as carrierSetRuntime,
+  type InternalRuntime,
+} from "../runtime-carrier.js";
 
 // ---------------------------------------------------------------------------
 // Mock HTTP client
@@ -104,6 +108,27 @@ beforeEach(() => {
   clearRegistry();
   clearBootstrapRegistry();
 });
+
+/**
+ * Install a fake runtime (vars/secrets/session) into the carrier so
+ * `{{KEY}}` param templating (GLU-156) has somewhere to resolve from.
+ * Returns a cleanup function — callers MUST call it (try/finally) so a
+ * runtime installed by one test never leaks into the next.
+ */
+function installRuntime(
+  vars: Record<string, string> = {},
+  secrets: Record<string, string> = {},
+  session: Record<string, unknown> = {},
+): () => void {
+  const runtime: InternalRuntime = {
+    vars,
+    secrets,
+    session,
+    http: {} as HttpClient,
+  };
+  carrierSetRuntime(runtime);
+  return () => carrierSetRuntime(undefined);
+}
 
 // ---------------------------------------------------------------------------
 // Authoring: contract.http.with() → ProtocolContract
@@ -251,6 +276,155 @@ test("v10 overlay: bootstrap resolvedInput drives real HTTP request construction
   // The exact route template (M8) rides on ky's NON-WIRE `context`, not a header, so it
   // can't leak to the SUT; the load runner reads it for an exact endpoint routeKey.
   expect(call.options.context).toEqual({ glubeanRoute: "POST /projects/:projectId/orders" });
+});
+
+// ---------------------------------------------------------------------------
+// GLU-156: path/query params resolve `{{KEY}}` env placeholders
+// ---------------------------------------------------------------------------
+
+test("GLU-156: path param `{{KEY}}` resolves from runtime vars and is URL-encoded AFTER resolution", async () => {
+  const cleanup = installRuntime({ GLUBEAN_PROJECT_ID: "proj_abc/def" });
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("projects.get", {
+      endpoint: "GET /v1/projects/:projectId",
+      cases: {
+        ok: {
+          description: "fetch a project by id",
+          params: {
+            projectId: { value: "{{GLUBEAN_PROJECT_ID}}", schema: z.string().min(1) },
+          },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+
+    expect(client._calls.length).toBe(1);
+    // Resolved to the real id, NOT the literal placeholder — and the "/" in
+    // the resolved value is percent-encoded (proves resolve-THEN-encode
+    // ordering, not merely "no double-encoding").
+    expect(client._calls[0].url).toBe("/v1/projects/proj_abc%2Fdef");
+  } finally {
+    cleanup();
+  }
+});
+
+test("GLU-156: path param plain string ParamValue (no {{}} wrapper object) also resolves", async () => {
+  const cleanup = installRuntime({ GLUBEAN_PROJECT_ID: "proj_xyz" });
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("projects.get2", {
+      endpoint: "GET /v1/projects/:projectId",
+      cases: {
+        ok: {
+          description: "fetch a project by id (string-shorthand ParamValue)",
+          params: { projectId: "{{GLUBEAN_PROJECT_ID}}" },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+    expect(client._calls[0].url).toBe("/v1/projects/proj_xyz");
+  } finally {
+    cleanup();
+  }
+});
+
+test("GLU-156: query param `{{KEY}}` resolves the same way as path params", async () => {
+  const cleanup = installRuntime({ GLUBEAN_TARGET_ID: "target_1" });
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("targets.list", {
+      endpoint: "GET /v1/targets",
+      cases: {
+        ok: {
+          description: "list targets filtered by target id",
+          query: { targetId: { value: "{{GLUBEAN_TARGET_ID}}" } },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+    expect(client._calls[0].options.searchParams).toEqual({ targetId: "target_1" });
+  } finally {
+    cleanup();
+  }
+});
+
+test("GLU-156: literal param value with no `{{}}` is passed through unchanged (no runtime needed)", async () => {
+  // No installRuntime() call — proves the fast-path never touches the
+  // carrier for a plain literal, so this also can't throw
+  // "configure() values can only be accessed during test execution."
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const c = api("projects.get3", {
+    endpoint: "GET /v1/projects/:projectId",
+    cases: {
+      ok: {
+        description: "fetch a project by literal id",
+        params: { projectId: "proj_literal" },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await c[0].fn!(makeCtx());
+  expect(client._calls[0].url).toBe("/v1/projects/proj_literal");
+});
+
+test("GLU-156: missing env var referenced by a path param throws the same error as other {{KEY}} consumers", async () => {
+  const cleanup = installRuntime({}); // GLUBEAN_PROJECT_ID intentionally absent
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("projects.get4", {
+      endpoint: "GET /v1/projects/:projectId",
+      cases: {
+        ok: {
+          description: "fetch a project by id",
+          params: { projectId: { value: "{{GLUBEAN_PROJECT_ID}}" } },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await expect(c[0].fn!(makeCtx())).rejects.toThrow(
+      'Missing value for template placeholder "{{GLUBEAN_PROJECT_ID}}"',
+    );
+    expect(client._calls.length).toBe(0); // never sent — fails before the request goes out
+  } finally {
+    cleanup();
+  }
+});
+
+test("GLU-156: multiple `{{KEY}}` placeholders in one path param segment all resolve", async () => {
+  const cleanup = installRuntime({ ORG: "acme", PROJECT: "widgets" });
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("orgs.projects.get", {
+      endpoint: "GET /v1/scoped/:scope",
+      cases: {
+        ok: {
+          description: "compound path segment with two placeholders",
+          params: { scope: { value: "{{ORG}}--{{PROJECT}}" } },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+    expect(client._calls[0].url).toBe("/v1/scoped/acme--widgets");
+  } finally {
+    cleanup();
+  }
 });
 
 // ---------------------------------------------------------------------------

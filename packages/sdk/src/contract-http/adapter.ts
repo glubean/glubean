@@ -55,6 +55,8 @@ import { buildOpenApiPartForHttp } from "./openapi.js";
 import { genericMarkdownPart } from "../contract-artifacts.js";
 import { matchInboundCaseHttp, preflightInboundCaseHttp } from "./inbound-match.js";
 import { createRequire } from "node:module";
+import { getRuntime } from "../configure/runtime.js";
+import { resolveTemplate } from "../configure/template.js";
 
 // =============================================================================
 // Helpers — endpoint, params, request body, response headers
@@ -79,10 +81,24 @@ function routeContext(method: string, path: string): { glubeanRoute: string } {
   return { glubeanRoute: `${method} ${path}` };
 }
 
+/**
+ * Resolve `{{KEY}}` env placeholders inside a path/query param value —
+ * the SAME `{{KEY}}` syntax `configure()` resolves for vars/secrets/http
+ * headers (GLU-156: a literal `params: { id: { value: "{{PROJECT_ID}}" } }`
+ * was previously URL-encoded VERBATIM — `%7B%7BPROJECT_ID%7D%7D` — instead
+ * of being resolved first). Fast-path on the common case (no braces) so
+ * ordinary literal param values never need an active runtime.
+ */
+function resolveParamTemplate(value: string): string {
+  if (!value.includes("{{")) return value;
+  const runtime = getRuntime();
+  return resolveTemplate(value, runtime.vars, runtime.secrets, runtime.session);
+}
+
 function extractParamValue(v: unknown): string {
-  if (typeof v === "string") return v;
+  if (typeof v === "string") return resolveParamTemplate(v);
   if (v && typeof v === "object" && "value" in v) {
-    return String((v as { value: string }).value);
+    return resolveParamTemplate(String((v as { value: string }).value));
   }
   return String(v);
 }
@@ -98,6 +114,13 @@ export function flattenParamValues(
   return result;
 }
 
+/**
+ * Substitute `:key` path segments with their (already env-resolved, via
+ * `flattenParamValues` → `extractParamValue`) values, URL-encoding EACH
+ * value as it's substituted. Order matters: env resolution must happen
+ * BEFORE this encode step, never after — encoding a raw `{{KEY}}` literal
+ * is exactly the GLU-156 bug.
+ */
 function resolveParams(
   path: string,
   params: Record<string, string> | undefined,

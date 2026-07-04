@@ -34,7 +34,7 @@ export function resolveTemplate(
       vars[key];
     if (value === undefined || value === null || value === "") {
       throw new Error(
-        `Missing value for template placeholder "{{${key}}}" in configure() http headers. ` +
+        `Missing value for template placeholder "{{${key}}}". ` +
           `Ensure "${key}" is available in session, as a secret, or as a var.`,
       );
     }
