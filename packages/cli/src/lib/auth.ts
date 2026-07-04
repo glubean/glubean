@@ -6,14 +6,29 @@
  * config > ~/.glubean/credentials.json.
  *
  * apiUrl is the ONE exception (GLU-161, mirrors GLU-139's fix in
- * packages/mcp/src/cloud.ts): the VAR NAME ranks above the source. The full
- * chain is --api-url flag > GLUBEAN_PLATFORM_API_URL (system env, then .env
- * file) > GLUBEAN_API_URL (system env, then .env file) > package.json
- * glubean.cloud.apiUrl > ~/.glubean/credentials.json. So a `.env` file's
- * GLUBEAN_PLATFORM_API_URL beats a system-env GLUBEAN_API_URL — see
- * resolveApiUrl below for why: a project can legitimately set GLUBEAN_API_URL
- * for an unrelated Dashboard API while GLUBEAN_PLATFORM_API_URL is the
- * unambiguous name for the Platform API these commands need.
+ * packages/mcp/src/cloud.ts): the VAR NAME ranks above the source, AND
+ * GLUBEAN_API_URL is auto-derived rather than used as-is. The full chain is:
+ *
+ *   1. --api-url flag (internal escape hatch — hidden from --help, kept for
+ *      self-hosted/non-standard setups; still parsed and functional)
+ *   2. GLUBEAN_PLATFORM_API_URL (internal escape hatch env var, system env
+ *      then .env file — never documented to users as the primary path)
+ *   3. GLUBEAN_API_URL (system env, then .env file) — the ONE var users are
+ *      expected to set. Its value is auto-derived to the Platform host (see
+ *      `derivePlatformApiUrl` below), NOT used directly — using it directly
+ *      is the original GLU-161 bug (it's the Dashboard/session host, a
+ *      separate Cloud Run service with no `/v1/*` routes).
+ *   4. package.json glubean.cloud.apiUrl — already documented/typed as the
+ *      Platform URL directly, used as-is (no derivation).
+ *   5. ~/.glubean/credentials.json `apiUrl` — same, already the Platform URL,
+ *      used as-is.
+ *   6. DEFAULT_API_URL (constants.ts) — itself the Platform host literal.
+ *
+ * Users only ever need to set GLUBEAN_API_URL (their Dashboard host, e.g.
+ * `https://api.staging.glubean.com`); resolveApiUrl derives the Platform
+ * ingest host from it automatically. --api-url / GLUBEAN_PLATFORM_API_URL
+ * remain as internal, undocumented overrides for the rare case the
+ * derivation can't apply (self-hosted / non-glubean.com deployments).
  */
 
 import { dirname, join } from "node:path";
@@ -270,6 +285,87 @@ export function checkTargetInProject(
   return checkResource(`${normalizeApiUrl(apiUrl)}/v1/projects/${projectId}/targets/${targetId}`, token);
 }
 
+/** Is `hostname` on the managed Glubean domain (`glubean.com` / `glubean.test`,
+ *  the local-dev domain — see resolveAuthUrl's doc below)? Only hosts on this
+ *  domain are eligible for `api.` → `platform.` derivation; a self-hosted /
+ *  custom domain can't be safely guessed at (see `derivePlatformApiUrl`). URL
+ *  normalizes `hostname` to lowercase, so this is already case-insensitive. */
+function isGlubeanDomain(hostname: string): boolean {
+  const labels = hostname.split(".");
+  if (labels.length < 2) return false;
+  const tld = labels[labels.length - 1];
+  const domain = labels[labels.length - 2];
+  return domain === "glubean" && (tld === "com" || tld === "test");
+}
+
+/**
+ * Derive the Platform/ingest API URL from a `GLUBEAN_API_URL`-style host —
+ * the REAL fix for GLU-161's 404: `api.<env>.glubean.com` (server-hono, the
+ * Dashboard/session host users are expected to set) and
+ * `platform.<env>.glubean.com` (the token-only `/v1/*` ingest API,
+ * `glubean-platform-api-{env}` on Cloud Run) are TWO SEPARATE services with
+ * no shared domain — reusing the Dashboard host directly for uploads 404s.
+ * Verified live (2026-07): `platform.glubean.com` / `platform.<env>.glubean.com`
+ * are real, working domain mappings.
+ *
+ * Returns the Platform base URL, or `null` when the value can't be safely
+ * derived (the caller then falls back to an explicit override or fails loud):
+ *  - Not a URL, or carries userinfo / a non-root path / a query / a fragment
+ *    → `null`. The result is a BASE onto which callers concatenate `/v1/...`;
+ *    a surviving path/query/`user:pass@` would build a malformed request URL
+ *    (or leak credentials into diagnostics), so those shapes are rejected
+ *    rather than silently mangled.
+ *  - First label is exactly `api` on a glubean.com/.test host → swap it for
+ *    `platform` (the derivation).
+ *  - First label is already `platform` on a glubean.com/.test host → returned
+ *    as-is (already the Platform host; no derivation needed).
+ *  - Any OTHER host — a different `*.glubean.com` label (`www`, bare
+ *    `glubean.com`, …) OR a non-glubean.com/.test host (self-hosted / custom
+ *    domain) → `null`: there's no way to know it serves `/v1/*`. The caller
+ *    must set an explicit override (`GLUBEAN_PLATFORM_API_URL` / `--api-url`)
+ *    and gets a clear config error if it doesn't.
+ */
+function derivePlatformApiUrl(rawUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  // Must be an HTTP(S) origin. `new URL()` happily parses `ftp://`, `ws://`,
+  // or a typo'd `htps://` — deriving those would silently swap the host and
+  // hand callers an unreachable base (they'd then fail as "cannot reach
+  // server" instead of getting the clear config hint). Reject up front.
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  // Reject anything that isn't a bare origin — a Platform BASE must have no
+  // userinfo / real path / query / fragment, else `${base}/v1/...` is
+  // malformed. A pathname that is semantically root (`/`, `///`, or an input
+  // like `/foo/..` that WHATWG normalizes down to `/`) is fine — a
+  // copy-pasted trailing slash is the GLU-109/GLU-61 case (normalizeApiUrl
+  // strips it); a pathname that still has a non-slash segment after
+  // normalization is a real path and IS rejected.
+  if (url.username || url.password || url.search || url.hash) return null;
+  if (url.pathname && !/^\/+$/.test(url.pathname)) return null;
+  if (!isGlubeanDomain(url.hostname)) return null;
+  const labels = url.hostname.split(".");
+  const first = labels[0];
+  if (first === "platform") return normalizeApiUrl(url.toString());
+  if (first !== "api") return null;
+  labels[0] = "platform";
+  url.hostname = labels.join(".");
+  return normalizeApiUrl(url.toString());
+}
+
+/**
+ * Shared remediation hint printed by every command (`run` / `ci run` / `load`
+ * / `sync` / `login`) when `resolveApiUrl` returns `null` — i.e. GLUBEAN_API_URL
+ * is set but can't be auto-derived to a Platform host and no explicit override
+ * is present. Kept here (one string, five call sites) so the guidance can't
+ * drift between commands. Callers wrap it in their own dim/reset styling.
+ */
+export const PLATFORM_API_URL_UNRESOLVED_HINT =
+  "GLUBEAN_API_URL doesn't look like a standard Glubean host (expected something like https://api.<env>.glubean.com) — it can't be auto-derived to the Platform ingest host. Set GLUBEAN_PLATFORM_API_URL directly to your Platform ingest URL.";
+
 /**
  * Resolve the platform/upload API URL. The RETURNED value is already
  * trailing-slash-normalized (see `normalizeApiUrl`) so every caller — the
@@ -277,28 +373,33 @@ export function checkTargetInProject(
  * builds its `/v1/...` request URL from the same clean base, whether or not
  * that caller remembers to normalize again itself.
  *
+ * Returns `null` when GLUBEAN_API_URL is set but isn't a standard glubean.com
+ * / glubean.test host (so it can't be auto-derived) AND no explicit override
+ * (`--api-url` / `GLUBEAN_PLATFORM_API_URL`) is set — the caller must surface
+ * a clear config error rather than silently guessing (that silent guess was
+ * the ORIGINAL GLU-161 bug).
+ *
  * GLU-161 (mirrors GLU-139's fix for the MCP server, `packages/mcp/src/cloud.ts`):
- * `GLUBEAN_PLATFORM_API_URL` is checked BEFORE the legacy `GLUBEAN_API_URL`, in
- * BOTH process env and .env-file vars, before either source falls through to
- * `cloudConfig`/the credentials file. A project that also dogfoods the
- * Dashboard API (server-hono — a *different* service with no `/v1/*` routes)
- * legitimately sets `GLUBEAN_API_URL` for that; reusing it here for the
- * Platform/ingest API that `run --upload` / `load --upload` / `sync` all need
- * silently 404s. `GLUBEAN_PLATFORM_API_URL` is the unambiguous name for "the
- * Platform API these commands talk to"; `GLUBEAN_API_URL` remains the fallback
- * for projects that only ever used the one var.
+ * `GLUBEAN_PLATFORM_API_URL` is checked BEFORE `GLUBEAN_API_URL`, in BOTH
+ * process env and .env-file vars, before either source falls through to
+ * `cloudConfig`/the credentials file. `GLUBEAN_API_URL` — the ONE var users
+ * are expected to set (their Dashboard host) — is then auto-derived to the
+ * Platform host via `derivePlatformApiUrl` (the real fix: this file no longer
+ * uses it directly as the Platform URL, which is what silently 404s).
+ * `GLUBEAN_PLATFORM_API_URL` / `--api-url` remain as internal, undocumented
+ * overrides for setups the derivation can't cover.
  */
 export async function resolveApiUrl(
   options: AuthOptions,
   sources?: ProjectAuthSources,
-): Promise<string> {
+): Promise<string | null> {
   if (options.apiUrl) return normalizeApiUrl(options.apiUrl);
   const fromEnv = (name: string): string | undefined =>
     process.env[name] || sources?.envFileVars?.[name] || undefined;
   const platform = fromEnv("GLUBEAN_PLATFORM_API_URL");
   if (platform) return normalizeApiUrl(platform);
   const legacy = fromEnv("GLUBEAN_API_URL");
-  if (legacy) return normalizeApiUrl(legacy);
+  if (legacy) return derivePlatformApiUrl(legacy);
   if (sources?.cloudConfig?.apiUrl) return normalizeApiUrl(sources.cloudConfig.apiUrl);
   const creds = await readCredentials();
   return normalizeApiUrl(creds?.apiUrl ?? DEFAULT_API_URL);

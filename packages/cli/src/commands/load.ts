@@ -318,6 +318,7 @@ async function resolveLoadUploadContext(
     resolveDefaultTargetId,
     checkUploadAuth,
     checkTargetInProject,
+    PLATFORM_API_URL_UNRESOLVED_HINT,
   } = await import("../lib/auth.js");
   const { resolveRedactionConfig, loadProjectConfigV1, GlubeanConfigError } =
     await import("../lib/config.js");
@@ -341,6 +342,11 @@ async function resolveLoadUploadContext(
   if (!projectId) {
     console.error(`${colors.red}Upload failed: no project ID.${colors.reset}`);
     console.error(`${colors.dim}Use --project or set GLUBEAN_PROJECT_ID.${colors.reset}`);
+    process.exit(1);
+  }
+  if (!apiUrl) {
+    console.error(`${colors.red}Upload failed: could not determine the Platform API URL.${colors.reset}`);
+    console.error(`${colors.dim}${PLATFORM_API_URL_UNRESOLVED_HINT}${colors.reset}`);
     process.exit(1);
   }
 

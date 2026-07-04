@@ -9,7 +9,7 @@
 const _cwd = process.env["GLUBEAN_CWD"];
 if (_cwd) process.chdir(_cwd);
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { CLI_VERSION } from "./version.js";
 import {
   loadProjectConfigV1,
@@ -38,6 +38,22 @@ import { envShowCommand, envUseCommand, envResetCommand, envListCommand } from "
 import { abortUpdateCheck, checkForUpdates } from "./update_check.js";
 
 const program = new Command();
+
+/**
+ * The `--api-url` flag: an INTERNAL escape hatch to override the Platform API
+ * URL for a single command. Hidden from `--help` (via `.hideHelp()`) because
+ * the user-facing path is the GLUBEAN_API_URL env var (auto-derived to the
+ * Platform host — see resolveApiUrl in ./lib/auth.ts); `--api-url` /
+ * GLUBEAN_PLATFORM_API_URL are for non-standard/self-hosted setups only. Still
+ * fully parsed — `options.apiUrl` is populated and threads into resolveApiUrl.
+ * Shared factory so all five commands (run / ci run / load / sync / login)
+ * stay identical (a fresh Option per call — Options are stateful, not reusable).
+ */
+const hiddenApiUrlOption = (): Option =>
+  new Option(
+    "--api-url <url>",
+    "internal: override the Platform API URL (prefer GLUBEAN_PLATFORM_API_URL / GLUBEAN_API_URL env vars)",
+  ).hideHelp();
 
 program
   .name("glubean")
@@ -119,7 +135,7 @@ program
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
-  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
+  .addOption(hiddenApiUrlOption())
   .option(
     "--input-json <value>",
     "Explicit case input as JSON literal or @path/to.json. Validated against the case's `needs` schema; runs raw (overlay skipped). Requires --filter to match exactly one testId.",
@@ -679,7 +695,7 @@ ciCmd
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
-  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
+  .addOption(hiddenApiUrlOption())
   .option(
     "--input-json <value>",
     "Explicit case input as JSON literal or @path/to.json. Validated against the case's `needs` schema; runs raw (overlay skipped). Requires --filter to match exactly one testId.",
@@ -756,7 +772,7 @@ program
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--token <token>", "Auth token (or GLUBEAN_TOKEN env)")
   .option("--token-env <name>", "Read the token from this env var instead of GLUBEAN_TOKEN")
-  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
+  .addOption(hiddenApiUrlOption())
   .option("--env-file <name>", "Env file basename to load (default: active env, else .env; prod-like active envs are refused implicitly)")
   .option("--allow-empty", "Allow clearing the project's projections when no tests are found")
   .action(async (options) => {
@@ -783,7 +799,7 @@ program
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
   .option("--upload-target <id>", "Cloud target id runs upload to (or GLUBEAN_TARGET_ID; else project default)")
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
-  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
+  .addOption(hiddenApiUrlOption())
   .action(async (target, options) => {
     await loadCommand(target, {
       envFile: options.envFile,
@@ -868,7 +884,7 @@ program
   .description("Authenticate with Glubean Cloud (device authorization in your browser)")
   .option("--token <token>", "Save a project token directly (skip the browser device flow)")
   .option("--project <id>", "Default project ID")
-  .option("--api-url <url>", "Platform API URL (or GLUBEAN_PLATFORM_API_URL, then GLUBEAN_API_URL — the Platform ingest API, not a Dashboard/session-auth host)")
+  .addOption(hiddenApiUrlOption())
   .option("--auth-url <url>", "Auth server URL for login (or GLUBEAN_AUTH_URL)")
   .option("--no-browser", "Don't auto-open the browser; print the URL to open manually")
   .action(async (options) => {

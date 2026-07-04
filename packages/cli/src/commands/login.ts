@@ -16,6 +16,7 @@ import {
   resolveApiUrl,
   resolveAuthUrl,
   writeCredentials,
+  PLATFORM_API_URL_UNRESOLVED_HINT,
 } from "../lib/auth.js";
 import { DEFAULT_API_URL, DEFAULT_AUTH_URL } from "../lib/constants.js";
 
@@ -106,6 +107,11 @@ async function persist(
 export async function loginCommand(options: LoginOptions): Promise<void> {
   const authUrl = (await resolveAuthUrl(options as AuthOptions)).replace(/\/+$/, "");
   const apiUrl = await resolveApiUrl(options as AuthOptions);
+  if (!apiUrl) {
+    console.error(`${colors.red}Login failed: could not determine the Platform API URL.${colors.reset}`);
+    console.error(`${colors.dim}${PLATFORM_API_URL_UNRESOLVED_HINT}${colors.reset}`);
+    process.exit(1);
+  }
 
   // Non-interactive escape hatch: persist a token the user already created in the
   // dashboard (Project → Tokens). The upload preflight validates it later.

@@ -1062,6 +1062,7 @@ export async function runCommand(
       resolveDefaultTargetId,
       checkUploadAuth,
       checkTargetInProject,
+      PLATFORM_API_URL_UNRESOLVED_HINT,
     } = await import("../lib/auth.js");
     const authOpts = {
       token: options.token,
@@ -1098,6 +1099,11 @@ export async function runCommand(
       console.error(
         `${colors.dim}Use --project or set GLUBEAN_PROJECT_ID.${colors.reset}`,
       );
+      process.exit(1);
+    }
+    if (!preApiUrl) {
+      console.error(`${colors.red}Error: could not determine the Platform API URL.${colors.reset}`);
+      console.error(`${colors.dim}${PLATFORM_API_URL_UNRESOLVED_HINT}${colors.reset}`);
       process.exit(1);
     }
     // Validate against the SAME server runs upload to. Don't pre-judge token
@@ -2793,7 +2799,8 @@ export async function runCommand(
 
   // ── Cloud upload ────────────────────────────────────────────────────────
   if (options.upload) {
-    const { resolveToken, resolveProjectId, resolveApiUrl } = await import("../lib/auth.js");
+    const { resolveToken, resolveProjectId, resolveApiUrl, PLATFORM_API_URL_UNRESOLVED_HINT } =
+      await import("../lib/auth.js");
     const { uploadToCloud, removeUploadedScreenshots } = await import("../lib/upload.js");
 
     const authOpts = {
@@ -2815,6 +2822,10 @@ export async function runCommand(
       process.exit(1);
     } else if (!projectId) {
       console.error(`${colors.red}Upload failed: no project ID.${colors.reset}`);
+      process.exit(1);
+    } else if (!apiUrl) {
+      console.error(`${colors.red}Upload failed: could not determine the Platform API URL.${colors.reset}`);
+      console.error(`${colors.dim}${PLATFORM_API_URL_UNRESOLVED_HINT}${colors.reset}`);
       process.exit(1);
     } else {
       // `compiledScopes`/`effectiveRedaction` are the SAME instances used

@@ -4,7 +4,12 @@ import { loadProjectEnv } from "@glubean/runner";
 
 import { buildProjections } from "./dry-run.js";
 import { findProjectConfig } from "./run.js";
-import { resolveToken, resolveProjectId, resolveApiUrl } from "../lib/auth.js";
+import {
+  resolveToken,
+  resolveProjectId,
+  resolveApiUrl,
+  PLATFORM_API_URL_UNRESOLVED_HINT,
+} from "../lib/auth.js";
 import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 
 const colors = {
@@ -172,9 +177,8 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     process.exit(1);
   }
   if (!apiUrl) {
-    console.error(
-      `${colors.red}Sync failed: no API URL (set --api-url / GLUBEAN_PLATFORM_API_URL / GLUBEAN_API_URL).${colors.reset}`,
-    );
+    console.error(`${colors.red}Sync failed: could not determine the Platform API URL.${colors.reset}`);
+    console.error(`${colors.dim}${PLATFORM_API_URL_UNRESOLVED_HINT}${colors.reset}`);
     process.exit(1);
   }
 

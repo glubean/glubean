@@ -276,11 +276,134 @@ test("resolveApiUrl: prefers GLUBEAN_PLATFORM_API_URL over GLUBEAN_API_URL (proc
   });
 });
 
-test("resolveApiUrl: falls back to GLUBEAN_API_URL when GLUBEAN_PLATFORM_API_URL is unset (legacy projects)", async () => {
+// ── GLU-161 follow-up: the REAL fix. `platform.<env>.glubean.com` and
+// `api.<env>.glubean.com` are TWO SEPARATE Cloud Run services with no shared
+// domain — reusing GLUBEAN_API_URL (the Dashboard host) directly for uploads
+// 404s. Users only need to set GLUBEAN_API_URL; resolveApiUrl auto-derives
+// the Platform host from it (swap the `api.` subdomain label for `platform.`)
+// so nobody needs to know about the internal GLUBEAN_PLATFORM_API_URL /
+// --api-url overrides at all in the common case. ─────────────────────────
+
+test("resolveApiUrl: auto-derives the Platform host from GLUBEAN_API_URL alone (no GLUBEAN_PLATFORM_API_URL / --api-url)", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.staging.glubean.com";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://platform.staging.glubean.com");
+  });
+});
+
+test("resolveApiUrl: auto-derives the Platform host for the bare prod domain too", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.glubean.com";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://platform.glubean.com");
+  });
+});
+
+test("resolveApiUrl: a GLUBEAN_API_URL that's already the platform.* glubean.com/.test host passes through as-is (no derivation needed)", async () => {
   await withTempHome(async () => {
     process.env["GLUBEAN_API_URL"] = "https://platform.glubean.com";
     const url = await resolveApiUrl({});
     expect(url).toBe("https://platform.glubean.com");
+  });
+});
+
+test("resolveApiUrl: returns null when GLUBEAN_API_URL isn't a glubean.com/.test host and can't be derived, with no override set", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://my-self-hosted-proxy.example.com";
+    const url = await resolveApiUrl({});
+    expect(url).toBeNull();
+  });
+});
+
+test("resolveApiUrl: GLUBEAN_PLATFORM_API_URL rescues a non-standard GLUBEAN_API_URL that can't be derived", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://my-self-hosted-proxy.example.com";
+    process.env["GLUBEAN_PLATFORM_API_URL"] = "https://ingest.example.com";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://ingest.example.com");
+  });
+});
+
+test("resolveApiUrl: an explicit --api-url flag rescues a non-standard GLUBEAN_API_URL that can't be derived", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://my-self-hosted-proxy.example.com";
+    const url = await resolveApiUrl({ apiUrl: "https://ingest.example.com" });
+    expect(url).toBe("https://ingest.example.com");
+  });
+});
+
+test("resolveApiUrl: the auto-derivation is case-insensitive (URL lowercases the host)", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://API.Staging.Glubean.COM";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://platform.staging.glubean.com");
+  });
+});
+
+test("resolveApiUrl: the auto-derivation preserves a non-default port", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.glubean.test:8443";
+    const url = await resolveApiUrl({});
+    expect(url).toBe("https://platform.glubean.test:8443");
+  });
+});
+
+// ── GLU-161 follow-up hardening: a Platform BASE must be a bare origin (callers
+// concatenate `/v1/...`). A GLUBEAN_API_URL carrying userinfo / a non-root path
+// / a query / a fragment can't be safely derived — it would build a malformed
+// request URL (or leak `user:pass@` into diagnostics) — so it returns null and
+// the caller fails loud instead of silently mangling it. And a glubean.com/.test
+// host whose first label is NEITHER `api` NOR `platform` (`www`, bare
+// `glubean.com`, …) isn't assumed correct — it also returns null. ────────────
+
+test("resolveApiUrl: null for a GLUBEAN_API_URL carrying userinfo (can't derive; would leak credentials)", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://user:pass@api.staging.glubean.com";
+    expect(await resolveApiUrl({})).toBeNull();
+  });
+});
+
+test("resolveApiUrl: null for a GLUBEAN_API_URL carrying a non-root path (would build a malformed /v1 base)", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.staging.glubean.com/foo";
+    expect(await resolveApiUrl({})).toBeNull();
+  });
+});
+
+test("resolveApiUrl: null for a GLUBEAN_API_URL carrying a query string or fragment", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://api.staging.glubean.com?x=1";
+    expect(await resolveApiUrl({})).toBeNull();
+    process.env["GLUBEAN_API_URL"] = "https://api.staging.glubean.com#h";
+    expect(await resolveApiUrl({})).toBeNull();
+  });
+});
+
+test("resolveApiUrl: null for a glubean.com host that's neither api.* nor platform.* (www / bare domain)", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "https://www.glubean.com";
+    expect(await resolveApiUrl({})).toBeNull();
+    process.env["GLUBEAN_API_URL"] = "https://glubean.com";
+    expect(await resolveApiUrl({})).toBeNull();
+  });
+});
+
+test("resolveApiUrl: null for a non-HTTP(S) scheme (ftp/ws/typo'd htps) — never silently swap the host on an unreachable base", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "ftp://api.glubean.com";
+    expect(await resolveApiUrl({})).toBeNull();
+    process.env["GLUBEAN_API_URL"] = "ws://api.staging.glubean.com";
+    expect(await resolveApiUrl({})).toBeNull();
+    process.env["GLUBEAN_API_URL"] = "htps://api.glubean.com";
+    expect(await resolveApiUrl({})).toBeNull();
+  });
+});
+
+test("resolveApiUrl: http:// (not just https) still derives — local/dev over plain HTTP is supported", async () => {
+  await withTempHome(async () => {
+    process.env["GLUBEAN_API_URL"] = "http://api.glubean.test";
+    expect(await resolveApiUrl({})).toBe("http://platform.glubean.test");
   });
 });
 
@@ -347,19 +470,19 @@ test("resolveApiUrl: strips a trailing slash from the --api-url flag", async () 
   });
 });
 
-test("resolveApiUrl: strips multiple trailing slashes from GLUBEAN_API_URL", async () => {
+test("resolveApiUrl: strips multiple trailing slashes from GLUBEAN_API_URL (after derivation to the Platform host)", async () => {
   await withTempHome(async () => {
     process.env["GLUBEAN_API_URL"] = "https://api.glubean.test///";
     const url = await resolveApiUrl({});
-    expect(url).toBe("https://api.glubean.test");
+    expect(url).toBe("https://platform.glubean.test");
   });
 });
 
-test("resolveApiUrl: strips a trailing slash from envFileVars / cloudConfig / credentials.json", async () => {
+test("resolveApiUrl: strips a trailing slash from envFileVars (after derivation) / cloudConfig / credentials.json (no derivation, used as-is)", async () => {
   await withTempHome(async () => {
     expect(
-      await resolveApiUrl({}, { envFileVars: { GLUBEAN_API_URL: "https://env-file.test/" } }),
-    ).toBe("https://env-file.test");
+      await resolveApiUrl({}, { envFileVars: { GLUBEAN_API_URL: "https://api.staging.glubean.com/" } }),
+    ).toBe("https://platform.staging.glubean.com");
     expect(
       await resolveApiUrl({}, { cloudConfig: { apiUrl: "https://config.test/" } }),
     ).toBe("https://config.test");

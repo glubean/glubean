@@ -213,8 +213,8 @@ glubean upgrade
 | `GLUBEAN_CWD` | Override the working directory (useful for shell aliases) |
 | `GLUBEAN_PROJECT_ID` | Default Cloud project for `--upload` |
 | `GLUBEAN_TOKEN` | Auth token for Cloud (alternative to `glubean login`) |
-| `GLUBEAN_PLATFORM_API_URL` | Override the Platform API URL for `run`/`load`/`sync`/`login` uploads (preferred — see GLUBEAN_API_URL below) |
-| `GLUBEAN_API_URL` | Legacy alias for the Platform API URL; still read as a fallback when `GLUBEAN_PLATFORM_API_URL` is unset. Some projects also use this name for an unrelated Dashboard API host — set `GLUBEAN_PLATFORM_API_URL` to disambiguate |
+| `GLUBEAN_API_URL` | Your Glubean host, e.g. `https://api.<env>.glubean.com`. For `run --upload` / `load --upload` / `sync` / `login`, the CLI auto-derives the Platform ingest host from it (the `api.` subdomain → `platform.`) — you don't set the Platform URL yourself. A non-`glubean.com`/`.test` host (self-hosted / custom domain) can't be derived; set `GLUBEAN_PLATFORM_API_URL` explicitly in that case |
+| `GLUBEAN_PLATFORM_API_URL` | Internal override for the Platform ingest API URL, taking priority over `GLUBEAN_API_URL`. Only needed for non-standard/self-hosted deployments where the `api.` → `platform.` derivation doesn't apply |
 
 ## Exit codes
 
