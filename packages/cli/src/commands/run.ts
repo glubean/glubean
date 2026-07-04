@@ -1367,6 +1367,19 @@ export async function runCommand(
     }
   }
 
+  // GLU-194: when EVERY targeted file failed to import, `allFileTests` is
+  // empty and there's nothing to discover/filter/run — but unlike a
+  // genuinely empty project (no discovery failures at all), this run must
+  // still flow through the SAME result/junit/upload pipeline a MIXED run
+  // already gets (GLU-155): a file importing fine but exporting zero tests,
+  // or a `--filter`/`--tags` match miss, keep the pre-existing exit-without-
+  // pipeline behavior (out of GLU-194's scope — see the issue). This flag
+  // gates every "0 tests to run" exit between here and the pipeline so
+  // `testsToRun` (derived from the now-empty `allFileTests`) is allowed to
+  // stay empty and fall all the way through, instead of exiting early.
+  const allBrokenDiscovery =
+    allFileTests.length === 0 && discoveryFailedFiles.length > 0;
+
   if (allFileTests.length === 0) {
     console.error(
       `\n${colors.red}❌ No test cases found${
@@ -1385,7 +1398,12 @@ export async function runCommand(
       // persisted (see resultPayload further below) but this all-or-mostly-
       // broken one didn't, and `--rerun-failed` had nothing to retry from.
       // Persist the same minimal shape `writeEmptyResult` uses elsewhere,
-      // plus `discoveryFailures`, before exiting.
+      // plus `discoveryFailures`, as a defensive fallback — GLU-194 makes
+      // this run fall through to the full pipeline below, which writes the
+      // complete (and consistent) version of this same file, but a later,
+      // unrelated exit (e.g. `--only-id`/`--rerun-failed` matching none of
+      // this run's — nonexistent — tests) would otherwise leave NO trace at
+      // all, same gap this fallback originally closed.
       try {
         const glubeanDir = resolve(rootDir, ".glubean");
         await mkdir(glubeanDir, { recursive: true });
@@ -1408,11 +1426,15 @@ export async function runCommand(
       } catch {
         // Non-critical — best-effort persistence, matches writeEmptyResult.
       }
+    } else {
+      // Genuinely empty (no import failures) — out of GLU-194's scope, keep
+      // exiting here without the result/junit/upload pipeline (pre-existing
+      // behavior for e.g. an empty directory or a file exporting no tests).
+      console.error(
+        `${colors.dim}Each test file must export tests: export const myTest = test("id")...${colors.reset}\n`,
+      );
+      process.exit(1);
     }
-    console.error(
-      `${colors.dim}Each test file must export tests: export const myTest = test("id")...${colors.reset}\n`,
-    );
-    process.exit(1);
   }
 
   if (isMultiFile) {
@@ -1476,7 +1498,11 @@ export async function runCommand(
       for (const match of findTemplateMatches(indexed, selId)) kept.add(match.ft);
     }
     testsToRun = testsToRun.filter((ft) => kept.has(ft));
-    if (testsToRun.length === 0) {
+    // GLU-194: an all-broken discovery run has nothing to narrow — `kept`
+    // stays empty and `testsToRun` was already empty — but must fall through
+    // to the pipeline (see `allBrokenDiscovery` above) rather than exit here
+    // with an id-narrowing-specific message that doesn't apply.
+    if (testsToRun.length === 0 && !allBrokenDiscovery) {
       // In rerun mode the ids come from the last run's failed set, not a
       // `--only-id` flag — report accordingly (e.g. a failed test was renamed
       // or removed since the recorded run).
@@ -1490,7 +1516,7 @@ export async function runCommand(
     }
   }
 
-  if (testsToRun.length === 0) {
+  if (testsToRun.length === 0 && !allBrokenDiscovery) {
     if (options.filter || hasTags) {
       const parts: string[] = [];
       if (options.filter) parts.push(`filter: "${options.filter}"`);
@@ -1529,9 +1555,18 @@ export async function runCommand(
   // until a richer run view lands. The projection already uploads whole
   // (branch/poll included), so the run view simply joins it.
 
-  console.log(
-    `\n${colors.bold}Running ${testsToRun.length} test(s)...${colors.reset}\n`,
-  );
+  if (allBrokenDiscovery) {
+    // GLU-194: nothing to execute — every targeted file failed to import.
+    // Skip the misleading "Running 0 test(s)..." banner; the pipeline below
+    // still records this as a failed run (discoveryFailedFiles is non-empty).
+    console.log(
+      `${colors.dim}No runnable tests — recording a failed run for --result-json/--reporter/--upload.${colors.reset}`,
+    );
+  } else {
+    console.log(
+      `\n${colors.bold}Running ${testsToRun.length} test(s)...${colors.reset}\n`,
+    );
+  }
 
   // ── Spike 3: runner input channels (attachment-model §8) ────────────────
   // `--input-json` / `--bootstrap-json` / `--force-standalone` apply to a
