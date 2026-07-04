@@ -216,6 +216,12 @@ test("discoverTests fails closed on non-HTTP contract when runtime import fails"
   // fallback should NOT fire for non-HTTP protocols because the static
   // extractor cannot represent them — a partial result would silently
   // drop contracts. Matches MCP server's policy.
+  //
+  // GLU-155: this used to resolve to `[]` — indistinguishable from a
+  // contract file that legitimately exports zero cases. discoverTests must
+  // now REJECT so the caller (glubean run's discovery loop) records the
+  // file as a discovery failure instead of silently dropping it while the
+  // run still exits 0.
   const filePath = join(contractFixtureDir, "grpc-broken.contract.ts");
   await writeFile(filePath, `
 import { contract } from "@glubean/sdk";
@@ -231,8 +237,7 @@ export const svc = contract.grpc("user.service", {
   // Silence the expected import-error log so test output stays clean.
   const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
-    const tests = await discoverTests(filePath);
-    expect(tests).toEqual([]);
+    await expect(discoverTests(filePath)).rejects.toThrow();
   } finally {
     errSpy.mockRestore();
   }
@@ -245,6 +250,9 @@ test("discoverTests fails closed when broken file mixes contract.http with contr
   // Multi-line fluent `contract\n  .flow(...)` chain is the canonical
   // style for non-trivial flows in this repo, so the detector must
   // tolerate whitespace between `contract` and `.flow`.
+  //
+  // GLU-155: same rejection contract as above — a broken import must
+  // surface as a thrown error, not a silently-empty result.
   const filePath = join(contractFixtureDir, "http-flow-broken.contract.ts");
   await writeFile(filePath, `
 import { contract } from "@glubean/sdk";
@@ -262,8 +270,7 @@ export const userFlow = contract
 
   const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
-    const tests = await discoverTests(filePath);
-    expect(tests).toEqual([]);
+    await expect(discoverTests(filePath)).rejects.toThrow();
   } finally {
     errSpy.mockRestore();
   }

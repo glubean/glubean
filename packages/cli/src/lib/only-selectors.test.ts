@@ -95,5 +95,43 @@ test("deriveRerunSelectors — no failures → empty", () => {
 
 test("deriveRerunSelectors — tolerates a missing tests array", () => {
   const r = deriveRerunSelectors({ tests: undefined as never });
-  expect(r).toEqual({ selectors: [], files: [] });
+  expect(r).toEqual({ selectors: [], files: [], discoveryFailureFiles: [] });
+});
+
+// ---------------------------------------------------------------------------
+// deriveRerunSelectors — GLU-155 discoveryFailures (files that failed to
+// IMPORT last run, so they contributed zero entries to `tests`)
+// ---------------------------------------------------------------------------
+
+test("deriveRerunSelectors — folds discoveryFailures files into `files`, reported separately", () => {
+  const { selectors, files, discoveryFailureFiles } = deriveRerunSelectors({
+    tests: [{ testId: "a", filePath: "tests/a.test.ts", success: true }],
+    discoveryFailures: [{ filePath: "contracts/broken.contract.ts" }],
+  });
+  // No discovered test ever failed, so no id-based selector — but the
+  // import-failed file must still be retried.
+  expect(selectors).toEqual([]);
+  expect(files).toEqual(["contracts/broken.contract.ts"]);
+  expect(discoveryFailureFiles).toEqual(["contracts/broken.contract.ts"]);
+});
+
+test("deriveRerunSelectors — discoveryFailures + failed tests coexist without duplicating a shared file", () => {
+  const { selectors, files, discoveryFailureFiles } = deriveRerunSelectors({
+    tests: [{ testId: "b", filePath: "tests/b.test.ts", success: false }],
+    discoveryFailures: [
+      { filePath: "tests/b.test.ts" }, // same file also recorded a discovery failure — no dupe
+      { filePath: "contracts/broken.contract.ts" },
+    ],
+  });
+  expect(selectors).toEqual([{ id: "b" }]);
+  expect(files).toEqual(["tests/b.test.ts", "contracts/broken.contract.ts"]);
+  // Already `seen` via the failed-test pass, so NOT double-counted here.
+  expect(discoveryFailureFiles).toEqual(["contracts/broken.contract.ts"]);
+});
+
+test("deriveRerunSelectors — tolerates a missing discoveryFailures array", () => {
+  const r = deriveRerunSelectors({
+    tests: [{ testId: "a", filePath: "tests/a.test.ts", success: true }],
+  });
+  expect(r).toEqual({ selectors: [], files: [], discoveryFailureFiles: [] });
 });

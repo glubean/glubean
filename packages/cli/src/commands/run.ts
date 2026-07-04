@@ -657,6 +657,20 @@ export async function discoverTests(filePath: string): Promise<DiscoveredTest[]>
         console.error(`\x1b[31m✗ Contract import failed: ${err.file}\x1b[0m`);
         console.error(`\x1b[2m  ${err.error}\x1b[0m`);
       }
+
+      // GLU-155: a contract file that throws during import is a discovery
+      // FAILURE, not an empty file — previously this returned `[]` here,
+      // which is indistinguishable from "this contract file legitimately
+      // exports zero cases." The caller's loop would then silently drop the
+      // whole file: other files still ran, the process still exited 0, and
+      // the final summary never mentioned the import error printed above.
+      // Throwing routes this through the existing per-file catch block below,
+      // which records it as a discovery failure — the run still executes
+      // every OTHER file (no fail-fast), but the summary now reports the
+      // failed file and the process exits non-zero. Message omits the file
+      // path (the caller already labels the error with the relative path) —
+      // just the underlying reason(s), already detailed above.
+      throw new Error(result.errors.map((err) => err.error).join("\n"));
     }
 
     return [];
@@ -918,6 +932,8 @@ export async function runCommand(
     const lastRunPath = resolve(rootDir, ".glubean", "last-run.result.json");
     let lastRun: {
       tests?: Array<{ testId?: string; rowIndex?: number; filePath?: string; success: boolean }>;
+      // GLU-155: files whose IMPORT failed last run (see resultPayload below).
+      discoveryFailures?: Array<{ filePath?: string; error?: string }>;
     };
     try {
       lastRun = JSON.parse(await readFile(lastRunPath, "utf-8"));
@@ -928,8 +944,14 @@ export async function runCommand(
       );
       process.exit(1);
     }
-    const { selectors, files } = deriveRerunSelectors({ tests: lastRun.tests ?? [] });
-    if (selectors.length === 0) {
+    const { selectors, files, discoveryFailureFiles } = deriveRerunSelectors({
+      tests: lastRun.tests ?? [],
+      discoveryFailures: lastRun.discoveryFailures ?? [],
+    });
+    // GLU-155: a run isn't "nothing to rerun" just because no DISCOVERED test
+    // failed — a file whose import threw last time carries zero test ids and
+    // must still be retried.
+    if (selectors.length === 0 && discoveryFailureFiles.length === 0) {
       console.log(
         `\n${colors.green}✓ Last run had no failures — nothing to rerun.${colors.reset}\n`,
       );
@@ -950,10 +972,50 @@ export async function runCommand(
       );
       process.exit(1);
     }
-    onlySelectors = selectors;
+    // GLU-155 codex R3 P2: a discovery-failure file's test ids were NEVER
+    // recorded (its import threw before any test ran), so `selectors` has no
+    // entry for it. Pushing its freshly-discovered ids into `onlySelectors`
+    // (an earlier version of this fix did that) is unsound for data-driven
+    // exports: `test.each`/`test.pick` discovery yields a TEMPLATE sentinel
+    // id (e.g. "user-$index"), but the harness's `matchOnly` (driven by the
+    // SAME global `GLUBEAN_RUNNER_ONLY_SELECTORS` selector set — one flat
+    // list, not scoped per file) matches CONCRETE expanded row ids by exact
+    // equality. The template id would never match a single row, so the
+    // rerun would exit green having executed ZERO rows from the very file
+    // it was supposed to retry — the same false-green failure mode GLU-155
+    // exists to close, just relocated to `--rerun-failed`.
+    //
+    // There is no way to scope selectors per-file in the current protocol
+    // (one flat list feeds both the CLI's own narrowing below and the
+    // harness env channel), so when a carry-over import-failed file is
+    // ACTUALLY IN THIS RUN'S TARGET, the only sound choice is to drop
+    // id-based narrowing entirely and run every test in every file
+    // `testFiles` was already narrowed to above. This only widens what a
+    // MIXED rerun (real failed tests in one file + an import failure in
+    // another) re-executes inside the failed-test file's OTHER,
+    // previously-passing cases — safe over-inclusion, not a correctness risk.
+    //
+    // GLU-155 codex R4 P2: gate that widening on discovery-failure files
+    // that SURVIVED the `testFiles` filter above — NOT on
+    // `discoveryFailureFiles.length` from the last run. A partial target
+    // (e.g. `glubean run one-failed-test-file.ts --rerun-failed`) that
+    // excludes the import-failed file must keep its precise id narrowing;
+    // otherwise the old run's unrelated import failure would silently
+    // re-run every previously-passing test in the one file being retried.
+    const discoveryFailureFilesAbs = new Set(
+      discoveryFailureFiles.map((f) => resolve(rootDir, f)),
+    );
+    const targetedDiscoveryFailures = testFiles.filter((f) =>
+      discoveryFailureFilesAbs.has(resolve(f)),
+    );
+    onlySelectors = targetedDiscoveryFailures.length > 0 ? [] : selectors;
     console.log(
-      `${colors.dim}--rerun-failed: ${selectors.length} failed test(s) across ` +
-        `${testFiles.length} file(s)${colors.reset}\n`,
+      `${colors.dim}--rerun-failed: ${selectors.length} failed test(s)` +
+        (targetedDiscoveryFailures.length > 0
+          ? ` + ${targetedDiscoveryFailures.length} file(s) that failed to import ` +
+            `(running those file(s) in full, import-time test ids are unknown)`
+          : "") +
+        ` across ${testFiles.length} file(s)${colors.reset}\n`,
     );
   } else {
     onlySelectors = selectorFlags.selectors;
@@ -966,6 +1028,24 @@ export async function runCommand(
   // `glubean` field lingers in package.json so users know it's inert now.
   await warnIfLegacyPackageJsonConfig(rootDir);
   const glubeanConfig = structuredClone(CONFIG_DEFAULTS);
+  // GLU-155 codex R2 P1: hoisted from its original spot (just before the
+  // runner-stream loop) so discovery-failure error messages can be redacted
+  // BEFORE they're persisted — a contract file can throw with a secret in
+  // its message (e.g. a leaked token interpolated into an error string), and
+  // that string now lands in `.glubean/last-run.result.json` / the Cloud
+  // upload result (see discoveryFailedFiles below). Value is unchanged by
+  // moving it — it only reads `options`/`glubeanConfig`, both already
+  // available here.
+  const effectiveRedaction = options.redactionConfig ?? glubeanConfig.redaction;
+  // Redact a raw error/exception message the same way `redactNonEvent` (further
+  // below) redacts `context`/`customMetadata` — same rules, same replacement
+  // format, just scoped to a single string instead of an arbitrary value tree.
+  const redactDiscoveryError = (message: string): string =>
+    redactValue(message, {
+      globalRules: effectiveRedaction.globalRules,
+      replacementFormat: effectiveRedaction.replacementFormat,
+      maxDepth: 64,
+    }) as string;
   const effectiveRun = mergeRunOptions(glubeanConfig.run, {
     verbose: options.verbose,
     pretty: options.pretty,
@@ -1229,6 +1309,15 @@ export async function runCommand(
   console.log(`${colors.dim}Discovering tests...${colors.reset}`);
   const allFileTests: FileTest[] = [];
   let totalDiscovered = 0;
+  // GLU-155: files whose discovery threw (e.g. a contract that fails on
+  // import) — aggregated so the run keeps executing every OTHER file, but
+  // the final summary + exit code still reflect the failure. Distinct from
+  // a genuinely test-less file (which discoverTests returns `[]` for
+  // without throwing) — this array is ONLY populated on a thrown error.
+  // Persisted into resultPayload.discoveryFailures below so
+  // `.glubean/last-run.result.json` / `--rerun-failed` stay consistent with
+  // the non-zero exit code (codex GLU-155 R1 P2).
+  const discoveryFailedFiles: Array<{ filePath: string; error: string }> = [];
 
   for (const filePath of testFiles) {
     try {
@@ -1252,18 +1341,27 @@ export async function runCommand(
       }
       totalDiscovered += filteredTests.length;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       if (isMultiFile) {
         const relPath = relative(process.cwd(), filePath);
-        console.error(
-          `  ${colors.red}✗${colors.reset} ${relPath}: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        console.error(`  ${colors.red}✗${colors.reset} ${relPath}: ${message}`);
+        // GLU-155: record the failure instead of silently moving on — the
+        // rest of the loop still runs every other file (aggregate, not
+        // fail-fast), but this file's absence must be visible in the
+        // summary and must flip the exit code non-zero below. The console
+        // line above stays UNREDACTED (local terminal, not persisted) —
+        // `error` here is redacted because it lands in
+        // `.glubean/last-run.result.json` / the Cloud upload result, which
+        // `context`/`customMetadata` already redact (codex R2 P1).
+        discoveryFailedFiles.push({
+          filePath: relative(rootDir, filePath),
+          error: redactDiscoveryError(message),
+        });
       } else {
         console.error(
           `\n${colors.red}❌ Failed to load test file${colors.reset}`,
         );
-        console.error(
-          `${colors.dim}${error instanceof Error ? error.message : String(error)}${colors.reset}`,
-        );
+        console.error(`${colors.dim}${message}${colors.reset}`);
         process.exit(1);
       }
     }
@@ -1275,6 +1373,42 @@ export async function runCommand(
         isMultiFile ? ` in ${testFiles.length} file(s)` : " in file"
       }${colors.reset}`,
     );
+    if (discoveryFailedFiles.length > 0) {
+      console.error(
+        `${colors.dim}${discoveryFailedFiles.length} file(s) failed to import (see errors above) — ` +
+          `that may be the entire cause.${colors.reset}`,
+      );
+      // GLU-155 codex R2 P2: this branch used to exit WITHOUT writing
+      // `.glubean/last-run.result.json` — a run where EVERY targeted file
+      // failed to import (or the ones that did import export zero tests)
+      // left no trace on disk, so a mixed run's discovery failure got
+      // persisted (see resultPayload further below) but this all-or-mostly-
+      // broken one didn't, and `--rerun-failed` had nothing to retry from.
+      // Persist the same minimal shape `writeEmptyResult` uses elsewhere,
+      // plus `discoveryFailures`, before exiting.
+      try {
+        const glubeanDir = resolve(rootDir, ".glubean");
+        await mkdir(glubeanDir, { recursive: true });
+        await writeFile(
+          resolve(glubeanDir, "last-run.result.json"),
+          JSON.stringify(
+            {
+              target: targetDisplay,
+              files: testFiles.map((f) => relative(rootDir, f)),
+              runAt: runStartLocal,
+              summary: { total: 0, passed: 0, failed: 0, skipped: 0, durationMs: 0, stats: {} },
+              tests: [],
+              discoveryFailures: discoveryFailedFiles,
+            },
+            null,
+            2,
+          ) + "\n",
+          "utf-8",
+        );
+      } catch {
+        // Non-critical — best-effort persistence, matches writeEmptyResult.
+      }
+    }
     console.error(
       `${colors.dim}Each test file must export tests: export const myTest = test("id")...${colors.reset}\n`,
     );
@@ -1891,7 +2025,8 @@ export async function runCommand(
   // just before the runner-stream loop — ensures they exist even for the
   // "every selected test was capability-skipped" short-circuit, which calls
   // `emitAllSkippedFilesUpTo` before the runner stream ever starts.
-  const effectiveRedaction = options.redactionConfig ?? glubeanConfig.redaction;
+  // (`effectiveRedaction` itself now lives further up — GLU-155 codex R2 P1 —
+  // so discovery-failure messages can be redacted before this point too.)
   const compiledScopes = compileScopes({
     builtinScopes: BUILTIN_SCOPES,
     globalRules: effectiveRedaction.globalRules,
@@ -2519,6 +2654,15 @@ export async function runCommand(
   if (skipped > 0) summaryParts.push(`${colors.yellow}${skipped} skipped${colors.reset}`);
   console.log(`${colors.bold}Tests:${colors.reset}  ${summaryParts.join(", ")}`);
   console.log(`${colors.bold}Total:${colors.reset}  ${passed + failed + skipped}`);
+  // GLU-155: a contract/test file that failed to import is NOT reflected in
+  // the pass/fail/skip counts above (its tests never got discovered), so it
+  // gets its own summary line — otherwise a run with import failures reads
+  // as a clean green summary even though whole files silently never ran.
+  if (discoveryFailedFiles.length > 0) {
+    console.log(
+      `${colors.bold}Discovery:${colors.reset} ${colors.red}${discoveryFailedFiles.length} file(s) failed to import${colors.reset} ${colors.dim}(${discoveryFailedFiles.map((d) => d.filePath).join(", ")})${colors.reset}`,
+    );
+  }
   if (overallPeakMemoryMB > 0) {
     const memColor = overallPeakMemoryMB > MEMORY_WARNING_THRESHOLD_MB ? colors.yellow : colors.dim;
     console.log(
@@ -2716,6 +2860,14 @@ export async function runCommand(
       ...(r.reason !== undefined && { reason: r.reason }),
       filePath: relative(rootDir, r.filePath),
     })),
+    // GLU-155: files that failed to IMPORT (zero test ids ever discovered),
+    // kept alongside `tests` so this run isn't internally inconsistent — the
+    // process already exits non-zero for these, but without this the saved
+    // `summary`/`tests` could read as a clean "N passed" even though a whole
+    // file silently never ran. `filePath` is rootDir-relative, matching
+    // `tests[].filePath`, so `--rerun-failed` (deriveRerunSelectors) can fold
+    // these files back into its target set on the next run.
+    ...(discoveryFailedFiles.length > 0 && { discoveryFailures: discoveryFailedFiles }),
     ...(thresholdSummary && { thresholds: thresholdSummary }),
     ...(options.meta && Object.keys(options.meta).length > 0
       ? { customMetadata: redactNonEvent(options.meta) as Record<string, unknown> }
@@ -2909,10 +3061,15 @@ export async function runCommand(
           // Stable idempotency id for this run — reused across the upload retry so
           // a lost-response retry replaces this run instead of duplicating it (P1).
           clientRunId: randomUUID(),
-          // A breached metric threshold fails the run (mirrors the process exit
-          // below) even when every test passed — don't record it as "passed".
+          // A breached metric threshold, or a file that failed to import
+          // (GLU-155 — mirrors the process exit below), fails the run even
+          // when every DISCOVERED test passed — don't record it as "passed".
           status:
-            failed > 0 || (thresholdSummary && !thresholdSummary.pass) ? "failed" : "passed",
+            failed > 0 ||
+            discoveryFailedFiles.length > 0 ||
+            (thresholdSummary && !thresholdSummary.pass)
+              ? "failed"
+              : "passed",
           startedAt: runStartTime,
           completedAt: new Date(Date.parse(runStartTime) + totalDurationMs).toISOString(),
           durationMs: totalDurationMs,
@@ -2988,7 +3145,14 @@ export async function runCommand(
     }
   }
 
-  if (failed > 0 || (thresholdSummary && !thresholdSummary.pass)) {
+  // GLU-155: a file that failed to import must fail the run even if every
+  // test that WAS discovered passed — otherwise CI reads green while a whole
+  // contract file silently never ran.
+  if (
+    failed > 0 ||
+    discoveryFailedFiles.length > 0 ||
+    (thresholdSummary && !thresholdSummary.pass)
+  ) {
     process.exit(1);
   }
 }

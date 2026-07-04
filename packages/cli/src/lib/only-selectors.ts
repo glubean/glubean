@@ -79,10 +79,24 @@ export function buildOnlySelectorsFromFlags(opts: OnlyFlags): BuildSelectorsResu
  * `{id}` or row-pinned `{id, rowIndex}`). `files` is the de-duplicated list of
  * `filePath`s of failed records (declaration order preserved) so the caller can
  * narrow discovery to only the files that actually contained a failure.
+ *
+ * GLU-155: a file whose IMPORT threw last run contributes ZERO entries to
+ * `tests` (no test id was ever discovered), so it would otherwise be invisible
+ * here — `--rerun-failed` would silently never retry it. `lastRun.discoveryFailures`
+ * (persisted alongside `tests` — see resultPayload in run.ts) plugs that gap:
+ * its files are folded into `files` too, and returned separately as
+ * `discoveryFailureFiles` so the caller knows to run those files IN FULL
+ * rather than apply id-based `onlySelectors` narrowing to them (their test
+ * ids are unknown until the file imports successfully again — and for
+ * `test.each`/`test.pick` exports, discovery only ever has a TEMPLATE
+ * sentinel id, which the harness's exact-match `matchOnly` would never
+ * match against the concrete expanded row ids it runs — see run.ts's
+ * `--rerun-failed` block, codex GLU-155 R3 P2).
  */
 export function deriveRerunSelectors(lastRun: {
   tests: Array<{ testId?: string; rowIndex?: number; filePath?: string; success: boolean }>;
-}): { selectors: OnlySelector[]; files: string[] } {
+  discoveryFailures?: Array<{ filePath?: string }>;
+}): { selectors: OnlySelector[]; files: string[]; discoveryFailureFiles: string[] } {
   const tests = lastRun.tests ?? [];
   const selectors = collectFailedSelectors(
     tests.map((t) => ({ id: t.testId, rowIndex: t.rowIndex, success: t.success })),
@@ -95,5 +109,13 @@ export function deriveRerunSelectors(lastRun: {
       files.push(t.filePath);
     }
   }
-  return { selectors, files };
+  const discoveryFailureFiles: string[] = [];
+  for (const df of lastRun.discoveryFailures ?? []) {
+    if (df.filePath && !seen.has(df.filePath)) {
+      seen.add(df.filePath);
+      files.push(df.filePath);
+      discoveryFailureFiles.push(df.filePath);
+    }
+  }
+  return { selectors, files, discoveryFailureFiles };
 }
