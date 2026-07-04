@@ -179,6 +179,132 @@ test(
   30_000,
 );
 
+// A file that imports fine but exports zero tests — distinct from
+// BROKEN_CONTRACT, which throws AT import time.
+const EMPTY_CONTRACT = `
+export const notATest = 42;
+`;
+
+test(
+  "glubean run: a MIXED target (one file fails import, another imports fine but exports zero tests) is NOT treated as all-broken — keeps the pre-existing exit-without-pipeline behavior (codex xhigh R2 P2)",
+  async () => {
+    // Guards against a too-loose \`allBrokenDiscovery\` check: before the R2
+    // fix, \`allFileTests.length === 0 && discoveryFailedFiles.length > 0\`
+    // was true here too (one file failed import, the other contributed zero
+    // tests), incorrectly routing this run through the full GLU-194 pipeline
+    // even though it isn't an all-import-failed run — one of the two targeted
+    // files imported successfully. This must keep exiting on the "Each test
+    // file must export tests" message, same as before GLU-194 ever shipped.
+    const dir = await prepareFixture("mixed-empty", {
+      "package.json": workspacePackageJson("glu194-mixed-empty"),
+      "contracts/broken.contract.ts": BROKEN_CONTRACT,
+      "contracts/empty.contract.ts": EMPTY_CONTRACT,
+    });
+
+    const { code, stdout, stderr } = await runCli(
+      [
+        "run",
+        "contracts/",
+        "--result-json",
+        "result.json",
+        "--reporter",
+        "junit",
+      ],
+      { cwd: dir },
+    );
+    const out = stdout + stderr;
+
+    expect(code).not.toBe(0);
+    // Diagnostics still fire (this file's import failure is real and
+    // reported), but since NOT every targeted file failed to import, the run
+    // falls through past the `allBrokenDiscovery` gate to the ordinary
+    // "0 tests to run" exit — same message a plain --filter/--tags miss gets
+    // (pre-existing, unrelated to GLU-194) — rather than the pipeline.
+    expect(out).toContain("No test cases found");
+    expect(out).toMatch(/1 file\(s\) failed to import/);
+    expect(out).toContain("All tests skipped");
+
+    // The full pipeline must NOT have been reached — no --result-json, no
+    // --reporter junit output. (The unconditional `.glubean/last-run.result.json`
+    // fallback sink from GLU-155 R2 P2 still fires — that one is intentionally
+    // unconditional on any discovery failure, mixed or not.)
+    expect(out).not.toContain("Result written to");
+    expect(out).not.toContain("JUnit XML written to");
+    await expect(readFile(join(dir, "result.json"), "utf-8")).rejects.toThrow();
+    await expect(
+      readFile(join(dir, "glubean-run.junit.xml"), "utf-8"),
+    ).rejects.toThrow();
+  },
+  30_000,
+);
+
+// A self-contained `.bootstrap.ts` overlay — deliberately NOT importing
+// anything from BROKEN_CONTRACT, so it imports cleanly on its own. Its
+// contract/case exist purely so `contract.bootstrap()` has a valid ref;
+// nothing here is ever run.
+const DUMMY_BOOTSTRAP = `
+import { contract } from "@glubean/sdk";
+
+const dummyApi = contract.http.with("dummyApi194", { endpoint: "https://example.invalid" });
+const dummyCase = dummyApi("dummy.ping", {
+  endpoint: "GET /ping",
+  cases: { ok: { description: "ok", expect: { status: 200 } } },
+});
+
+export const dummyOverlay = contract.bootstrap(dummyCase.case("ok"), async () => {
+  // no-op — exists only so this file imports cleanly and registers a
+  // bootstrap overlay (GLU-194 R3 fixture).
+});
+`;
+
+test(
+  "glubean run: a target with ONE broken runnable file + a clean .bootstrap.ts overlay IS all-broken — reaches the pipeline (codex xhigh R3 P2)",
+  async () => {
+    // Guards against re-narrowing the R2 fix too far: `resolveTestFiles`
+    // always retains `.bootstrap.ts` files (so their side-effecting
+    // `contract.bootstrap()` registration fires), and `discoverTests`
+    // returns `[]` (not a throw) for them — so comparing
+    // `discoveryFailedFiles.length` against the RAW `testFiles.length`
+    // (which counts the bootstrap file) would wrongly conclude this is a
+    // MIXED run and skip the pipeline, even though the only RUNNABLE file
+    // in this target failed to import.
+    const dir = await prepareFixture("bootstrap-overlay", {
+      "package.json": workspacePackageJson("glu194-bootstrap-overlay"),
+      "contracts/broken.contract.ts": BROKEN_CONTRACT,
+      "contracts/overlay.bootstrap.ts": DUMMY_BOOTSTRAP,
+    });
+
+    const { code, stdout, stderr } = await runCli(
+      [
+        "run",
+        "contracts/",
+        "--result-json",
+        "result.json",
+        "--reporter",
+        "junit",
+      ],
+      { cwd: dir },
+    );
+    const out = stdout + stderr;
+
+    expect(code).not.toBe(0);
+    expect(out).toMatch(/1 file\(s\) failed to import/);
+
+    // The pipeline MUST be reached — this is the case the R3 fix restores.
+    expect(out).toContain("Result written to");
+    expect(out).toContain("JUnit XML written to");
+    const resultJsonContent = JSON.parse(
+      await readFile(join(dir, "result.json"), "utf-8"),
+    );
+    expect(resultJsonContent.discoveryFailures).toHaveLength(1);
+    expect(resultJsonContent.discoveryFailures[0].filePath).toBe(
+      "contracts/broken.contract.ts",
+    );
+    expect(resultJsonContent.tests).toEqual([]);
+  },
+  30_000,
+);
+
 /** Minimal fake Glubean Platform API — just enough of the `/v1/*` surface for
  *  the CLI's upload preflight (project + explicit target check) and the run
  *  ingest POST. Captures every ingest body it receives for assertions. */

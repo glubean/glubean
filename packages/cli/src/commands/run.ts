@@ -1377,8 +1377,34 @@ export async function runCommand(
   // gates every "0 tests to run" exit between here and the pipeline so
   // `testsToRun` (derived from the now-empty `allFileTests`) is allowed to
   // stay empty and fall all the way through, instead of exiting early.
+  //
+  // codex xhigh R2 P2: this must require EVERY targeted file to have failed
+  // import, not merely "at least one did and zero tests were collected
+  // overall". `allFileTests.length === 0 && discoveryFailedFiles.length > 0`
+  // was also true for a MIXED target where file A fails to import and file B
+  // imports fine but exports zero tests — that's the "file importing fine
+  // but exporting zero tests" case the comment above explicitly says must
+  // keep the pre-existing exit-without-pipeline behavior, yet the old check
+  // routed it into the full pipeline anyway. Comparing against `testFiles`
+  // (the actual targeted-file count, already narrowed by `--rerun-failed`
+  // above) makes "all" mean all.
+  //
+  // codex xhigh R3 P2: `testFiles` also includes `.bootstrap.ts` overlays
+  // (always retained per `resolveTestFiles` above so their side-effecting
+  // `contract.bootstrap()` registrations fire on import), and
+  // `discoverTests` returns `[]` — not a throw — for those, so a bootstrap
+  // file never lands in `discoveryFailedFiles` even when it imports fine.
+  // A target of exactly one broken runnable file + one clean bootstrap
+  // overlay is genuinely all-broken (the only RUNNABLE file failed), but
+  // `discoveryFailedFiles.length` (1) !== `testFiles.length` (2) would say
+  // otherwise. Exclude bootstrap-only files from both sides of the count so
+  // "all" means "all runnable files", matching what a human calls all-broken.
+  const runnableTargetFileCount = testFiles.filter(
+    (f) => !isBootstrapOnlyFile(f),
+  ).length;
   const allBrokenDiscovery =
-    allFileTests.length === 0 && discoveryFailedFiles.length > 0;
+    runnableTargetFileCount > 0 &&
+    discoveryFailedFiles.length === runnableTargetFileCount;
 
   if (allFileTests.length === 0) {
     console.error(
