@@ -75,17 +75,93 @@ export interface RetryMeta {
   reason: string;
 }
 
+/**
+ * Coarse session lifecycle a node performs (GLU-195), for the Specs inspector's
+ * at-a-glance badge:
+ * - `establish` — logs in / mints a fresh session (Set-Cookie / token issued);
+ * - `refresh`   — rotates/renews an existing session;
+ * - `read`      — consumes the session to authenticate (no mutation);
+ * - `revoke`    — logs out / clears the session.
+ */
+export type SessionLifecycle = "establish" | "refresh" | "read" | "revoke";
+
+/**
+ * Cookie NAMES a node reads and/or sets (GLU-195). These are logical
+ * IDENTIFIERS (`"better-auth.session_token"`), never cookie VALUES.
+ *
+ * They are grouped under this nested object — rather than flat `cookiesRead`/
+ * `cookiesSet` keys — DELIBERATELY: the projection is redacted before upload
+ * (`glubean sync`), and the redactor masks scalars under any key containing the
+ * substring `cookie` (a cookie VALUE is credential material by default, GLU-104/
+ * GLU-123). A flat `cookiesRead: ["better-auth.session_token"]` would upload as
+ * `["[REDACTED]"]` — the exact opposite of what GLU-195 wants. Under the neutral
+ * `read`/`set` inner keys the NAMES survive as the structural identifiers they
+ * are (the redactor preserves them like schema field names), while a direct
+ * cookie VALUE elsewhere (`extensions: { cookie: "sid=…" }`) still redacts.
+ *
+ * Because these NAMES ride an un-redacted channel, the builder enforces the
+ * RFC-7230 token grammar on each entry (no `=`/`;`/`:`/whitespace) at build
+ * time — a `name=value` pair cannot be smuggled in as a "name".
+ */
+export interface CookieEffect {
+  /** Cookie names this node SENDS/consumes to authenticate. */
+  read?: string[];
+  /** Cookie names this node SETS or refreshes (the Set-Cookie it establishes). */
+  set?: string[];
+}
+
+/**
+ * Structured cookie / header / session behavior an opaque node performs
+ * (GLU-195). A hint-tier DECLARATION — the SAME trust tier as `reads`/`note`
+ * (the projection stays static and honest; it emits only what the author
+ * declared). Before this, session behavior was only reachable as free text in
+ * `reads` (e.g. `["better-auth session cookie"]`), which the Specs workflow
+ * inspector could not render first-class. Every field is optional; declare
+ * only what applies — an all-empty object is meaningless and rejected at build
+ * time (omit the hint instead). All names are LOGICAL identifiers, not values.
+ */
+export interface SessionEffect {
+  /** Cookie names read/set (see `CookieEffect` for the redaction rationale). */
+  cookies?: CookieEffect;
+  /** Request header NAMES this node propagates for auth (e.g. `"Authorization"`),
+   * NOT values — each is build-validated as an RFC-7230 token. */
+  headers?: string[];
+  /** Coarse lifecycle badge (see `SessionLifecycle`). */
+  lifecycle?: SessionLifecycle;
+}
+
+/**
+ * One declared assertion an opaque node verifies inline (GLU-195). The
+ * hint-tier analogue of a declarative check's `expects`: an opaque
+ * action/check cannot have its predicate extracted, so the author DECLARES
+ * each verification as a structured, individually-renderable row — richer than
+ * the single free-text `asserts` string. It carries no live predicate and
+ * never executes; it is projection-only DECLARATION (same trust as `note`).
+ */
+export interface AssertHint {
+  /** Human-readable statement of what is verified (e.g. `"status is 200"`). */
+  message: string;
+  /** Optional path the assertion targets (state/response), e.g. `"session.token"`. */
+  target?: string;
+}
+
 /** Projection hints for an opaque `.action()` (raise its grade to `partial`). */
 export interface ActionProjection {
   reads?: string[];
   writes?: string[];
   note?: string;
+  /** Structured cookie/header/session behavior (GLU-195). */
+  session?: SessionEffect;
+  /** Structured per-node assertions the action verifies inline (GLU-195). */
+  verify?: AssertHint[];
 }
 
 /** Projection hints for an opaque `.check()` (raise its grade to `partial`). */
 export interface CheckProjection {
   reads?: string[];
   asserts?: string;
+  /** Structured per-node assertions — richer than the free-text `asserts` (GLU-195). */
+  verify?: AssertHint[];
 }
 
 /**
@@ -479,6 +555,13 @@ export interface ProjectedWorkflowNode {
   asserts?: string;
   /** action note. */
   note?: string;
+  /** action/pollAction: structured cookie/header/session behavior (GLU-195).
+   * NOT emitted on `check` — a check verifies, it does not mutate the session. */
+  session?: SessionEffect;
+  /** action/check/pollAction: structured per-node assertions the node verifies
+   * inline (GLU-195). The hint-tier analogue of a declarative check's `expects`
+   * (which carries live predicates); `verify` rows are author DECLARATIONS. */
+  verify?: AssertHint[];
   /** group children. */
   nodes?: ProjectedWorkflowNode[];
   /** branch family: how the taken case is decided (addendum §9). */

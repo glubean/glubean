@@ -69,13 +69,18 @@ export function staticGradeOf(node: WorkflowNode): StaticGrade {
       return (node as ComputeNode).reads !== undefined ? "partial" : "opaque";
     case "action": {
       const p = (node as ActionNode).project;
-      return p && (p.reads?.length || p.writes?.length || p.note) ? "partial" : "opaque";
+      // Any declared hint — dataflow (reads/writes/note), session behavior, or a
+      // per-node assertion (GLU-195) — raises an opaque action to `partial`.
+      return p && (p.reads?.length || p.writes?.length || p.note || p.session || p.verify?.length)
+        ? "partial"
+        : "opaque";
     }
     case "check": {
       const c = node as CheckNode;
       // declarative expects → assertions are DATA (phase4 §7) — full.
       if (c.expects !== undefined) return "full";
-      return c.project?.asserts ? "partial" : "opaque";
+      // free-text `asserts` OR structured `verify` rows (GLU-195) → partial.
+      return c.project?.asserts || c.project?.verify?.length ? "partial" : "opaque";
     }
     case "group":
       return (node as GroupNode).nodes.reduce(
@@ -167,6 +172,11 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         reads: p?.reads,
         writes: p?.writes,
         note: p?.note,
+        // GLU-195: structured session/cookie/header behavior + per-node
+        // assertions, emitted only when the author declared them (absent, not
+        // empty — a new consumer never reads a placeholder as "no behavior").
+        ...(p?.session ? { session: p.session } : {}),
+        ...(p?.verify ? { verify: p.verify } : {}),
         retry: a.retry,
         ...(a.meta.timeout !== undefined ? { nodeTimeoutMs: a.meta.timeout } : {}),
       };
@@ -180,6 +190,9 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
         grade,
         reads: p?.reads,
         asserts: p?.asserts,
+        // GLU-195: structured per-node assertions (richer than free-text
+        // `asserts`); the inline check's hint-tier analogue of `expects`.
+        ...(p?.verify ? { verify: p.verify } : {}),
         ...(c.expects !== undefined
           ? {
               expects: c.expects.map((item) =>
@@ -241,6 +254,9 @@ function projectNode(node: WorkflowNode): ProjectedWorkflowNode {
               reads: p.project?.reads,
               writes: p.project?.writes,
               note: p.project?.note,
+              // GLU-195: a pollAction probe carries the same hint tier as an action.
+              ...(p.project?.session ? { session: p.project.session } : {}),
+              ...(p.project?.verify ? { verify: p.project.verify } : {}),
             }),
         accept: p.accept,
         // The opaque until's fn takes (ctx, res, state) — wider than the condition

@@ -99,6 +99,40 @@ export const secretsContract = api("secrets-contract", {
 `;
 }
 
+/** GLU-195 fixture: a workflow whose action declares structured session
+ * behavior. Cookie NAMES (`better-auth.session_token`) are identifiers that MUST
+ * survive redaction so the Specs inspector can render them; a real cookie VALUE
+ * placed in the workflow's `extensions.cookie` (a direct scalar under a
+ * sensitive key) MUST still be masked. Pins that the nested `cookies.read/set`
+ * shape (not a flat `cookiesRead` key) keeps the names upload-safe. */
+function workflowFixtureSource(): string {
+  return `
+import { workflow } from "@glubean/sdk";
+
+// @workflow
+export const authJourney = workflow({
+  id: "auth-journey",
+  name: "Auth journey",
+  extensions: { cookie: ${JSON.stringify(REAL_COOKIE)} },
+})
+  .setup(async () => ({}))
+  .action("get-session-with-cookie", async (_c, s) => s, {
+    project: {
+      session: {
+        cookies: {
+          read: ["better-auth.session_token"],
+          set: ["better-auth.session_data"],
+        },
+        headers: ["Authorization"],
+        lifecycle: "read",
+      },
+      verify: [{ message: "session endpoint returns 200", target: "res.status" }],
+    },
+  })
+  .build();
+`;
+}
+
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -112,6 +146,7 @@ beforeEach(async () => {
   await mkdir(join(fixtureDir, "contracts"), { recursive: true });
   await writeFile(join(fixtureDir, "package.json"), minimalPackageJson("sync-redaction-fixture"));
   await writeFile(join(fixtureDir, "contracts", "secrets.contract.ts"), contractFixtureSource());
+  await writeFile(join(fixtureDir, "auth.flow.ts"), workflowFixtureSource());
 
   fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ upserted: 1 })));
   vi.stubGlobal("fetch", fetchMock);
@@ -202,5 +237,49 @@ describe("GLU-123 — glubean sync redacts contract projection extensions before
     expect(bodySchema.properties.cookie.description).toBe(
       "cookie field NAME on the schema, not a value",
     );
+  });
+});
+
+describe("GLU-195 — workflow node session.cookies NAMES survive upload; a real cookie VALUE still redacts", () => {
+  test("cookie/header identifiers in a node's `session` hint upload verbatim, but extensions.cookie is masked", async () => {
+    await syncCommand({
+      dir: fixtureDir,
+      token: "gb_test_token",
+      project: "proj_test",
+      apiUrl: "https://api.glubean.test",
+      allowEmpty: true,
+    });
+
+    const workflowBody = bodyForKind("workflow") as {
+      workflows: Array<{ workflowId: string; projection: any }>;
+    };
+    const wf = workflowBody.workflows.find((w) => w.workflowId === "auth-journey");
+    expect(wf, "auth-journey workflow uploaded").toBeDefined();
+    const projection = wf!.projection;
+    const serialized = JSON.stringify(projection);
+
+    // The cookie/header NAMES are structural identifiers — they MUST survive so
+    // the Specs inspector can render them first-class (the whole point of GLU-195).
+    expect(serialized).toContain("better-auth.session_token");
+    expect(serialized).toContain("better-auth.session_data");
+    const actionNode = projection.nodes.find((n: any) => n.id === "get-session-with-cookie");
+    expect(actionNode).toBeDefined();
+    expect(actionNode.session).toEqual({
+      cookies: {
+        read: ["better-auth.session_token"],
+        set: ["better-auth.session_data"],
+      },
+      headers: ["Authorization"],
+      lifecycle: "read",
+    });
+    expect(actionNode.verify).toEqual([
+      { message: "session endpoint returns 200", target: "res.status" },
+    ]);
+
+    // …while a REAL cookie VALUE sitting under a sensitive key (the workflow's
+    // `extensions.cookie`) is still masked — GLU-123's protection is intact.
+    expect(serialized).not.toContain(REAL_COOKIE);
+    expect(typeof projection.extensions.cookie).toBe("string");
+    expect(projection.extensions.cookie).not.toBe(REAL_COOKIE);
   });
 });

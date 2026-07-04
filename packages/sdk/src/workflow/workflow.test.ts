@@ -253,6 +253,204 @@ describe("projectWorkflow() static grades", () => {
     expect((proj.nodes[0]).grade).toBe("partial"); // action: reads hint counts
     expect((proj.nodes[1]).grade).toBe("opaque"); // check: reads alone is not asserts
   });
+
+  // --- GLU-195: structured session/cookie/header + per-node assertions --------
+
+  it("GLU-195: action projects structured session behavior + verify rows (first-class, not free-text reads)", () => {
+    const wf = workflow("w")
+      .action("get-session-with-cookie", async (_c, s) => s, {
+        project: {
+          session: {
+            cookies: {
+              read: ["better-auth.session_token"],
+              set: ["better-auth.session_data"],
+            },
+            headers: ["Authorization"],
+            lifecycle: "read",
+          },
+          verify: [
+            { message: "session endpoint returns 200", target: "res.status" },
+            { message: "user id is present", target: "state.user.id" },
+          ],
+        },
+      })
+      .build();
+    const node = projectWorkflow(wf).nodes[0];
+    expect(node.grade).toBe("partial"); // session/verify are hint-tier declarations
+    expect(node.session).toEqual({
+      cookies: {
+        read: ["better-auth.session_token"],
+        set: ["better-auth.session_data"],
+      },
+      headers: ["Authorization"],
+      lifecycle: "read",
+    });
+    expect(node.verify).toEqual([
+      { message: "session endpoint returns 200", target: "res.status" },
+      { message: "user id is present", target: "state.user.id" },
+    ]);
+  });
+
+  it("GLU-195: session OR verify alone raises a bare action to partial", () => {
+    const sessionOnly = projectWorkflow(
+      workflow("w1")
+        .action("a", async (_c, s) => s, { project: { session: { lifecycle: "establish" } } })
+        .build(),
+    ).nodes[0];
+    expect(sessionOnly.grade).toBe("partial");
+    expect(sessionOnly.session).toEqual({ lifecycle: "establish" });
+
+    const verifyOnly = projectWorkflow(
+      workflow("w2")
+        .action("a", async (_c, s) => s, { project: { verify: [{ message: "ok" }] } })
+        .build(),
+    ).nodes[0];
+    expect(verifyOnly.grade).toBe("partial");
+    expect(verifyOnly.verify).toEqual([{ message: "ok" }]);
+  });
+
+  it("GLU-195: inline check projects structured verify rows alongside free-text asserts", () => {
+    const node = projectWorkflow(
+      workflow("w")
+        .check("c", async () => {}, {
+          project: { asserts: "x == y", verify: [{ message: "token rotated", target: "session.token" }] },
+        })
+        .build(),
+    ).nodes[0];
+    expect(node.grade).toBe("partial");
+    expect(node.asserts).toBe("x == y");
+    expect(node.verify).toEqual([{ message: "token rotated", target: "session.token" }]);
+  });
+
+  it("GLU-195: structured hints are ABSENT (not empty) when undeclared — projection contract stays additive", () => {
+    const node = projectWorkflow(
+      workflow("w").action("a", async (_c, s) => s, { project: { note: "n" } }).build(),
+    ).nodes[0];
+    expect(node.grade).toBe("partial");
+    expect("session" in node).toBe(false);
+    expect("verify" in node).toBe(false);
+  });
+
+  it("GLU-195: malformed structured hints are rejected at BUILD time (typed contract, unlike free-text)", () => {
+    // empty session object — declares no behavior
+    expect(() =>
+      workflow("e1").action("a", async (_c, s) => s, { project: { session: {} } }),
+    ).toThrow(/declares no behavior/);
+    // bad lifecycle enum
+    expect(() =>
+      workflow("e2").action("a", async (_c, s) => s, {
+        project: { session: { lifecycle: "login" as never } },
+      }),
+    ).toThrow(/lifecycle/);
+    // non-string cookie entry (nested under cookies.read)
+    expect(() =>
+      workflow("e3").action("a", async (_c, s) => s, {
+        project: { session: { cookies: { read: [123 as never] } } },
+      }),
+    ).toThrow(/session\.cookies\.read/);
+    // empty cookies object — declares neither read nor set
+    expect(() =>
+      workflow("e3b").action("a", async (_c, s) => s, {
+        project: { session: { cookies: {} } },
+      }),
+    ).toThrow(/neither `read` nor `set`/);
+    // a cookie VALUE (name=value pair) must NOT enter the redaction-preserved
+    // name slot — the RFC-token grammar rejects `=`/`;`/whitespace (codex R4 P2).
+    expect(() =>
+      workflow("e3c").action("a", async (_c, s) => s, {
+        project: { session: { cookies: { read: ["sessid=REALSECRET; HttpOnly"] } } },
+      }),
+    ).toThrow(/valid cookie\/header NAME/);
+    expect(() =>
+      workflow("e3d").action("a", async (_c, s) => s, {
+        project: { session: { cookies: { set: ["a=b"] } } },
+      }),
+    ).toThrow(/valid cookie\/header NAME/);
+    // a header VALUE smuggled through the header NAME slot is rejected too
+    expect(() =>
+      workflow("e3e").action("a", async (_c, s) => s, {
+        project: { session: { headers: ["Authorization: Bearer SECRET"] } },
+      }),
+    ).toThrow(/valid cookie\/header NAME/);
+    // empty verify array
+    expect(() =>
+      workflow("e4").action("a", async (_c, s) => s, { project: { verify: [] } }),
+    ).toThrow(/non-empty array/);
+    // verify item missing message
+    expect(() =>
+      workflow("e5").action("a", async (_c, s) => s, {
+        project: { verify: [{ target: "x" } as never] },
+      }),
+    ).toThrow(/message/);
+    // same guard applies to inline check
+    expect(() =>
+      workflow("e6").check("c", async () => {}, { project: { verify: [{ message: "  " }] } }),
+    ).toThrow(/message/);
+  });
+
+  it("GLU-195: pollAction (no call identity) projects session + verify like an action", () => {
+    const node = projectWorkflow(
+      workflow("w")
+        .setup(async () => ({}))
+        .pollAction("probe", async () => ({ ready: true }), {
+          until: (predicateW) => predicateW.when((r: { ready: boolean }) => r.ready).eq(true),
+          timeout: 1000,
+          project: {
+            session: { cookies: { read: ["sid"] }, lifecycle: "read" },
+            verify: [{ message: "probe body is ready", target: "res.ready" }],
+          },
+        })
+        .build(),
+    ).nodes[0];
+    expect(node.grade).toBe("partial");
+    expect(node.session).toEqual({ cookies: { read: ["sid"] }, lifecycle: "read" });
+    expect(node.verify).toEqual([{ message: "probe body is ready", target: "res.ready" }]);
+  });
+
+  it("GLU-195: `session` is rejected on check — a check verifies, it does not mutate the session", () => {
+    expect(() =>
+      workflow("cs").check("c", async () => {}, {
+        // `session` is not on CheckProjection; a JS/as-any bypass must still be rejected,
+        // not silently dropped (check never emits it).
+        project: { session: { lifecycle: "read" } } as never,
+      }),
+    ).toThrow(/session` is not supported on check/);
+  });
+
+  it("GLU-195: the declarative check form takes no `project` hints (its predicates ARE the data)", () => {
+    expect(() =>
+      workflow("dc").check("c", {
+        expect: (predicateW) => [predicateW.when((s: { ok: boolean }) => s.ok).eq(true)],
+        // hints belong to the inline form; a `project` here must be rejected, not dropped.
+        project: { verify: [{ message: "x" }] },
+      } as never),
+    ).toThrow(/declarative form.*takes no `project`/);
+  });
+
+  it("GLU-195: unknown keys in structured hints are rejected (closed schema — no leak into the contract)", () => {
+    expect(() =>
+      workflow("u1").action("a", async (_c, s) => s, {
+        project: { session: { cookies: { read: ["x"] }, bogus: 1 } as never },
+      }),
+    ).toThrow(/unknown key "bogus"/);
+    // unknown key inside the nested cookies object is rejected too
+    expect(() =>
+      workflow("u1b").action("a", async (_c, s) => s, {
+        project: { session: { cookies: { read: ["x"], deleted: ["y"] } } as never },
+      }),
+    ).toThrow(/unknown key "deleted"/);
+    expect(() =>
+      workflow("u2").action("a", async (_c, s) => s, {
+        project: { verify: [{ message: "ok", severity: "high" } as never] },
+      }),
+    ).toThrow(/unknown key "severity"/);
+    // an array masquerading as an AssertHint record is rejected
+    expect(() =>
+      workflow("u3").action("a", async (_c, s) => s, {
+        project: { verify: [["message", "x"] as never] },
+      }),
+    ).toThrow(/must be an AssertHint object/);
+  });
 });
 
 // --- S2.5 discovery: build() finalizes into a registered Test handle ----------

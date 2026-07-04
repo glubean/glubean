@@ -274,6 +274,129 @@ function validateNodeTimeout(meta: NodeMeta, kind: string): void {
   }
 }
 
+const SESSION_LIFECYCLES = new Set(["establish", "refresh", "read", "revoke"]);
+const SESSION_KEYS = new Set(["cookies", "headers", "lifecycle"]);
+const COOKIE_KEYS = new Set(["read", "set"]);
+const ASSERT_KEYS = new Set(["message", "target"]);
+
+/**
+ * RFC 7230 `token` grammar (= RFC 6265 cookie-name = HTTP field-name): one or
+ * more `tchar` — no CTLs, no separators (`= ; : , " / [ ] ? { } ( ) < > @ \`,
+ * SP, HT). Cookie/header entries in a `session` hint are NAMES (identifiers),
+ * and the sync redactor deliberately PRESERVES them (nested under the neutral
+ * `read`/`set`/`headers` keys), so enforcing name-grammar here is what stops an
+ * author smuggling a cookie/header VALUE (`sessid=SECRET; HttpOnly`) through
+ * that un-redacted channel (codex R4 P2). Values belong in the request, never
+ * in a projection hint.
+ */
+const NAME_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/** Assert `arr` is a non-empty array of RFC-7230-token NAMES (throws with `where`). */
+function assertNameTokens(arr: unknown, where: string): void {
+  if (!Array.isArray(arr) || arr.length === 0) {
+    throw new Error(`${where} must be a non-empty array of names`);
+  }
+  for (const s of arr) {
+    if (typeof s !== "string" || s.trim() === "") {
+      throw new Error(`${where} must contain only non-empty strings; got ${JSON.stringify(s)}`);
+    }
+    if (!NAME_TOKEN.test(s)) {
+      throw new Error(
+        `${where}: ${JSON.stringify(s)} is not a valid cookie/header NAME — it must be an RFC-7230 token (no \`=\`, \`;\`, \`:\`, whitespace, or quotes). A hint carries identifiers, never values.`,
+      );
+    }
+  }
+}
+
+/** A plain record (rejects null / arrays / class instances-as-arrays). */
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Reject keys the projection schema does not know — they would otherwise ride
+ * verbatim into the first-class projection contract Cloud renders (codex R1 P2). */
+function assertKnownKeys(obj: Record<string, unknown>, allowed: Set<string>, where: string): void {
+  for (const k of Object.keys(obj)) {
+    if (!allowed.has(k)) {
+      throw new Error(`${where}: unknown key ${JSON.stringify(k)} (allowed: ${[...allowed].join(", ")})`);
+    }
+  }
+}
+
+/**
+ * Validate the STRUCTURED projection hints introduced in GLU-195 (`session`,
+ * `verify`). Unlike the free-text hints (`reads`/`writes`/`note`/`asserts`,
+ * which cannot be malformed), these carry a typed contract — an enum, a
+ * required `message`, and a CLOSED key set — that Cloud renders first-class, so
+ * garbage here would leak into or break a downstream consumer. The projector
+ * emits these hints verbatim, so this is the ONE place their shape is enforced:
+ * rejected at build time (mirrors how declarative `check({ expect })` rejects an
+ * empty predicate array). The legacy free-text hints are left untouched.
+ *
+ * `allowSession` is false for `check`: a check VERIFIES, it does not perform
+ * session mutations (lifecycle discipline), and `CheckProjection` does not type
+ * `session` — so a `session` that only reaches here via JS/`as any` is a silent
+ * hint drop (check never emits it) and is rejected outright (codex R1 P2).
+ */
+function validateProjectionHints(
+  project: { session?: unknown; verify?: unknown } | undefined,
+  kind: string,
+  id: string,
+  allowSession: boolean,
+): void {
+  if (!project) return;
+  const where = `workflow.${kind}() "${id}"`;
+  if (project.session !== undefined) {
+    if (!allowSession) {
+      throw new Error(`${where}: \`project.session\` is not supported on ${kind} nodes`);
+    }
+    const s = project.session;
+    if (!isPlainRecord(s)) {
+      throw new Error(`${where}: \`project.session\` must be a SessionEffect object`);
+    }
+    assertKnownKeys(s, SESSION_KEYS, `${where}: \`session\``);
+    if (s.cookies !== undefined) {
+      const c = s.cookies;
+      if (!isPlainRecord(c)) {
+        throw new Error(`${where}: \`session.cookies\` must be a { read?, set? } object`);
+      }
+      assertKnownKeys(c, COOKIE_KEYS, `${where}: \`session.cookies\``);
+      if (c.read !== undefined) assertNameTokens(c.read, `${where}: \`session.cookies.read\``);
+      if (c.set !== undefined) assertNameTokens(c.set, `${where}: \`session.cookies.set\``);
+      if (c.read === undefined && c.set === undefined) {
+        throw new Error(`${where}: \`session.cookies\` declares neither \`read\` nor \`set\` — omit it`);
+      }
+    }
+    if (s.headers !== undefined) assertNameTokens(s.headers, `${where}: \`session.headers\``);
+    if (s.lifecycle !== undefined && !SESSION_LIFECYCLES.has(s.lifecycle as string)) {
+      throw new Error(
+        `${where}: \`session.lifecycle\` must be one of establish|refresh|read|revoke; got ${JSON.stringify(s.lifecycle)}`,
+      );
+    }
+    if (s.cookies === undefined && s.headers === undefined && s.lifecycle === undefined) {
+      throw new Error(`${where}: \`project.session\` declares no behavior — omit it instead of passing {}`);
+    }
+  }
+  if (project.verify !== undefined) {
+    const v = project.verify;
+    if (!Array.isArray(v) || v.length === 0) {
+      throw new Error(`${where}: \`project.verify\` must be a non-empty array of assertions`);
+    }
+    for (const item of v) {
+      if (!isPlainRecord(item)) {
+        throw new Error(`${where}: every \`project.verify\` item must be an AssertHint object`);
+      }
+      assertKnownKeys(item, ASSERT_KEYS, `${where}: \`verify[]\``);
+      if (typeof item.message !== "string" || item.message.trim() === "") {
+        throw new Error(`${where}: every \`project.verify\` item needs a non-empty \`message\` string`);
+      }
+      if (item.target !== undefined && (typeof item.target !== "string" || item.target.trim() === "")) {
+        throw new Error(`${where}: \`project.verify[].target\`, when set, must be a non-empty string`);
+      }
+    }
+  }
+}
+
 /**
  * Normalize a step's first argument into a `NodeMeta`. A string is shorthand for
  * the node `id` (mirrors `workflow(id)`); an object is spread as-is. `id` falls
@@ -779,6 +902,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
       const meta = normalizeNodeMeta(idOrMeta, this._nodes.length, this._idPrefix);
       validateNodeTimeout(meta, "action");
       if (opts?.retry) validateRetryMeta(opts.retry, meta.id);
+      validateProjectionHints(opts?.project, "action", meta.id, true);
       const node: ActionNode<State> = {
         kind: "action",
         meta,
@@ -804,6 +928,16 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         typeof fnOrOpts === "object" &&
         typeof (fnOrOpts as { expect?: unknown }).expect === "function"
       ) {
+        // The declarative form IS the data (its `expects` predicates project as
+        // assertions); projection HINTS belong to the inline form only
+        // (`CheckProjection` is typed `project?: undefined` here). Reject a
+        // `project` reaching this branch via JS/`as any` — otherwise it would be
+        // silently dropped, never emitted (codex R2 P2).
+        if ((fnOrOpts as { project?: unknown }).project !== undefined) {
+          throw new Error(
+            `workflow.check() "${checkMeta.id}": the declarative form (\`{ expect }\`) takes no \`project\` hints — its predicates ARE the projected data; use the inline \`check(id, fn, { project })\` form for hints`,
+          );
+        }
         const expectFn = (fnOrOpts as {
           expect: (w: PredicateScope<State>) => BranchPredicate<State>[];
         }).expect;
@@ -831,6 +965,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
           `workflow.check() "${checkMeta.id}" requires a check function or { expect: (w) => [...] }`,
         );
       }
+      validateProjectionHints(opts?.project, "check", checkMeta.id, false);
       const node: CheckNode<State> = {
         kind: "check",
         meta: checkMeta,
@@ -1351,6 +1486,7 @@ class WorkflowBuilderImpl<State> implements WorkflowBuilder<State> {
         },
         meta.id,
       );
+      validateProjectionHints(opts.project, "pollAction", meta.id, true);
       const node: PollNode<State> = {
         kind: "poll",
         meta,
