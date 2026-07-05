@@ -30,20 +30,64 @@ export const jsonHandler: RedactionHandler = {
 /**
  * Handles plain string values. Wraps the string in an object so the engine
  * can apply value-level pattern plugins, then extracts the result.
+ *
+ * GLU-214: `ky`'s `NetworkError.message` (a fetch/network failure — e.g.
+ * ECONNREFUSED) embeds the FULL request URL verbatim, e.g. `Request failed
+ * due to a network error: GET https://host/data?custom_secret=abc&page=1`.
+ * This handler used to ONLY value-pattern-scan the whole string (bearer/jwt
+ * /ip/hex — known SHAPES), so a custom-string secret riding as a query VALUE
+ * (no recognized shape) passed through in plaintext even though the SAME
+ * scope's `sensitiveKeys` list would have caught it by KEY had the string
+ * been routed through the `url-query` handler instead. Before the
+ * whole-string pattern scan, find any embedded `http(s)://` URL(s) and run
+ * them through `urlQueryHandler`'s existing by-key query redaction — same
+ * logic, just located within surrounding prose first. This only masks the
+ * query VALUE under a sensitive key; it does not touch the rest of the
+ * message (no whole-string over-masking).
  */
+const EMBEDDED_URL_RE = /https?:\/\/[^\s"'<>]+/g;
+
+function redactEmbeddedUrls(
+  text: string,
+  ctx: HandlerContext,
+  engine: RedactionEngineInterface,
+): { value: string; redacted: boolean; details: RedactionResult["details"] } {
+  let didRedact = false;
+  const details: RedactionResult["details"] = [];
+  const value = text.replace(EMBEDDED_URL_RE, (match) => {
+    const r = urlQueryHandler.process(match, ctx, engine);
+    if (r.redacted) {
+      didRedact = true;
+      details.push(...r.details);
+      return r.value as string;
+    }
+    return match;
+  });
+  return { value, redacted: didRedact, details };
+}
+
 export const rawStringHandler: RedactionHandler = {
   name: "raw-string",
   process(value, ctx, engine) {
     if (typeof value !== "string") {
       return { value, redacted: false, details: [] };
     }
-    // Wrap in object so the engine walks it as a string value
-    const result = engine.redact({ __raw: value }, { id: ctx.scopeId, name: ctx.scopeName });
+    // Query-key-based redaction of any embedded URL(s) FIRST (GLU-214).
+    const urlPass = redactEmbeddedUrls(value, ctx, engine);
+
+    // Then wrap in object so the engine walks it as a string value —
+    // whole-text value-pattern scan (catches ip/bearer/jwt/etc. anywhere in
+    // the message, including a URL's host/path which the by-key pass above
+    // doesn't touch).
+    const result = engine.redact(
+      { __raw: urlPass.value },
+      { id: ctx.scopeId, name: ctx.scopeName },
+    );
     const redacted = result.value as Record<string, unknown>;
     return {
       value: redacted.__raw,
-      redacted: result.redacted,
-      details: result.details,
+      redacted: result.redacted || urlPass.redacted,
+      details: [...urlPass.details, ...result.details],
     };
   },
 };

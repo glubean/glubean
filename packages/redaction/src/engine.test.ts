@@ -359,6 +359,60 @@ describe("rawStringHandler", () => {
     expect(result.value).toBe(42);
     expect(result.redacted).toBe(false);
   });
+
+  // GLU-214: ky's NetworkError.message embeds the FULL request URL verbatim
+  // on a network failure (ECONNREFUSED/etc) — `Request failed due to a
+  // network error: GET https://host/data?custom_secret=...&page=1`. A
+  // custom-string secret riding as a query VALUE matches no known
+  // value-pattern SHAPE (bearer/jwt/ip/hex), so only key-based redaction
+  // (the same logic `urlQueryHandler` already applies to a bare URL) catches
+  // it. Non-secret query params and value-pattern hits elsewhere in the
+  // message (e.g. an IP address in the host) must still come through /
+  // still get redacted.
+  test("redacts a custom-string query secret embedded in a network-error message, preserving non-secret params and still redacting IP", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["custom_secret"], excluded: [] }),
+        ipAddressPlugin,
+      ],
+      replacementFormat: "simple",
+    });
+
+    const message =
+      "Request failed due to a network error: GET https://10.0.0.5/data?custom_secret=abc123&page=1";
+
+    const result = rawStringHandler.process(
+      message,
+      { scopeId: "status.error", scopeName: "Status error" },
+      engine,
+    );
+    const out = result.value as string;
+
+    expect(out).not.toContain("abc123"); // custom query secret redacted
+    expect(out).toContain("page=1"); // non-secret query param preserved
+    expect(out).not.toContain("10.0.0.5"); // IP still redacted (value-pattern)
+    expect(out).toContain("GET"); // surrounding prose preserved
+    expect(result.redacted).toBe(true);
+  });
+
+  test("leaves an embedded URL with no sensitive query params untouched (no over-masking)", () => {
+    const engine = new RedactionEngine({
+      plugins: [
+        sensitiveKeysPlugin({ useBuiltIn: false, additional: ["custom_secret"], excluded: [] }),
+      ],
+      replacementFormat: "simple",
+    });
+
+    const message = "Request failed due to a network error: GET https://api.example.com/data?page=1";
+
+    const result = rawStringHandler.process(
+      message,
+      { scopeId: "status.error", scopeName: "Status error" },
+      engine,
+    );
+    expect(result.value).toBe(message); // untouched — nothing sensitive
+    expect(result.redacted).toBe(false);
+  });
 });
 
 describe("urlQueryHandler", () => {
