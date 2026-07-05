@@ -202,8 +202,16 @@ describe("GLU-221 phase 1 — sync source location + git provenance", () => {
     expect(contractBody.git.repo).toBe("acme/monorepo");
     // Rebased: "packages/app/contracts/widgets.contract.ts" (repo-root-
     // relative), NOT "contracts/widgets.contract.ts" (project-root-relative).
-    expect(contractBody.contracts[0].sourceFile).toBe(
-      join("packages", "app", "contracts", "widgets.contract.ts"),
-    );
+    const expectedRebased = join("packages", "app", "contracts", "widgets.contract.ts");
+    expect(contractBody.contracts[0].sourceFile).toBe(expectedRebased);
+    // GLU-221 phase 1 P2-2 fix — the SAME rebase must also apply to the
+    // sourceFile EMBEDDED inside the uploaded `projection` body (contract
+    // level and per-case level), not just the top-level `sourceFile` field
+    // asserted above. Before the fix these stayed project-root-relative
+    // ("contracts/widgets.contract.ts"), which would resolve to the WRONG
+    // path for a monorepo subdirectory scan.
+    expect(contractBody.contracts[0].projection.sourceFile).toBe(expectedRebased);
+    expect(contractBody.contracts[0].projection.cases).toHaveLength(1);
+    expect(contractBody.contracts[0].projection.cases[0].sourceFile).toBe(expectedRebased);
   });
 });

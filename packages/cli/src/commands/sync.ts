@@ -312,6 +312,35 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     if (!repoRootAbs) return sourceFile;
     return relative(repoRootAbs, resolve(rootDir, sourceFile));
   };
+  // GLU-221 phase 1 P2-2 fix — `c.sourceFile` (the TOP-LEVEL `ProjectedContract`
+  // field, rebased just above) is a SEPARATE copy from the `sourceFile` embedded
+  // inside `c.projection` (the scanner's `NormalizedContractMeta`, uploaded
+  // verbatim below as the reviewable projection body) at BOTH the contract level
+  // (`projection.sourceFile`) and the per-case level (`projection.cases[].sourceFile`
+  // — see `NormalizedCaseMeta.sourceFile`). In a monorepo where `rootDir` is a
+  // subdirectory of the git repo, only the top-level field was being rebased;
+  // anything reading the embedded projection/case `sourceFile` directly (e.g. a
+  // future Cloud per-case deep link) would resolve against the WRONG path
+  // (project-root-relative, not repo-root-relative). Apply the SAME rebase here.
+  const rebaseEmbeddedSourceFiles = (projection: unknown): unknown => {
+    if (!projection || typeof projection !== "object") return projection;
+    const p = projection as { sourceFile?: unknown; cases?: unknown };
+    const rebased: Record<string, unknown> = { ...(projection as Record<string, unknown>) };
+    if (typeof p.sourceFile === "string") {
+      rebased.sourceFile = toRepoRelativeSourceFile(p.sourceFile) ?? undefined;
+    }
+    if (Array.isArray(p.cases)) {
+      rebased.cases = p.cases.map((cs) =>
+        cs && typeof cs === "object" && typeof (cs as { sourceFile?: unknown }).sourceFile === "string"
+          ? {
+              ...(cs as Record<string, unknown>),
+              sourceFile: toRepoRelativeSourceFile((cs as { sourceFile: string }).sourceFile) ?? undefined,
+            }
+          : cs,
+      );
+    }
+    return rebased;
+  };
 
   // Contracts/workflows: redact the free-text + the normalized `projection` body
   // (schemas/descriptions/notes), preserve identity/structural fields.
@@ -323,7 +352,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     deprecated: c.deprecated == null ? null : (redactField(c.deprecated) as string),
     tags: c.tags ?? [],
     caseCount: c.caseCount,
-    projection: redactStructure(c.projection),
+    projection: redactStructure(rebaseEmbeddedSourceFiles(c.projection)),
     projectionComplete: c.projectionComplete,
     incompleteReason: c.incompleteReason ?? null,
     // GLU-221 phase 1 — best-effort source location (structural identity

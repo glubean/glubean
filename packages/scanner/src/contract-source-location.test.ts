@@ -148,6 +148,76 @@ export const getWidget = api.get("get-widget", { endpoint: "GET /widgets/:id" })
   });
 });
 
+/** Two literal `contract.http(...)` exports that share the SAME
+ * author-chosen `contractId` ("shared-id") but different export names/case
+ * keys — the fixture for the P2-3 regression test below. */
+const DUP_ID_FIXTURE = `const contract = {
+  http(id, spec) {
+    const cases = Object.entries(spec.cases ?? {}).map(([key, c]) => ({
+      key,
+      lifecycle: "active",
+      severity: "warning",
+      description: c?.description,
+    }));
+    const projection = { id, protocol: "http", target: spec.endpoint, cases };
+    const arr = [];
+    Object.assign(arr, { _projection: projection, _extracted: projection });
+    return arr;
+  },
+};
+
+export const contractA = contract.http("shared-id", {
+  endpoint: "GET /a",
+  cases: {
+    aOk: { description: "a-ok" },
+  },
+});
+
+export const contractB = contract.http("shared-id", {
+  endpoint: "GET /b",
+  cases: {
+    bOk: { description: "b-ok" },
+  },
+});
+`;
+const A_EXPORT_LINE = lineOfSubstring(DUP_ID_FIXTURE, "export const contractA");
+const B_EXPORT_LINE = lineOfSubstring(DUP_ID_FIXTURE, "export const contractB");
+const A_CASE_LINE = lineOfSubstring(DUP_ID_FIXTURE, "aOk: {");
+const B_CASE_LINE = lineOfSubstring(DUP_ID_FIXTURE, "bOk: {");
+
+describe("extractContractFromFile — GLU-221 phase 1 P2-3: two contracts sharing a contractId", () => {
+  test("static line lookup is keyed by (contractId, exportName, protocol) — no cross-assignment between contracts that share an author-chosen id", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-loc-dupid-"));
+    const filePath = join(dir, "widgets.contract.ts");
+    writeFileSync(filePath, DUP_ID_FIXTURE);
+
+    const result = await extractContractFromFile(filePath, dir);
+    expect(result.errors).toEqual([]);
+    expect(result.contracts).toHaveLength(2);
+
+    const a = result.contracts.find((c) => c.exportName === "contractA");
+    const b = result.contracts.find((c) => c.exportName === "contractB");
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(a!.id).toBe("shared-id");
+    expect(b!.id).toBe("shared-id");
+
+    // Before the P2-3 fix, `staticContractLocations` was keyed by
+    // contractId ALONE — the second `extractContractCases` entry (contractB's)
+    // silently overwrote the first in the lookup Map, so EVERY contract
+    // sharing "shared-id" resolved to whichever entry was inserted last,
+    // regardless of which export it actually was.
+    expect(a!.line).toBe(A_EXPORT_LINE);
+    expect(b!.line).toBe(B_EXPORT_LINE);
+    expect(a!.line).not.toBe(b!.line);
+
+    const aCase = a!.cases.find((c) => c.key === "aOk");
+    const bCase = b!.cases.find((c) => c.key === "bOk");
+    expect(aCase?.line).toBe(A_CASE_LINE);
+    expect(bCase?.line).toBe(B_CASE_LINE);
+  });
+});
+
 describe("extractContractsFromProject — GLU-221 source location merge (project-level)", () => {
   test("contracts across multiple files each carry a project-root-relative sourceFile", async () => {
     dir = mkdtempSync(join(tmpdir(), "glubean-contract-loc-project-"));

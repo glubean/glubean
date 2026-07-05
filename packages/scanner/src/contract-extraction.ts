@@ -750,7 +750,8 @@ interface RawFileMaterials {
  * derived from the STATIC AST extractor (`extractContractCases`). This is
  * the ONLY place real (non-fabricated) source lines exist for contract
  * declarations — the runtime-import path below has no notion of source
- * position at all. Keyed by contractId; case lines keyed by case key.
+ * position at all. Keyed by `contractLocationKey(contractId, exportName,
+ * protocol)` (see below), not contractId alone; case lines keyed by case key.
  *
  * Only recognizes the literal `contract.<protocol>("id", { cases: {...} })`
  * form (narrow mode, same as the fallback extractor) — a scoped/custom
@@ -759,6 +760,20 @@ interface RawFileMaterials {
  * leaves `line`/`sourceFile` undefined, never guesses). Never throws:
  * `extractContractCases` already fails closed to `[]` on a parse error.
  */
+/**
+ * GLU-221 phase 1 P2-3 fix — composite key so two contracts that happen to
+ * share the same `contractId` (a literal `contract.<protocol>(...)` export
+ * AND a separate scoped/custom-factory contract that returns the SAME id —
+ * ids are author-chosen strings, not guaranteed unique across exports) never
+ * get their static line info cross-assigned to the wrong one. `JSON.stringify`
+ * of the tuple, not naive string concatenation — avoids any ambiguity from a
+ * separator character that could itself appear inside a user-chosen
+ * `contractId` string literal.
+ */
+function contractLocationKey(contractId: string, exportName: string, protocol: string): string {
+  return JSON.stringify([contractId, exportName, protocol]);
+}
+
 function staticContractLocations(content: string): Map<
   string,
   { line: number; endLine?: number; cases: Map<string, { line: number; endLine?: number }> }
@@ -772,7 +787,7 @@ function staticContractLocations(content: string): Map<
     for (const cs of c.cases) {
       cases.set(cs.key, { line: cs.line, ...(cs.endLine !== undefined ? { endLine: cs.endLine } : {}) });
     }
-    out.set(c.contractId, {
+    out.set(contractLocationKey(c.contractId, c.exportName, c.protocol), {
       line: c.line,
       ...(c.endLine !== undefined ? { endLine: c.endLine } : {}),
       cases,
@@ -876,7 +891,10 @@ async function collectRawMaterials(filePath: string, projectRoot?: string): Prom
     }
     for (const contract of contracts) {
       if (sourceFile !== undefined) contract.sourceFile = sourceFile;
-      const loc = locations?.get(contract.id);
+      // GLU-221 phase 1 P2-3 fix — look up by the SAME composite key
+      // `staticContractLocations` indexes by (contractId alone would merge
+      // two different contracts that happen to share an author-chosen id).
+      const loc = locations?.get(contractLocationKey(contract.id, contract.exportName, contract.protocol));
       if (loc) {
         contract.line = loc.line;
         if (loc.endLine !== undefined) contract.endLine = loc.endLine;

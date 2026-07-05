@@ -88,6 +88,34 @@ describe("parseGitHubRepo", () => {
   test("rejects an empty string", () => {
     expect(parseGitHubRepo("")).toBeNull();
   });
+
+  // GLU-221 phase 1 P2-1 fix — a query string / fragment / credential must
+  // never leak into the parsed repo id (it ships to the server as
+  // `git.repo`). The old non-greedy regex backtracked `?token=xxx` into the
+  // repo capture because nothing followed `.git` to anchor the match.
+  test("strips a credential-bearing query string, never folding it into the repo id (https)", () => {
+    expect(parseGitHubRepo("https://github.com/acme/app.git?token=SECRET123")).toBe("acme/app");
+  });
+
+  test("strips a query string with no .git suffix (https)", () => {
+    expect(parseGitHubRepo("https://github.com/acme/app?token=SECRET123")).toBe("acme/app");
+  });
+
+  test("strips a fragment (https)", () => {
+    expect(parseGitHubRepo("https://github.com/acme/app.git#readme")).toBe("acme/app");
+  });
+
+  test("strips a query string on the ssh:// form", () => {
+    expect(parseGitHubRepo("ssh://git@github.com/acme/app.git?token=SECRET123")).toBe("acme/app");
+  });
+
+  test("a userinfo (e.g. token-as-username) in the URL is dropped, not folded into the repo id", () => {
+    expect(parseGitHubRepo("https://oauth2:SECRET123@github.com/acme/app.git")).toBe("acme/app");
+  });
+
+  test("rejects a path with more than two segments (not a guessable owner/repo)", () => {
+    expect(parseGitHubRepo("https://github.com/acme/app/extra")).toBeNull();
+  });
 });
 
 describe("detectGitProvenance — boundary fallbacks (never throw, never fabricate)", () => {
@@ -169,5 +197,41 @@ describe("detectGitProvenance — boundary fallbacks (never throw, never fabrica
 
   test("never throws for a nonexistent directory", async () => {
     await expect(detectGitProvenance(join(dir, "does-not-exist"))).resolves.toBeNull();
+  });
+
+  // GLU-221 phase 1 P1 fix — `sync` uploads the CURRENT WORKING TREE, not
+  // the HEAD commit. A dirty tree must not report `commit` (it would anchor
+  // a Cloud deep link to a commit whose content doesn't match what was
+  // actually uploaded) — `repo`/`branch` are unaffected.
+  test("dirty working tree (uncommitted modification) → commit is null, repo/branch still populated", async () => {
+    await initCommittedRepo(dir);
+    await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    await writeFile(join(dir, "a.txt"), "modified, not committed");
+
+    const result = await detectGitProvenance(dir);
+    expect(result).not.toBeNull();
+    expect(result!.repo).toBe("acme/widgets");
+    expect(result!.commit).toBeNull();
+    expect(result!.branch).toBe("main");
+  });
+
+  test("dirty working tree (untracked new file) → commit is null", async () => {
+    await initCommittedRepo(dir);
+    await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    await writeFile(join(dir, "untracked.txt"), "new file, never added");
+
+    const result = await detectGitProvenance(dir);
+    expect(result).not.toBeNull();
+    expect(result!.commit).toBeNull();
+  });
+
+  test("clean working tree (nothing after the init commit) → commit is populated, matches HEAD", async () => {
+    await initCommittedRepo(dir);
+    await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    const sha = (await git(dir, ["rev-parse", "HEAD"])).trim();
+
+    const result = await detectGitProvenance(dir);
+    expect(result).not.toBeNull();
+    expect(result!.commit).toBe(sha);
   });
 });
