@@ -16,6 +16,13 @@
  * with every disk-writing flag enabled and `--upload` OMITTED. It then reads
  * every artifact the CLI wrote and asserts none of the five secret literals
  * appear anywhere in cleartext.
+ *
+ * GLU-209 follow-up: the `--reporter junit` XML sink was not covered by the
+ * assertions above. It's built from `collectedRuns` (same already-redacted
+ * `event` object pushed into `testEvents` inside the `file:event` handler —
+ * see the redaction comment at that call site), so it should already be
+ * safe, but this had no direct regression coverage. A second test below
+ * exercises `--reporter junit` end-to-end and asserts the XML file is clean.
  */
 import { createServer, type Server } from "node:http";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -140,6 +147,55 @@ export const secretCall = test("secretCall", async (ctx) => {
   return dir;
 }
 
+// GLU-209: same secret-carrying HTTP call as `prepare`, plus a SECOND test
+// that deliberately fails an assertion — so the JUnit `<failure>` branch of
+// `toJunitXml` (which is a narrower sink than result.json: it only ever
+// serializes `classname`/`name`/`time` plus `status.error` /
+// assertion-message TEXT, never the raw event/requestBody objects) gets
+// real exercise, not just the always-`<testcase .../>` passing branch.
+async function prepareJunit(name: string, baseUrl: string): Promise<string> {
+  seq += 1;
+  const dir = join(FIXTURE_ROOT, `${name}-${seq}`);
+  await mkdir(join(dir, "tests"), { recursive: true });
+  await writeFile(join(dir, "package.json"), pkgJson(`glu105-e2e-${seq}`), "utf-8");
+  await writeFile(
+    join(dir, "tests", "secret.test.ts"),
+    `
+import { test } from "@glubean/sdk";
+
+export const secretCall = test("secretCall", async (ctx) => {
+  const res = await ctx.http.post(
+    "${baseUrl}/secret?token=${QUERY_SECRET}",
+    {
+      headers: { Authorization: "Bearer ${HEADER_SECRET}" },
+      json: { password: "${BODY_PASSWORD_SECRET}" },
+    },
+  );
+  const data = await res.json();
+  ctx.assert(data.ok === true, "response should be ok");
+});
+
+export const secretCallFailing = test("secretCallFailing", async (ctx) => {
+  const res = await ctx.http.post(
+    "${baseUrl}/secret?token=${QUERY_SECRET}",
+    {
+      headers: { Authorization: "Bearer ${HEADER_SECRET}" },
+      json: { password: "${BODY_PASSWORD_SECRET}" },
+    },
+  );
+  const data = await res.json();
+  // Deliberately fail — asserts a false condition so this test lands in the
+  // JUnit <failure> branch. The message itself is intentionally secret-free
+  // (embedding a secret in a user-authored free-text message is a separate,
+  // pre-existing key/pattern-matching limitation, not what GLU-209 is about).
+  ctx.assert(data.ok === false, "intentional failure for JUnit coverage");
+});
+`,
+    "utf-8",
+  );
+  return dir;
+}
+
 const ALL_SECRETS = [
   HEADER_SECRET,
   QUERY_SECRET,
@@ -254,6 +310,48 @@ test(
 
       // ── 6. `--verbose` console output (stdout/stderr themselves) ──
       assertNoSecretsIn("--verbose console output", out);
+    } finally {
+      close();
+    }
+  },
+  60_000,
+);
+
+test(
+  "a real `glubean run --reporter junit` (no --upload) never writes plaintext secrets into the JUnit XML sink",
+  async () => {
+    const { baseUrl, close } = await startSecretServer();
+    let dir: string;
+    try {
+      dir = await prepareJunit("junit", baseUrl);
+
+      const { stdout, stderr } = await runCli(
+        [
+          "run",
+          "tests/secret.test.ts",
+          "--no-session",
+          "--reporter",
+          "junit:glubean-run.junit.xml",
+        ],
+        { cwd: dir },
+      );
+      const out = stdout + stderr;
+
+      // Sanity: both tests genuinely ran — one passes, one fails — so this
+      // exercises both the plain `<testcase .../>` branch AND the
+      // `<failure>` branch of toJunitXml, not a vacuous all-pass run.
+      expect(out).toContain("secretCall");
+      expect(out).toContain("secretCallFailing");
+
+      const junitPath = extractPrintedPath(out, "JUnit XML written to");
+      expect(junitPath, "CLI must print the --reporter junit output path").toBeTruthy();
+      const junitXml = await readFile(junitPath!, "utf-8");
+
+      assertNoSecretsIn("--reporter junit XML output", junitXml);
+      // Sanity: the failing test's <failure> block is actually in there,
+      // proving the failure branch (not just the passing branch) ran.
+      expect(junitXml).toContain("secretCallFailing");
+      expect(junitXml).toContain("<failure");
     } finally {
       close();
     }
