@@ -331,6 +331,15 @@ export function lineOf(node: AnyNode): number {
   return node.loc?.start.line ?? 1;
 }
 
+/**
+ * 1-based line of a node's end position (GLU-221) — `undefined` when the
+ * parse didn't retain location info, so callers can omit the field instead
+ * of fabricating a value (unlike `lineOf`, which has always defaulted to 1).
+ */
+export function endLineOf(node: AnyNode): number | undefined {
+  return node.loc?.end.line;
+}
+
 /** `true` if the node is a top-level `export` declaration wrapper. */
 export function hasExportModifier(node: AnyNode): boolean {
   return node.type === "ExportNamedDeclaration";

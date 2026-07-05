@@ -61,6 +61,11 @@ export interface ProjectedContract {
   projection: unknown;
   projectionComplete: boolean;
   incompleteReason?: string;
+  /** GLU-221 phase 1 — best-effort source location (project-root-relative),
+   * when statically resolvable. See `NormalizedContractMeta.sourceFile`. */
+  sourceFile?: string;
+  line?: number;
+  endLine?: number;
 }
 
 /** One projected workflow (C1) — the scanner's static normalized workflow. */
@@ -208,6 +213,11 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
     ...(c.unprojectableSchemas && c.unprojectableSchemas.length > 0
       ? { incompleteReason: `${c.unprojectableSchemas.length} declared schema(s) couldn't be projected` }
       : {}),
+    // GLU-221 phase 1 — carried through only when the scanner resolved them;
+    // absent for scoped/custom-factory contracts (see NormalizedContractMeta doc).
+    ...(c.sourceFile !== undefined ? { sourceFile: c.sourceFile } : {}),
+    ...(c.line !== undefined ? { line: c.line } : {}),
+    ...(c.endLine !== undefined ? { endLine: c.endLine } : {}),
   }));
   const workflows: ProjectedWorkflow[] = (scanResult.workflows ?? []).map((w) => {
     const g = w.gradeSummary ?? { full: 0, partial: 0, opaque: 0 };

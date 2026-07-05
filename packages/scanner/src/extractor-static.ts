@@ -284,6 +284,9 @@ export interface ContractCaseStaticMeta {
   key: string;
   /** Source location (1-based line number) of the case key */
   line: number;
+  /** Source location (1-based end line) of the case's declaring object,
+   * when the parse retained it (GLU-221). */
+  endLine?: number;
   /** Human-readable description (required field on ContractCase) */
   description?: string;
   /** Expected status code, or undefined if not statically extractable */
@@ -329,6 +332,9 @@ export interface ContractStaticMeta {
   exportName: string;
   /** Source location (1-based line number) of the export */
   line: number;
+  /** Source location (1-based end line) of the export statement, when the
+   * parse retained it (GLU-221). */
+  endLine?: number;
   /** Endpoint (e.g. "POST /users") */
   endpoint: string;
   /** Protocol */

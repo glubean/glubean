@@ -25,6 +25,7 @@ import {
   findPropertyCall,
   walk,
   lineOf,
+  endLineOf,
   type AnyNode,
   type SourceFile,
 } from "./ast.js";
@@ -1106,15 +1107,19 @@ function readCases(casesObj: AnyNode): ContractCaseStaticMeta[] {
       // Reference / shorthand case value (`cases: { ok }` or `ok: sharedCase`):
       // the case body isn't an inline object, so per-case fields can't be read,
       // but the KEY is still a real case — preserve it (VSCode discovery needs it).
+      const refNode = (property.key as AnyNode) ?? (property.value as AnyNode);
       out.push({
         key,
-        line: lineOf((property.key as AnyNode) ?? (property.value as AnyNode)),
+        line: lineOf(refNode),
+        ...(endLineOf(refNode) !== undefined ? { endLine: endLineOf(refNode) } : {}),
         ...(inbound ? { direction: "inbound" as const } : {}),
       });
       continue;
     }
 
     const meta: ContractCaseStaticMeta = { key, line: lineOf(property.value as AnyNode) };
+    const caseEndLine = endLineOf(property.value as AnyNode);
+    if (caseEndLine !== undefined) meta.endLine = caseEndLine;
     if (inbound || stringProperty(body, "direction") === "inbound") {
       meta.direction = "inbound";
     }
@@ -1197,6 +1202,8 @@ export function extractContractCases(
       protocol: found.protocol,
       cases: casesObj ? readCases(casesObj) : [],
     };
+    const contractEndLine = endLineOf(statement);
+    if (contractEndLine !== undefined) meta.endLine = contractEndLine;
     const description = stringProperty(spec, "description");
     if (description !== undefined) meta.description = description;
     const feature = stringProperty(spec, "feature");

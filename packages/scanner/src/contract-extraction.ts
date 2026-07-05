@@ -16,9 +16,10 @@
  */
 
 import { pathToFileURL } from "node:url";
-import { resolve, basename } from "node:path";
-import { readdirSync, statSync } from "node:fs";
+import { resolve, relative, basename } from "node:path";
+import { readdirSync, statSync, readFileSync } from "node:fs";
 import { GLUBEAN_KINDS, buildSuffixes } from "./kinds.js";
+import { extractContractCases } from "./extractor-ast.js";
 
 // =============================================================================
 // Types — mirror sdk's ExtractedContractProjection / ExtractedFlowProjection
@@ -127,6 +128,21 @@ export interface NormalizedCaseMeta {
    * (design §9.5); it exists in contract metadata only. Absent = runnable.
    */
   runnable?: boolean;
+  /**
+   * GLU-221 phase 1 — best-effort source location of this case's key in the
+   * declaring file, project-root-relative. Populated ONLY when the contract
+   * uses the literal `contract.<protocol>("id", { cases: {...} })` form (the
+   * same narrow form `extractContractCases` recognizes) — a scoped/custom
+   * factory (`contract.http.with(...)`, a wrapped `stableApi(...)`) is
+   * invisible to static analysis and leaves this undefined, never fabricated.
+   * 1-based. No `column` — extractor-ast.ts hardcodes col 1 for exports
+   * elsewhere in this codebase, so a column here would be equally fake.
+   */
+  sourceFile?: string;
+  /** 1-based start line of the case key, when statically resolvable. */
+  line?: number;
+  /** 1-based end line of the case's declaring object, when resolvable. */
+  endLine?: number;
 }
 
 /**
@@ -156,6 +172,19 @@ export interface NormalizedContractMeta {
    * Omitted when every declared schema projected cleanly.
    */
   unprojectableSchemas?: string[];
+  /**
+   * GLU-221 phase 1 — best-effort source location of the contract's export
+   * statement, project-root-relative (relative to the directory `scan()`/
+   * `extractContractFromFile()` was invoked with). Same narrow-form caveat
+   * as `NormalizedCaseMeta.sourceFile`: only literal `contract.<protocol>(...)`
+   * exports are statically visible; scoped/custom factories leave this
+   * undefined rather than a fabricated guess. No `column` (see case-level doc).
+   */
+  sourceFile?: string;
+  /** 1-based start line of the export statement, when statically resolvable. */
+  line?: number;
+  /** 1-based end line of the export statement, when resolvable. */
+  endLine?: number;
 }
 
 /**
@@ -250,6 +279,20 @@ export interface NormalizedWorkflowNode {
   expects?: unknown[];
   /** call/action/check: per-node terminal timeout (§17 #4). */
   nodeTimeoutMs?: number;
+  /**
+   * GLU-221 phase 1 — reserved for a future per-node source location.
+   * NOT populated yet: workflow nodes are built via chained builder calls at
+   * runtime (`workflow(...).call(...).action(...)...`), and — unlike a
+   * `contract.<protocol>(...)` export — nothing in this codebase captures a
+   * source position per builder call today. Declared now (optional, so
+   * absence is indistinguishable from today's behavior) so the wire shape is
+   * ready once a population mechanism exists; do not synthesize a value.
+   */
+  sourceFile?: string;
+  /** See `sourceFile` — reserved, not populated in phase 1. */
+  line?: number;
+  /** See `sourceFile` — reserved, not populated in phase 1. */
+  endLine?: number;
 }
 
 /** Workflow projection as carried in metadata.json (mirror of WorkflowProjection). */
@@ -703,13 +746,56 @@ interface RawFileMaterials {
 }
 
 /**
+ * GLU-221 phase 1 — best-effort line lookup for contracts/cases in a file,
+ * derived from the STATIC AST extractor (`extractContractCases`). This is
+ * the ONLY place real (non-fabricated) source lines exist for contract
+ * declarations — the runtime-import path below has no notion of source
+ * position at all. Keyed by contractId; case lines keyed by case key.
+ *
+ * Only recognizes the literal `contract.<protocol>("id", { cases: {...} })`
+ * form (narrow mode, same as the fallback extractor) — a scoped/custom
+ * factory (`contract.http.with(...)`, a wrapped `stableApi(...)`) is
+ * invisible to static analysis and simply contributes no entry (caller
+ * leaves `line`/`sourceFile` undefined, never guesses). Never throws:
+ * `extractContractCases` already fails closed to `[]` on a parse error.
+ */
+function staticContractLocations(content: string): Map<
+  string,
+  { line: number; endLine?: number; cases: Map<string, { line: number; endLine?: number }> }
+> {
+  const out = new Map<
+    string,
+    { line: number; endLine?: number; cases: Map<string, { line: number; endLine?: number }> }
+  >();
+  for (const c of extractContractCases(content)) {
+    const cases = new Map<string, { line: number; endLine?: number }>();
+    for (const cs of c.cases) {
+      cases.set(cs.key, { line: cs.line, ...(cs.endLine !== undefined ? { endLine: cs.endLine } : {}) });
+    }
+    out.set(c.contractId, {
+      line: c.line,
+      ...(c.endLine !== undefined ? { endLine: c.endLine } : {}),
+      cases,
+    });
+  }
+  return out;
+}
+
+/**
  * Internal: dynamically import a file and collect raw materials
  * (contracts / flows / overlay markers / errors) without synthesis.
  * Both `extractContractFromFile` and `extractContractsFromProject` use
  * this — the former synthesizes per-file, the latter synthesizes
  * project-wide so cross-file overlay replacement and dedup work.
+ *
+ * @param projectRoot - GLU-221 phase 1, optional. When given, `sourceFile`
+ *   on any extracted contract/case is `filePath` relative to this root
+ *   (matching the `files{}` keys the scanner already reports). Omitted →
+ *   `sourceFile` is left undefined (backward compatible; a caller that
+ *   doesn't know its project root gets today's behavior, not an absolute
+ *   path leaking local filesystem layout).
  */
-async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> {
+async function collectRawMaterials(filePath: string, projectRoot?: string): Promise<RawFileMaterials> {
   const contracts: NormalizedContractMeta[] = [];
   const workflows: NormalizedWorkflowMeta[] = [];
   const markers: BootstrapOverlayMarker[] = [];
@@ -776,6 +862,36 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
     errors.push({ file: absolutePath, error: message });
   }
 
+  // GLU-221 phase 1: stamp sourceFile + best-effort line info onto whatever
+  // contracts the runtime import above produced. Best-effort/never-throw —
+  // a read or parse failure here must not turn an otherwise-successful
+  // extraction into an error (the contracts are already valid without it).
+  if (contracts.length > 0) {
+    const sourceFile = projectRoot ? relative(projectRoot, absolutePath) : undefined;
+    let locations: ReturnType<typeof staticContractLocations> | undefined;
+    try {
+      locations = staticContractLocations(readFileSync(absolutePath, "utf-8"));
+    } catch {
+      locations = undefined;
+    }
+    for (const contract of contracts) {
+      if (sourceFile !== undefined) contract.sourceFile = sourceFile;
+      const loc = locations?.get(contract.id);
+      if (loc) {
+        contract.line = loc.line;
+        if (loc.endLine !== undefined) contract.endLine = loc.endLine;
+        for (const c of contract.cases) {
+          const caseLoc = loc.cases.get(c.key);
+          if (caseLoc) {
+            if (sourceFile !== undefined) c.sourceFile = sourceFile;
+            c.line = caseLoc.line;
+            if (caseLoc.endLine !== undefined) c.endLine = caseLoc.endLine;
+          }
+        }
+      }
+    }
+  }
+
   return { contracts, workflows, markers, errors };
 }
 
@@ -786,11 +902,17 @@ async function collectRawMaterials(filePath: string): Promise<RawFileMaterials> 
  * Per-file synthesis: only this file's contracts/markers are seen.
  * Cross-file overlay replacement (overlay in fileA targets case in fileB)
  * only resolves at project level via `extractContractsFromProject`.
+ *
+ * @param projectRoot - GLU-221 phase 1, optional. Forwarded to
+ *   `collectRawMaterials` so extracted contracts carry a project-root-
+ *   relative `sourceFile`. Omitted → `sourceFile` stays undefined
+ *   (backward compatible).
  */
 export async function extractContractFromFile(
   filePath: string,
+  projectRoot?: string,
 ): Promise<ExtractionResult> {
-  const raw = await collectRawMaterials(filePath);
+  const raw = await collectRawMaterials(filePath, projectRoot);
   const synth = synthesizeAttachments(raw.contracts, raw.markers);
   return {
     contracts: raw.contracts,
@@ -871,7 +993,7 @@ export async function extractContractsFromProject(
   const allErrors: ExtractionResult["errors"] = [];
 
   for (const filePath of files) {
-    const raw = await collectRawMaterials(filePath);
+    const raw = await collectRawMaterials(filePath, dir);
     allContracts.push(...raw.contracts);
     allWorkflows.push(...raw.workflows);
     allMarkers.push(...raw.markers);

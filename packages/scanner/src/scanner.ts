@@ -329,7 +329,9 @@ export class Scanner {
     const contractsProjection: NormalizedContractMeta[] = [];
     for (const filePath of [...contractFiles, ...flowFiles]) {
       const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
-      const result = await extractContractFromFile(absolutePath);
+      // GLU-221 phase 1: `dir` is this scan's project root — forwarded so
+      // extracted contracts carry a project-root-relative `sourceFile`.
+      const result = await extractContractFromFile(absolutePath, dir);
 
       if (result.contracts.length > 0) {
         // Keep the rich projection verbatim …
@@ -428,7 +430,7 @@ export class Scanner {
     const seenWorkflowIds = new Set<string>();
     for (const filePath of allFlowSourceFiles) {
       const absolutePath = this.fs.resolve ? this.fs.resolve(filePath) : filePath;
-      const result = await extractContractFromFile(absolutePath);
+      const result = await extractContractFromFile(absolutePath, dir);
       for (const wf of result.workflows) {
         if (seenWorkflowIds.has(wf.id)) continue;
         workflows.push(wf);

@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { resolve, relative } from "node:path";
 import { stat } from "node:fs/promises";
 import { loadProjectEnv } from "@glubean/runner";
 
@@ -11,6 +11,7 @@ import {
   PLATFORM_API_URL_UNRESOLVED_HINT,
 } from "../lib/auth.js";
 import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
+import { detectGitProvenance, gitRoot } from "../lib/git.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -292,6 +293,26 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     assertions: redactField(t.assertions),
     endpoints: redactField(t.endpoints),
   }));
+  // GLU-221 phase 1 — local git provenance (repo/commit/branch), independent
+  // of CI (`sync` runs from a developer machine as often as from CI). A
+  // contract's source position is only useful to Cloud alongside a
+  // resolvable repo identity. Best-effort: `detectGitProvenance`/`gitRoot`
+  // fail closed to `null` on every boundary case (no git, no remote,
+  // non-GitHub remote, zero-commit repo) rather than throwing — sync must
+  // never abort over this.
+  const gitInfo = await detectGitProvenance(rootDir);
+  // A contract's `sourceFile` (from the scanner) is relative to `rootDir` —
+  // the directory that was scanned — which, in a monorepo, can be a
+  // SUBDIRECTORY of the git repo root. Rebase onto the repo root so a future
+  // Cloud deep link resolves against the actual GitHub tree, not the
+  // scanned subpath.
+  const repoRootAbs = gitInfo ? await gitRoot(rootDir) : null;
+  const toRepoRelativeSourceFile = (sourceFile?: string): string | null => {
+    if (!sourceFile) return null;
+    if (!repoRootAbs) return sourceFile;
+    return relative(repoRootAbs, resolve(rootDir, sourceFile));
+  };
+
   // Contracts/workflows: redact the free-text + the normalized `projection` body
   // (schemas/descriptions/notes), preserve identity/structural fields.
   const safeContracts = contracts.map((c) => ({
@@ -305,6 +326,13 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     projection: redactStructure(c.projection),
     projectionComplete: c.projectionComplete,
     incompleteReason: c.incompleteReason ?? null,
+    // GLU-221 phase 1 — best-effort source location (structural identity
+    // fields, like `contractId` above — never redacted). `null` when the
+    // scanner couldn't statically resolve them (scoped/custom factory
+    // contracts, or a contract file outside any git repo).
+    sourceFile: toRepoRelativeSourceFile(c.sourceFile),
+    line: c.line ?? null,
+    endLine: c.endLine ?? null,
   }));
   const safeWorkflows = workflows.map((w) => ({
     workflowId: w.workflowId,
@@ -371,7 +399,11 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   };
 
   const testRes = await post("test", { tests: safeTests });
-  const contractRes = await post("contract", { contracts: safeContracts });
+  // GLU-221 phase 1 — git provenance travels at the contract-kind top level
+  // (siblings the same full-snapshot-replace body as `contracts`), not
+  // per-contract: one repo/commit/branch describes the whole sync, same as
+  // `contracts`/`workflows` are each project-level snapshots.
+  const contractRes = await post("contract", { contracts: safeContracts, git: gitInfo ?? null });
   const workflowRes = await post("workflow", { workflows: safeWorkflows });
   // The OpenAPI doc is a project-level single snapshot (not a per-id replace) — one
   // doc rendered from all HTTP contracts. POST it last; `null` clears a stale doc. Two
