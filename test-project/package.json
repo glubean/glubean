@@ -2,6 +2,9 @@
   "name": "test-project",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
   "dependencies": {
     "@glubean/sdk": "workspace:*",
     "@glubean/runner": "workspace:*",
