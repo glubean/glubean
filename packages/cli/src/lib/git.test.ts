@@ -225,6 +225,27 @@ describe("detectGitProvenance — boundary fallbacks (never throw, never fabrica
     expect(result!.commit).toBeNull();
   });
 
+  // GLU-221 phase 1 P1 follow-up — an untracked file must be detected as
+  // dirty even when the repo/user config suppresses untracked reporting
+  // (`status.showUntrackedFiles=no`, common in large repos for speed). The
+  // dirtiness check forces `--untracked-files=all`, so the config can't hide
+  // an untracked (but scanned) contract source and let us hand back a HEAD
+  // commit whose tree doesn't contain that file.
+  test("untracked file with status.showUntrackedFiles=no → still detected dirty, commit is null", async () => {
+    await initCommittedRepo(dir);
+    await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    // Repo-level config that a plain `git status --porcelain` would honor,
+    // hiding the untracked file below.
+    await git(dir, ["config", "status.showUntrackedFiles", "no"]);
+    await writeFile(join(dir, "untracked.contract.ts"), "// untracked, never added");
+
+    const result = await detectGitProvenance(dir);
+    expect(result).not.toBeNull();
+    expect(result!.repo).toBe("acme/widgets");
+    expect(result!.commit).toBeNull();
+    expect(result!.branch).toBe("main");
+  });
+
   test("clean working tree (nothing after the init commit) → commit is populated, matches HEAD", async () => {
     await initCommittedRepo(dir);
     await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);

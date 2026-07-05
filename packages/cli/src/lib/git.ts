@@ -218,9 +218,17 @@ export async function detectGitProvenance(dir?: string): Promise<GitProvenance |
  * CLOSED to `true` ("assume dirty") on a `git status` failure: withholding
  * a precise commit-based deep link is always safe; fabricating one from an
  * unconfirmed-clean tree is not.
+ *
+ * `--untracked-files=all` is EXPLICIT, not left to config: `git status`
+ * otherwise honors the repo/user `status.showUntrackedFiles` setting, which
+ * large repos commonly set to `no` for speed. With `no`, an untracked file
+ * emits no `??` line, so a tree carrying an untracked (but scanned) contract
+ * source would look clean here — and we'd hand back HEAD's commit for a deep
+ * link into a tree that doesn't contain that file. Forcing `all` makes the
+ * dirtiness check independent of any ambient config.
  */
 async function isWorkingTreeDirty(dir?: string): Promise<boolean> {
-  const { code, stdout } = await execGit(["status", "--porcelain"], dir);
+  const { code, stdout } = await execGit(["status", "--porcelain", "--untracked-files=all"], dir);
   if (code !== 0) return true;
   return stdout.trim().length > 0;
 }
