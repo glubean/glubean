@@ -20,6 +20,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
+    "pretest": "test -n \"$CI\" || pnpm --filter \"@glubean/mcp...\" build",
     "test": "vitest run"
   },
   "publishConfig": {

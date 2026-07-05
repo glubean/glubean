@@ -32,10 +32,12 @@ are bumped **together** on every release — even packages that didn't change. C
    ```
    node -e 'const fs=require("fs"),p=require("path");for(const d of fs.readdirSync("packages")){const f=p.join("packages",d,"package.json");if(fs.existsSync(f))fs.writeFileSync(f,fs.readFileSync(f,"utf8").replace(/("version":\s*")[^"]+(")/,"$1X.Y.Z$2"))}'
    ```
-2. `pnpm install` (lockfile stays clean for a pure version bump) → `pnpm -r build` → **`pnpm -r test`**.
+2. `pnpm install` (lockfile stays clean for a pure version bump) → `CI=1 pnpm -r build` → **`CI=1 pnpm -r test`**.
    - **Run the FULL `pnpm -r test`, never a scoped subset.** A change to a shared shape (e.g. the
      workflow wrapper, an `@glubean/sdk/internal` export) has monorepo-wide blast radius that
      per-package gates miss (this bit us at the v0.7.0 release — graphql/grpc tests broke).
+   - **Prefix with `CI=1`** (matching the actual CI env) so `cli`/`mcp`'s `pretest` guard (see
+     Commit gate below) no-ops instead of doing a redundant, racy nested rebuild during `pnpm -r test`.
 3. `git commit -m "chore(release): vX.Y.Z"` → `git tag vX.Y.Z` → push the commit **and** the tag.
 
 ### Release mechanics / gotchas
@@ -67,6 +69,21 @@ order — keep `publish.yml` and this list in sync when packages are added/remov
 ## Commit gate
 
 See [`~/.claude/CLAUDE.md`](/Users/peisong/.claude/CLAUDE.md) (global) for the converge gate + propose-skip categories. This repo follows the global rule unchanged. Test runner here is `vitest` (per-package).
+
+**Scoped `pnpm --filter <pkg> test` before `pnpm -r build`** can read a workspace dependency's
+stale `dist/` (gitignored, not rebuilt) through the symlink and produce a false-red result that
+looks like a real bug (bit us twice on `@glubean/redaction` — GLU-194/GLU-198 were both stale-dist
+false alarms, not real defects). `cli` and `mcp` now carry a `pretest: "test -n \"$CI\" || pnpm
+--filter \"@glubean/<pkg>...\" build"` guard: it rebuilds only that package's own dependency
+closure (not the whole workspace), and only outside `CI` — under `CI=true` it's a no-op, since the
+release/publish flow already runs `pnpm -r build` before `pnpm -r test` (skipping it there avoids
+two packages' pretest hooks doing a concurrent, non-incremental `tsc` rebuild of shared deps like
+`sdk`/`redaction` mid-`pnpm -r test`, which is wasted work at best and a `dist/` write race at
+worst — reproduced locally before this guard was added). **When running the full pre-release
+`pnpm -r build && pnpm -r test` locally (not through CI), prefix it with `CI=1`** so the same
+no-op guard kicks in and you get the same race-free behavior as the CI pipeline. For any other
+package, run `pnpm -r build` once before a scoped test run, or don't trust a red result without
+checking whether the failing package's dist actually matches its src (GLU-200).
 
 ## vNext workflow authoring conventions (owner decision 2026-06-12, "option D")
 
