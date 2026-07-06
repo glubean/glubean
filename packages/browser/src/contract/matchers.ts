@@ -61,7 +61,10 @@ function escapeRegExp(s: string): string {
  * segment. A trailing slash on the observed path is tolerated.
  */
 export function pathTemplateToRegExp(template: string): RegExp {
-  const normalized = template.replace(/\/+$/, "") || "/";
+  // Normalize a leading slash: HTTP endpoints may be authored without one
+  // (`GET api/users/:id`), but observed request pathnames always carry it.
+  const withSlash = template.startsWith("/") ? template : `/${template}`;
+  const normalized = withSlash.replace(/\/+$/, "") || "/";
   const body = normalized
     .split("/")
     .map((seg) => (seg.startsWith(":") ? "[^/]+" : escapeRegExp(seg)))
@@ -123,11 +126,17 @@ function schemaAccepts(schema: SchemaLikeLoose, value: unknown): boolean {
   return true;
 }
 
-/** Read `{ method, path, status, schema }` from a referenced contract.http case. */
+/**
+ * Read `{ method, path, status, schema }` from a referenced contract.http
+ * case. Returns null when the ref does not resolve to a runnable *outbound*
+ * HTTP case: no endpoint, an unknown `caseKey` (typo), or an inbound case with
+ * no `expect.status`. Rejecting here is what stops a broken ref from silently
+ * matching any observed request to the endpoint.
+ */
 function readReferencedRoute(ref: ContractCaseRef<unknown, unknown>): {
   method: string;
   pathTemplate: string;
-  status: number | undefined;
+  status: number;
   schema: SchemaLikeLoose | undefined;
 } | null {
   const spec = ref.contract?._spec as
@@ -138,11 +147,13 @@ function readReferencedRoute(ref: ContractCaseRef<unknown, unknown>): {
   const caseSpec = spec.cases?.[ref.caseKey] as
     | { expect?: { status?: number; schema?: SchemaLikeLoose } }
     | undefined;
+  // A valid outbound HTTP case always declares a numeric expect.status.
+  if (!caseSpec || typeof caseSpec.expect?.status !== "number") return null;
   return {
     method,
     pathTemplate: path,
-    status: caseSpec?.expect?.status,
-    schema: caseSpec?.expect?.schema,
+    status: caseSpec.expect.status,
+    schema: caseSpec.expect.schema,
   };
 }
 
@@ -160,10 +171,12 @@ export function matchCalls(
 ): CallsMatchResult {
   const referenced = readReferencedRoute(ref);
   if (!referenced) {
+    // Broken ref (unknown caseKey / not an outbound HTTP case / no endpoint):
+    // fail loudly rather than silently matching any request to the endpoint.
     return {
       matched: false,
       schema: "not-applicable",
-      detail: `calls ref "${ref.contractId}#${ref.caseKey}" does not resolve to an HTTP contract with an endpoint`,
+      detail: `calls ref "${ref.contractId}#${ref.caseKey}" does not resolve to an outbound HTTP case (unknown case key, inbound case, or missing endpoint/status)`,
       route: `${ref.protocol}:${ref.contractId}#${ref.caseKey}`,
     };
   }
@@ -186,8 +199,7 @@ export function matchCalls(
   }
 
   // atLeastOnce on status: any route hit with the expected status satisfies.
-  const statusHits =
-    status === undefined ? routeHits : routeHits.filter((t) => t.status === status);
+  const statusHits = routeHits.filter((t) => t.status === status);
   if (statusHits.length === 0) {
     const got = [...new Set(routeHits.map((t) => t.status))].join(", ");
     return {
@@ -205,8 +217,11 @@ export function matchCalls(
   if (!schema) {
     return { matched: true, schema: "not-applicable", detail: statusPart, route };
   }
-  const body = statusHits.find((t) => t.responseBody !== undefined)?.responseBody;
-  if (body === undefined) {
+  // atLeastOnce also applies to the body: check EVERY matching call's body —
+  // if any one satisfies the schema, the contract holds (a broken retry
+  // followed by a good call must not fail).
+  const bodies = statusHits.filter((t) => t.responseBody !== undefined);
+  if (bodies.length === 0) {
     return {
       matched: true,
       schema: "unverified",
@@ -214,13 +229,13 @@ export function matchCalls(
       route,
     };
   }
-  if (schemaAccepts(schema, body)) {
+  if (bodies.some((t) => schemaAccepts(schema, t.responseBody))) {
     return { matched: true, schema: "verified", detail: `${statusPart} (body matches schema)`, route };
   }
   return {
     matched: false,
     schema: "mismatch",
-    detail: `${statusPart} but response body failed the referenced case schema`,
+    detail: `${statusPart} but no matching call's response body satisfied the referenced case schema`,
     route,
   };
 }
@@ -247,17 +262,20 @@ export function matchUrl(expect: UrlExpect, finalUrl: string): UrlMatchResult {
     /* leave finalUrl as-is for relative inputs */
   }
 
-  if (expect.pattern !== undefined) {
-    const re = new RegExp(expect.pattern);
-    const ok = re.test(finalUrl);
-    return { ok, detail: `final url ${finalUrl} ${ok ? "matches" : "does not match"} /${expect.pattern}/` };
-  }
-
+  // notPath is a universal forbidden-path guard — enforce it FIRST, even when
+  // `pattern` or `path` is also declared (a regex host/prefix match must not
+  // let an explicitly-forbidden path through).
   if (expect.notPath !== undefined) {
     const forbidden = Array.isArray(expect.notPath) ? expect.notPath : [expect.notPath];
     if (forbidden.includes(pathname)) {
       return { ok: false, detail: `terminal path ${pathname} is forbidden (notPath)` };
     }
+  }
+
+  if (expect.pattern !== undefined) {
+    const re = new RegExp(expect.pattern);
+    const ok = re.test(finalUrl);
+    return { ok, detail: `final url ${finalUrl} ${ok ? "matches" : "does not match"} /${expect.pattern}/` };
   }
 
   if (expect.path !== undefined) {
@@ -271,7 +289,7 @@ export function matchUrl(expect: UrlExpect, finalUrl: string): UrlMatchResult {
     };
   }
 
-  // Only notPath was specified and it passed.
+  // Only notPath was specified and it passed the forbidden-path guard above.
   if (expect.notPath !== undefined) {
     return { ok: true, detail: `terminal path ${pathname} is not forbidden` };
   }

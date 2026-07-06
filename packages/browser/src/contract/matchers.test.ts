@@ -88,6 +88,11 @@ describe("pathTemplateToRegExp", () => {
   test("tolerates a trailing slash", () => {
     expect(pathTemplateToRegExp("/x/y").test("/x/y/")).toBe(true);
   });
+  test("normalizes a missing leading slash (codex R1 #4)", () => {
+    // Endpoint authored without a leading slash still matches an observed
+    // pathname (which always carries one).
+    expect(pathTemplateToRegExp("api/users/:id").test("/api/users/123")).toBe(true);
+  });
 });
 
 describe("pathnameOf", () => {
@@ -181,6 +186,58 @@ describe("matchCalls", () => {
     expect(r.schema).toBe("mismatch");
   });
 
+  test("unknown caseKey (typo) → not matched, does NOT silently pass (codex R1 #1)", () => {
+    const ref = {
+      __glubean_type: "contract-case-ref",
+      contractId: "auth.sign-in.email",
+      caseKey: "typoNotInCases",
+      protocol: "http",
+      target: "POST /api/auth/sign-in/email",
+      contract: {
+        _spec: {
+          endpoint: "POST /api/auth/sign-in/email",
+          cases: { validStagingCredentials: { expect: { status: 200 } } },
+        },
+      },
+    } as unknown as ContractCaseRef<unknown, unknown>;
+    // Even with a matching request present, a broken ref must not pass.
+    const r = matchCalls(ref, [
+      trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 }),
+    ]);
+    expect(r.matched).toBe(false);
+    expect(r.detail).toContain("does not resolve");
+  });
+
+  test("leading-slash-less endpoint still matches (codex R1 #4)", () => {
+    const ref = makeHttpRef({ endpoint: "POST api/auth/sign-in/email", status: 200 });
+    const r = matchCalls(ref, [
+      trace({ method: "POST", url: "https://api.staging.glubean.com/api/auth/sign-in/email", status: 200 }),
+    ]);
+    expect(r.matched).toBe(true);
+  });
+
+  test("schema: atLeastOnce over bodies — a later good body passes despite an earlier bad one (codex R1 #2)", () => {
+    const schema = { safeParse: (v: unknown) => ({ success: (v as { good?: boolean })?.good === true }) };
+    const ref = makeHttpRef({ endpoint: "GET /api/x", status: 200, schema });
+    const r = matchCalls(ref, [
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: { good: false } }),
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: { good: true } }),
+    ]);
+    expect(r.matched).toBe(true);
+    expect(r.schema).toBe("verified");
+  });
+
+  test("schema mismatch only when NO matching body satisfies (codex R1 #2)", () => {
+    const schema = { safeParse: (v: unknown) => ({ success: (v as { good?: boolean })?.good === true }) };
+    const ref = makeHttpRef({ endpoint: "GET /api/x", status: 200, schema });
+    const r = matchCalls(ref, [
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: { good: false } }),
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: { good: false } }),
+    ]);
+    expect(r.matched).toBe(false);
+    expect(r.schema).toBe("mismatch");
+  });
+
   test("non-HTTP / unresolvable ref → not matched, not-applicable", () => {
     const ref = {
       __glubean_type: "contract-case-ref",
@@ -219,6 +276,15 @@ describe("matchUrl", () => {
   });
   test("notPath checked before path when both present", () => {
     expect(matchUrl({ path: ["/login"], notPath: ["/login"] }, "https://h/login").ok).toBe(false);
+  });
+  test("notPath enforced even when pattern also matches (codex R1 #3)", () => {
+    // A regex that matches the host/prefix must NOT let a forbidden path pass.
+    const r = matchUrl(
+      { pattern: "^https://app\\.staging\\.", notPath: "/login" },
+      "https://app.staging.glubean.com/login",
+    );
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain("forbidden");
   });
 });
 
