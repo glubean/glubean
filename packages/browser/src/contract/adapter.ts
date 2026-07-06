@@ -415,7 +415,15 @@ async function runAndJudge(
       await page.captureScreenshot("final");
     }
 
-    const evidence: BrowserEvidence = { network, consoleErrors, finalUrl: page.url() };
+    // Freeze the evidence window: SNAPSHOT the recording buffers. Judging +
+    // verify run while the page is still open, so late polling/console events
+    // must not mutate the frozen bundle (they'd change expect.calls/console
+    // verdicts after the freeze point).
+    const evidence: BrowserEvidence = {
+      network: [...network],
+      consoleErrors: [...consoleErrors],
+      finalUrl: page.url(),
+    };
     const failures = await judgeExpects(ctx, page, caseSpec, evidence);
     if (caseSpec.verify) {
       await caseSpec.verify(ctx, evidence, resolvedInput as never);
@@ -429,8 +437,12 @@ async function runAndJudge(
     }
     return evidence;
   } catch (err) {
+    // Thrown step/navigation/verify failure. Use captureScreenshot (always
+    // records) rather than screenshotOnFailure (which the client can gate to a
+    // no-op via screenshot:"off") so a contract that requested failure/final
+    // evidence actually gets it — consistent with the soft-failure path above.
     if (strategy === "on-failure" || strategy === "final") {
-      await page.screenshotOnFailure().catch(() => undefined);
+      await page.captureScreenshot("failure").catch(() => undefined);
     }
     throw err;
   } finally {

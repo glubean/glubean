@@ -111,10 +111,13 @@ interface FakePage {
 function makeFakeBrowser(config: FakePageConfig): {
   browser: GlubeanBrowser;
   last: () => FakePage | undefined;
+  lastCtx: () => BrowserTestContext | undefined;
 } {
   let last: FakePage | undefined;
+  let lastCtx: BrowserTestContext | undefined;
   const browser = {
     newPage: async (ctx: BrowserTestContext): Promise<InstrumentedPage> => {
+      lastCtx = ctx;
       const visible = new Set(config.visible ?? []);
       const rec: FakePage = {
         page: undefined as unknown as InstrumentedPage,
@@ -176,7 +179,7 @@ function makeFakeBrowser(config: FakePageConfig): {
     close: async () => {},
     disconnect: async () => {},
   } as unknown as GlubeanBrowser;
-  return { browser, last: () => last };
+  return { browser, last: () => last, lastCtx: () => lastCtx };
 }
 
 function httpRef(endpoint: string, status: number, schema?: { safeParse: (v: unknown) => { success: boolean } }): ContractCaseRef<unknown, unknown> {
@@ -429,6 +432,67 @@ describe("executeCase judging", () => {
     };
     await runCase(spec);
     expect(last()?.captureScreenshotLabels).not.toContain("expect-failure");
+  });
+
+  test("evidence arrays are snapshotted — post-freeze events don't mutate the bundle (codex R6 #1)", async () => {
+    const { browser, lastCtx } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    let captured: BrowserEvidence | undefined;
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [],
+          verify: (_ctx, evidence) => {
+            captured = evidence;
+          },
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec);
+    expect(captured?.network).toHaveLength(1);
+    // A trace arriving AFTER the freeze (emitted to the live recording ctx) must
+    // NOT retroactively appear in the frozen bundle.
+    lastCtx()?.trace({
+      name: "GET late",
+      method: "GET",
+      url: "https://h/late",
+      status: 200,
+      duration: 1,
+      durationMs: 1,
+    } as unknown as Parameters<BrowserTestContext["trace"]>[0]);
+    expect(captured?.network).toHaveLength(1);
+  });
+
+  test("thrown failure uses captureScreenshot (always records), not mode-gated screenshotOnFailure (codex R6 #2)", async () => {
+    const { browser, last } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [
+            {
+              id: "s",
+              intent: "s",
+              action: async () => {
+                throw new Error("navigation blew up");
+              },
+            },
+          ],
+          expect: [],
+        } as BrowserContractCase,
+      },
+    };
+    await expect(runCase(spec)).rejects.toThrow(/blew up/);
+    expect(last()?.captureScreenshotLabels).toContain("failure");
   });
 
   test("settle waits for a late-arriving trace before judging calls (codex R5 #1)", async () => {
