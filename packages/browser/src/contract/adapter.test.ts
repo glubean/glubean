@@ -93,6 +93,12 @@ interface FakePageConfig {
   traces?: BrowserTraceRecord[];
   /** Console errors emitted on goto. */
   consoleErrors?: Array<{ message: string; source?: string }>;
+  /**
+   * When set, `raw.waitForNetworkIdle` exists (real-page behaviour) and these
+   * traces are emitted asynchronously AFTER goto — simulating the CDP
+   * getResponseBody lag that lands a trace after network idle.
+   */
+  lateTraces?: BrowserTraceRecord[];
 }
 
 interface FakePage {
@@ -116,23 +122,31 @@ function makeFakeBrowser(config: FakePageConfig): {
         captureScreenshotLabels: [],
         closed: false,
       };
+      const emitTrace = (t: BrowserTraceRecord) =>
+        ctx.trace({
+          name: `${t.method} ${t.url}`,
+          method: t.method,
+          url: t.url,
+          status: t.status,
+          duration: t.durationMs,
+          durationMs: t.durationMs,
+          requestBody: t.requestBody,
+          responseBody: t.responseBody,
+        } as unknown as Parameters<BrowserTestContext["trace"]>[0]);
       const page = {
-        raw: {}, // no waitForNetworkIdle → settle is a no-op
+        // With lateTraces, expose waitForNetworkIdle (real-page behaviour) so
+        // settleNetwork's trace-flush wait engages; otherwise settle is a no-op.
+        raw: config.lateTraces
+          ? { waitForNetworkIdle: async () => {} }
+          : {},
         goto: async (_url: string) => {
-          for (const t of config.traces ?? []) {
-            ctx.trace({
-              name: `${t.method} ${t.url}`,
-              method: t.method,
-              url: t.url,
-              status: t.status,
-              duration: t.durationMs,
-              durationMs: t.durationMs,
-              requestBody: t.requestBody,
-              responseBody: t.responseBody,
-            } as unknown as Parameters<BrowserTestContext["trace"]>[0]);
-          }
+          for (const t of config.traces ?? []) emitTrace(t);
           for (const c of config.consoleErrors ?? []) {
             ctx.event({ type: "browser:console-error", data: { message: c.message, source: c.source } });
+          }
+          // Late traces land AFTER idle (async getResponseBody lag).
+          for (const [i, t] of (config.lateTraces ?? []).entries()) {
+            setTimeout(() => emitTrace(t), 30 * (i + 1));
           }
         },
         url: () => config.finalUrl,
@@ -415,6 +429,76 @@ describe("executeCase judging", () => {
     };
     await runCase(spec);
     expect(last()?.captureScreenshotLabels).not.toContain("expect-failure");
+  });
+
+  test("settle waits for a late-arriving trace before judging calls (codex R5 #1)", async () => {
+    // The matching sign-in trace lands AFTER network idle (getResponseBody lag).
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      lateTraces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "calls-signin", calls: httpRef("POST /api/auth/sign-in/email", 200) }],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec);
+    // Without the trace-flush wait this would be a false failure.
+    expect(log.assertions.find((a) => a.message?.startsWith("[calls-signin]"))?.passed).toBe(true);
+  });
+
+  test("verify receives the logical input (codex R5 #2)", async () => {
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    let seenInput: { email?: string } | undefined;
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [],
+          verify: (_ctx, _evidence, input) => {
+            seenInput = input as unknown as { email?: string };
+          },
+        } as BrowserContractCase,
+      },
+    };
+    await browserAdapter.executeCase!({
+      ctx: makeCtx().ctx,
+      contract: { _spec: spec } as never,
+      caseKey: "happyPath",
+      resolvedInput: { email: "dogfood@example.com" },
+    });
+    expect(seenInput?.email).toBe("dogfood@example.com");
+  });
+
+  test("entry-only journey (steps: []) is runnable, not skipped (codex R5 #3)", async () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/dashboard" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/dashboard",
+      cases: {
+        pageLoad: {
+          description: "just open the page and check the URL",
+          steps: [],
+          expect: [{ id: "url", url: { path: "/dashboard" } }],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec, "pageLoad");
+    // Judged (not skipped): exactly one url assertion, and it passed.
+    expect(log.assertions).toHaveLength(1);
+    expect(log.assertions[0].passed).toBe(true);
   });
 
   test("verify hook runs with the frozen evidence bundle", async () => {

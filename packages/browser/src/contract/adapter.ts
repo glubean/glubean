@@ -124,9 +124,13 @@ function resolveEntry(
   return caseSpec.entry ?? spec.entry;
 }
 
-/** True iff every step has an `action` (Mode A can replay the whole journey). */
+/**
+ * True iff every step has an `action` (Mode A can replay the whole journey).
+ * An empty `steps` array is runnable: a page-load contract just opens `entry`
+ * and judges url/dom/console — vacuously "all steps have actions".
+ */
 function isRunnable(caseSpec: BrowserContractCase): boolean {
-  return caseSpec.steps.length > 0 && caseSpec.steps.every((s) => typeof s.action === "function");
+  return caseSpec.steps.every((s) => typeof s.action === "function");
 }
 
 /** List the step ids that lack an `action`. */
@@ -210,6 +214,13 @@ function makeRecordingCtx(ctx: TestContext): RecordingCtx {
 const DOM_TIMEOUT_MS = 8_000;
 const NETWORK_IDLE_MS = 500;
 const NETWORK_IDLE_TIMEOUT_MS = 5_000;
+// After network idle, trace emission still lags (async CDP getResponseBody);
+// poll until the trace array stops growing for this long, capped by the max.
+const TRACE_POLL_MS = 50;
+const TRACE_STABLE_MS = 250;
+const TRACE_FLUSH_MAX_MS = 2_000;
+
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Convert a BrowserLocatorSpec into a page selector string. */
 function locatorToSelector(spec: BrowserLocatorSpec): string {
@@ -228,17 +239,46 @@ function locatorToSelector(spec: BrowserLocatorSpec): string {
   }
 }
 
-/** Best-effort settle: wait for the network to go idle after the last step. */
-async function settleNetwork(page: InstrumentedPage): Promise<void> {
+/**
+ * Best-effort settle before freezing the evidence window: wait for the network
+ * to go idle, THEN wait for the trace array to stop growing.
+ *
+ * The @glubean/browser tracer emits a trace only after an async CDP
+ * `Network.getResponseBody` resolves — which is not network activity that
+ * `waitForNetworkIdle` observes, so the last request's trace can land *after*
+ * idle. Polling until `network` is stable (or a bounded cap) keeps
+ * `expect.calls` from snapshotting before the final requests are recorded.
+ *
+ * Gated on `waitForNetworkIdle` being present (real page): a fake/test page
+ * returns immediately, so unit tests stay fast.
+ */
+async function settleNetwork(
+  page: InstrumentedPage,
+  network: readonly BrowserTraceRecord[],
+): Promise<void> {
   const raw = (page as { raw?: { waitForNetworkIdle?: (o: unknown) => Promise<void> } }).raw;
-  if (raw && typeof raw.waitForNetworkIdle === "function") {
-    try {
-      await raw.waitForNetworkIdle({
-        idleTime: NETWORK_IDLE_MS,
-        timeout: NETWORK_IDLE_TIMEOUT_MS,
-      });
-    } catch {
-      /* idle timeout is fine — proceed with whatever was captured */
+  if (!(raw && typeof raw.waitForNetworkIdle === "function")) return;
+
+  try {
+    await raw.waitForNetworkIdle({
+      idleTime: NETWORK_IDLE_MS,
+      timeout: NETWORK_IDLE_TIMEOUT_MS,
+    });
+  } catch {
+    /* idle timeout is fine — proceed to the trace-flush wait */
+  }
+
+  let waited = 0;
+  let lastLen = network.length;
+  let stableFor = 0;
+  while (stableFor < TRACE_STABLE_MS && waited < TRACE_FLUSH_MAX_MS) {
+    await delay(TRACE_POLL_MS);
+    waited += TRACE_POLL_MS;
+    if (network.length === lastLen) {
+      stableFor += TRACE_POLL_MS;
+    } else {
+      lastLen = network.length;
+      stableFor = 0;
     }
   }
 }
@@ -370,7 +410,7 @@ async function runAndJudge(
         await page.captureScreenshot(`step-${step.id}`);
       }
     }
-    await settleNetwork(page);
+    await settleNetwork(page, network);
     if (strategy === "final") {
       await page.captureScreenshot("final");
     }
@@ -378,7 +418,7 @@ async function runAndJudge(
     const evidence: BrowserEvidence = { network, consoleErrors, finalUrl: page.url() };
     const failures = await judgeExpects(ctx, page, caseSpec, evidence);
     if (caseSpec.verify) {
-      await caseSpec.verify(ctx, evidence);
+      await caseSpec.verify(ctx, evidence, resolvedInput as never);
     }
     // Glubean assertions are SOFT (they record, they don't throw), so a failed
     // expect never reaches the catch block below. Capture the requested

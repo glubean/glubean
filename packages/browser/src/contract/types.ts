@@ -271,9 +271,16 @@ export interface BrowserContractCase<Input = void> extends BaseCaseSpec {
 
   /**
    * Escape hatch: custom assertions over the frozen evidence bundle. Mode A
-   * only. Runs after the declared `expect` entries are judged.
+   * only. Runs after the declared `expect` entries are judged. Receives the
+   * case's logical input (matching `needs`) as the third argument, so a
+   * verify can assert on it against the captured evidence (e.g. "the submitted
+   * email appears in the sign-in request body").
    */
-  verify?: (ctx: TestContext, evidence: BrowserEvidence) => void | Promise<void>;
+  verify?: (
+    ctx: TestContext,
+    evidence: BrowserEvidence,
+    input: Input,
+  ) => void | Promise<void>;
 }
 
 /**
