@@ -10,11 +10,11 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 ## [Unreleased]
 
 ### Added
-- **Custom metrics authoring** (`@glubean/sdk/load`) — `rate()`, `trend()`, `counter()` metric builders for user-defined load signals (`A1`).
-- **Custom metrics fold + gate thresholds** (`@glubean/runner`) — custom metric values are folded into the load artifact alongside built-in metrics; threshold evaluation supports custom metric names (`A2`).
+- **Structured session/cookie/header behavior + per-node assertions on workflow nodes** (`@glubean/sdk`, GLU-195) — the workflow-node projection schema gains author-declared `session` (cookie/header names + a coarse establish/refresh/read/revoke lifecycle badge) and `verify` (structured per-node assertion rows) hints, so the Specs workflow inspector can render them first-class instead of parsing free-text `reads`. All fields are optional and backward-compatible; cookie/header NAMES are validated against RFC-7230 token grammar (so a value can't be smuggled) and stay redaction-safe (names survive sync, real cookie values still mask — GLU-123 intact).
 
 ### Fixed
-- **`glubean init` no longer resolves `npm test` to a stale global CLI** (`@glubean/cli`, GLU-110 / GitHub #9) — all three scaffold templates (standard, `--contract-first`, `--template demo`) now list `@glubean/cli` as a direct `dependencies` entry, same as `@glubean/runner`. Without it, `node_modules/.bin` had no local `glubean` binary, so the bare `glubean` in generated `npm test`/`npm run test:ci` scripts silently fell back to whatever `glubean` happened to be on the machine's global PATH — commonly a much older version that doesn't recognize current flags (e.g. `error: unknown option '--profile'`). The generated CI workflow template's `npx glubean ci run` was not a safe substitute either — without a local `node_modules/.bin/glubean`, `npx` resolution is not guaranteed to avoid a stale global — so adding the CLI as a direct dependency (which both invocation styles resolve to first) was the fix, not a script-only rewrite.
+- **Redact query secrets embedded in raw-string network-error messages** (`@glubean/redaction`, GLU-214) — ky's `NetworkError.message` embeds the full request URL verbatim on a connection failure, so a custom-string secret riding as a query value (e.g. `?custom_secret=abc`) leaked in plaintext into `--log-file`, because the raw-string handler only ran whole-string pattern matching (bearer/jwt/ip/hex). It now finds embedded `http(s)://` URLs in the text and runs them through the same by-key query redaction as the url-query handler before the pattern scan.
+- **All-broken discovery-failure runs now flow through the full result/junit/upload pipeline** (`@glubean/cli`, GLU-194, GLU-155 follow-up) — when *every* targeted contract/test file failed to import, `glubean run` took an early-exit branch that persisted only `last-run.result.json` and skipped `--result-json`, `--reporter junit`, and `--upload` (unlike a mixed run where some files import). The "0 tests to run" exits are now gated behind an `allBrokenDiscovery` flag so an all-broken run still writes reporters and uploads status `failed`; a genuinely empty run (no import failures) keeps its prior exit-without-pipeline behavior.
 
 ---
 
@@ -42,6 +42,62 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 - **MCP/redaction — residual plaintext-secret leaks closed (R11–R16)** (`@glubean/mcp`, `@glubean/redaction`, GLU-129 follow-up) — a verification-debt re-run after 0.9.2 found 3 residual leak shapes: tuple-form entries (`["token", "secret"]`, the shape `Object.entries()`/header pairs produce — the array walker never checked element 0 as a key), form-urlencoded string literals inside SDK assertion messages, and bare form-urlencoded message strings that bypassed the scrubber loop. Also fixed 2 over-masking regressions (double-masking), gated via `looksLikeFormUrlEncoded`. Converged to 3 consecutive rounds with 0 leaks found.
 - **Reject Windows drive-relative/absolute projection paths** (`@glubean/cli`, GLU-143) — `assertContainedRelativePath` validated paths with POSIX-only semantics, so a Windows drive-relative value like `C:outside.json` (and other Windows-only escape forms — `\outside`, UNC paths, backslash `..` escapes) could pass containment checks meant to keep `projections.contracts.<name>.output`/`target` inside the project root. Paths are now validated under both POSIX and Windows semantics.
 - **`trace.routeKey` now stamped for standalone/workflow runs, not just load runs** (`@glubean/runner`, GLU-148) — `contract.http()` case execution already set `context.glubeanRoute` and the load runner's engine read it back into `trace.routeKey`, but a normal `glubean run` (standalone contract cases and workflow `.call()` steps) executes through the separate legacy harness, whose `afterResponse` hook never read `context.glubeanRoute` — so `trace.routeKey` was never stamped outside load runs.
+
+---
+
+## [0.9.2] — 2026-07-02
+
+### Fixed
+- **MCP local-debug tools redact assertion/log/status/error/warning events, not just trace** (`@glubean/mcp`, `@glubean/redaction`, GLU-129) — `glubean_run_local_file` / `glubean_get_local_events` still returned plaintext secrets embedded in non-trace event fields, closing the leak class that survived GLU-104 (10 codex xhigh rounds; round 11 was deferred to the following release as recorded verification debt — see 0.9.3).
+- **MCP `open*` cloud tools prefer `GLUBEAN_PLATFORM_API_URL` over legacy `GLUBEAN_API_URL`** (`@glubean/mcp`, GLU-139) — the ingest tools need the Platform host, not the Dashboard host that `GLUBEAN_API_URL` typically points at (the CLI-side counterpart shipped later in 0.9.4 / GLU-161).
+- **Discovery resolves tags inherited from `contract.http.with()` defaults** (`@glubean/mcp`, GLU-130) — tags applied via a contract's `.with()` defaults were dropped during discovery; a shared tag-resolution helper now gives runtime and static-fallback the same result.
+- **Result JSON `summary.stats` derived from per-test events** (`@glubean/cli`, GLU-128) — the persisted summary stats are now computed from the emitted per-test events rather than a separate accounting path that could drift.
+
+### Added
+- **Hoist reusable OpenAPI body schemas into `components.schemas`** (`@glubean/sdk`, GLU-127) — repeated request/response body schemas are lifted into `components.schemas` and referenced, instead of being inlined at every operation.
+
+---
+
+## [0.9.1] — 2026-07-03
+
+### Fixed
+- **Redaction — MCP trace output leaked auth headers/cookies/body/gRPC** (`@glubean/mcp`, `@glubean/redaction`, GLU-104) — auth headers, cookies, and request/response bodies in MCP trace output were returned in cleartext; hardened over multiple codex rounds (credential-key aliases, malformed/array `set-cookie`, JSON-as-string bodies, relative-URL query, cyclic-input guard, target/name query params, URL fragments).
+- **CLI local disk writes bypassed event redaction** (`@glubean/cli`, `@glubean/redaction`, GLU-105) — disk-writing sinks (not just `--upload`) are now routed through the same event redaction, non-event result fields are scrubbed before local disk writes, and browser download evidence URLs are redacted.
+- **`glubean sync` projection redaction leaked cookie/session-id in cleartext** (`@glubean/cli`, `@glubean/redaction`, GLU-123) — projection upload masked cookie/session-id values, and boolean JSON-Schema nodes under sensitive keys are preserved.
+- **OpenAPI merge dropped operations on method+path collisions** (`@glubean/sdk`, GLU-116) — colliding operations are preserved (relocated to a vendor extension) instead of being silently dropped; every operation is now always kept.
+- **Normalize OpenAPI path keys to always start with `/`** (`@glubean/sdk`, GLU-119).
+- **Support Zod v4 static `toJSONSchema` fallback** (`@glubean/sdk`, GLU-120) — Zod v4 request/response schemas were lost during projection.
+- **`glubean init` no longer resolves `npm test` to a stale global CLI** (`@glubean/cli`, GLU-110 / GitHub #9) — all three scaffold templates (standard, `--contract-first`, `--template demo`) now list `@glubean/cli` as a direct `dependencies` entry, same as `@glubean/runner`. Without it, `node_modules/.bin` had no local `glubean` binary, so the bare `glubean` in generated `npm test`/`npm run test:ci` scripts silently fell back to whatever `glubean` happened to be on the machine's global PATH — commonly a much older version that doesn't recognize current flags (e.g. `error: unknown option '--profile'`). The generated CI workflow template's `npx glubean ci run` was not a safe substitute either — without a local `node_modules/.bin/glubean`, `npx` resolution is not guaranteed to avoid a stale global — so adding the CLI as a direct dependency (which both invocation styles resolve to first) was the fix, not a script-only rewrite.
+- **CLI upload preflight 404 on a trailing-slash `--api-url`/`GLUBEAN_API_URL`** (`@glubean/cli`, GLU-109 / GitHub #8) — trailing-slash API URLs are normalized in both the preflight and the real POST.
+- **`glubean init` standard template missing `zod` dependency** (`@glubean/cli`, GLU-114).
+- **`configure()` JSDoc used a bare key instead of `{{key}}` template syntax** (`@glubean/sdk`, GLU-115).
+- **`demo` init template gitignore now ignores generated `result.json`** (`@glubean/cli`, GLU-121).
+
+### Added
+- **Contract projection outputs can be declared in `glubean.yaml`** (`@glubean/cli`, `@glubean/sdk`, GLU-117) — with path-containment validation so a projection output stays inside the project root.
+
+---
+
+## [0.9.0] — 2026-07-03
+
+### Added
+- **BT1-M4 browser capabilities** (`@glubean/browser`, GLU-70) — `storageState`, dialog handling, popup/`waitForPopup`, `nth`/`count`, `expectChecked`/`expectValue`, and `userAgent`.
+- **BT1-M5 tail browser capabilities** (`@glubean/browser`, GLU-71) — iframe and download support.
+- **`test.each` row-key metadata** (`@glubean/sdk`, B3-T1) — `idTemplate` + reorder-stable `rowKey` on all three registration paths, ride the projection upload (collision-safe shared template tokenizer, word-boundary `$index`).
+- **Runtime emit of `.each` row identity on the run-events channel** (`@glubean/runner`, `@glubean/engine`, `@glubean/cli`, B3-T3, GLU-75).
+- **Custom metrics authoring** (`@glubean/sdk/load`) — `rate()`, `trend()`, `counter()` metric builders for user-defined load signals (`A1`).
+- **Custom metrics fold + gate thresholds** (`@glubean/runner`) — custom metric values are folded into the load artifact alongside built-in metrics; threshold evaluation supports custom metric names (`A2`).
+
+### Changed
+- **60 Dependabot security vulnerabilities resolved** (GLU-78) — via root pnpm `overrides` (hono, `@hono/node-server`, protobufjs, basic-ftp, fast-uri, lodash, path-to-regexp, ws, qs, ip-address, brace-expansion, picomatch, postcss, vite) plus direct bumps (vitest, `@grpc/grpc-js`, tsx).
+
+### Fixed
+- **Preserve sticky-regex anchoring in mock URL matching** (`@glubean/browser`, GLU-73) — the `EvidenceSession` Fetch mock lost anchoring for sticky-regex URL patterns.
+- **Project hand-rolled `SchemaLike` response schemas via the `jsonSchema` hint** (`@glubean/sdk`, `@glubean/graphql`, `@glubean/grpc`, GLU-90) — hand-rolled response schemas across HTTP/GraphQL/gRPC now project instead of being dropped.
+- **Engine captures a clean pre-absolutization relative URL for worker reanchor** (`@glubean/engine`, GLU-81).
+- **B2-M3 run-selector edges** (`@glubean/cli`, GLU-67) — `--only-id` keeps all matching exports, and rerun/capability-skip ordering no longer produces spurious skips outside the failed set.
+- **Refuse to silently load a prod-like active-env** (`@glubean/cli`, GLU-88) — the CLI no longer silently defaults to a production-looking active environment.
+- **Widen spawn-test timeouts to stop load-induced flakes** (`@glubean/runner`, `@glubean/cli`, GLU-79) — test-infra only, no product runtime change; fixes flakes that reddened release CI under parallel load.
 
 ---
 
@@ -168,6 +224,9 @@ Changes prior to `v0.7.0` are not captured in this CHANGELOG. Use `git log v0.2.
 [0.9.5]: https://github.com/glubean/glubean/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/glubean/glubean/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/glubean/glubean/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/glubean/glubean/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/glubean/glubean/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/glubean/glubean/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/glubean/glubean/compare/v0.8.1...v0.8.4
 [0.8.2]: https://github.com/glubean/glubean/compare/v0.8.1...5db5384
 [0.8.1]: https://github.com/glubean/glubean/compare/v0.7.0...v0.8.1
