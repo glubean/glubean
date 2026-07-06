@@ -25,3 +25,6 @@ test-project/**/*.js
 test-project/**/*.d.ts
 
 .claude/
+
+# Local run artifacts (screenshots, results, logs)
+.glubean/

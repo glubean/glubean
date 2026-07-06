@@ -36,7 +36,10 @@ interface GlubeanKindDef {
 
 export const GLUBEAN_KINDS: readonly GlubeanKindDef[] = [
   { kind: "test", stems: ["test"], suiteKind: true, runtimeArtifact: false },
-  { kind: "contract", stems: ["contract"], suiteKind: true, runtimeArtifact: true },
+  // `.browser` rides the "contract" kind: a contract.browser journey IS a
+  // contract (GLU-233 / P1-3), so `.browser.ts` files are discovered, eagerly
+  // imported, and scanned exactly like `.contract.ts`.
+  { kind: "contract", stems: ["contract", "browser"], suiteKind: true, runtimeArtifact: true },
   // `.workflow` is the canonical vNext stem; `.flow` is the legacy alias. Both
   // ride the "flow" kind during the migration window.
   { kind: "flow", stems: ["flow", "workflow"], suiteKind: true, runtimeArtifact: true },
