@@ -660,6 +660,36 @@ describe("executeCase judging", () => {
     expect(last()?.captureScreenshotLabels).toContain("expect-failure");
   });
 
+  test("on-failure fires for a PARSE-ONLY validate failure (codex R10)", async () => {
+    // SchemaLike may be parse-only (no safeParse); a throwing parse is a failure.
+    const { browser, last } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [],
+          verify: (vctx) => {
+            vctx.validate(
+              { bad: 1 },
+              {
+                parse: () => {
+                  throw new Error("schema rejected");
+                },
+              } as never,
+              "payload",
+            );
+          },
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec, "c");
+    expect(last()?.captureScreenshotLabels).toContain("expect-failure");
+  });
+
   test("uncaught page error fails console-clean (codex R8 #1)", async () => {
     // A JS crash emits browser:uncaught-error (not console-error) — console-clean
     // must still fail, otherwise a passing test on a crashing page.

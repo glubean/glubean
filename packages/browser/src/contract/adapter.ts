@@ -257,17 +257,28 @@ function countingCtx(ctx: TestContext, onFail: () => void): TestContext {
       if (prop === "validate") {
         return <T>(
           data: unknown,
-          schema: { safeParse?: (v: unknown) => { success: boolean } },
+          schema: {
+            safeParse?: (v: unknown) => { success: boolean };
+            parse?: (v: unknown) => unknown;
+          },
           label?: string,
           options?: { severity?: "error" | "warning" },
         ): T | undefined => {
           // Only error-severity validations fail the case; warnings don't.
-          if ((options?.severity ?? "error") === "error" && typeof schema?.safeParse === "function") {
+          // Mirror the runner: prefer safeParse, else a parse-only validator
+          // (SchemaLike supports both) — a parse that throws is a failure.
+          if ((options?.severity ?? "error") === "error") {
+            let failed = false;
             try {
-              if (schema.safeParse(data).success === false) onFail();
+              if (typeof schema?.safeParse === "function") {
+                failed = schema.safeParse(data).success === false;
+              } else if (typeof schema?.parse === "function") {
+                schema.parse(data);
+              }
             } catch {
-              /* the real validate handles thrown parsers */
+              failed = typeof schema?.safeParse !== "function"; // parse threw → fail
             }
+            if (failed) onFail();
           }
           return (target.validate as unknown as (...a: unknown[]) => T | undefined)(
             data,
