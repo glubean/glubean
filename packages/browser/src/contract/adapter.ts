@@ -247,13 +247,16 @@ async function settleNetwork(page: InstrumentedPage): Promise<void> {
 // expect judging (authoritative Mode A — ctx.assert)
 // =============================================================================
 
-/** Judge a `dom` expectation against the live page. */
+/**
+ * Judge a `dom` expectation against the live page. Returns whether it passed
+ * (soft — records the assertion either way; the caller counts failures).
+ */
 async function judgeDom(
   ctx: TestContext,
   page: InstrumentedPage,
   id: string,
   dom: NonNullable<Extract<BrowserExpect, { dom: unknown }>["dom"]>,
-): Promise<void> {
+): Promise<boolean> {
   if (dom.visible) {
     const selector = locatorToSelector(dom.visible);
     const label = describeLocator(dom.visible);
@@ -266,10 +269,11 @@ async function judgeDom(
         true,
         `[${id}] ${label} visible${dom.containsText ? ` containing "${dom.containsText}"` : ""}`,
       );
+      return true;
     } catch (err) {
       ctx.assert(false, `[${id}] ${label} not visible: ${errMessage(err)}`);
+      return false;
     }
-    return;
   }
   if (dom.absent) {
     const selector = locatorToSelector(dom.absent);
@@ -277,21 +281,27 @@ async function judgeDom(
     try {
       await page.expectHidden(selector, { timeout: DOM_TIMEOUT_MS });
       ctx.assert(true, `[${id}] ${label} absent`);
+      return true;
     } catch (err) {
       ctx.assert(false, `[${id}] ${label} still present: ${errMessage(err)}`);
+      return false;
     }
-    return;
   }
   ctx.fail(`[${id}] dom expectation declared neither "visible" nor "absent"`);
 }
 
-/** Judge all declared expects against the frozen evidence + live page. */
+/**
+ * Judge all declared expects against the frozen evidence + live page.
+ * Returns the number of FAILED expects so the caller can trigger an
+ * on-failure screenshot (soft assertions never throw).
+ */
 async function judgeExpects(
   ctx: TestContext,
   page: InstrumentedPage,
   caseSpec: BrowserContractCase,
   evidence: BrowserEvidence,
-): Promise<void> {
+): Promise<number> {
+  let failures = 0;
   for (const raw of caseSpec.expect ?? []) {
     const e = raw as {
       id: string;
@@ -302,11 +312,14 @@ async function judgeExpects(
     };
     if (e.url) {
       const r = matchUrl(e.url, evidence.finalUrl);
+      if (!r.ok) failures++;
       ctx.assert(r.ok, `[${e.id}] ${r.detail}`);
     } else if (e.dom) {
-      await judgeDom(ctx, page, e.id, e.dom);
+      const passed = await judgeDom(ctx, page, e.id, e.dom);
+      if (!passed) failures++;
     } else if (e.calls) {
       const r = matchCalls(e.calls, evidence.network);
+      if (!r.matched) failures++;
       ctx.assert(r.matched, `[${e.id}] ${r.detail}`);
       // schema "unverified" is a visible debt, NOT a failure (§3.1).
       if (r.matched && r.schema === "unverified") {
@@ -314,11 +327,13 @@ async function judgeExpects(
       }
     } else if (e.console) {
       const r = matchConsole(e.console, evidence.consoleErrors);
+      if (!r.ok) failures++;
       ctx.assert(r.ok, `[${e.id}] ${r.detail}`);
     } else {
       ctx.fail(`[${e.id}] expect entry declares none of url/dom/calls/console`);
     }
   }
+  return failures;
 }
 
 function errMessage(err: unknown): string {
@@ -361,9 +376,16 @@ async function runAndJudge(
     }
 
     const evidence: BrowserEvidence = { network, consoleErrors, finalUrl: page.url() };
-    await judgeExpects(ctx, page, caseSpec, evidence);
+    const failures = await judgeExpects(ctx, page, caseSpec, evidence);
     if (caseSpec.verify) {
       await caseSpec.verify(ctx, evidence);
+    }
+    // Glubean assertions are SOFT (they record, they don't throw), so a failed
+    // expect never reaches the catch block below. Capture the requested
+    // on-failure screenshot here for the soft-failure path. ("final" already
+    // took a terminal screenshot above; "each-step" captured per step.)
+    if (failures > 0 && strategy === "on-failure") {
+      await page.captureScreenshot("expect-failure").catch(() => undefined);
     }
     return evidence;
   } catch (err) {

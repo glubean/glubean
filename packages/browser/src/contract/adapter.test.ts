@@ -14,7 +14,7 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import { contract, installPlugin } from "@glubean/sdk";
 import type { ContractCaseRef, TestContext } from "@glubean/sdk";
-import browserPlugin, { browserAdapter } from "../index.js";
+import browserPlugin, { browserAdapter, defineBrowserCase } from "../index.js";
 import type {
   BrowserContractCase,
   BrowserContractRoot,
@@ -98,6 +98,7 @@ interface FakePageConfig {
 interface FakePage {
   page: InstrumentedPage;
   expectVisibleCalls: string[];
+  captureScreenshotLabels: string[];
   closed: boolean;
 }
 
@@ -109,7 +110,12 @@ function makeFakeBrowser(config: FakePageConfig): {
   const browser = {
     newPage: async (ctx: BrowserTestContext): Promise<InstrumentedPage> => {
       const visible = new Set(config.visible ?? []);
-      const rec: FakePage = { page: undefined as unknown as InstrumentedPage, expectVisibleCalls: [], closed: false };
+      const rec: FakePage = {
+        page: undefined as unknown as InstrumentedPage,
+        expectVisibleCalls: [],
+        captureScreenshotLabels: [],
+        closed: false,
+      };
       const page = {
         raw: {}, // no waitForNetworkIdle → settle is a no-op
         goto: async (_url: string) => {
@@ -141,7 +147,9 @@ function makeFakeBrowser(config: FakePageConfig): {
           const t = config.texts?.[sel] ?? "";
           if (!t.includes(text)) throw new Error(`text mismatch for ${sel}`);
         },
-        captureScreenshot: async () => {},
+        captureScreenshot: async (label: string) => {
+          rec.captureScreenshotLabels.push(label);
+        },
         screenshotOnFailure: async () => {},
         close: async () => {
           rec.closed = true;
@@ -366,6 +374,49 @@ describe("executeCase judging", () => {
     expect(last()?.expectVisibleCalls).toContain('::-p-aria(Welcome back, Peisong[role="heading"])');
   });
 
+  test("on-failure screenshot captured on a SOFT expect failure (codex R4 #2)", async () => {
+    // screenshot:"on-failure" + a failing url expect. Soft asserts don't throw,
+    // so the capture must happen in the judging path, not just the catch block.
+    const { browser, last } = makeFakeBrowser({
+      finalUrl: "https://app.staging.glubean.com/login", // fails url-dashboard
+      visible: ["h1.welcome"],
+      texts: { "h1.welcome": "Welcome back, Peisong" },
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "url-dashboard", url: { path: "/" } }],
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec);
+    expect(last()?.captureScreenshotLabels).toContain("expect-failure");
+  });
+
+  test("on-failure screenshot NOT captured when all expects pass (codex R4 #2)", async () => {
+    const { browser, last } = makeFakeBrowser({ finalUrl: "https://h/dashboard" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "url-dashboard", url: { path: "/dashboard" } }],
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec);
+    expect(last()?.captureScreenshotLabels).not.toContain("expect-failure");
+  });
+
   test("verify hook runs with the frozen evidence bundle", async () => {
     const { browser } = makeFakeBrowser({
       finalUrl: "https://h/",
@@ -481,5 +532,45 @@ describe("contract.browser factory", () => {
     expect(journey._projection.instanceName).toBe("dashboardUI");
     expect(journey._projection.protocol).toBe("browser");
     expect(typeof journey.case).toBe("function");
+  });
+
+  test("input-bearing case (defineBrowserCase) types the action input + case ref (codex R4 #1)", async () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    let seenEmail: string | undefined;
+    const ui = (contract as unknown as { browser: BrowserContractRoot }).browser.with("dashboardUI", {
+      client: browser,
+      entry: "/login",
+    });
+    // If the shared-Input regression were present, `input.email` below would not
+    // type-check (Input would collapse to void/unknown for the whole cases map).
+    const journey = ui("auth.login.journey", {
+      cases: {
+        happyPath: defineBrowserCase<{ email: string }>({
+          description: "login with a typed email",
+          needs: { safeParse: (v: unknown) => ({ success: true, data: v }) } as never,
+          steps: [
+            {
+              id: "s",
+              intent: "type the email",
+              action: async (_page, input) => {
+                seenEmail = input.email; // must be typed as string, not unknown
+              },
+            },
+          ],
+          expect: [],
+        }),
+      },
+    });
+    // `journey.case("happyPath")` carries the {email} input type at compile time.
+    const ref = journey.case("happyPath");
+    expect(ref.caseKey).toBe("happyPath");
+
+    await browserAdapter.executeCase!({
+      ctx: makeCtx().ctx,
+      contract: { _spec: journey._spec } as never,
+      caseKey: "happyPath",
+      resolvedInput: { email: "dogfood@example.com" },
+    });
+    expect(seenEmail).toBe("dogfood@example.com");
   });
 });

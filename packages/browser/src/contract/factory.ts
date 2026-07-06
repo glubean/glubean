@@ -29,13 +29,13 @@ import type {
 type InternalDefaults = BrowserContractDefaults & { _name?: string };
 
 type BrowserDispatch = <
-  Input,
-  Cases extends Record<string, BrowserContractCase<Input>>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Cases extends Record<string, BrowserContractCase<any>>,
 >(
   id: string,
-  spec: BrowserContractSpec<Input, Cases>,
+  spec: BrowserContractSpec<Cases>,
 ) => ProtocolContract<
-  BrowserContractSpec<Input, Cases>,
+  BrowserContractSpec<Cases>,
   BrowserSafeSchemas,
   BrowserContractMeta,
   Cases
@@ -93,13 +93,13 @@ export function createBrowserFactory(
   defaults?: InternalDefaults,
 ): BrowserContractFactory {
   const factory = <
-    Input,
-    Cases extends Record<string, BrowserContractCase<Input>>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    Cases extends Record<string, BrowserContractCase<any>>,
   >(
     id: string,
-    spec: BrowserContractSpec<Input, Cases>,
+    spec: BrowserContractSpec<Cases>,
   ): ProtocolContract<
-    BrowserContractSpec<Input, Cases>,
+    BrowserContractSpec<Cases>,
     BrowserSafeSchemas,
     BrowserContractMeta,
     Cases
@@ -112,7 +112,7 @@ export function createBrowserFactory(
       );
     }
     const merged = mergeBrowserDefaults(defaults, spec as unknown as BrowserContractSpec);
-    return dispatch(id, merged as unknown as BrowserContractSpec<Input, Cases>);
+    return dispatch(id, merged as unknown as BrowserContractSpec<Cases>);
   };
 
   (factory as unknown as { with: BrowserContractRoot["with"] }).with = (

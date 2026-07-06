@@ -297,10 +297,16 @@ export function defineBrowserCase<Input = void>(
  * (string) + case key.
  */
 export interface BrowserContractSpec<
-  Input = void,
-  Cases extends Record<string, BrowserContractCase<Input>> = Record<
+  // Each case carries its OWN logical input via `needs` (extracted per-case by
+  // core's `InferCaseInput`), so the map is constrained to `BrowserContractCase<any>`
+  // rather than a single shared `Input` — otherwise a contract mixing cases with
+  // different `needs` (or any input-bearing case) fails to type-check. Same shape
+  // as GraphQL/gRPC (`GraphqlContractCase<Vars, Res, any>`).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Cases extends Record<string, BrowserContractCase<any>> = Record<
     string,
-    BrowserContractCase<Input>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    BrowserContractCase<any>
   >,
 > {
   /** Browser client (resolved `GlubeanBrowser`) for all cases. */
@@ -410,13 +416,13 @@ export type BrowserContractRoot = {
 };
 
 export type BrowserContractFactory = <
-  Input,
-  Cases extends Record<string, BrowserContractCase<Input>>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Cases extends Record<string, BrowserContractCase<any>>,
 >(
   id: string,
-  spec: BrowserContractSpec<Input, Cases>,
+  spec: BrowserContractSpec<Cases>,
 ) => ProtocolContract<
-  BrowserContractSpec<Input, Cases>,
+  BrowserContractSpec<Cases>,
   BrowserSafeSchemas,
   BrowserContractMeta,
   Cases
