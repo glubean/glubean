@@ -16,7 +16,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -228,9 +228,10 @@ describe("detectGitProvenance — boundary fallbacks (never throw, never fabrica
   // GLU-221 phase 1 P1 follow-up — an untracked file must be detected as
   // dirty even when the repo/user config suppresses untracked reporting
   // (`status.showUntrackedFiles=no`, common in large repos for speed). The
-  // dirtiness check forces `--untracked-files=all`, so the config can't hide
-  // an untracked (but scanned) contract source and let us hand back a HEAD
-  // commit whose tree doesn't contain that file.
+  // dirtiness check passes an explicit `--untracked-files=normal`, which
+  // overrides the config regardless of which value is chosen (GLU-221
+  // round-3 moved this from `all` to `normal` — see `git.ts` for why; the
+  // override-the-config property this test pins is unchanged either way).
   test("untracked file with status.showUntrackedFiles=no → still detected dirty, commit is null", async () => {
     await initCommittedRepo(dir);
     await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
@@ -254,5 +255,68 @@ describe("detectGitProvenance — boundary fallbacks (never throw, never fabrica
     const result = await detectGitProvenance(dir);
     expect(result).not.toBeNull();
     expect(result!.commit).toBe(sha);
+  });
+
+  // GLU-221 round-3 — the systemic gitignore-aware rule: a file that exists
+  // ONLY as untracked-and-gitignored must never flip the tree dirty, no
+  // matter what the scanner has separately read off disk. This is `git
+  // status`'s own ignore semantics (no `--ignored` flag passed), not a
+  // hand-rolled `.gitignore` parse — that's the point of the fix (a single
+  // authoritative rule instead of a growing list of boundary patches).
+  test("untracked file that IS gitignored → NOT dirty, commit is still populated", async () => {
+    await initCommittedRepo(dir);
+    await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    const sha = (await git(dir, ["rev-parse", "HEAD"])).trim();
+    await writeFile(join(dir, ".gitignore"), "ignored.contract.ts\n");
+    await git(dir, ["add", ".gitignore"]);
+    await git(dir, ["commit", "-q", "-m", "add gitignore"]);
+    const shaAfterGitignore = (await git(dir, ["rev-parse", "HEAD"])).trim();
+    await writeFile(join(dir, "ignored.contract.ts"), "// scanned by the contract scanner, but gitignored");
+
+    const result = await detectGitProvenance(dir);
+    expect(result).not.toBeNull();
+    expect(result!.repo).toBe("acme/widgets");
+    expect(result!.commit).toBe(shaAfterGitignore);
+    expect(result!.commit).not.toBe(sha);
+    expect(result!.branch).toBe("main");
+  });
+
+  // A directory that's entirely gitignored (e.g. `node_modules/`, a build
+  // output dir) must not flip the tree dirty either — same rule, applied to
+  // a directory instead of a single file. This is also the case
+  // `--untracked-files=all` would have paid a real recursion cost for
+  // (enumerating every file inside) despite it being irrelevant here, since
+  // the directory is ignored and never appears in `--porcelain` output at
+  // all regardless of the `--untracked-files` mode.
+  test("untracked directory that IS gitignored → NOT dirty", async () => {
+    await initCommittedRepo(dir);
+    await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    await writeFile(join(dir, ".gitignore"), "node_modules/\n");
+    await git(dir, ["add", ".gitignore"]);
+    await git(dir, ["commit", "-q", "-m", "add gitignore"]);
+    const sha = (await git(dir, ["rev-parse", "HEAD"])).trim();
+    await mkdir(join(dir, "node_modules"), { recursive: true });
+    await writeFile(join(dir, "node_modules", "some-dep.js"), "module.exports = {};");
+
+    const result = await detectGitProvenance(dir);
+    expect(result).not.toBeNull();
+    expect(result!.commit).toBe(sha);
+  });
+
+  // Untracked-and-NOT-ignored must still flip dirty even when it sits right
+  // next to gitignored siblings — proves the rule discriminates per-path
+  // rather than short-circuiting on "some ignore rule exists in this repo".
+  test("untracked non-ignored file alongside a gitignored one → dirty", async () => {
+    await initCommittedRepo(dir);
+    await git(dir, ["remote", "add", "origin", "git@github.com:acme/widgets.git"]);
+    await writeFile(join(dir, ".gitignore"), "ignored.contract.ts\n");
+    await git(dir, ["add", ".gitignore"]);
+    await git(dir, ["commit", "-q", "-m", "add gitignore"]);
+    await writeFile(join(dir, "ignored.contract.ts"), "// gitignored, irrelevant to this test");
+    await writeFile(join(dir, "tracked-candidate.contract.ts"), "// untracked, NOT gitignored");
+
+    const result = await detectGitProvenance(dir);
+    expect(result).not.toBeNull();
+    expect(result!.commit).toBeNull();
   });
 });

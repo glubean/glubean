@@ -175,9 +175,14 @@ export function parseGitHubRepo(remoteUrl: string): string | null {
  *    "HEAD", which would be a fabricated branch name if passed through)
  *  - a shallow clone → no special-cased failure; `rev-parse HEAD` and
  *    `remote get-url origin` both work normally on a shallow checkout
- *  - an uncommitted change anywhere in the working tree → `commit` is
- *    `null` (see `GitProvenance.commit`); everything else in the result is
- *    unaffected
+ *  - an uncommitted change to a TRACKED file, or an UNTRACKED-and-NOT-
+ *    gitignored file, anywhere in the working tree → `commit` is `null`
+ *    (see `GitProvenance.commit` and `isWorkingTreeDirty`); everything else
+ *    in the result is unaffected
+ *  - a file that exists only as untracked-and-gitignored (`node_modules/`,
+ *    build output, a scanned-but-ignored contract source, …) → NOT treated
+ *    as a working-tree change; `commit` is still populated (see
+ *    `isWorkingTreeDirty` for why this is the systemic rule, not a gap)
  */
 export async function detectGitProvenance(dir?: string): Promise<GitProvenance | null> {
   try {
@@ -213,22 +218,49 @@ export async function detectGitProvenance(dir?: string): Promise<GitProvenance |
 }
 
 /**
- * `true` when the working tree has any uncommitted change (`git status
- * --porcelain` is non-empty) — staged, unstaged, or untracked. Fails
- * CLOSED to `true` ("assume dirty") on a `git status` failure: withholding
- * a precise commit-based deep link is always safe; fabricating one from an
+ * `true` when the working tree has any uncommitted change — GLU-221's
+ * gitignore-aware systemic rule (owner decision, replacing two rounds of
+ * one-boundary-at-a-time patches on this same function):
+ *
+ *   dirty  ⇔  a TRACKED file has a staged or unstaged change,
+ *             OR an UNTRACKED file exists that is NOT excluded by
+ *             `.gitignore` (or any other git ignore mechanism).
+ *   clean  ⇔  neither of the above — in particular, a file that exists only
+ *             because it's untracked-and-ignored (`node_modules/`, `dist/`,
+ *             `.env`, a scanned-but-gitignored contract source, …) NEVER
+ *             counts as dirty, by design, no matter what the scanner has
+ *             read off disk.
+ *
+ * Implemented as ONE call to `git status --porcelain --untracked-files=normal`
+ * and nothing else — no manual `.gitignore` parsing, no post-filtering of
+ * `git`'s output. `git status` already applies the ignore rule authoritatively
+ * (an ignored path never appears in `--porcelain` output unless `--ignored`
+ * is also passed, which this does not do); re-deriving that logic by hand
+ * would just be a second, drift-prone copy of what git itself already does.
+ * Any non-empty output ⇒ dirty; empty ⇒ clean. Fails CLOSED to `true`
+ * ("assume dirty") on a `git status` failure: withholding a precise
+ * commit-based deep link is always safe; fabricating one from an
  * unconfirmed-clean tree is not.
  *
- * `--untracked-files=all` is EXPLICIT, not left to config: `git status`
- * otherwise honors the repo/user `status.showUntrackedFiles` setting, which
- * large repos commonly set to `no` for speed. With `no`, an untracked file
- * emits no `??` line, so a tree carrying an untracked (but scanned) contract
- * source would look clean here — and we'd hand back HEAD's commit for a deep
- * link into a tree that doesn't contain that file. Forcing `all` makes the
- * dirtiness check independent of any ambient config.
+ * `--untracked-files=normal` (not the bare default, and — as of this fix —
+ * not `all` either):
+ *  - EXPLICIT beats the repo/user `status.showUntrackedFiles` config: a bare
+ *    `git status --porcelain` honors that setting, and large repos commonly
+ *    set it to `no` for speed, which would hide an untracked (but scanned)
+ *    contract source and let a dirty tree read as clean (GLU-221 round-2).
+ *    Passing ANY explicit `--untracked-files` value on the command line
+ *    overrides the config regardless of which value is chosen.
+ *  - `normal` over `all`: `all` recurses into every untracked directory and
+ *    emits one `??` line per file inside it — pure waste here, since only
+ *    the boolean "is stdout non-empty" is read, and a risk (large untracked
+ *    dir → large stdout → the `execFile` `maxBuffer` ceiling) that scales
+ *    with a directory's contents rather than with git's own status set
+ *    (GLU-221 round-3 P2). `normal` reports an untracked directory as a
+ *    single `??` line (the directory itself), which is already sufficient
+ *    to make the output non-empty — same dirty/clean verdict, no recursion.
  */
 async function isWorkingTreeDirty(dir?: string): Promise<boolean> {
-  const { code, stdout } = await execGit(["status", "--porcelain", "--untracked-files=all"], dir);
+  const { code, stdout } = await execGit(["status", "--porcelain", "--untracked-files=normal"], dir);
   if (code !== 0) return true;
   return stdout.trim().length > 0;
 }
