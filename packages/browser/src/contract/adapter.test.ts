@@ -1,0 +1,485 @@
+/**
+ * Tests for the built-in browser contract adapter (Mode A minimal — GLU-212).
+ *
+ * Scope: project / normalize, executeCase judging (url / dom / calls /
+ * console → soft ctx.assert), unimplemented-case skip, the raw execute path,
+ * executeCaseInFlow, verify hook, and the factory + plugin wiring.
+ *
+ * Uses a fake GlubeanBrowser whose page emits canned network traces + console
+ * errors and answers dom checks from config — no real Chrome. The fake ctx
+ * mirrors the runner's SOFT assert (records `passed`, never throws) so a run
+ * judges ALL expects and we can inspect every verdict.
+ */
+
+import { beforeAll, describe, expect, test } from "vitest";
+import { contract, installPlugin } from "@glubean/sdk";
+import type { ContractCaseRef, TestContext } from "@glubean/sdk";
+import browserPlugin, { browserAdapter } from "../index.js";
+import type {
+  BrowserContractCase,
+  BrowserContractRoot,
+  BrowserContractSpec,
+  BrowserEvidence,
+  BrowserTraceRecord,
+} from "./types.js";
+import type { BrowserTestContext, GlubeanBrowser, InstrumentedPage } from "../page.js";
+
+beforeAll(async () => {
+  await installPlugin(browserPlugin);
+});
+
+// ---------------------------------------------------------------------------
+// Fake ctx — SOFT assert (records, does not throw); fail/skip throw.
+// ---------------------------------------------------------------------------
+
+class SkipSignal extends Error {}
+class FailSignal extends Error {}
+
+interface CtxLog {
+  assertions: Array<{ passed: boolean; message?: string }>;
+  warns: Array<{ condition: boolean; message: string }>;
+  traces: unknown[];
+  events: Array<{ type: string; data: Record<string, unknown> }>;
+}
+
+function makeCtx(secrets: Record<string, string> = {}): { ctx: TestContext; log: CtxLog } {
+  const log: CtxLog = { assertions: [], warns: [], traces: [], events: [] };
+  const ctx = {
+    vars: { get: () => undefined, require: () => "", all: () => ({}) },
+    secrets: {
+      get: (k: string) => secrets[k],
+      require: (k: string) => {
+        if (!(k in secrets)) throw new Error(`missing secret ${k}`);
+        return secrets[k];
+      },
+    },
+    session: { get: () => undefined, require: () => undefined, set: () => {}, entries: () => ({}) },
+    http: {},
+    log: () => {},
+    assert: (cond: unknown, message?: string) => {
+      log.assertions.push({ passed: Boolean(cond), message });
+    },
+    warn: (condition: boolean, message: string) => {
+      log.warns.push({ condition, message });
+    },
+    validate: (data: unknown) => data,
+    trace: (t: unknown) => log.traces.push(t),
+    action: () => {},
+    event: (ev: { type: string; data: Record<string, unknown> }) => log.events.push(ev),
+    metric: () => {},
+    skip: (reason?: string): never => {
+      throw new SkipSignal(reason);
+    },
+    fail: (message: string): never => {
+      log.assertions.push({ passed: false, message });
+      throw new FailSignal(message);
+    },
+    expect: (v: unknown) => ({ toBe: () => {}, toEqual: () => {}, toMatchObject: () => {}, __v: v }),
+  } as unknown as TestContext;
+  return { ctx, log };
+}
+
+// ---------------------------------------------------------------------------
+// Fake browser / page
+// ---------------------------------------------------------------------------
+
+interface FakePageConfig {
+  finalUrl: string;
+  /** Selectors that resolve to a visible element. */
+  visible?: string[];
+  /** selector → element text (for expectText / containsText). */
+  texts?: Record<string, string>;
+  /** Network traces emitted on goto (simulating page-load requests). */
+  traces?: BrowserTraceRecord[];
+  /** Console errors emitted on goto. */
+  consoleErrors?: Array<{ message: string; source?: string }>;
+}
+
+interface FakePage {
+  page: InstrumentedPage;
+  expectVisibleCalls: string[];
+  closed: boolean;
+}
+
+function makeFakeBrowser(config: FakePageConfig): {
+  browser: GlubeanBrowser;
+  last: () => FakePage | undefined;
+} {
+  let last: FakePage | undefined;
+  const browser = {
+    newPage: async (ctx: BrowserTestContext): Promise<InstrumentedPage> => {
+      const visible = new Set(config.visible ?? []);
+      const rec: FakePage = { page: undefined as unknown as InstrumentedPage, expectVisibleCalls: [], closed: false };
+      const page = {
+        raw: {}, // no waitForNetworkIdle → settle is a no-op
+        goto: async (_url: string) => {
+          for (const t of config.traces ?? []) {
+            ctx.trace({
+              name: `${t.method} ${t.url}`,
+              method: t.method,
+              url: t.url,
+              status: t.status,
+              duration: t.durationMs,
+              durationMs: t.durationMs,
+              requestBody: t.requestBody,
+              responseBody: t.responseBody,
+            } as unknown as Parameters<BrowserTestContext["trace"]>[0]);
+          }
+          for (const c of config.consoleErrors ?? []) {
+            ctx.event({ type: "browser:console-error", data: { message: c.message, source: c.source } });
+          }
+        },
+        url: () => config.finalUrl,
+        expectVisible: async (sel: string) => {
+          rec.expectVisibleCalls.push(sel);
+          if (!visible.has(sel)) throw new Error(`not visible: ${sel}`);
+        },
+        expectHidden: async (sel: string) => {
+          if (visible.has(sel)) throw new Error(`still present: ${sel}`);
+        },
+        expectText: async (sel: string, text: string) => {
+          const t = config.texts?.[sel] ?? "";
+          if (!t.includes(text)) throw new Error(`text mismatch for ${sel}`);
+        },
+        captureScreenshot: async () => {},
+        screenshotOnFailure: async () => {},
+        close: async () => {
+          rec.closed = true;
+        },
+      };
+      rec.page = page as unknown as InstrumentedPage;
+      last = rec;
+      return rec.page;
+    },
+    close: async () => {},
+    disconnect: async () => {},
+  } as unknown as GlubeanBrowser;
+  return { browser, last: () => last };
+}
+
+function httpRef(endpoint: string, status: number, schema?: { safeParse: (v: unknown) => { success: boolean } }): ContractCaseRef<unknown, unknown> {
+  return {
+    __glubean_type: "contract-case-ref",
+    contractId: "auth.sign-in.email",
+    caseKey: "validStagingCredentials",
+    protocol: "http",
+    target: endpoint,
+    contract: {
+      _spec: { endpoint, cases: { validStagingCredentials: { expect: { status, schema } } } },
+    },
+  } as unknown as ContractCaseRef<unknown, unknown>;
+}
+
+function trace(p: Partial<BrowserTraceRecord> & { method: string; url: string; status: number }): BrowserTraceRecord {
+  return { durationMs: 8, ...p };
+}
+
+// A fully-implemented login journey spec (all steps have actions).
+function loginSpec(
+  client: GlubeanBrowser,
+  overrides: Partial<BrowserContractSpec> = {},
+): BrowserContractSpec {
+  return {
+    client,
+    entry: "/login",
+    baseUrl: "https://app.staging.glubean.com",
+    agentNotes: ["watch layout"],
+    cases: {
+      happyPath: {
+        description: "login lands on dashboard",
+        needs: undefined,
+        steps: [
+          { id: "open", intent: "open login", action: async () => {} },
+          { id: "submit", intent: "submit", action: async () => {} },
+        ],
+        expect: [
+          { id: "url-dashboard", url: { path: ["/", "/dashboard"], notPath: "/login" } },
+          { id: "dom-welcome", dom: { visible: { selector: "h1.welcome" }, containsText: "Welcome back" } },
+          { id: "calls-signin", calls: httpRef("POST /api/auth/sign-in/email", 200) },
+          { id: "console-clean", console: { errors: 0, allow: ["favicon"] } },
+        ],
+      } as BrowserContractCase,
+    },
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// project / normalize
+// ---------------------------------------------------------------------------
+
+describe("projectBrowser", () => {
+  test("threads journey skeleton, runnability, requires=browser", () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec = loginSpec(browser);
+    (spec as unknown as { _factory: { instanceName: string } })._factory = { instanceName: "dashboardUI" };
+    const proj = browserAdapter.project(spec);
+
+    expect(proj.protocol).toBe("browser");
+    expect(proj.instanceName).toBe("dashboardUI");
+    expect(proj.meta?.baseUrl).toBe("https://app.staging.glubean.com");
+    expect(proj.cases).toHaveLength(1);
+    const c = proj.cases[0];
+    expect(c.key).toBe("happyPath");
+    expect(c.requires).toBe("browser");
+    expect(c.schemas?.hasActions).toBe(true);
+    expect(c.schemas?.intents).toEqual([
+      { id: "open", intent: "open login" },
+      { id: "submit", intent: "submit" },
+    ]);
+    expect(c.schemas?.expectIds).toEqual(["url-dashboard", "dom-welcome", "calls-signin", "console-clean"]);
+    expect(c.schemas?.agentNotes).toContain("watch layout");
+  });
+
+  test("hasActions false when a step lacks an action (Mode A unimplemented)", () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      cases: {
+        partial: {
+          description: "intent-only",
+          steps: [{ id: "s1", intent: "do x" }], // no action
+          expect: [{ id: "u", url: { path: "/" } }],
+        } as BrowserContractCase,
+      },
+    };
+    const proj = browserAdapter.project(spec);
+    expect(proj.cases[0].schemas?.hasActions).toBe(false);
+  });
+
+  test("normalize produces a JSON-safe projection", () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const proj = browserAdapter.project(loginSpec(browser)) as never;
+    const extracted = browserAdapter.normalize({ ...(proj as object), id: "auth.login.journey" } as never);
+    expect(extracted.id).toBe("auth.login.journey");
+    expect(extracted.protocol).toBe("browser");
+    expect(() => JSON.stringify(extracted)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// executeCase — judging
+// ---------------------------------------------------------------------------
+
+async function runCase(
+  spec: BrowserContractSpec,
+  caseKey = "happyPath",
+  ctxLog = makeCtx(),
+): Promise<{ log: CtxLog }> {
+  await browserAdapter.executeCase!({
+    ctx: ctxLog.ctx,
+    contract: { _spec: spec } as never,
+    caseKey,
+    resolvedInput: undefined,
+  });
+  return { log: ctxLog.log };
+}
+
+describe("executeCase judging", () => {
+  test("all expects pass on a clean journey", async () => {
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://app.staging.glubean.com/",
+      visible: ["h1.welcome"],
+      texts: { "h1.welcome": "Welcome back, Peisong" },
+      traces: [trace({ method: "POST", url: "https://api.staging.glubean.com/api/auth/sign-in/email", status: 200 })],
+      consoleErrors: [{ message: "favicon.ico 404", source: "https://app/favicon.ico" }],
+    });
+    const { log } = await runCase(loginSpec(browser));
+    expect(log.assertions.every((a) => a.passed)).toBe(true);
+    expect(log.assertions.map((a) => a.message?.slice(1, a.message.indexOf("]")))).toEqual([
+      "url-dashboard",
+      "dom-welcome",
+      "calls-signin",
+      "console-clean",
+    ]);
+  });
+
+  test("url fail is recorded (still on /login) and other expects still judged", async () => {
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://app.staging.glubean.com/login",
+      visible: ["h1.welcome"],
+      texts: { "h1.welcome": "Welcome back, Peisong" },
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    const { log } = await runCase(loginSpec(browser));
+    const byId = (id: string) => log.assertions.find((a) => a.message?.startsWith(`[${id}]`));
+    expect(byId("url-dashboard")?.passed).toBe(false);
+    // console-clean (last) still judged → all four expects produced an assertion.
+    expect(log.assertions).toHaveLength(4);
+  });
+
+  test("product-domain console error fails console-clean", async () => {
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://app.staging.glubean.com/",
+      visible: ["h1.welcome"],
+      texts: { "h1.welcome": "Welcome back, Peisong" },
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+      consoleErrors: [{ message: "404", source: "https://api.staging.glubean.com/projects/x/targets" }],
+    });
+    const { log } = await runCase(loginSpec(browser));
+    const console = log.assertions.find((a) => a.message?.startsWith("[console-clean]"));
+    expect(console?.passed).toBe(false);
+  });
+
+  test("calls schema unverified (body absent) passes but warns", async () => {
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://app.staging.glubean.com/",
+      visible: ["h1.welcome"],
+      texts: { "h1.welcome": "Welcome back" },
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [
+            { id: "calls-signin", calls: httpRef("POST /api/auth/sign-in/email", 200, { safeParse: () => ({ success: true }) }) },
+          ],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec);
+    expect(log.assertions.find((a) => a.message?.startsWith("[calls-signin]"))?.passed).toBe(true);
+    expect(log.warns.some((w) => w.message.includes("schema unverified"))).toBe(true);
+  });
+
+  test("dom role locator produces a :-p-aria selector", async () => {
+    const { browser, last } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      visible: ['::-p-aria(Welcome back, Peisong[role="heading"])'],
+    });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      cases: {
+        happyPath: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "dom-welcome", dom: { visible: { role: "heading", name: "Welcome back, Peisong" } } }],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec);
+    expect(log.assertions[0].passed).toBe(true);
+    expect(last()?.expectVisibleCalls).toContain('::-p-aria(Welcome back, Peisong[role="heading"])');
+  });
+
+  test("verify hook runs with the frozen evidence bundle", async () => {
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    let seen: BrowserEvidence | undefined;
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/login",
+      cases: {
+        happyPath: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [],
+          verify: (_ctx, evidence) => {
+            seen = evidence;
+          },
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec);
+    expect(seen?.network).toHaveLength(1);
+    expect(seen?.network[0].url).toContain("/api/auth/sign-in/email");
+    expect(seen?.finalUrl).toBe("https://h/");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unimplemented skip / raw execute / flow
+// ---------------------------------------------------------------------------
+
+describe("runnability", () => {
+  test("executeCase skips an unimplemented case (a step has no action)", async () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      cases: {
+        partial: {
+          description: "intent-only",
+          steps: [
+            { id: "s1", intent: "do x", action: async () => {} },
+            { id: "s2", intent: "do y" }, // no action
+          ],
+          expect: [{ id: "u", url: { path: "/" } }],
+        } as BrowserContractCase,
+      },
+    };
+    const { ctx, log } = makeCtx();
+    await expect(
+      browserAdapter.executeCase!({ ctx, contract: { _spec: spec } as never, caseKey: "partial", resolvedInput: undefined }),
+    ).rejects.toThrow(/unimplemented/);
+    // No expects judged when skipped.
+    expect(log.assertions).toHaveLength(0);
+  });
+
+  test("executeCaseInFlow throws for an unimplemented case", async () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      cases: {
+        partial: { description: "x", steps: [{ id: "s", intent: "s" }], expect: [] } as BrowserContractCase,
+      },
+    };
+    const { ctx } = makeCtx();
+    await expect(
+      browserAdapter.executeCaseInFlow!({ ctx, contract: { _spec: spec } as never, caseKey: "partial", resolvedInputs: undefined }),
+    ).rejects.toThrow(/unimplemented/);
+  });
+
+  test("raw execute path runs a runnable case", async () => {
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://app.staging.glubean.com/",
+      visible: ["h1.welcome"],
+      texts: { "h1.welcome": "Welcome back, Peisong" },
+      traces: [trace({ method: "POST", url: "https://api/api/auth/sign-in/email", status: 200 })],
+    });
+    const spec = loginSpec(browser);
+    const { ctx, log } = makeCtx();
+    await browserAdapter.execute(ctx, spec.cases.happyPath, spec);
+    expect(log.assertions.every((a) => a.passed)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// factory + plugin wiring
+// ---------------------------------------------------------------------------
+
+describe("contract.browser factory", () => {
+  test("root is .with-only; direct call throws", () => {
+    const root = (contract as unknown as { browser: BrowserContractRoot }).browser;
+    expect(typeof root.with).toBe("function");
+    expect(() => (root as unknown as (...a: unknown[]) => unknown)("id", {})).toThrow(/not supported/);
+  });
+
+  test(".with injects client + baseUrl and builds a ProtocolContract", () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const ui = (contract as unknown as { browser: BrowserContractRoot }).browser.with("dashboardUI", {
+      client: browser,
+      baseUrl: "https://app.staging.glubean.com",
+      entry: "/login",
+    });
+    const journey = ui("auth.login.journey", {
+      cases: {
+        happyPath: {
+          description: "login",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "u", url: { path: "/" } }],
+        },
+      },
+    });
+    expect(journey._spec.client).toBe(browser);
+    expect(journey._spec.baseUrl).toBe("https://app.staging.glubean.com");
+    expect(journey._projection.instanceName).toBe("dashboardUI");
+    expect(journey._projection.protocol).toBe("browser");
+    expect(typeof journey.case).toBe("function");
+  });
+});

@@ -37,8 +37,39 @@
  * @module
  */
 
+import { contract, definePlugin } from "@glubean/sdk";
+import type { PluginManifest } from "@glubean/sdk";
+import { browserAdapter, createBrowserRoot } from "./contract/index.js";
+import type { BrowserContractRoot } from "./contract/index.js";
+
 export { browser } from "./plugin.js";
 export { GlubeanBrowser, GlubeanPage } from "./page.js";
+
+/**
+ * Plugin manifest — installs the `contract.browser` adapter (Mode A).
+ *
+ * `installPlugin(browserPlugin)` registers the adapter and, in `setup()`,
+ * swaps the raw dispatcher `contract.register` attached for the scoped-defaults
+ * root (`.with(name, defaults)` only). This is a SEPARATE install path from the
+ * `browser()` client factory (consumed via `configure({ plugins })`): the
+ * client is the Mode A executor, the adapter is the contract surface.
+ */
+const browserPlugin: PluginManifest = definePlugin({
+  name: "@glubean/browser",
+  contracts: { browser: browserAdapter },
+  setup() {
+    const dispatcher = (
+      contract as unknown as { browser: Parameters<typeof createBrowserRoot>[0] }
+    ).browser;
+    (contract as unknown as { browser: BrowserContractRoot }).browser =
+      createBrowserRoot(dispatcher);
+  },
+});
+
+export default browserPlugin;
+
+// Contract authoring surface (types, defineBrowserCase, matchers, adapter).
+export * from "./contract/index.js";
 export type {
   ActionOptions,
   BrowserAction,
