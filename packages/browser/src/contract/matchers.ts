@@ -77,9 +77,9 @@ export function pathnameOf(url: string): string {
   try {
     return new URL(url).pathname;
   } catch {
-    // Relative or malformed — strip query/hash and use as-is.
-    const q = url.search?.length ? url : url.split(/[?#]/, 1)[0];
-    return q;
+    // Relative or malformed — strip any query string / hash fragment. (`url` is
+    // a plain string here, so we must split it, not read a `.search` property.)
+    return url.split(/[?#]/)[0];
   }
 }
 
@@ -250,26 +250,29 @@ export function matchCalls(
       route,
     };
   }
-  // atLeastOnce also applies to the body: check EVERY matching call's body —
-  // if any one satisfies the schema, the contract holds (a broken retry
-  // followed by a good call must not fail). Truncated (>64KB) bodies can't be
-  // validated → they degrade to unverified, not a mismatch.
-  const bodies = statusHits.filter((t) => isValidatableBody(t.responseBody));
-  if (bodies.length === 0) {
+  // atLeastOnce also applies to the body: if ANY validatable body satisfies the
+  // schema, the contract holds (a broken retry followed by a good call must not
+  // fail). Truncated (>64KB) or absent bodies can't be validated.
+  const validatable = statusHits.filter((t) => isValidatableBody(t.responseBody));
+  if (validatable.some((t) => schemaAccepts(schema, t.responseBody))) {
+    return { matched: true, schema: "verified", detail: `${statusPart} (body matches schema)`, route };
+  }
+  // Nothing validatable satisfied the schema. Only conclude `mismatch` when we
+  // actually inspected EVERY matching call (all had validatable bodies). If any
+  // hit had an unavailable/truncated body, that could have been the satisfying
+  // response → degrade to `unverified` rather than a false failure.
+  if (validatable.length > 0 && validatable.length === statusHits.length) {
     return {
-      matched: true,
-      schema: "unverified",
-      detail: `${statusPart} (response body unavailable or truncated — schema unverified)`,
+      matched: false,
+      schema: "mismatch",
+      detail: `${statusPart} but no matching call's response body satisfied the referenced case schema`,
       route,
     };
   }
-  if (bodies.some((t) => schemaAccepts(schema, t.responseBody))) {
-    return { matched: true, schema: "verified", detail: `${statusPart} (body matches schema)`, route };
-  }
   return {
-    matched: false,
-    schema: "mismatch",
-    detail: `${statusPart} but no matching call's response body satisfied the referenced case schema`,
+    matched: true,
+    schema: "unverified",
+    detail: `${statusPart} (response body unavailable or truncated — schema unverified)`,
     route,
   };
 }

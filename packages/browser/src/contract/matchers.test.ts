@@ -99,6 +99,12 @@ describe("pathnameOf", () => {
   test("strips host and query", () => {
     expect(pathnameOf("https://api.staging.glubean.com/api/x?includeArchived=true")).toBe("/api/x");
   });
+  test("strips query/hash from a relative URL (codex R3 #1)", () => {
+    // `new URL` throws on a relative URL → the fallback must strip ?query / #hash
+    // (must NOT read String.prototype.search).
+    expect(pathnameOf("/api/auth?x=1")).toBe("/api/auth");
+    expect(pathnameOf("/api/auth#frag")).toBe("/api/auth");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -227,7 +233,7 @@ describe("matchCalls", () => {
     expect(r.schema).toBe("verified");
   });
 
-  test("schema mismatch only when NO matching body satisfies (codex R1 #2)", () => {
+  test("schema mismatch only when ALL matching bodies are validatable and none satisfy (codex R1 #2)", () => {
     const schema = { safeParse: (v: unknown) => ({ success: (v as { good?: boolean })?.good === true }) };
     const ref = makeHttpRef({ endpoint: "GET /api/x", status: 200, schema });
     const r = matchCalls(ref, [
@@ -236,6 +242,19 @@ describe("matchCalls", () => {
     ]);
     expect(r.matched).toBe(false);
     expect(r.schema).toBe("mismatch");
+  });
+
+  test("unvalidatable body among failing ones → unverified, not mismatch (codex R3 #2)", () => {
+    // One truncated body (could have been the good one) + one validatable body
+    // that fails → cannot conclude mismatch → unverified (not a false failure).
+    const schema = { safeParse: (v: unknown) => ({ success: (v as { good?: boolean })?.good === true }) };
+    const ref = makeHttpRef({ endpoint: "GET /api/x", status: 200, schema });
+    const r = matchCalls(ref, [
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: '{"partial"…[truncated]' }),
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: { good: false } }),
+    ]);
+    expect(r.matched).toBe(true);
+    expect(r.schema).toBe("unverified");
   });
 
   test("truncated (>64KB) body degrades to unverified, not mismatch (codex R2 #2)", () => {
