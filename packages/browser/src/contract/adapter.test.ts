@@ -583,6 +583,83 @@ describe("executeCase judging", () => {
     expect(log.assertions[0].passed).toBe(true);
   });
 
+  test("dom expect with BOTH visible+absent evaluates both (codex R9 #1)", async () => {
+    // welcome heading visible AND error banner still present → the absent
+    // sub-check must fail even though the visible sub-check passes.
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      present: ["h1.welcome", ".error-banner"],
+      visible: ["h1.welcome"],
+    });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [
+            {
+              id: "dom",
+              dom: { visible: { selector: "h1.welcome" }, absent: { selector: ".error-banner" } },
+            },
+          ],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec, "c");
+    // Two assertions for the one dom expect: visible passes, absent fails.
+    expect(log.assertions.some((a) => a.message?.includes("visible") && a.passed)).toBe(true);
+    expect(log.assertions.some((a) => a.message?.includes("still present") && !a.passed)).toBe(true);
+  });
+
+  test("on-failure screenshot fires for a soft failure inside a STEP ACTION (codex R9 #2)", async () => {
+    const { browser, last } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [
+            {
+              id: "s",
+              intent: "s",
+              action: async (_page, _input, actionCtx) => {
+                actionCtx.assert(false, "action-level check failed");
+              },
+            },
+          ],
+          expect: [],
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec, "c");
+    expect(last()?.captureScreenshotLabels).toContain("expect-failure");
+  });
+
+  test("on-failure screenshot fires for a verify VALIDATE failure (codex R9 #3)", async () => {
+    const { browser, last } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [],
+          verify: (vctx) => {
+            vctx.validate({ bad: 1 }, { safeParse: () => ({ success: false }) } as never, "payload");
+          },
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec, "c");
+    expect(last()?.captureScreenshotLabels).toContain("expect-failure");
+  });
+
   test("uncaught page error fails console-clean (codex R8 #1)", async () => {
     // A JS crash emits browser:uncaught-error (not console-error) — console-clean
     // must still fail, otherwise a passing test on a crashing page.

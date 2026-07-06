@@ -217,14 +217,22 @@ function makeRecordingCtx(ctx: TestContext): RecordingCtx {
 }
 
 /**
- * Wrap a TestContext so every FAILED soft assertion invokes `onFail`. Used to
- * count soft failures inside `verify` (which asserts directly, invisible to
- * `judgeExpects`) so an on-failure screenshot still fires when the only failure
- * is in `verify`. Traps BOTH forms:
- *   - `ctx.assert(false, ...)` — the boolean/result form, and
- *   - the fluent `ctx.expect(x).toBe(y)` — which the runner's own `expect`
- *     routes through the ORIGINAL `ctx.assert` (closure-captured), bypassing the
- *     `assert` trap; so we rebuild the Expectation with a counting emitter.
+ * Wrap a TestContext so every FAILED soft assertion invokes `onFail` — used to
+ * decide whether to capture an on-failure screenshot (Glubean assertions are
+ * soft: they record, they don't throw, so failures never reach the catch
+ * block). Soft failures can arrive through THREE independent channels, so we
+ * trap all of them:
+ *   - `ctx.assert(false, ...)` — boolean/result form;
+ *   - the fluent `ctx.expect(x).toBe(y)` — the runner's own `expect` routes
+ *     through the closure-captured original `ctx.assert`, bypassing the trap,
+ *     so we rebuild the Expectation with a counting emitter (this also covers
+ *     custom matchers, which emit through the same channel);
+ *   - `ctx.validate(data, schema)` — schema validation emits its own assertion
+ *     (not via ctx.assert), so pre-check the schema to count an error-severity
+ *     failure, then delegate to the real validate for the actual recording.
+ *
+ * Applied to the WHOLE run (step actions + judging + verify) so an on-failure
+ * screenshot fires no matter which phase/channel produced the failure.
  */
 function countingCtx(ctx: TestContext, onFail: () => void): TestContext {
   const countingAssert = (arg1: unknown, ...rest: unknown[]) => {
@@ -245,6 +253,29 @@ function countingCtx(ctx: TestContext, onFail: () => void): TestContext {
               result.message,
             );
           }) as unknown as ReturnType<TestContext["expect"]>;
+      }
+      if (prop === "validate") {
+        return <T>(
+          data: unknown,
+          schema: { safeParse?: (v: unknown) => { success: boolean } },
+          label?: string,
+          options?: { severity?: "error" | "warning" },
+        ): T | undefined => {
+          // Only error-severity validations fail the case; warnings don't.
+          if ((options?.severity ?? "error") === "error" && typeof schema?.safeParse === "function") {
+            try {
+              if (schema.safeParse(data).success === false) onFail();
+            } catch {
+              /* the real validate handles thrown parsers */
+            }
+          }
+          return (target.validate as unknown as (...a: unknown[]) => T | undefined)(
+            data,
+            schema,
+            label,
+            options,
+          );
+        };
       }
       const v = Reflect.get(target, prop, receiver);
       return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
@@ -333,16 +364,21 @@ async function settleNetwork(
 // =============================================================================
 
 /**
- * Judge a `dom` expectation against the live page. Returns whether it passed
- * (soft — records the assertion either way; the caller counts failures).
+ * Judge a `dom` expectation against the live page. Evaluates EVERY declared
+ * sub-check (`visible` and/or `absent`) — an expect that declares both must not
+ * pass on the visible check alone while the forbidden element is still present.
+ * Soft: records each assertion via `ctx.assert` (the caller's counting ctx
+ * tallies failures).
  */
 async function judgeDom(
   ctx: TestContext,
   page: InstrumentedPage,
   id: string,
   dom: NonNullable<Extract<BrowserExpect, { dom: unknown }>["dom"]>,
-): Promise<boolean> {
+): Promise<void> {
+  let evaluated = false;
   if (dom.visible) {
+    evaluated = true;
     const selector = locatorToSelector(dom.visible);
     const label = describeLocator(dom.visible);
     try {
@@ -354,13 +390,12 @@ async function judgeDom(
         true,
         `[${id}] ${label} visible${dom.containsText ? ` containing "${dom.containsText}"` : ""}`,
       );
-      return true;
     } catch (err) {
       ctx.assert(false, `[${id}] ${label} not visible: ${errMessage(err)}`);
-      return false;
     }
   }
   if (dom.absent) {
+    evaluated = true;
     const selector = locatorToSelector(dom.absent);
     const label = describeLocator(dom.absent);
     try {
@@ -370,27 +405,26 @@ async function judgeDom(
       // would wrongly pass it, so assert zero matches instead.
       await page.expectCount(selector, 0, { timeout: DOM_TIMEOUT_MS });
       ctx.assert(true, `[${id}] ${label} absent (0 matches)`);
-      return true;
     } catch (err) {
       ctx.assert(false, `[${id}] ${label} still present in the DOM: ${errMessage(err)}`);
-      return false;
     }
   }
-  ctx.fail(`[${id}] dom expectation declared neither "visible" nor "absent"`);
+  if (!evaluated) {
+    ctx.fail(`[${id}] dom expectation declared neither "visible" nor "absent"`);
+  }
 }
 
 /**
- * Judge all declared expects against the frozen evidence + live page.
- * Returns the number of FAILED expects so the caller can trigger an
- * on-failure screenshot (soft assertions never throw).
+ * Judge all declared expects against the frozen evidence + live page. `ctx` is
+ * the run's counting context, so a failed `ctx.assert` here is tallied for the
+ * on-failure screenshot decision (soft assertions never throw).
  */
 async function judgeExpects(
   ctx: TestContext,
   page: InstrumentedPage,
   caseSpec: BrowserContractCase,
   evidence: BrowserEvidence,
-): Promise<number> {
-  let failures = 0;
+): Promise<void> {
   for (const raw of caseSpec.expect ?? []) {
     const e = raw as {
       id: string;
@@ -401,14 +435,11 @@ async function judgeExpects(
     };
     if (e.url) {
       const r = matchUrl(e.url, evidence.finalUrl);
-      if (!r.ok) failures++;
       ctx.assert(r.ok, `[${e.id}] ${r.detail}`);
     } else if (e.dom) {
-      const passed = await judgeDom(ctx, page, e.id, e.dom);
-      if (!passed) failures++;
+      await judgeDom(ctx, page, e.id, e.dom);
     } else if (e.calls) {
       const r = matchCalls(e.calls, evidence.network);
-      if (!r.matched) failures++;
       ctx.assert(r.matched, `[${e.id}] ${r.detail}`);
       // schema "unverified" is a visible debt, NOT a failure (§3.1).
       if (r.matched && r.schema === "unverified") {
@@ -416,13 +447,11 @@ async function judgeExpects(
       }
     } else if (e.console) {
       const r = matchConsole(e.console, evidence.consoleErrors);
-      if (!r.ok) failures++;
       ctx.assert(r.ok, `[${e.id}] ${r.detail}`);
     } else {
       ctx.fail(`[${e.id}] expect entry declares none of url/dom/calls/console`);
     }
   }
-  return failures;
 }
 
 function errMessage(err: unknown): string {
@@ -448,13 +477,21 @@ async function runAndJudge(
   const strategy = caseSpec.screenshot ?? "final";
   const { recCtx, network, consoleErrors } = makeRecordingCtx(ctx);
 
+  // ONE counting context for the WHOLE run — step actions, judging, and verify.
+  // Any soft failure (assert / fluent expect / validate) in any phase is tallied
+  // so an on-failure screenshot fires even though soft assertions never throw.
+  let failures = 0;
+  const cctx = countingCtx(ctx, () => {
+    failures++;
+  });
+
   const page = await client.newPage(recCtx);
   try {
     if (entry) {
       await page.goto(entry, { waitUntil: "domcontentloaded" });
     }
     for (const step of caseSpec.steps) {
-      await step.action!(page, resolvedInput as never, ctx);
+      await step.action!(page, resolvedInput as never, cctx);
       if (strategy === "each-step") {
         await page.captureScreenshot(`step-${step.id}`);
       }
@@ -473,22 +510,14 @@ async function runAndJudge(
       consoleErrors: [...consoleErrors],
       finalUrl: page.url(),
     };
-    let failures = await judgeExpects(ctx, page, caseSpec, evidence);
+    await judgeExpects(cctx, page, caseSpec, evidence);
     if (caseSpec.verify) {
-      // Count soft assertion failures inside verify too — verify uses ctx.assert
-      // directly, which judgeExpects can't see.
-      await caseSpec.verify(
-        countingCtx(ctx, () => {
-          failures++;
-        }),
-        evidence,
-        resolvedInput as never,
-      );
+      await caseSpec.verify(cctx, evidence, resolvedInput as never);
     }
     // Glubean assertions are SOFT (they record, they don't throw), so a failed
-    // expect/verify never reaches the catch block below. Capture the requested
-    // on-failure screenshot here for the soft-failure path. ("final" already
-    // took a terminal screenshot above; "each-step" captured per step.)
+    // expect/verify/action never reaches the catch block below. Capture the
+    // requested on-failure screenshot here for the soft-failure path. ("final"
+    // already took a terminal screenshot above; "each-step" captured per step.)
     if (failures > 0 && strategy === "on-failure") {
       await page.captureScreenshot("expect-failure").catch(() => undefined);
     }
