@@ -238,6 +238,31 @@ describe("matchCalls", () => {
     expect(r.schema).toBe("mismatch");
   });
 
+  test("truncated (>64KB) body degrades to unverified, not mismatch (codex R2 #2)", () => {
+    const schema = { safeParse: (v: unknown) => ({ success: typeof v === "object" }) };
+    const ref = makeHttpRef({ endpoint: "GET /api/x", status: 200, schema });
+    // The tracer leaves oversized bodies as a raw string ending in the marker.
+    const r = matchCalls(ref, [
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: '{"partial":1…[truncated]' }),
+    ]);
+    expect(r.matched).toBe(true);
+    expect(r.schema).toBe("unverified");
+  });
+
+  test("schema without safeParse/parse → unverified, not falsely verified (codex R2 #3)", () => {
+    // A JSON-schema companion object (no runtime validator).
+    const ref = makeHttpRef({
+      endpoint: "GET /api/x",
+      status: 200,
+      schema: { jsonSchema: { type: "object" } } as unknown as { safeParse: (v: unknown) => { success: boolean } },
+    });
+    const r = matchCalls(ref, [
+      trace({ method: "GET", url: "https://h/api/x", status: 200, responseBody: { anything: true } }),
+    ]);
+    expect(r.matched).toBe(true);
+    expect(r.schema).toBe("unverified");
+  });
+
   test("non-HTTP / unresolvable ref → not matched, not-applicable", () => {
     const ref = {
       __glubean_type: "contract-case-ref",

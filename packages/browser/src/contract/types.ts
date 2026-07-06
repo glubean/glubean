@@ -376,7 +376,19 @@ export type BrowserContractSafeMeta = BrowserContractMeta;
 
 /**
  * What `executeCaseInFlow` returns (and what a flow `step.out(state, res)`
- * lens receives). Browser journeys return the frozen evidence bundle.
+ * lens receives at runtime). Browser journeys return the frozen evidence
+ * bundle.
+ *
+ * Flow-typing convention (matches GraphQL/gRPC): `journey.case(key)` resolves
+ * its `res` type to `unknown`, not `BrowserEvidence`. Core's `ApplyCaseOutput`
+ * only propagates a concrete `res` type for adapters whose `__caseOutputShape`
+ * marker has a `body` field to replace per-case (that mechanism is HTTP-only —
+ * only `HttpPayloadSchemas` declares the marker). Browser journeys have no
+ * per-case response schema, so — exactly like `GraphqlFlowCaseOutput` /
+ * `GrpcFlowCaseOutput` — this concrete type is exported for authors to annotate
+ * a lens manually (`(s, res: BrowserFlowCaseOutput) => ...`); we deliberately
+ * do NOT add a non-functional `__caseOutputShape` marker (it would still
+ * resolve to `unknown` and only imply typing that isn't there).
  */
 export type BrowserFlowCaseOutput = BrowserEvidence;
 

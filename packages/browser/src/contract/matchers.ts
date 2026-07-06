@@ -99,13 +99,31 @@ export interface CallsMatchResult {
   route: string;
 }
 
+/**
+ * The @glubean/browser network tracer caps captured bodies at 64KB and marks
+ * anything over the cap with a trailing "…[truncated]" (leaving it a raw
+ * string after JSON.parse fails). Matching this exact marker lets the matcher
+ * degrade a large-but-valid response to `unverified` instead of a false
+ * schema mismatch. Keep in sync with `network.ts` (MAX_BODY_BYTES suffix).
+ */
+const TRUNCATION_MARKER = "…[truncated]";
+
 /** Minimal SchemaLike surface used for standalone validation. */
 interface SchemaLikeLoose {
   safeParse?: (v: unknown) => { success: boolean; error?: unknown };
   parse?: (v: unknown) => unknown;
 }
 
-/** Validate `value` against a SchemaLike without a TestContext. */
+/** Whether a SchemaLike can actually be validated at runtime. */
+function canValidate(schema: SchemaLikeLoose): boolean {
+  return typeof schema.safeParse === "function" || typeof schema.parse === "function";
+}
+
+/**
+ * Validate `value` against a runtime-validatable SchemaLike.
+ * Precondition: `canValidate(schema)` is true (caller degrades non-validatable
+ * schemas to `unverified` rather than reporting false coverage).
+ */
 function schemaAccepts(schema: SchemaLikeLoose, value: unknown): boolean {
   if (typeof schema.safeParse === "function") {
     try {
@@ -114,15 +132,19 @@ function schemaAccepts(schema: SchemaLikeLoose, value: unknown): boolean {
       return false;
     }
   }
-  if (typeof schema.parse === "function") {
-    try {
-      schema.parse(value);
-      return true;
-    } catch {
-      return false;
-    }
+  // canValidate guaranteed parse exists.
+  try {
+    schema.parse!(value);
+    return true;
+  } catch {
+    return false;
   }
-  // No usable validator — treat as unverifiable (caller degrades to unverified).
+}
+
+/** Whether a captured response body can be schema-checked (present + not truncated). */
+function isValidatableBody(body: unknown): boolean {
+  if (body === undefined) return false;
+  if (typeof body === "string" && body.endsWith(TRUNCATION_MARKER)) return false;
   return true;
 }
 
@@ -213,19 +235,31 @@ export function matchCalls(
   const hit = statusHits[0];
   const statusPart = `${hit.method} ${pathnameOf(hit.url)} → ${hit.status}`;
 
-  // Schema check (best-effort; body absent → unverified, NOT fail).
+  // Schema check (best-effort; anything we cannot actually validate →
+  // `unverified`, NOT fail and NOT falsely `verified`).
   if (!schema) {
     return { matched: true, schema: "not-applicable", detail: statusPart, route };
   }
+  if (!canValidate(schema)) {
+    // e.g. a JSON-schema companion object with no safeParse/parse — nothing
+    // was actually validated, so do not overstate coverage.
+    return {
+      matched: true,
+      schema: "unverified",
+      detail: `${statusPart} (referenced case schema is not runtime-validatable — unverified)`,
+      route,
+    };
+  }
   // atLeastOnce also applies to the body: check EVERY matching call's body —
   // if any one satisfies the schema, the contract holds (a broken retry
-  // followed by a good call must not fail).
-  const bodies = statusHits.filter((t) => t.responseBody !== undefined);
+  // followed by a good call must not fail). Truncated (>64KB) bodies can't be
+  // validated → they degrade to unverified, not a mismatch.
+  const bodies = statusHits.filter((t) => isValidatableBody(t.responseBody));
   if (bodies.length === 0) {
     return {
       matched: true,
       schema: "unverified",
-      detail: `${statusPart} (response body unavailable — schema unverified)`,
+      detail: `${statusPart} (response body unavailable or truncated — schema unverified)`,
       route,
     };
   }
