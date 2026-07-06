@@ -346,18 +346,35 @@ export interface BrowserContractSpec<
 // =============================================================================
 
 /**
+ * One projected expect — the JSON-safe SEMANTICS of an expect entry, not just
+ * its id. Consumers (markdown, `glubean contracts`, Cloud, agent QA surfaces)
+ * diff on these, so a change to `url.path` / `dom` / the `calls` target must be
+ * visible even when the stable `id` is unchanged. The live `calls`
+ * ContractCaseRef is flattened to `"contractId#caseKey"`.
+ */
+export interface ProjectedExpect {
+  id: string;
+  kind: "url" | "dom" | "calls" | "console" | "unknown";
+  url?: UrlExpect;
+  dom?: DomExpect;
+  /** `"<contractId>#<caseKey>"` — the referenced contract.http case. */
+  calls?: string;
+  console?: ConsoleExpect;
+}
+
+/**
  * Per-case projection payload. Browser journeys have no request/response
  * schema the way HTTP does; the projectable surface is the journey skeleton
- * (intents + expect ids + agentNotes) plus a Mode-A runnability flag. All
- * fields are JSON-safe by construction, so `BrowserSafeSchemas` is identical.
+ * (intents + expects + agentNotes) plus a Mode-A runnability flag. All fields
+ * are JSON-safe by construction, so `BrowserSafeSchemas` is identical.
  */
 export interface BrowserPayloadSchemas {
   /** Effective entry path for the case. */
   entry?: string;
   /** Ordered step id + intent pairs (journey skeleton). */
   intents?: Array<{ id: string; intent: string }>;
-  /** Declared expect ids (the fixed questionnaire). */
-  expectIds?: string[];
+  /** Declared expects (the fixed questionnaire) with their semantics. */
+  expects?: ProjectedExpect[];
   /** Mode B attention list effective for the case. */
   agentNotes?: string[];
   /**

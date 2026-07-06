@@ -270,8 +270,35 @@ describe("projectBrowser", () => {
       { id: "open", intent: "open login" },
       { id: "submit", intent: "submit" },
     ]);
-    expect(c.schemas?.expectIds).toEqual(["url-dashboard", "dom-welcome", "calls-signin", "console-clean"]);
+    // Projected expects carry SEMANTICS, not just ids (codex R11 #1).
+    expect(c.schemas?.expects?.map((e) => `${e.id}:${e.kind}`)).toEqual([
+      "url-dashboard:url",
+      "dom-welcome:dom",
+      "calls-signin:calls",
+      "console-clean:console",
+    ]);
+    const urlExpect = c.schemas?.expects?.find((e) => e.id === "url-dashboard");
+    expect(urlExpect?.url).toEqual({ path: ["/", "/dashboard"], notPath: "/login" });
+    const callsExpect = c.schemas?.expects?.find((e) => e.id === "calls-signin");
+    expect(callsExpect?.calls).toBe("auth.sign-in.email#validStagingCredentials");
     expect(c.schemas?.agentNotes).toContain("watch layout");
+  });
+
+  test("changing url.path under the same id changes the projection (codex R11 #1)", () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const mk = (path: string): BrowserContractSpec => ({
+      client: browser,
+      cases: {
+        c: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "u", url: { path } }],
+        } as BrowserContractCase,
+      },
+    });
+    const a = browserAdapter.project(mk("/dashboard")).cases[0].schemas?.expects;
+    const b = browserAdapter.project(mk("/login")).cases[0].schemas?.expects;
+    expect(JSON.stringify(a)).not.toBe(JSON.stringify(b)); // same id, different semantics → different projection
   });
 
   test("hasActions false when a step lacks an action (Mode A unimplemented)", () => {

@@ -40,6 +40,7 @@ export type {
   BrowserTraceRecord,
   ConsoleExpect,
   DomExpect,
+  ProjectedExpect,
   UrlExpect,
 } from "./types.js";
 export type { CallsMatchResult, ConsoleMatchResult, UrlMatchResult } from "./matchers.js";

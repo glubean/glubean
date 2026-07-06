@@ -61,6 +61,7 @@ import type {
   BrowserPayloadSchemas,
   BrowserSafeSchemas,
   BrowserTraceRecord,
+  ProjectedExpect,
 } from "./types.js";
 
 // =============================================================================
@@ -84,6 +85,22 @@ function toJsonSchemaOrUndefined(schema: unknown): Record<string, unknown> | und
     return declared as Record<string, unknown>;
   }
   return undefined;
+}
+
+/** Serialize one expect to its JSON-safe projected semantics (not just the id). */
+function projectExpect(raw: BrowserExpect): ProjectedExpect {
+  const e = raw as {
+    id: string;
+    url?: Extract<BrowserExpect, { url: unknown }>["url"];
+    dom?: Extract<BrowserExpect, { dom: unknown }>["dom"];
+    calls?: { contractId?: string; caseKey?: string };
+    console?: Extract<BrowserExpect, { console: unknown }>["console"];
+  };
+  if (e.url) return { id: e.id, kind: "url", url: e.url };
+  if (e.dom) return { id: e.id, kind: "dom", dom: e.dom };
+  if (e.calls) return { id: e.id, kind: "calls", calls: `${e.calls.contractId}#${e.calls.caseKey}` };
+  if (e.console) return { id: e.id, kind: "console", console: e.console };
+  return { id: e.id, kind: "unknown" };
 }
 
 /** Merge contract-level + case-level agentNotes (contract first, dedup). */
@@ -301,9 +318,13 @@ function countingCtx(ctx: TestContext, onFail: () => void): TestContext {
 const DOM_TIMEOUT_MS = 8_000;
 const NETWORK_IDLE_MS = 500;
 const NETWORK_IDLE_TIMEOUT_MS = 5_000;
-// After network idle, trace emission still lags (async CDP getResponseBody);
-// poll until the trace array stops growing for this long, capped by the max.
+// After network idle, trace emission still lags (async CDP getResponseBody).
+// Always wait a MINIMUM flush window (so an initially-quiet buffer doesn't exit
+// before a delayed trace lands), then poll until the array is stable, capped by
+// the max. (A precise fix would be a pending-request drain signal from the
+// tracer — a follow-up; this heuristic covers the common lag.)
 const TRACE_POLL_MS = 50;
+const TRACE_MIN_FLUSH_MS = 350;
 const TRACE_STABLE_MS = 250;
 const TRACE_FLUSH_MAX_MS = 2_000;
 
@@ -358,7 +379,8 @@ async function settleNetwork(
   let waited = 0;
   let lastLen = network.length;
   let stableFor = 0;
-  while (stableFor < TRACE_STABLE_MS && waited < TRACE_FLUSH_MAX_MS) {
+  // Require BOTH a minimum flush window AND a stable tail before exiting.
+  while (waited < TRACE_FLUSH_MAX_MS && (waited < TRACE_MIN_FLUSH_MS || stableFor < TRACE_STABLE_MS)) {
     await delay(TRACE_POLL_MS);
     waited += TRACE_POLL_MS;
     if (network.length === lastLen) {
@@ -572,7 +594,7 @@ function projectBrowser(
     const schemas: BrowserPayloadSchemas = {
       entry: casted.entry ?? spec.entry,
       intents: casted.steps.map((s) => ({ id: s.id, intent: s.intent })),
-      expectIds: (casted.expect ?? []).map((e) => e.id),
+      expects: (casted.expect ?? []).map(projectExpect),
       agentNotes: mergeNotes(spec.agentNotes, casted.agentNotes),
       hasActions: isRunnable(casted),
     };
@@ -717,7 +739,7 @@ function renderBrowserTarget(target: string): string {
 function describeBrowserPayload(schemas: BrowserSafeSchemas): PayloadDescriptor | undefined {
   return {
     hasRequest: (schemas.intents?.length ?? 0) > 0,
-    hasResponse: (schemas.expectIds?.length ?? 0) > 0,
+    hasResponse: (schemas.expects?.length ?? 0) > 0,
     protocol: "browser",
   };
 }
