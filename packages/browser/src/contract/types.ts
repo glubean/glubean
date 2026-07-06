@@ -309,10 +309,8 @@ export interface BrowserContractSpec<
   // rather than a single shared `Input` — otherwise a contract mixing cases with
   // different `needs` (or any input-bearing case) fails to type-check. Same shape
   // as GraphQL/gRPC (`GraphqlContractCase<Vars, Res, any>`).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Cases extends Record<string, BrowserContractCase<any>> = Record<
     string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     BrowserContractCase<any>
   >,
 > {
@@ -423,7 +421,6 @@ export type BrowserContractRoot = {
 };
 
 export type BrowserContractFactory = <
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Cases extends Record<string, BrowserContractCase<any>>,
 >(
   id: string,

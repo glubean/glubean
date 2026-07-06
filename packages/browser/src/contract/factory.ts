@@ -29,7 +29,6 @@ import type {
 type InternalDefaults = BrowserContractDefaults & { _name?: string };
 
 type BrowserDispatch = <
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Cases extends Record<string, BrowserContractCase<any>>,
 >(
   id: string,
@@ -93,7 +92,6 @@ export function createBrowserFactory(
   defaults?: InternalDefaults,
 ): BrowserContractFactory {
   const factory = <
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     Cases extends Record<string, BrowserContractCase<any>>,
   >(
     id: string,

@@ -35,7 +35,7 @@ import type {
   PayloadDescriptor,
   TestContext,
 } from "@glubean/sdk";
-import { genericMarkdownPart } from "@glubean/sdk";
+import { Expectation, genericMarkdownPart } from "@glubean/sdk";
 
 import type {
   BrowserTestContext,
@@ -167,6 +167,10 @@ function makeRecordingCtx(ctx: TestContext): RecordingCtx {
     artifactDir: host.artifactDir,
     action: (a) => ctx.action(a as unknown as Parameters<TestContext["action"]>[0]),
     event: (ev) => {
+      // A console.error is `browser:console-error`; an UNCAUGHT page exception
+      // (a JS crash) is `browser:uncaught-error`. Both must count toward a
+      // `console: { errors: 0 }` expectation — otherwise console-clean passes on
+      // a crashing page. Uncaught errors have no source; tag the message.
       if (ev.type === "browser:console-error") {
         consoleErrors.push({
           message: String((ev.data as { message?: unknown })?.message ?? ""),
@@ -174,6 +178,11 @@ function makeRecordingCtx(ctx: TestContext): RecordingCtx {
             typeof (ev.data as { source?: unknown })?.source === "string"
               ? ((ev.data as { source: string }).source)
               : undefined,
+        });
+      } else if (ev.type === "browser:uncaught-error") {
+        consoleErrors.push({
+          message: `[uncaught] ${String((ev.data as { message?: unknown })?.message ?? "")}`,
+          source: undefined,
         });
       }
       ctx.event(ev as unknown as Parameters<TestContext["event"]>[0]);
@@ -208,23 +217,34 @@ function makeRecordingCtx(ctx: TestContext): RecordingCtx {
 }
 
 /**
- * Wrap a TestContext so every FAILED `ctx.assert` (boolean or result form)
- * invokes `onFail`. Used to count soft assertion failures inside `verify` (which
- * calls `ctx.assert` directly, invisible to `judgeExpects`) so an on-failure
- * screenshot still fires when the only failure is in `verify`.
+ * Wrap a TestContext so every FAILED soft assertion invokes `onFail`. Used to
+ * count soft failures inside `verify` (which asserts directly, invisible to
+ * `judgeExpects`) so an on-failure screenshot still fires when the only failure
+ * is in `verify`. Traps BOTH forms:
+ *   - `ctx.assert(false, ...)` — the boolean/result form, and
+ *   - the fluent `ctx.expect(x).toBe(y)` — which the runner's own `expect`
+ *     routes through the ORIGINAL `ctx.assert` (closure-captured), bypassing the
+ *     `assert` trap; so we rebuild the Expectation with a counting emitter.
  */
 function countingCtx(ctx: TestContext, onFail: () => void): TestContext {
+  const countingAssert = (arg1: unknown, ...rest: unknown[]) => {
+    const passed =
+      typeof arg1 === "boolean" ? arg1 : Boolean((arg1 as { passed?: unknown } | null)?.passed);
+    if (!passed) onFail();
+    return (ctx.assert as (...a: unknown[]) => void)(arg1, ...rest);
+  };
   return new Proxy(ctx, {
     get(target, prop, receiver) {
-      if (prop === "assert") {
-        return (arg1: unknown, ...rest: unknown[]) => {
-          const passed =
-            typeof arg1 === "boolean"
-              ? arg1
-              : Boolean((arg1 as { passed?: unknown } | null)?.passed);
-          if (!passed) onFail();
-          return (target.assert as (...a: unknown[]) => void)(arg1, ...rest);
-        };
+      if (prop === "assert") return countingAssert;
+      if (prop === "expect") {
+        return <V>(actual: V) =>
+          new Expectation(actual, (result) => {
+            if (!result.passed) onFail();
+            countingAssert(
+              { passed: result.passed, actual: result.actual, expected: result.expected },
+              result.message,
+            );
+          }) as unknown as ReturnType<TestContext["expect"]>;
       }
       const v = Reflect.get(target, prop, receiver);
       return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;

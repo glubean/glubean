@@ -56,8 +56,11 @@ function makeCtx(secrets: Record<string, string> = {}): { ctx: TestContext; log:
     session: { get: () => undefined, require: () => undefined, set: () => {}, entries: () => ({}) },
     http: {},
     log: () => {},
-    assert: (cond: unknown, message?: string) => {
-      log.assertions.push({ passed: Boolean(cond), message });
+    assert: (arg1: unknown, message?: string) => {
+      // Mirror the runner's two overloads: boolean or a { passed } result.
+      const passed =
+        typeof arg1 === "boolean" ? arg1 : Boolean((arg1 as { passed?: unknown } | null)?.passed);
+      log.assertions.push({ passed, message });
     },
     warn: (condition: boolean, message: string) => {
       log.warns.push({ condition, message });
@@ -98,6 +101,8 @@ interface FakePageConfig {
   traces?: BrowserTraceRecord[];
   /** Console errors emitted on goto. */
   consoleErrors?: Array<{ message: string; source?: string }>;
+  /** Uncaught page exceptions (browser:uncaught-error) emitted on goto. */
+  uncaughtErrors?: Array<{ message: string }>;
   /**
    * When set, `raw.waitForNetworkIdle` exists (real-page behaviour) and these
    * traces are emitted asynchronously AFTER goto — simulating the CDP
@@ -152,6 +157,9 @@ function makeFakeBrowser(config: FakePageConfig): {
           for (const t of config.traces ?? []) emitTrace(t);
           for (const c of config.consoleErrors ?? []) {
             ctx.event({ type: "browser:console-error", data: { message: c.message, source: c.source } });
+          }
+          for (const u of config.uncaughtErrors ?? []) {
+            ctx.event({ type: "browser:uncaught-error", data: { message: u.message } });
           }
           // Late traces land AFTER idle (async getResponseBody lag).
           for (const [i, t] of (config.lateTraces ?? []).entries()) {
@@ -573,6 +581,49 @@ describe("executeCase judging", () => {
     // Judged (not skipped): exactly one url assertion, and it passed.
     expect(log.assertions).toHaveLength(1);
     expect(log.assertions[0].passed).toBe(true);
+  });
+
+  test("uncaught page error fails console-clean (codex R8 #1)", async () => {
+    // A JS crash emits browser:uncaught-error (not console-error) — console-clean
+    // must still fail, otherwise a passing test on a crashing page.
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      uncaughtErrors: [{ message: "TypeError: cannot read 'x' of undefined" }],
+    });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "console-clean", console: { errors: 0 } }],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec, "c");
+    expect(log.assertions.find((a) => a.message?.startsWith("[console-clean]"))?.passed).toBe(false);
+  });
+
+  test("on-failure screenshot fires for a FLUENT verify failure (vctx.expect) (codex R8 #2)", async () => {
+    const { browser, last } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [],
+          verify: (vctx) => {
+            vctx.expect(1).toBe(2); // fluent soft failure
+          },
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec, "c");
+    expect(last()?.captureScreenshotLabels).toContain("expect-failure");
   });
 
   test("dom.absent fails a hidden-but-present element (zero-matches, not hidden) (codex R7 #1)", async () => {
