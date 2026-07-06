@@ -18,6 +18,33 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ---
 
+## [0.9.5] — 2026-07-04
+
+### Fixed
+- **`{{ENV}}` placeholders in contract HTTP path/query params now resolve before encoding** (`@glubean/sdk`, GLU-156) — case params such as `params: { projectId: { value: "{{GLUBEAN_PROJECT_ID}}" } }` were previously URL-encoded verbatim (producing a literal `%7B%7B...%7D%7D` in the request path — a 404 — instead of the real value). `extractParamValue` now resolves `{{KEY}}` through the same `configure()` template resolver used by headers/query/body; resolution happens before per-segment `encodeURIComponent`, so a resolved value with reserved characters is still percent-encoded correctly.
+- **A contract/test file that throws on import now fails the run instead of silently reporting zero tests** (`@glubean/cli`, GLU-155) — `discoverTests()` previously swallowed import failures by returning `[]`, indistinguishable from a file that legitimately exports no tests; the run kept going and exited 0 while an entire file never ran. Import failures are now recorded, surfaced as a "Discovery: N file(s) failed to import" summary line, and the run exits non-zero and uploads as `failed`; `--rerun-failed` can retry the import-failed file.
+
+---
+
+## [0.9.4] — 2026-07-04
+
+### Fixed
+- **`glubean sync`/`--upload` auto-derive the Platform ingest host from `GLUBEAN_API_URL`; `--api-url` is now hidden from `--help`** (`@glubean/cli`, GLU-161) — users who only set `GLUBEAN_API_URL` (their Dashboard host) got a 404 on every `sync`/upload/login call, because those commands actually need a separate Platform API host. `resolveApiUrl()` now auto-derives the Platform host by swapping the `api.` subdomain label for `platform.`; `--api-url`/`GLUBEAN_PLATFORM_API_URL` remain as internal, hidden overrides for hosts the derivation can't cover, and an unresolvable host now prints a remediation hint and exits 1 instead of silently guessing. `DEFAULT_API_URL` is corrected from `api.glubean.com` (404s on `/v1/*`) to `platform.glubean.com`.
+- **Runtime `ctx.skip(reason)` now reaches the persisted/uploaded result** (`@glubean/runner`, `@glubean/cli`, `@glubean/redaction`, GLU-142) — a test's actual runtime skip reason never made it past the harness wire event, so the dashboard could only ever show a spec's *declared* skip reason, never the real one a given run carried. `ExecutionResult.reason` and the uploaded `test_result` row now carry it through, redacted the same as `status.error`/`status.stack`.
+- **`glubean_list_test_files` (MCP) now includes contract/workflow coverage files, not just `test()` files** (`@glubean/mcp`, GLU-140) — in a contract-first project, the tool previously returned only files with `test()` exports, silently omitting `*.contract.ts`/`*.flow.ts`/`*.workflow.ts` — the files where the project's actual runnable coverage lives — which could push an agent toward `test()`-first behavior.
+- **Screenshot cleanup warning wording** (`@glubean/cli`, GLU-138) — the post-upload warning duplicated "screenshot list screenshot file(s)" and buried the skip reason inside an awkward count phrase; reworded to state the total skipped count up front with reasons listed parenthetically (no behavior change).
+
+---
+
+## [0.9.3] — 2026-07-03
+
+### Fixed
+- **MCP/redaction — residual plaintext-secret leaks closed (R11–R16)** (`@glubean/mcp`, `@glubean/redaction`, GLU-129 follow-up) — a verification-debt re-run after 0.9.2 found 3 residual leak shapes: tuple-form entries (`["token", "secret"]`, the shape `Object.entries()`/header pairs produce — the array walker never checked element 0 as a key), form-urlencoded string literals inside SDK assertion messages, and bare form-urlencoded message strings that bypassed the scrubber loop. Also fixed 2 over-masking regressions (double-masking), gated via `looksLikeFormUrlEncoded`. Converged to 3 consecutive rounds with 0 leaks found.
+- **Reject Windows drive-relative/absolute projection paths** (`@glubean/cli`, GLU-143) — `assertContainedRelativePath` validated paths with POSIX-only semantics, so a Windows drive-relative value like `C:outside.json` (and other Windows-only escape forms — `\outside`, UNC paths, backslash `..` escapes) could pass containment checks meant to keep `projections.contracts.<name>.output`/`target` inside the project root. Paths are now validated under both POSIX and Windows semantics.
+- **`trace.routeKey` now stamped for standalone/workflow runs, not just load runs** (`@glubean/runner`, GLU-148) — `contract.http()` case execution already set `context.glubeanRoute` and the load runner's engine read it back into `trace.routeKey`, but a normal `glubean run` (standalone contract cases and workflow `.call()` steps) executes through the separate legacy harness, whose `afterResponse` hook never read `context.glubeanRoute` — so `trace.routeKey` was never stamped outside load runs.
+
+---
+
 ## [0.8.4] — 2026-07-02
 
 > Scope: lockstep release re-aligning all 13 packages on one version (mixed 0.8.1 / 0.8.2 / 0.8.3 → 0.8.4). `@glubean/sdk` 0.8.4 is a version-only republish of 0.8.2 (see [0.8.2] below — F31 zod JSON Schema fix + the sdk authoring surface that rode along); `@glubean/cli` picks up everything since its independent 0.8.3 (2026-06-27); all other packages ship everything since 0.8.1. Unchanged packages (`auth`, `graphql`, `grpc`, `oauth-code`, `redaction`, `glubean` meta) are republished at 0.8.4 per lockstep policy. There is no 0.8.3 lockstep release — 0.8.3 was a cli-only manual publish with no tag.
@@ -137,7 +164,10 @@ Changes prior to `v0.7.0` are not captured in this CHANGELOG. Use `git log v0.2.
 - `v0.3.x`–`v0.5.x` — config profiles, multi-suite, `--ci` flag, demo template, per-profile multi-project upload.
 - `v0.2.x` — initial Node.js port from Deno; `@glubean/engine` spike, inbound contract receivers, workflow vNext (S2 series).
 
-[Unreleased]: https://github.com/glubean/glubean/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/glubean/glubean/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/glubean/glubean/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/glubean/glubean/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/glubean/glubean/compare/v0.9.2...v0.9.3
 [0.8.4]: https://github.com/glubean/glubean/compare/v0.8.1...v0.8.4
 [0.8.2]: https://github.com/glubean/glubean/compare/v0.8.1...5db5384
 [0.8.1]: https://github.com/glubean/glubean/compare/v0.7.0...v0.8.1
