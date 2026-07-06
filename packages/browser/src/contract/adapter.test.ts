@@ -87,6 +87,11 @@ interface FakePageConfig {
   finalUrl: string;
   /** Selectors that resolve to a visible element. */
   visible?: string[];
+  /**
+   * Selectors present in the DOM (matches ≥ 1), whether visible or not. Defaults
+   * to `visible`. Used to model "hidden but present" for dom.absent tests.
+   */
+  present?: string[];
   /** selector → element text (for expectText / containsText). */
   texts?: Record<string, string>;
   /** Network traces emitted on goto (simulating page-load requests). */
@@ -119,6 +124,7 @@ function makeFakeBrowser(config: FakePageConfig): {
     newPage: async (ctx: BrowserTestContext): Promise<InstrumentedPage> => {
       lastCtx = ctx;
       const visible = new Set(config.visible ?? []);
+      const present = new Set(config.present ?? config.visible ?? []);
       const rec: FakePage = {
         page: undefined as unknown as InstrumentedPage,
         expectVisibleCalls: [],
@@ -159,6 +165,10 @@ function makeFakeBrowser(config: FakePageConfig): {
         },
         expectHidden: async (sel: string) => {
           if (visible.has(sel)) throw new Error(`still present: ${sel}`);
+        },
+        expectCount: async (sel: string, expected: number) => {
+          const actual = present.has(sel) ? 1 : 0;
+          if (actual !== expected) throw new Error(`count ${actual} !== ${expected} for ${sel}`);
         },
         expectText: async (sel: string, text: string) => {
           const t = config.texts?.[sel] ?? "";
@@ -563,6 +573,66 @@ describe("executeCase judging", () => {
     // Judged (not skipped): exactly one url assertion, and it passed.
     expect(log.assertions).toHaveLength(1);
     expect(log.assertions[0].passed).toBe(true);
+  });
+
+  test("dom.absent fails a hidden-but-present element (zero-matches, not hidden) (codex R7 #1)", async () => {
+    // Error banner display:none'd but NOT removed → still in the DOM → absent fails.
+    const { browser } = makeFakeBrowser({
+      finalUrl: "https://h/",
+      present: [".error-banner"], // in DOM
+      visible: [], // but not visible
+    });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "no-error", dom: { absent: { selector: ".error-banner" } } }],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec, "c");
+    expect(log.assertions[0].passed).toBe(false); // present-but-hidden ≠ absent
+  });
+
+  test("dom.absent passes a truly-removed element", async () => {
+    const { browser } = makeFakeBrowser({ finalUrl: "https://h/", present: [], visible: [] });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [{ id: "no-error", dom: { absent: { selector: ".error-banner" } } }],
+        } as BrowserContractCase,
+      },
+    };
+    const { log } = await runCase(spec, "c");
+    expect(log.assertions[0].passed).toBe(true);
+  });
+
+  test("on-failure screenshot fires when the ONLY failure is a soft verify assertion (codex R7 #2)", async () => {
+    const { browser, last } = makeFakeBrowser({ finalUrl: "https://h/" });
+    const spec: BrowserContractSpec = {
+      client: browser,
+      entry: "/x",
+      cases: {
+        c: {
+          description: "x",
+          screenshot: "on-failure",
+          steps: [{ id: "s", intent: "s", action: async () => {} }],
+          expect: [], // all expects pass (none)
+          verify: (vctx) => {
+            vctx.assert(false, "custom verify failed");
+          },
+        } as BrowserContractCase,
+      },
+    };
+    await runCase(spec, "c");
+    expect(last()?.captureScreenshotLabels).toContain("expect-failure");
   });
 
   test("verify hook runs with the frozen evidence bundle", async () => {

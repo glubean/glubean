@@ -207,6 +207,31 @@ function makeRecordingCtx(ctx: TestContext): RecordingCtx {
   return { recCtx, network, consoleErrors };
 }
 
+/**
+ * Wrap a TestContext so every FAILED `ctx.assert` (boolean or result form)
+ * invokes `onFail`. Used to count soft assertion failures inside `verify` (which
+ * calls `ctx.assert` directly, invisible to `judgeExpects`) so an on-failure
+ * screenshot still fires when the only failure is in `verify`.
+ */
+function countingCtx(ctx: TestContext, onFail: () => void): TestContext {
+  return new Proxy(ctx, {
+    get(target, prop, receiver) {
+      if (prop === "assert") {
+        return (arg1: unknown, ...rest: unknown[]) => {
+          const passed =
+            typeof arg1 === "boolean"
+              ? arg1
+              : Boolean((arg1 as { passed?: unknown } | null)?.passed);
+          if (!passed) onFail();
+          return (target.assert as (...a: unknown[]) => void)(arg1, ...rest);
+        };
+      }
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    },
+  });
+}
+
 // =============================================================================
 // Journey execution + evidence freeze
 // =============================================================================
@@ -319,11 +344,15 @@ async function judgeDom(
     const selector = locatorToSelector(dom.absent);
     const label = describeLocator(dom.absent);
     try {
-      await page.expectHidden(selector, { timeout: DOM_TIMEOUT_MS });
-      ctx.assert(true, `[${id}] ${label} absent`);
+      // `absent` means "resolves to NO element" (zero matches), NOT merely
+      // hidden — a CSS-hidden-but-present element (e.g. an error banner that was
+      // display:none'd but not removed) must FAIL an absent check. expectHidden
+      // would wrongly pass it, so assert zero matches instead.
+      await page.expectCount(selector, 0, { timeout: DOM_TIMEOUT_MS });
+      ctx.assert(true, `[${id}] ${label} absent (0 matches)`);
       return true;
     } catch (err) {
-      ctx.assert(false, `[${id}] ${label} still present: ${errMessage(err)}`);
+      ctx.assert(false, `[${id}] ${label} still present in the DOM: ${errMessage(err)}`);
       return false;
     }
   }
@@ -424,12 +453,20 @@ async function runAndJudge(
       consoleErrors: [...consoleErrors],
       finalUrl: page.url(),
     };
-    const failures = await judgeExpects(ctx, page, caseSpec, evidence);
+    let failures = await judgeExpects(ctx, page, caseSpec, evidence);
     if (caseSpec.verify) {
-      await caseSpec.verify(ctx, evidence, resolvedInput as never);
+      // Count soft assertion failures inside verify too — verify uses ctx.assert
+      // directly, which judgeExpects can't see.
+      await caseSpec.verify(
+        countingCtx(ctx, () => {
+          failures++;
+        }),
+        evidence,
+        resolvedInput as never,
+      );
     }
     // Glubean assertions are SOFT (they record, they don't throw), so a failed
-    // expect never reaches the catch block below. Capture the requested
+    // expect/verify never reaches the catch block below. Capture the requested
     // on-failure screenshot here for the soft-failure path. ("final" already
     // took a terminal screenshot above; "each-step" captured per step.)
     if (failures > 0 && strategy === "on-failure") {
