@@ -1032,8 +1032,9 @@ qaCmd
   .requiredOption("--file <path>", "path to the .browser.ts contract")
   .requiredOption("--case <key>", "case key to record")
   .option("--report <path>", "where to write the sealed report")
+  .option("--model <id>", "recording agent model id for the report (or set GLUBEAN_QA_MODEL)")
   .action(async (opts) => {
-    await qaOpenCommand({ file: opts.file, case: opts.case, report: opts.report });
+    await qaOpenCommand({ file: opts.file, case: opts.case, report: opts.report, model: opts.model });
   });
 
 qaCmd
@@ -1043,8 +1044,9 @@ qaCmd
   .requiredOption("--file <path>", "path to the .browser.ts contract")
   .requiredOption("--case <key>", "case key to record")
   .option("--report <path>", "where to write the sealed report")
+  .option("--model <id>", "recording agent model id for the report (or set GLUBEAN_QA_MODEL)")
   .action(async (opts) => {
-    await qaAttachCommand({ endpoint: opts.endpoint, file: opts.file, case: opts.case, report: opts.report });
+    await qaAttachCommand({ endpoint: opts.endpoint, file: opts.file, case: opts.case, report: opts.report, model: opts.model });
   });
 
 qaCmd

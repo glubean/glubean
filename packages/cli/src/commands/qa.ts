@@ -16,6 +16,7 @@
  * the session's pid. Multi-target tracking + a full detached daemon are P2.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -43,10 +44,14 @@ import {
 function buildRuntime(): Parameters<typeof runWithRuntime>[0] {
   const vars: Record<string, string> = {};
   const secrets: Record<string, string> = {};
+  // Pass through ALL env vars (like `glubean run`'s env-file load) so a client
+  // in either mode resolves — `browser({ baseUrl: "BASE_URL" })` OR
+  // `browser({ endpoint: "CHROME_ENDPOINT" })`. Secret-shaped keys are also
+  // exposed via ctx.secrets for action-driven refs.
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v !== "string") continue;
-    if (/_URL$/.test(k) || k === "BASE_URL") vars[k] = v;
-    if (/(TOKEN|PASSWORD|SECRET|EMAIL)$/.test(k)) secrets[k] = v;
+    vars[k] = v;
+    if (/(TOKEN|PASSWORD|SECRET|EMAIL|KEY)$/.test(k)) secrets[k] = v;
   }
   const httpStub = new Proxy(
     {},
@@ -60,6 +65,22 @@ function buildRuntime(): Parameters<typeof runWithRuntime>[0] {
 }
 
 const SESSION_FILE = ".glubean/qa/current.json";
+
+/**
+ * Resolve the agent model id for the report's `executor.model` (required for
+ * provenance/diffing). Prefer `--model`, else `GLUBEAN_QA_MODEL` — never a
+ * placeholder (codex R4): a report without a precise model id is unattributable.
+ */
+function resolveModel(flag?: string): string {
+  const model = flag ?? process.env["GLUBEAN_QA_MODEL"];
+  if (!model || !model.trim()) {
+    throw new Error(
+      "qa: the recording agent's model id is required for the report. Pass --model <id> " +
+        "(e.g. --model claude-sonnet-5) or set GLUBEAN_QA_MODEL.",
+    );
+  }
+  return model.trim();
+}
 
 interface QaSession {
   pid: number;
@@ -160,6 +181,7 @@ async function record(opts: {
   revision: string;
   reportPath: string;
   collector: ReturnType<typeof makeCollector>;
+  model: string;
   getFinalUrl: () => string;
   cleanup: () => Promise<void>;
 }): Promise<void> {
@@ -179,7 +201,7 @@ async function record(opts: {
         caseSpec: opts.caseSpec,
         contractRevision: opts.revision,
         evidence,
-        executor: { kind: "agent", model: process.env["GLUBEAN_QA_MODEL"] ?? "agent", finishedAt: new Date().toISOString() },
+        executor: { kind: "agent", model: opts.model, finishedAt: new Date().toISOString() },
       });
       mkdirSync(dirname(resolve(opts.reportPath)), { recursive: true });
       writeFileSync(opts.reportPath, JSON.stringify(report, null, 2));
@@ -203,7 +225,8 @@ function safeUrl(page: { url(): string } | undefined): string {
   }
 }
 
-export async function qaOpenCommand(opts: { file: string; case: string; report?: string }): Promise<void> {
+export async function qaOpenCommand(opts: { file: string; case: string; report?: string; model?: string }): Promise<void> {
+  const model = resolveModel(opts.model);
   await runWithRuntime(buildRuntime(), async () => {
     const { contractId, caseSpec, client, revision } = await loadBrowserCase(opts.file, opts.case);
     if (!client) throw new Error("qa open: the contract has no browser client to launch.");
@@ -223,6 +246,7 @@ export async function qaOpenCommand(opts: { file: string; case: string; report?:
       revision,
       reportPath,
       collector,
+      model,
       getFinalUrl: () => safeUrl(page),
       cleanup: () => client.close(),
     });
@@ -234,7 +258,9 @@ export async function qaAttachCommand(opts: {
   file: string;
   case: string;
   report?: string;
+  model?: string;
 }): Promise<void> {
+  const model = resolveModel(opts.model);
   await runWithRuntime(buildRuntime(), async () => {
     const { contractId, caseSpec, revision } = await loadBrowserCase(opts.file, opts.case);
     const reportPath = opts.report ?? `.glubean/qa/${opts.case}.report.json`;
@@ -266,6 +292,7 @@ export async function qaAttachCommand(opts: {
       revision,
       reportPath,
       collector,
+      model,
       getFinalUrl: () => safeUrl(page),
       cleanup: async () => {
         raw.disconnect();
@@ -274,16 +301,36 @@ export async function qaAttachCommand(opts: {
   });
 }
 
+/** True iff `pid` is alive AND looks like our glubean qa recorder (guards PID reuse). */
+function isLiveRecorder(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // existence check — throws if no such process
+  } catch {
+    return false;
+  }
+  try {
+    const cmd = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+    return /glubean|node|qa/i.test(cmd);
+  } catch {
+    // ps unavailable (non-POSIX): fall back to the existence check above.
+    return true;
+  }
+}
+
 export function qaStopCommand(): void {
   if (!existsSync(SESSION_FILE)) {
     throw new Error("qa stop: no active session (.glubean/qa/current.json not found).");
   }
   const s = JSON.parse(readFileSync(SESSION_FILE, "utf8")) as QaSession;
-  try {
-    process.kill(s.pid, "SIGTERM");
-    // eslint-disable-next-line no-console
-    console.log(`qa: signaled recorder (pid ${s.pid}) to seal → ${s.reportPath}`);
-  } catch {
-    throw new Error(`qa stop: recorder pid ${s.pid} is not running (already stopped?).`);
+  // Verify the pid still belongs to a live recorder before signaling — a stale
+  // session file after a crash must NOT SIGTERM an unrelated (pid-reused) process.
+  if (!isLiveRecorder(s.pid)) {
+    rmSync(SESSION_FILE, { force: true });
+    throw new Error(
+      `qa stop: recorder pid ${s.pid} is not running (crashed / already stopped) — cleared the stale session.`,
+    );
   }
+  process.kill(s.pid, "SIGTERM");
+  // eslint-disable-next-line no-console
+  console.log(`qa: signaled recorder (pid ${s.pid}) to seal → ${s.reportPath}`);
 }
