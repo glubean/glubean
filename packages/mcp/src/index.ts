@@ -1239,6 +1239,16 @@ async function scanProject(
     const scanner = createScanner();
     return await scanner.scan(dir);
   }
+  // Runtime scan eagerly imports contract files. Plugin-registered contract
+  // surfaces — contract.browser / contract.graphql / contract.grpc, installed
+  // via a project's glubean.setup.ts — throw `Cannot read properties of
+  // undefined (reading 'with')` at import unless their manifest is installed
+  // first, and the scanner swallows that as a "Contract import failed:"
+  // warning, silently DROPPING those contracts from the result. Bootstrap the
+  // project's plugins before scanning so metadata / list-files reflect the
+  // real coverage, mirroring `glubean scan` and `glubean run` (codex GLU-212
+  // R8 P2). Idempotent + a no-op when the project has no glubean.setup.ts.
+  await bootstrap(dir);
   return await scan(dir);
 }
 

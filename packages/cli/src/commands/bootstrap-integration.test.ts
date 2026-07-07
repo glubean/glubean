@@ -108,6 +108,76 @@ export const getUser = gql("get-user", {
     expect(contract.cases[0].key).toBe("ok");
   });
 
+  // GLU-212 R8 P2: `.browser` rides the "contract" kind (scanner kinds
+  // registry), so every runtime scan path — `glubean scan`, MCP `scanProject`,
+  // `extractContractsFromProject` — imports `.browser.ts` files. Those use the
+  // plugin-registered `contract.browser.with(...)`, which throws at import
+  // unless browserPlugin is installed first; the scanner then swallows it as a
+  // "Contract import failed:" warning and silently DROPS the journey. This pins
+  // the fix (scanProject/scan callers bootstrap first) at the same layer as the
+  // graphql case: bootstrap → extract surfaces the contract.browser journey.
+  test("bootstrap + extractContractsFromProject surfaces contract.browser journeys", async () => {
+    await writeFile(
+      join(fixtureDir, "glubean.setup.ts"),
+      `
+import { installPlugin } from "@glubean/sdk";
+import browserPlugin from "@glubean/browser";
+await installPlugin(browserPlugin);
+`,
+    );
+
+    const contractsDir = join(fixtureDir, "journeys");
+    await mkdir(contractsDir, { recursive: true });
+    await writeFile(
+      join(contractsDir, "login.browser.ts"),
+      `
+import { configure, contract } from "@glubean/sdk";
+import { browser } from "@glubean/browser";
+
+const { chrome } = configure({
+  plugins: { chrome: browser({ launch: true, baseUrl: "https://app.example.com" }) },
+});
+
+const ui = contract.browser.with("loginUI", {
+  client: chrome,
+  baseUrl: "https://app.example.com",
+  feature: "auth",
+});
+
+export const journey = ui("auth.login.journey", {
+  entry: "/login",
+  cases: {
+    happyPath: {
+      description: "Sign in and land on the dashboard.",
+      steps: [
+        {
+          id: "open",
+          intent: "Open the login page.",
+          action: async (page) => {
+            await page.goto("/login");
+          },
+        },
+      ],
+      expect: [
+        { id: "url-dashboard", url: { pattern: "^https://app\\\\.example\\\\.com/dashboard" } },
+      ],
+    },
+  },
+});
+`,
+    );
+
+    await bootstrap(fixtureDir);
+    const result = await extractContractsFromProject(fixtureDir);
+
+    expect(result.errors).toEqual([]);
+    expect(result.contracts.length).toBe(1);
+    const journey = result.contracts[0];
+    expect(journey.protocol).toBe("browser");
+    expect(journey.id).toBe("auth.login.journey");
+    expect(journey.cases.map((c) => c.key)).toEqual(["happyPath"]);
+  });
+
 });
 
 // NOTES on what this test deliberately does NOT cover:

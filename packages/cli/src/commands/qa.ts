@@ -22,7 +22,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bootstrap } from "@glubean/runner";
-import { DEFAULT_GLOBAL_RULES, redactValue } from "@glubean/redaction";
+import { CREDENTIAL_KEYS, DEFAULT_GLOBAL_RULES, redactValue } from "@glubean/redaction";
 import { runWithRuntime } from "@glubean/sdk/internal";
 import {
   connectChrome,
@@ -245,14 +245,10 @@ async function record(opts: {
       // SECRET RED LINE (codex R7): a recorded final URL / console message can
       // carry a token/password — the report must pass the redaction pipeline
       // before touching disk, PLUS an explicit scrub of the known env secret
-      // values (defense-in-depth for values the pattern rules may miss).
+      // values (defense-in-depth for opaque-shaped secrets the pattern rules
+      // miss, e.g. `?token=<random>` with no recognizable shape).
       const redacted = redactValue(report, { globalRules: DEFAULT_GLOBAL_RULES });
-      let json = JSON.stringify(redacted, null, 2);
-      for (const v of Object.values(process.env)) {
-        if (typeof v === "string" && v.length >= 6 && json.includes(v)) {
-          json = json.split(v).join("«redacted-secret»");
-        }
-      }
+      const json = scrubEnvSecrets(JSON.stringify(redacted, null, 2));
       mkdirSync(dirname(resolve(opts.reportPath)), { recursive: true });
       writeFileSync(opts.reportPath, json);
       // eslint-disable-next-line no-console
@@ -265,6 +261,32 @@ async function record(opts: {
     process.once("SIGTERM", seal);
     process.once("SIGINT", seal);
   });
+}
+
+/**
+ * Belt-and-suspenders scrub of literal secret VALUES from an already
+ * redacted + serialized QA report (defense-in-depth after `redactValue`, for
+ * opaque-shaped secrets the pattern rules miss — e.g. `?token=<random>` with
+ * no recognizable shape). Only env vars whose NAME matches the redaction
+ * pipeline's credential-key heuristic (`CREDENTIAL_KEYS`, case-insensitive
+ * substring) are scrubbed, so attributable non-secrets survive — the resolved
+ * `executor.model` when it came from GLUBEAN_QA_MODEL, and BASE_URL evidence
+ * (codex GLU-212 R8 P2; a blanket all-env scrub erased both). The `length >= 6`
+ * guard avoids masking short values that collide with ordinary report text.
+ * Exported for unit testing.
+ */
+export function scrubEnvSecrets(
+  json: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  let out = json;
+  for (const [key, v] of Object.entries(env)) {
+    if (typeof v !== "string" || v.length < 6 || !out.includes(v)) continue;
+    const lower = key.toLowerCase();
+    if (!CREDENTIAL_KEYS.some((k) => lower.includes(k))) continue;
+    out = out.split(v).join("«redacted-secret»");
+  }
+  return out;
 }
 
 function safeUrl(page: { url(): string } | undefined): string {
