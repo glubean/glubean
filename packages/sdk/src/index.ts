@@ -563,13 +563,21 @@ export type ContractNamespace = ContractProtocolRoots & {
     protocol: string,
     adapter: ContractProtocolAdapter<Spec, Rt, RtM, Sf, SfM>,
   ) => void;
-  bootstrap: <Needs, Params = void>(
+  bootstrap: (<Needs, Params = void>(
     ref: import("./contract-types.js").ContractCaseRef<Needs, unknown>,
-    spec: import("./contract-types.js").Bootstrap<
-      Params,
-      NoInfer<Needs>
-    >,
-  ) => import("./contract-types.js").BootstrapAttachment<Needs, Params>;
+    spec:
+      | import("./contract-types.js").Bootstrap<Params, NoInfer<Needs>>
+      | import("./bootstrap-registry.js").NamedBootstrapUse,
+  ) => import("./contract-types.js").BootstrapAttachment<Needs, Params>) & {
+    /**
+     * Define a reusable named bootstrap (GLU-236). Attach it to a case with
+     * `contract.bootstrap(ref, { use: "<name>" })`.
+     */
+    define: <Params = void, Output = unknown>(
+      name: string,
+      spec: import("./contract-types.js").Bootstrap<Params, Output>,
+    ) => void;
+  };
   [protocol: string]: unknown;
 };
 

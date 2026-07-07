@@ -116,8 +116,26 @@ async function loadBrowserCase(
     if (pc?._extracted?.protocol === "browser" && pc._spec?.cases?.[caseKey]) {
       const caseSpec = pc._spec.cases[caseKey] as BrowserContractCase;
       const projCase = pc._extracted.cases?.find((c) => c.key === caseKey);
+      // contractRevision = the SEMANTIC subset only (entry + agentNotes + step
+      // ids/intents + expects). Action coverage (`hasActions`) is an
+      // implementation detail and must NOT churn the diff sequence.
+      const s = (projCase?.schemas ?? {}) as {
+        entry?: unknown;
+        agentNotes?: unknown;
+        intents?: unknown;
+        expects?: unknown;
+      };
       const revision = createHash("sha256")
-        .update(JSON.stringify({ id: pc._extracted.id, case: caseKey, schemas: projCase?.schemas ?? null }))
+        .update(
+          JSON.stringify({
+            id: pc._extracted.id,
+            case: caseKey,
+            entry: s.entry ?? null,
+            agentNotes: s.agentNotes ?? null,
+            intents: s.intents ?? null,
+            expects: s.expects ?? null,
+          }),
+        )
         .digest("hex")
         .slice(0, 12);
       // Mode A resolves the client case > spec — mirror that so a per-case

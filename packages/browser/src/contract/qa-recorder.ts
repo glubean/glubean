@@ -150,13 +150,27 @@ export function sealQaReport(input: SealQaRunInput): AgentQaReport {
     (e) => byId.get((e as { id: string }).id) ?? { id: (e as { id: string }).id, verdict: "blocked" as const, judgedBy: "agent" as const },
   );
 
+  // steps[] MUST cover every spec step id (agent-qa-report-v1 §5). A passive
+  // recorder doesn't observe individual step boundaries, so when the caller
+  // (agent) supplies none, synthesize a valid, honest entry per spec step.
+  const stepsById = new Map<string, QaStep>((input.steps ?? []).map((s) => [s.id, s]));
+  const steps: QaStep[] = (input.caseSpec.steps ?? []).map(
+    (s) =>
+      stepsById.get(s.id) ?? {
+        id: s.id,
+        status: "completed",
+        note: "recorded passively — the recorder did not attribute per-step boundaries; the agent may supply step outcomes",
+        evidence: ["passive-recording"],
+      },
+  );
+
   return {
     kind: "agent-qa-report/v1",
     contract: input.contractId,
     case: input.caseKey,
     contractRevision: input.contractRevision,
     executor: input.executor,
-    steps: input.steps ?? [],
+    steps,
     expect,
     extraFindings: input.extraFindings ?? [],
     provenance: "agent-judged",

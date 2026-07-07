@@ -361,11 +361,11 @@ test("named bootstrap: define + { use } resolves and runs the shared overlay (GL
     cases: { ok: { description: "d" } },
   }) as ProtocolContract<MockSpec>;
 
-  (contract.bootstrap as any).define("signed-in-session", async () => {
+  contract.bootstrap.define("signed-in-session", async () => {
     log.push("named-bootstrap-ran");
     return { session: "abc" };
   });
-  contract.bootstrap(c.case("ok"), { use: "signed-in-session" } as any);
+  contract.bootstrap(c.case("ok"), { use: "signed-in-session" });
 
   await c[0].fn!(makeMockCtx());
   expect(log).toContain("named-bootstrap-ran");
@@ -378,14 +378,14 @@ test("named bootstrap: an unknown name throws at attach time (GLU-236)", () => {
     target: "/x",
     cases: { ok: { description: "d" } },
   }) as ProtocolContract<MockSpec>;
-  expect(() => contract.bootstrap(c.case("ok"), { use: "no-such-bootstrap" } as any)).toThrow(
+  expect(() => contract.bootstrap(c.case("ok"), { use: "no-such-bootstrap" })).toThrow(
     /unknown named bootstrap/,
   );
 });
 
 test("named bootstrap: a duplicate define throws (GLU-236)", () => {
-  (contract.bootstrap as any).define("dup-named-bs", async () => ({}));
-  expect(() => (contract.bootstrap as any).define("dup-named-bs", async () => ({}))).toThrow(
+  contract.bootstrap.define("dup-named-bs", async () => ({}));
+  expect(() => contract.bootstrap.define("dup-named-bs", async () => ({}))).toThrow(
     /duplicate named bootstrap/,
   );
 });

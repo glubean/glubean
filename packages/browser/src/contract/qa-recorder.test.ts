@@ -82,6 +82,28 @@ describe("sealQaReport", () => {
     expect(() => JSON.stringify(report)).not.toThrow();
   });
 
+  test("auto-populates a valid steps[] covering every spec step id (codex R2)", () => {
+    const spec2: BrowserContractCase = {
+      description: "x",
+      steps: [
+        { id: "open", intent: "open" },
+        { id: "submit", intent: "submit" },
+      ],
+      expect: [{ id: "url", url: { path: "/" } }],
+    } as BrowserContractCase;
+    const report = sealQaReport({
+      contractId: "c",
+      caseKey: "k",
+      caseSpec: spec2,
+      contractRevision: "rev",
+      evidence: { finalUrl: "https://h/", network: [], consoleErrors: [] },
+      executor: { kind: "agent", model: "m" },
+    });
+    expect(report.steps.map((s) => s.id)).toEqual(["open", "submit"]);
+    // completed steps need >=1 evidence (validator §5).
+    expect(report.steps.every((s) => s.status !== "completed" || (s.evidence?.length ?? 0) > 0)).toBe(true);
+  });
+
   test("agent answers CANNOT override a runtime-judged url/calls/console verdict (codex R1)", () => {
     // A failing calls verdict (no POST observed) must NOT be flippable to pass
     // by an agent answer — machine-checkable expects stay runtime-authoritative.
