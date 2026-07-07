@@ -386,4 +386,45 @@ defaults:
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     }
   }, 30_000);
+
+  test("a MISSING explicit --config path is fatal, not a silent baseline-redaction fallback (codex GLU-244 R5 P2)", async () => {
+    const server: Server = createServer((req, res) => {
+      if (req.url === "/v1/projects/prj_bare") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "prj_bare" }));
+        return;
+      }
+      if (req.url === "/v1/projects/prj_bare/targets/tgt_bare") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "tgt_bare" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not_found" }));
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const addr = server.address();
+    const apiUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : addr}`;
+
+    try {
+      await writeFile(join(dir, "plan-a.load.ts"), "// placeholder\n");
+      // NOTE: "missing.yaml" is never created — the pre-fix bug treated
+      // ANY "not found" as benign (baseline redaction), even for an
+      // EXPLICITLY requested (but missing/typo'd) --config path.
+      const { code, stdout, stderr } = await runCli(
+        [
+          "load", "plan-a.load.ts", "--config", "missing.yaml", "--upload",
+          "--project", "prj_bare", "--upload-target", "tgt_bare",
+          "--token", "faketoken", "--api-url", apiUrl,
+        ],
+        { cwd: dir },
+      );
+      const out = stripAnsi(stdout + stderr);
+      expect(code).not.toBe(0);
+      expect(out).toContain("could not load glubean.yaml redaction config");
+      expect(out).toContain("not found");
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    }
+  }, 30_000);
 });

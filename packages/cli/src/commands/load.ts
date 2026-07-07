@@ -488,7 +488,12 @@ async function resolveLoadUploadContext(
   // is fatal for upload — load artifacts (samples / failure traces) can carry
   // secrets only the project's custom `defaults.redaction` rules cover, so we must
   // never silently fall back to weaker baseline-only redaction. Absent glubean.yaml
-  // → baseline is correct (no custom rules declared).
+  // → baseline is correct (no custom rules declared) — but ONLY when no config
+  // path was ever explicitly requested. A caller-supplied `options.configPath`
+  // (GLU-244: bare `--config <path>` or the path a `--profile` resolution
+  // already loaded) that turns out missing is a real error (typo'd/deleted
+  // file) — codex GLU-244 R5 P2: silently falling back to baseline for an
+  // EXPLICIT-but-missing config is a fail-OPEN upload, not fail-closed.
   let redaction = resolveRedactionConfig();
   try {
     // GLU-244: reuse the EXACT config path a `--profile` resolution already
@@ -502,7 +507,11 @@ async function resolveLoadUploadContext(
     redaction = resolveRedactionConfig(config.defaults?.redaction);
   } catch (err) {
     if (!(err instanceof GlubeanConfigError)) throw err;
-    if (!/not found/i.test(err.message)) {
+    // "not found" is only a benign fallback-to-baseline case for the
+    // DEFAULT path (no glubean.yaml at all is a valid, config-less project).
+    // An EXPLICIT `--config` path that doesn't exist is always fatal.
+    const isDefaultPathNotFound = !options.configPath && /not found/i.test(err.message);
+    if (!isDefaultPathNotFound) {
       console.error(
         `${colors.red}Upload failed: could not load glubean.yaml redaction config (${err.message.split("\n")[0]}).${colors.reset}`,
       );
