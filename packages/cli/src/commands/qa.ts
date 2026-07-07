@@ -267,13 +267,13 @@ async function record(opts: {
  * Belt-and-suspenders scrub of literal secret VALUES from an already
  * redacted + serialized QA report (defense-in-depth after `redactValue`, for
  * opaque-shaped secrets the pattern rules miss — e.g. `?token=<random>` with
- * no recognizable shape). Only env vars whose NAME matches the redaction
- * pipeline's credential-key heuristic (`CREDENTIAL_KEYS`, case-insensitive
- * substring) are scrubbed, so attributable non-secrets survive — the resolved
- * `executor.model` when it came from GLUBEAN_QA_MODEL, and BASE_URL evidence
- * (codex GLU-212 R8 P2; a blanket all-env scrub erased both). The `length >= 6`
- * guard avoids masking short values that collide with ordinary report text.
- * Exported for unit testing.
+ * no recognizable shape). An env value is treated as secret-bearing when
+ * EITHER signal fires (see `isSecretEnvValue`): a credential-shaped var NAME,
+ * or a value that embeds credentials (a URL with userinfo). Attributable
+ * non-secrets survive — the resolved `executor.model` from GLUBEAN_QA_MODEL,
+ * and BASE_URL evidence — because neither signal matches them. The
+ * `length >= 6` guard avoids masking short values that collide with ordinary
+ * report text. Exported for unit testing.
  */
 export function scrubEnvSecrets(
   json: string,
@@ -282,11 +282,38 @@ export function scrubEnvSecrets(
   let out = json;
   for (const [key, v] of Object.entries(env)) {
     if (typeof v !== "string" || v.length < 6 || !out.includes(v)) continue;
-    const lower = key.toLowerCase();
-    if (!CREDENTIAL_KEYS.some((k) => lower.includes(k))) continue;
+    if (!isSecretEnvValue(key, v)) continue;
     out = out.split(v).join("«redacted-secret»");
   }
   return out;
+}
+
+// A URL/URI carrying userinfo credentials: `scheme://user:pass@host`. Negated,
+// bounded character classes (no overlapping quantifiers) keep this linear —
+// no catastrophic backtracking. Matches DATABASE_URL-style connection strings
+// (`postgres://user:opaque-pass@host/db`); a plain `https://app.example.com`
+// has no `:pass@` and does not match.
+const URL_USERINFO_CREDENTIAL = /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i;
+
+/**
+ * Whether an env var's value should be scrubbed from a QA report. Two precise
+ * signals, deliberately narrow so benign config (BASE_URL, a model id) is
+ * never erased (codex GLU-212 R8) while real secrets outside the credential-key
+ * name list are still caught (codex GLU-212 R9):
+ *   1. NAME is credential-shaped — matches the redaction pipeline's own
+ *      `CREDENTIAL_KEYS` heuristic (PASSWORD / TOKEN / SECRET / API_KEY / ...).
+ *   2. VALUE embeds credentials — a URL with userinfo (e.g. DATABASE_URL), a
+ *      secret regardless of the var's name.
+ * High-entropy/opaque values are intentionally NOT treated as secret here: the
+ * `redactValue` pattern pass (bearer / jwt / hex / aws / github-token plugins)
+ * owns that, and an entropy heuristic would re-introduce the R8 over-redaction
+ * (a build SHA / benign opaque id would be masked).
+ */
+function isSecretEnvValue(key: string, value: string): boolean {
+  const lower = key.toLowerCase();
+  if (CREDENTIAL_KEYS.some((k) => lower.includes(k))) return true;
+  if (URL_USERINFO_CREDENTIAL.test(value)) return true;
+  return false;
 }
 
 function safeUrl(page: { url(): string } | undefined): string {

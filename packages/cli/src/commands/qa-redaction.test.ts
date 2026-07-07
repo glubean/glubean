@@ -34,6 +34,26 @@ describe("scrubEnvSecrets", () => {
     expect(out).toContain(baseUrl);
   });
 
+  test("scrubs a credential-BEARING URL even when the key is not credential-named", () => {
+    // codex GLU-212 R9 P1: DATABASE_URL embeds a password in its userinfo. The
+    // key name has no credential keyword, but the value is a secret and the
+    // pattern pass won't reliably parse arbitrary credentialed URLs.
+    const dbUrl = "postgres://svc_user:opaque-pass-42@db.internal:5432/app";
+    const json = JSON.stringify({ consoleError: `connect failed: ${dbUrl}` });
+    const out = scrubEnvSecrets(json, { DATABASE_URL: dbUrl });
+    expect(out).not.toContain(dbUrl);
+    expect(out).not.toContain("opaque-pass-42");
+    expect(out).toContain("«redacted-secret»");
+  });
+
+  test("preserves a plain (userinfo-free) URL under a non-credential key", () => {
+    // AMQP/redis-style connection string WITHOUT embedded creds must survive —
+    // the userinfo signal is what distinguishes it from DATABASE_URL above.
+    const plain = "https://api.example.com/v1/health?region=us-east-1";
+    const out = scrubEnvSecrets(JSON.stringify({ url: plain }), { SERVICE_URL: plain });
+    expect(out).toContain(plain);
+  });
+
   test("common credential key aliases all match (substring, case-insensitive)", () => {
     for (const key of [
       "MY_PASSWORD",
