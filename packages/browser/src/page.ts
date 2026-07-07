@@ -427,6 +427,16 @@ export class GlubeanBrowser {
     }
   }
 
+  /**
+   * True iff this client LAUNCHES its own Chrome (`browser({ launch: true })`)
+   * rather than connecting to an existing one (`browser({ endpoint })`). A caller
+   * that may terminate the browser (e.g. `glubean qa open`) should refuse a
+   * non-launch client, whose Chrome is owned by the user/CI.
+   */
+  get isLaunched(): boolean {
+    return "launch" in this._options && this._options.launch === true;
+  }
+
   /** Disconnect from the browser without closing it. Useful for remote Chrome. */
   async disconnect(): Promise<void> {
     const browser = await this._getBrowser();

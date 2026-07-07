@@ -125,47 +125,82 @@ function makeCollector() {
 async function loadBrowserCase(
   file: string,
   caseKey: string,
+  contractId?: string,
 ): Promise<{ contractId: string; caseSpec: BrowserContractCase; client?: GlubeanBrowser; revision: string }> {
   const abs = resolve(file);
   await bootstrap(dirname(abs)); // installs the browser plugin via glubean.setup.ts
   const mod = (await import(pathToFileURL(abs).href)) as Record<string, unknown>;
-  for (const value of Object.values(mod)) {
-    const pc = value as {
-      _spec?: { cases?: Record<string, unknown>; client?: GlubeanBrowser };
-      _extracted?: { id?: string; protocol?: string; cases?: Array<{ key: string; schemas?: unknown }> };
-    };
-    if (pc?._extracted?.protocol === "browser" && pc._spec?.cases?.[caseKey]) {
-      const caseSpec = pc._spec.cases[caseKey] as BrowserContractCase;
-      const projCase = pc._extracted.cases?.find((c) => c.key === caseKey);
-      // contractRevision = the SEMANTIC subset only (entry + agentNotes + step
-      // ids/intents + expects). Action coverage (`hasActions`) is an
-      // implementation detail and must NOT churn the diff sequence.
-      const s = (projCase?.schemas ?? {}) as {
-        entry?: unknown;
-        agentNotes?: unknown;
-        intents?: unknown;
-        expects?: unknown;
-      };
-      const revision = createHash("sha256")
-        .update(
-          JSON.stringify({
-            id: pc._extracted.id,
-            case: caseKey,
-            entry: s.entry ?? null,
-            agentNotes: s.agentNotes ?? null,
-            intents: s.intents ?? null,
-            expects: s.expects ?? null,
-          }),
-        )
-        .digest("hex")
-        .slice(0, 12);
-      // Mode A resolves the client case > spec — mirror that so a per-case
-      // client override is honored.
-      const client = caseSpec.client ?? pc._spec.client;
-      return { contractId: pc._extracted.id ?? "unknown", caseSpec, client, revision };
+  type PC = {
+    _spec?: { cases?: Record<string, unknown>; client?: GlubeanBrowser };
+    _extracted?: { id?: string; protocol?: string; cases?: Array<{ key: string; schemas?: unknown }> };
+  };
+  // Collect ALL browser contracts carrying the case key — do not silently pick
+  // the first (codex R5: a `.browser.ts` may export several contracts reusing a
+  // generic case key like `happyPath`).
+  const matches = (Object.values(mod) as PC[]).filter(
+    (pc) => pc?._extracted?.protocol === "browser" && !!pc._spec?.cases?.[caseKey],
+  );
+  const scoped = contractId ? matches.filter((pc) => pc._extracted?.id === contractId) : matches;
+  if (scoped.length === 0) {
+    const ids = matches.map((pc) => pc._extracted?.id).join(", ");
+    throw new Error(
+      contractId
+        ? `qa: no browser contract "${contractId}" in ${file} carries case "${caseKey}" (found: ${ids || "none"}).`
+        : `qa: no browser contract in ${file} carries case "${caseKey}".`,
+    );
+  }
+  if (scoped.length > 1) {
+    const ids = scoped.map((pc) => pc._extracted?.id).join(", ");
+    throw new Error(
+      `qa: case "${caseKey}" is ambiguous across ${scoped.length} contracts in ${file} (${ids}). Pass --contract <id>.`,
+    );
+  }
+  const pc = scoped[0];
+  const caseSpec = pc._spec!.cases![caseKey] as BrowserContractCase;
+  const projCase = pc._extracted!.cases?.find((c) => c.key === caseKey);
+  // contractRevision = the SEMANTIC subset only (entry + agentNotes + step
+  // ids/intents + expects). Action coverage (`hasActions`) must NOT churn it.
+  const s = (projCase?.schemas ?? {}) as {
+    entry?: unknown;
+    agentNotes?: unknown;
+    intents?: unknown;
+    expects?: unknown;
+  };
+  const revision = createHash("sha256")
+    .update(
+      JSON.stringify({
+        id: pc._extracted!.id,
+        case: caseKey,
+        entry: s.entry ?? null,
+        agentNotes: s.agentNotes ?? null,
+        intents: s.intents ?? null,
+        expects: s.expects ?? null,
+      }),
+    )
+    .digest("hex")
+    .slice(0, 12);
+  // Mode A resolves the client case > spec.
+  const client = caseSpec.client ?? pc._spec!.client;
+  return { contractId: pc._extracted!.id ?? "unknown", caseSpec, client, revision };
+}
+
+/** Wait until the trace buffer stops growing (bounded) before sealing. */
+async function settleTraces(network: unknown[]): Promise<void> {
+  const POLL = 50;
+  const STABLE = 500;
+  const MAX = 3000;
+  let waited = 0;
+  let last = network.length;
+  let stable = 0;
+  while (waited < MAX && stable < STABLE) {
+    await new Promise((r) => setTimeout(r, POLL));
+    waited += POLL;
+    if (network.length === last) stable += POLL;
+    else {
+      last = network.length;
+      stable = 0;
     }
   }
-  throw new Error(`qa: no browser contract in ${file} carries case "${caseKey}".`);
 }
 
 function writeSession(s: QaSession): void {
@@ -187,9 +222,12 @@ async function record(opts: {
 }): Promise<void> {
   await new Promise<void>((resolveWait) => {
     let sealed = false;
-    const seal = () => {
+    const seal = async () => {
       if (sealed) return;
       sealed = true;
+      // The tracer emits a trace only after an async CDP getResponseBody — wait
+      // for the buffer to stop growing so the final request isn't missed (codex R5).
+      await settleTraces(opts.collector.network);
       const evidence: BrowserEvidence = {
         network: [...opts.collector.network],
         consoleErrors: [...opts.collector.consoleErrors],
@@ -225,11 +263,17 @@ function safeUrl(page: { url(): string } | undefined): string {
   }
 }
 
-export async function qaOpenCommand(opts: { file: string; case: string; report?: string; model?: string }): Promise<void> {
+export async function qaOpenCommand(opts: { file: string; case: string; report?: string; model?: string; contract?: string }): Promise<void> {
   const model = resolveModel(opts.model);
   await runWithRuntime(buildRuntime(), async () => {
-    const { contractId, caseSpec, client, revision } = await loadBrowserCase(opts.file, opts.case);
+    const { contractId, caseSpec, client, revision } = await loadBrowserCase(opts.file, opts.case, opts.contract);
     if (!client) throw new Error("qa open: the contract has no browser client to launch.");
+    if (!client.isLaunched) {
+      throw new Error(
+        "qa open: the contract's client is endpoint-backed (browser({ endpoint })), whose Chrome is owned by " +
+          "the user/CI — `open` would close it on stop. Use `glubean qa attach --endpoint <ws>` instead.",
+      );
+    }
     const reportPath = opts.report ?? `.glubean/qa/${opts.case}.report.json`;
     const collector = makeCollector();
     // `open` launches the browser and creates the recorded tab — the agent
@@ -259,10 +303,11 @@ export async function qaAttachCommand(opts: {
   case: string;
   report?: string;
   model?: string;
+  contract?: string;
 }): Promise<void> {
   const model = resolveModel(opts.model);
   await runWithRuntime(buildRuntime(), async () => {
-    const { contractId, caseSpec, revision } = await loadBrowserCase(opts.file, opts.case);
+    const { contractId, caseSpec, revision } = await loadBrowserCase(opts.file, opts.case, opts.contract);
     const reportPath = opts.report ?? `.glubean/qa/${opts.case}.report.json`;
     const collector = makeCollector();
     // Connect to the agent's OWN running browser and instrument the SINGLE
@@ -310,7 +355,9 @@ function isLiveRecorder(pid: number): boolean {
   }
   try {
     const cmd = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-    return /glubean|node|qa/i.test(cmd);
+    // Require a glubean qa recorder command line — NOT just any `node` process
+    // (a pid-reused unrelated node must not match, codex R5).
+    return /glubean/i.test(cmd) && /\bqa\b/i.test(cmd);
   } catch {
     // ps unavailable (non-POSIX): fall back to the existence check above.
     return true;
