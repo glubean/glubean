@@ -17,19 +17,20 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bootstrap } from "@glubean/runner";
 import { runWithRuntime } from "@glubean/sdk/internal";
 import {
   connectChrome,
-  GlubeanBrowser,
+  GlubeanPage,
   sealQaReport,
   type AgentQaReport,
   type BrowserContractCase,
   type BrowserEvidence,
   type BrowserTraceRecord,
+  type GlubeanBrowser,
   type InstrumentedPage,
 } from "@glubean/browser";
 
@@ -119,7 +120,10 @@ async function loadBrowserCase(
         .update(JSON.stringify({ id: pc._extracted.id, case: caseKey, schemas: projCase?.schemas ?? null }))
         .digest("hex")
         .slice(0, 12);
-      return { contractId: pc._extracted.id ?? "unknown", caseSpec, client: pc._spec.client, revision };
+      // Mode A resolves the client case > spec — mirror that so a per-case
+      // client override is honored.
+      const client = caseSpec.client ?? pc._spec.client;
+      return { contractId: pc._extracted.id ?? "unknown", caseSpec, client, revision };
     }
   }
   throw new Error(`qa: no browser contract in ${file} carries case "${caseKey}".`);
@@ -130,22 +134,26 @@ function writeSession(s: QaSession): void {
   writeFileSync(SESSION_FILE, JSON.stringify(s, null, 2));
 }
 
-/** Record a single page until a stop signal, then seal an agent-qa-report/v1. */
+/** Record until a stop signal, then seal an agent-qa-report/v1 + clean up. */
 async function record(opts: {
-  page: InstrumentedPage;
   contractId: string;
   caseKey: string;
   caseSpec: BrowserContractCase;
   revision: string;
   reportPath: string;
   collector: ReturnType<typeof makeCollector>;
+  getFinalUrl: () => string;
+  cleanup: () => Promise<void>;
 }): Promise<void> {
   await new Promise<void>((resolveWait) => {
+    let sealed = false;
     const seal = () => {
+      if (sealed) return;
+      sealed = true;
       const evidence: BrowserEvidence = {
         network: [...opts.collector.network],
         consoleErrors: [...opts.collector.consoleErrors],
-        finalUrl: safeUrl(opts.page),
+        finalUrl: opts.getFinalUrl(),
       };
       const report: AgentQaReport = sealQaReport({
         contractId: opts.contractId,
@@ -159,16 +167,19 @@ async function record(opts: {
       writeFileSync(opts.reportPath, JSON.stringify(report, null, 2));
       // eslint-disable-next-line no-console
       console.log(`\nqa: sealed report → ${opts.reportPath} (${evidence.network.length} calls recorded)`);
-      resolveWait();
+      void opts.cleanup().catch(() => undefined).finally(() => {
+        if (existsSync(SESSION_FILE)) rmSync(SESSION_FILE, { force: true });
+        resolveWait();
+      });
     };
     process.once("SIGTERM", seal);
     process.once("SIGINT", seal);
   });
 }
 
-function safeUrl(page: InstrumentedPage): string {
+function safeUrl(page: { url(): string } | undefined): string {
   try {
-    return page.url();
+    return page?.url() ?? "";
   } catch {
     return "";
   }
@@ -180,12 +191,23 @@ export async function qaOpenCommand(opts: { file: string; case: string; report?:
     if (!client) throw new Error("qa open: the contract has no browser client to launch.");
     const reportPath = opts.report ?? `.glubean/qa/${opts.case}.report.json`;
     const collector = makeCollector();
+    // `open` launches the browser and creates the recorded tab — the agent
+    // connects to `wsEndpoint` and drives THIS tab.
     const page = await client.newPage(collector.ctx);
     const wsEndpoint = await client.wsEndpoint();
     writeSession({ pid: process.pid, wsEndpoint, file: opts.file, caseKey: opts.case, reportPath, startedAt: new Date().toISOString() });
     // eslint-disable-next-line no-console
     console.log(`qa: recording. Drive this browser, then run \`glubean qa stop\`.\n  cdp: ${wsEndpoint}\n  case: ${contractId}#${opts.case}`);
-    await record({ page, contractId, caseKey: opts.case, caseSpec, revision, reportPath, collector });
+    await record({
+      contractId,
+      caseKey: opts.case,
+      caseSpec,
+      revision,
+      reportPath,
+      collector,
+      getFinalUrl: () => safeUrl(page),
+      cleanup: () => client.close(),
+    });
   });
 }
 
@@ -199,15 +221,45 @@ export async function qaAttachCommand(opts: {
     const { contractId, caseSpec, revision } = await loadBrowserCase(opts.file, opts.case);
     const reportPath = opts.report ?? `.glubean/qa/${opts.case}.report.json`;
     const collector = makeCollector();
-    // Connect to the agent's own running browser (CDP) and wrap it so newPage
-    // gives an instrumented, recorded page.
+    // Connect to the agent's OWN running browser and instrument the tabs it is
+    // already driving (plus any it opens later) — do NOT create a fresh tab, or
+    // the agent's journey traffic is missed.
     const raw = await connectChrome(opts.endpoint);
-    const client = new GlubeanBrowser(async () => raw, undefined, { endpoint: "attached" } as never);
-    const page = await client.newPage(collector.ctx);
+    const options = { endpoint: "attached", consoleForward: true, networkTrace: true } as never;
+    const instrumented: InstrumentedPage[] = [];
+    const instrument = async (rp: { url(): string } & Parameters<typeof GlubeanPage._create>[0]) => {
+      if (rp.url().startsWith("devtools://")) return;
+      instrumented.push(await GlubeanPage._create(rp, undefined, collector.ctx, options));
+    };
+    for (const rp of await raw.pages()) await instrument(rp as never);
+    raw.on("targetcreated", (t: { page(): Promise<unknown> }) => {
+      void t
+        .page()
+        .then((p) => (p ? instrument(p as never) : undefined))
+        .catch(() => undefined);
+    });
     writeSession({ pid: process.pid, wsEndpoint: opts.endpoint, file: opts.file, caseKey: opts.case, reportPath, startedAt: new Date().toISOString() });
     // eslint-disable-next-line no-console
-    console.log(`qa: attached + recording ${contractId}#${opts.case}. Run \`glubean qa stop\` when done.`);
-    await record({ page, contractId, caseKey: opts.case, caseSpec, revision, reportPath, collector });
+    console.log(`qa: attached + recording ${instrumented.length} tab(s) for ${contractId}#${opts.case}. Run \`glubean qa stop\` when done.`);
+    await record({
+      contractId,
+      caseKey: opts.case,
+      caseSpec,
+      revision,
+      reportPath,
+      collector,
+      // Final URL = the last non-blank tab the agent had open.
+      getFinalUrl: () => {
+        const active = [...instrumented].reverse().find((p) => {
+          const u = safeUrl(p);
+          return u && u !== "about:blank";
+        });
+        return safeUrl(active ?? instrumented[instrumented.length - 1]);
+      },
+      cleanup: async () => {
+        raw.disconnect();
+      },
+    });
   });
 }
 

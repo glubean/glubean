@@ -137,7 +137,12 @@ export function sealQaReport(input: SealQaRunInput): AgentQaReport {
   const runtime = judgeRecordedExpects(input.caseSpec, input.evidence);
   const byId = new Map<string, QaExpectAnswer>(runtime.map((a) => [a.id, a]));
   for (const a of input.agentAnswers ?? []) {
-    // Agent answers override — but only for ids it actually addressed.
+    // Agent answers may ONLY fill in what the runtime judge left to the agent
+    // (dom / anything `judgedBy: "agent"`). A runtime-judged machine-checkable
+    // verdict (url / calls / console) is authoritative — an agent answer must
+    // never flip a failed expect.calls / url / console into a pass.
+    const existing = byId.get(a.id);
+    if (existing && existing.judgedBy === "runtime") continue;
     byId.set(a.id, { ...a, judgedBy: "agent" });
   }
   // Preserve spec order.

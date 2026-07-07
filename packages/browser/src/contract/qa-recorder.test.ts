@@ -82,6 +82,26 @@ describe("sealQaReport", () => {
     expect(() => JSON.stringify(report)).not.toThrow();
   });
 
+  test("agent answers CANNOT override a runtime-judged url/calls/console verdict (codex R1)", () => {
+    // A failing calls verdict (no POST observed) must NOT be flippable to pass
+    // by an agent answer — machine-checkable expects stay runtime-authoritative.
+    const report = sealQaReport({
+      contractId: "c",
+      caseKey: "happyPath",
+      caseSpec,
+      contractRevision: "rev",
+      evidence: { finalUrl: "https://app.staging.glubean.com/login", network: [], consoleErrors: [] },
+      executor: { kind: "agent", model: "m" },
+      agentAnswers: [
+        { id: "calls-signin", verdict: "pass", evidence: "agent claims it happened", judgedBy: "agent" },
+        { id: "url-dashboard", verdict: "pass", evidence: "agent claims dashboard", judgedBy: "agent" },
+      ],
+    });
+    // Runtime judged these FAIL (no POST, still on /login) — agent can't flip them.
+    expect(report.expect.find((e) => e.id === "calls-signin")).toMatchObject({ verdict: "fail", judgedBy: "runtime" });
+    expect(report.expect.find((e) => e.id === "url-dashboard")).toMatchObject({ verdict: "fail", judgedBy: "runtime" });
+  });
+
   test("agent answers override the recorder's unverified dom verdict", () => {
     const report = sealQaReport({
       contractId: "c",
