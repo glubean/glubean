@@ -1526,7 +1526,13 @@ export function resolveRunPlan(
       builtin.reporters.truncateArrays,
   };
 
-  const envFile = cliOverrides.envFile ?? defaults.envFile ?? builtin.envFile;
+  // `profile.envFile` (GLU-244 — declared on every profile, not just
+  // load-only ones) slots in between defaults and CLI, same precedence spot
+  // as every other per-profile field above. Without this, a profile could
+  // declare `envFile` (schema-valid) and `run --profile <name>` would
+  // silently ignore it (codex GLU-244 R1 P2).
+  const envFile =
+    cliOverrides.envFile ?? profile.envFile ?? defaults.envFile ?? builtin.envFile;
   const redaction = resolveRedactionConfig(defaults.redaction);
 
   // ── Thresholds ─────────────────────────────────────────────────────────

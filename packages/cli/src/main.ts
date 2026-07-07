@@ -854,11 +854,13 @@ async function executeLoad(
   const profileConfigPath = configFiles && configFiles.length > 0 ? configFiles[0] : undefined;
 
   let resolvedLoadPlan;
+  let resolvedConfigPath: string;
   try {
     const { config, configPath } = await loadProjectConfigV1(
       process.cwd(),
       profileConfigPath ? { configPath: profileConfigPath } : {},
     );
+    resolvedConfigPath = configPath;
     const cliOverrides: CliLoadProfileOverrides = {
       plan: options.plan,
       envFile: options.envFile,
@@ -878,6 +880,15 @@ async function executeLoad(
   // still apply.
   const loadTargets = target ? [target] : resolvedLoadPlan.plans.map((p) => p.target);
 
+  // Upload TARGET (runs live under a target — ADR 0007): CLI --upload-target
+  // wins; otherwise inherit the profile's upload.targetId ONLY when --project
+  // didn't override the destination project (mirrors executeRun's identical
+  // guard) — a profile target belongs to the profile's project, so pairing it
+  // with an overridden --project would post to the WRONG project's target.
+  const effectiveUploadTarget =
+    (options.uploadTarget as string | undefined) ??
+    (options.project ? undefined : resolvedLoadPlan.upload?.targetId);
+
   await loadCommand(loadTargets, {
     // Only forward the profile's envFile when it's NOT the builtin default —
     // when nothing overrode it, pass `undefined` so loadCommand's own
@@ -888,13 +899,23 @@ async function executeLoad(
       (resolvedLoadPlan.envFile !== RESOLVED_PLAN_BUILTIN_DEFAULTS.envFile
         ? resolvedLoadPlan.envFile
         : undefined),
-    upload: options.upload,
+    // profile.upload.enabled auto-triggers upload without a CLI --upload
+    // flag — same as `run`'s `resolvedPlan?.upload?.enabled` fallback. CLI
+    // `--upload` still forces it on regardless of the profile's bit.
+    upload: options.upload ?? resolvedLoadPlan.upload?.enabled,
     uploadReceiptJson: options.uploadReceiptJson,
     project: options.project ?? resolvedLoadPlan.upload?.projectId,
-    target: options.uploadTarget ?? resolvedLoadPlan.upload?.targetId,
+    target: effectiveUploadTarget,
     token: options.token,
     apiUrl: options.apiUrl,
     tokenEnv: resolvedLoadPlan.upload?.tokenEnv,
+    // GLU-244 codex R1 P1: without this, --upload's redaction-config reload
+    // (resolveLoadUploadContext) would re-read the DEFAULT glubean.yaml path
+    // even when --config selected a different file for THIS profile
+    // resolution — silently using baseline redaction instead of the
+    // selected config's `defaults.redaction`. Pass the exact path already
+    // loaded above so the reload can't disagree with it.
+    configPath: resolvedConfigPath,
   });
 }
 

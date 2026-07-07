@@ -145,22 +145,43 @@ async function walkLoadFiles(dir: string, out: string[]): Promise<void> {
 }
 
 /**
+ * Thrown by `resolveManyLoadTargets` when ONE OR MORE of the given targets
+ * resolves to zero `.load.ts` files (GLU-244 codex R1 P1): with several
+ * targets (e.g. a `--profile` selection spanning multiple plans), a typo'd
+ * `load.plans.<name>.target` must not be silently swallowed just because a
+ * SIBLING target still resolves — that would let a misconfigured plan
+ * silently not run while the command still exits 0.
+ */
+export class LoadTargetResolutionError extends Error {
+  constructor(public readonly emptyTargets: string[]) {
+    super(`No .load.ts files found for ${emptyTargets.map((t) => `"${t}"`).join(", ")}.`);
+    this.name = "LoadTargetResolutionError";
+  }
+}
+
+/**
  * Resolve MULTIPLE file/directory/glob targets (e.g. each plan in a
  * `glubean load --profile <name>` selection, GLU-244) to one deduped file
  * list, preserving each target's own resolution order and dropping
  * duplicates a later target re-discovers (a plan target that overlaps an
- * earlier one shouldn't double-run it). Exported for unit testing.
+ * earlier one shouldn't double-run it). Throws `LoadTargetResolutionError`
+ * if ANY individual target resolves to zero files — every selected target
+ * must contribute at least one file. Exported for unit testing.
  */
 export async function resolveManyLoadTargets(targets: string[]): Promise<string[]> {
   const seen = new Set<string>();
   const out: string[] = [];
+  const empty: string[] = [];
   for (const target of targets) {
-    for (const file of await resolveLoadFiles(target)) {
+    const files = await resolveLoadFiles(target);
+    if (files.length === 0) empty.push(target);
+    for (const file of files) {
       if (seen.has(file)) continue;
       seen.add(file);
       out.push(file);
     }
   }
+  if (empty.length > 0) throw new LoadTargetResolutionError(empty);
   return out;
 }
 
@@ -302,6 +323,15 @@ export interface LoadCommandOptions {
    *  var (after an explicit `--token`) — mirrors `run`'s per-profile
    *  `upload.tokenEnv`. No silent fallback to GLUBEAN_TOKEN when set. */
   tokenEnv?: string;
+  /**
+   * Profile-driven (GLU-244): the EXACT glubean.yaml path already loaded to
+   * resolve the profile/plan (absolute, or relative to `rootDir`) — reused by
+   * `resolveLoadUploadContext`'s own config reload (redaction resolution) so
+   * a `--config <path>` override can't silently disagree between plan
+   * resolution and upload redaction. Omit to use the default
+   * `rootDir/glubean.yaml` path (bare `glubean load`, no --profile).
+   */
+  configPath?: string;
 }
 
 /**
@@ -461,7 +491,14 @@ async function resolveLoadUploadContext(
   // → baseline is correct (no custom rules declared).
   let redaction = resolveRedactionConfig();
   try {
-    const { config } = await loadProjectConfigV1(rootDir);
+    // GLU-244: reuse the EXACT config path a `--profile` resolution already
+    // loaded (when given) instead of always re-reading the default
+    // `rootDir/glubean.yaml` — otherwise a `--config <path>` override would
+    // resolve the plan from one file but redaction from another.
+    const { config } = await loadProjectConfigV1(
+      rootDir,
+      options.configPath ? { configPath: options.configPath } : {},
+    );
     redaction = resolveRedactionConfig(config.defaults?.redaction);
   } catch (err) {
     if (!(err instanceof GlubeanConfigError)) throw err;
@@ -577,13 +614,27 @@ export async function loadCommand(
   }
 
   const targets = target === undefined ? undefined : Array.isArray(target) ? target : [target];
-  const files = targets
-    ? await resolveManyLoadTargets(targets)
-    : await resolveLoadFiles(process.cwd());
+  let files: string[];
+  if (targets) {
+    try {
+      files = await resolveManyLoadTargets(targets);
+    } catch (err) {
+      if (err instanceof LoadTargetResolutionError) {
+        console.log(`${colors.yellow}${err.message}${colors.reset}`);
+        process.exit(1);
+      }
+      throw err;
+    }
+  } else {
+    files = await resolveLoadFiles(process.cwd());
+  }
+  // Defensive fallback only — every real caller supplies ≥1 target (a bare
+  // `glubean load` uses `process.cwd()`; `--profile` mode's target list is
+  // non-empty per `resolveLoadPlan`'s own guard), and `resolveManyLoadTargets`
+  // already throws above when a NON-EMPTY target list yields zero files.
   if (files.length === 0) {
-    const label = targets?.map((t) => `"${t}"`).join(", ");
     console.log(
-      `${colors.yellow}No .load.ts files found${label ? ` for ${label}` : ` in ${process.cwd()}`}.${colors.reset}`,
+      `${colors.yellow}No .load.ts files found in ${process.cwd()}.${colors.reset}`,
     );
     process.exit(1);
   }

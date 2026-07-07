@@ -8,6 +8,7 @@ import {
   printOutcome,
   writeLoadResults,
   resolveManyLoadTargets,
+  LoadTargetResolutionError,
   type LoadRunOutcome,
 } from "./load.js";
 
@@ -97,11 +98,31 @@ describe("resolveManyLoadTargets (GLU-244 — profile load.plans → multiple ta
     }
   });
 
-  it("returns [] when a target resolves to no .load.ts files", async () => {
+  it("throws LoadTargetResolutionError when a target resolves to no .load.ts files (GLU-244 codex R1 P1)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "glubean-load-many-empty-"));
     try {
-      const files = await resolveManyLoadTargets([join(dir, "does-not-exist.load.ts")]);
-      expect(files).toEqual([]);
+      const missing = join(dir, "does-not-exist.load.ts");
+      await expect(resolveManyLoadTargets([missing])).rejects.toThrow(LoadTargetResolutionError);
+      await expect(resolveManyLoadTargets([missing])).rejects.toThrow(
+        `No .load.ts files found for "${missing}".`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws naming ONLY the empty target(s) when one of several targets resolves to files and another doesn't (no silent partial success)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-load-many-partial-empty-"));
+    try {
+      await writeFile(join(dir, "a.load.ts"), "// a\n", "utf-8");
+      const missing = join(dir, "missing.load.ts");
+      const err = await resolveManyLoadTargets([join(dir, "a.load.ts"), missing]).catch(
+        (e) => e as LoadTargetResolutionError,
+      );
+      expect(err).toBeInstanceOf(LoadTargetResolutionError);
+      expect((err as LoadTargetResolutionError).emptyTargets).toEqual([missing]);
+      expect((err as Error).message).toContain(missing);
+      expect((err as Error).message).not.toContain("a.load.ts");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

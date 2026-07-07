@@ -115,6 +115,27 @@ describe("resolveRunPlan", () => {
       expect(plan.execution.concurrency).toBe(16);
       expect(plan.execution.failFast).toBe(false);
     });
+
+    it("profile.envFile (GLU-244) overrides config.defaults.envFile", () => {
+      const config = makeConfig({
+        defaults: { envFile: ".env.defaults" },
+        profiles: {
+          local: { suites: ["tests"], envFile: ".env.local" },
+        },
+      });
+      const plan = resolveRunPlan(config, "/p", "local");
+      expect(plan.envFile).toBe(".env.local");
+    });
+
+    it("CLI --env-file beats profile.envFile", () => {
+      const config = makeConfig({
+        profiles: {
+          local: { suites: ["tests"], envFile: ".env.local" },
+        },
+      });
+      const plan = resolveRunPlan(config, "/p", "local", { envFile: ".env.cli" });
+      expect(plan.envFile).toBe(".env.cli");
+    });
   });
 
   describe("arrays REPLACE per layer (not concat)", () => {
