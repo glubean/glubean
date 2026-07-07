@@ -46,6 +46,26 @@ describe("scrubEnvSecrets", () => {
     expect(out).toContain("«redacted-secret»");
   });
 
+  test("scrubs a password-only DSN (empty username in userinfo)", () => {
+    // codex GLU-212 R10 P1: REDIS_URL=redis://:pass@host has no username before
+    // the colon; the userinfo signal must still fire on the password.
+    const redisUrl = "redis://:opaque-pass-77@cache.internal:6379/0";
+    const json = JSON.stringify({ networkErr: `ECONNREFUSED ${redisUrl}` });
+    const out = scrubEnvSecrets(json, { REDIS_URL: redisUrl });
+    expect(out).not.toContain(redisUrl);
+    expect(out).not.toContain("opaque-pass-77");
+    expect(out).toContain("«redacted-secret»");
+  });
+
+  test("token-as-username URL (no password) is left to the pattern pipeline", () => {
+    // `https://tok@host` has userinfo but no `:pass@`; scrubEnvSecrets does not
+    // fire (avoids masking a benign `https://user@host`), and the redactValue
+    // token plugins own recognizable tokens. Documents the intentional edge.
+    const url = "https://plainuser@example.com/path";
+    const out = scrubEnvSecrets(JSON.stringify({ url }), { SERVICE_URL: url });
+    expect(out).toContain(url);
+  });
+
   test("preserves a plain (userinfo-free) URL under a non-credential key", () => {
     // AMQP/redis-style connection string WITHOUT embedded creds must survive —
     // the userinfo signal is what distinguishes it from DATABASE_URL above.

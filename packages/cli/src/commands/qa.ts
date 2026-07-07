@@ -288,12 +288,15 @@ export function scrubEnvSecrets(
   return out;
 }
 
-// A URL/URI carrying userinfo credentials: `scheme://user:pass@host`. Negated,
-// bounded character classes (no overlapping quantifiers) keep this linear —
-// no catastrophic backtracking. Matches DATABASE_URL-style connection strings
-// (`postgres://user:opaque-pass@host/db`); a plain `https://app.example.com`
-// has no `:pass@` and does not match.
-const URL_USERINFO_CREDENTIAL = /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i;
+// A URL/URI carrying a userinfo PASSWORD: `scheme://[user]:pass@host`. The
+// username segment is optional (`*`, not `+`) so password-only DSNs like
+// `redis://:pass@host` match too (codex GLU-212 R10). This generalizes to every
+// password-in-userinfo DSN — postgres / mysql / mongodb / redis / amqp / ... —
+// so it is one bounded rule, not a per-scheme list. A `:pass@` is required, so
+// a plain `https://app.example.com` (no password) and a token-as-username
+// `https://tok@host` (no colon — left to the pattern pipeline's token plugins)
+// do NOT match. Negated, bounded classes keep it linear (no ReDoS).
+const URL_USERINFO_CREDENTIAL = /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:[^/\s@]+@/i;
 
 /**
  * Whether an env var's value should be scrubbed from a QA report. Two precise
