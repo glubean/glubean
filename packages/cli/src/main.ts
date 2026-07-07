@@ -10,6 +10,7 @@ const _cwd = process.env["GLUBEAN_CWD"];
 if (_cwd) process.chdir(_cwd);
 
 import { Command, Option } from "commander";
+import { resolve as resolvePath } from "node:path";
 import { CLI_VERSION } from "./version.js";
 import {
   loadProjectConfigV1,
@@ -832,8 +833,27 @@ async function executeLoad(
     process.exit(1);
   }
 
+  // `--config` is resolved to an ABSOLUTE path once, up front, regardless of
+  // profile mode — codex GLU-244 R4 P2: bare `glubean load --config <path>
+  // --upload` (no --profile) used to silently drop the flag, so
+  // `resolveLoadUploadContext`'s redaction reload would read the DEFAULT
+  // `rootDir/glubean.yaml` instead of the one the user selected. Resolving
+  // against `process.cwd()` here (not `rootDir`, which for load is derived
+  // from the DISCOVERED FILE's directory and may differ from cwd) matches
+  // how `--config` is already interpreted in profile mode below.
+  const configFiles = options.config && options.config.length > 0
+    ? (options.config as string[]).flatMap((v: string) =>
+        v.split(",").map((s: string) => s.trim()).filter(Boolean),
+      )
+    : undefined;
+  const explicitConfigPath = configFiles && configFiles.length > 0
+    ? resolvePath(process.cwd(), configFiles[0])
+    : undefined;
+
   if (!options.profile) {
-    // Unchanged pre-GLU-244 behavior: bare `glubean load [target]`.
+    // Unchanged pre-GLU-244 behavior: bare `glubean load [target]` — plus
+    // `--config` now threading through to the upload redaction reload (see
+    // note above).
     await loadCommand(target, {
       envFile: options.envFile,
       upload: options.upload,
@@ -842,24 +862,18 @@ async function executeLoad(
       target: options.uploadTarget,
       token: options.token,
       apiUrl: options.apiUrl,
+      configPath: explicitConfigPath,
     });
     return;
   }
 
   // ── Profile mode (GLU-244) ──────────────────────────────────────────────
-  const configFiles = options.config && options.config.length > 0
-    ? (options.config as string[]).flatMap((v: string) =>
-        v.split(",").map((s: string) => s.trim()).filter(Boolean),
-      )
-    : undefined;
-  const profileConfigPath = configFiles && configFiles.length > 0 ? configFiles[0] : undefined;
-
   let resolvedLoadPlan;
   let resolvedConfigPath: string;
   try {
     const { config, configPath } = await loadProjectConfigV1(
       process.cwd(),
-      profileConfigPath ? { configPath: profileConfigPath } : {},
+      explicitConfigPath ? { configPath: explicitConfigPath } : {},
     );
     resolvedConfigPath = configPath;
     const cliOverrides: CliLoadProfileOverrides = {

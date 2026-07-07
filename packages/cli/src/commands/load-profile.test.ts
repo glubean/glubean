@@ -327,3 +327,63 @@ profiles:
     }
   }, 30_000);
 });
+
+describe("glubean load (bare, no --profile) — --config threads through to upload redaction (codex GLU-244 R4 P2)", () => {
+  test("--config <path> is NOT silently ignored on a bare `glubean load --upload` (no --profile)", async () => {
+    const server: Server = createServer((req, res) => {
+      if (req.url === "/v1/projects/prj_bare") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "prj_bare" }));
+        return;
+      }
+      if (req.url === "/v1/projects/prj_bare/targets/tgt_bare") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "tgt_bare" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not_found" }));
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const addr = server.address();
+    const apiUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : addr}`;
+
+    try {
+      await writeFile(join(dir, "plan-a.load.ts"), "// placeholder\n");
+      // Deliberately INVALID redaction block, at a NON-default config path.
+      // NOTE: no glubean.yaml at the default path at all — if `--config`
+      // were silently dropped (the pre-fix bug), the reload of the (missing)
+      // default path would hit the "not found" branch, which is treated as
+      // OK (baseline redaction) — masking the bug entirely. With the fix,
+      // alt.yaml IS loaded and its invalid `replacementFormat` surfaces as a
+      // fatal config error instead.
+      await writeFile(
+        join(dir, "alt.yaml"),
+        `version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles: {}
+defaults:
+  redaction:
+    replacementFormat: bogus
+`,
+        "utf-8",
+      );
+
+      const { code, stdout, stderr } = await runCli(
+        [
+          "load", "plan-a.load.ts", "--config", "alt.yaml", "--upload",
+          "--project", "prj_bare", "--upload-target", "tgt_bare",
+          "--token", "faketoken", "--api-url", apiUrl,
+        ],
+        { cwd: dir },
+      );
+      const out = stripAnsi(stdout + stderr);
+      expect(code).not.toBe(0);
+      expect(out).toContain("could not load glubean.yaml redaction config");
+      expect(out).toContain("replacementFormat");
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    }
+  }, 30_000);
+});

@@ -35,6 +35,7 @@ function makePlan(over: Partial<ResolvedRunPlan> = {}): ResolvedRunPlan {
       truncateArrays: false,
     },
     envFile: ".env",
+    envFileExplicit: false,
     redaction: { ...structuredClone(DEFAULT_CONFIG), replacementFormat: "simple" },
     thresholds: {},
     ...over,
