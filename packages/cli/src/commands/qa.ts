@@ -22,6 +22,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bootstrap } from "@glubean/runner";
+import { DEFAULT_GLOBAL_RULES, redactValue } from "@glubean/redaction";
 import { runWithRuntime } from "@glubean/sdk/internal";
 import {
   connectChrome,
@@ -241,8 +242,19 @@ async function record(opts: {
         evidence,
         executor: { kind: "agent", model: opts.model, finishedAt: new Date().toISOString() },
       });
+      // SECRET RED LINE (codex R7): a recorded final URL / console message can
+      // carry a token/password — the report must pass the redaction pipeline
+      // before touching disk, PLUS an explicit scrub of the known env secret
+      // values (defense-in-depth for values the pattern rules may miss).
+      const redacted = redactValue(report, { globalRules: DEFAULT_GLOBAL_RULES });
+      let json = JSON.stringify(redacted, null, 2);
+      for (const v of Object.values(process.env)) {
+        if (typeof v === "string" && v.length >= 6 && json.includes(v)) {
+          json = json.split(v).join("«redacted-secret»");
+        }
+      }
       mkdirSync(dirname(resolve(opts.reportPath)), { recursive: true });
-      writeFileSync(opts.reportPath, JSON.stringify(report, null, 2));
+      writeFileSync(opts.reportPath, json);
       // eslint-disable-next-line no-console
       console.log(`\nqa: sealed report → ${opts.reportPath} (${evidence.network.length} calls recorded)`);
       void opts.cleanup().catch(() => undefined).finally(() => {
@@ -304,6 +316,7 @@ export async function qaAttachCommand(opts: {
   report?: string;
   model?: string;
   contract?: string;
+  url?: string;
 }): Promise<void> {
   const model = resolveModel(opts.model);
   await runWithRuntime(buildRuntime(), async () => {
@@ -320,11 +333,26 @@ export async function qaAttachCommand(opts: {
     const rawPages = (await raw.pages()).filter(
       (p: { url(): string }) => !p.url().startsWith("devtools://"),
     );
-    const journeyRaw =
-      [...rawPages].reverse().find((p: { url(): string }) => {
-        const u = p.url();
-        return u && u !== "about:blank";
-      }) ?? rawPages[0];
+    const nonBlank = rawPages.filter((p: { url(): string }) => p.url() && p.url() !== "about:blank");
+    let journeyRaw: { url(): string } | undefined;
+    if (opts.url) {
+      const hits = nonBlank.filter((p: { url(): string }) => p.url().includes(opts.url!));
+      if (hits.length !== 1) {
+        throw new Error(
+          `qa attach: --url "${opts.url}" matched ${hits.length} tab(s) (${nonBlank.map((p: { url(): string }) => p.url()).join(", ") || "none"}).`,
+        );
+      }
+      journeyRaw = hits[0];
+    } else if (nonBlank.length === 1) {
+      journeyRaw = nonBlank[0];
+    } else if (nonBlank.length === 0) {
+      journeyRaw = rawPages[0]; // a single blank tab the agent will navigate
+    } else {
+      throw new Error(
+        `qa attach: the browser has ${nonBlank.length} open tabs — pass --url <substr> to select the journey tab ` +
+          `(${nonBlank.map((p: { url(): string }) => p.url()).join(", ")}).`,
+      );
+    }
     if (!journeyRaw) throw new Error("qa attach: the attached browser has no page to record.");
     const page = await GlubeanPage._create(journeyRaw as never, undefined, collector.ctx, options);
     writeSession({ pid: process.pid, wsEndpoint: opts.endpoint, file: opts.file, caseKey: opts.case, reportPath, startedAt: new Date().toISOString() });

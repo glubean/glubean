@@ -1047,8 +1047,9 @@ qaCmd
   .option("--report <path>", "where to write the sealed report")
   .option("--model <id>", "recording agent model id for the report (or set GLUBEAN_QA_MODEL)")
   .option("--contract <id>", "disambiguate when several contracts in the file share the case key")
+  .option("--url <substr>", "select the journey tab by URL substring (required when several tabs are open)")
   .action(async (opts) => {
-    await qaAttachCommand({ endpoint: opts.endpoint, file: opts.file, case: opts.case, report: opts.report, model: opts.model, contract: opts.contract });
+    await qaAttachCommand({ endpoint: opts.endpoint, file: opts.file, case: opts.case, report: opts.report, model: opts.model, contract: opts.contract, url: opts.url });
   });
 
 qaCmd
