@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import { scan } from "@glubean/scanner";
+import { bootstrap } from "@glubean/runner";
 import { buildMetadata } from "../metadata.js";
 import { CLI_VERSION } from "../version.js";
 import { lintDescription } from "./contracts.js";
@@ -29,6 +30,11 @@ export async function scanCommand(
   console.log(`${colors.dim}Directory: ${dir}${colors.reset}`);
   console.log(`${colors.dim}Output:    ${outputPath}${colors.reset}\n`);
 
+  // Bootstrap project plugins BEFORE scanning: `scan()` imports contract files,
+  // and plugin-registered surfaces like `contract.browser.with(...)` /
+  // `contract.graphql.with(...)` throw at import if the plugin's manifest (from
+  // glubean.setup.ts) isn't installed first. Mirrors `glubean run` (codex R6).
+  await bootstrap(dir);
   const scanResult = await scan(dir);
   // Presence gate counts EVERY artifact kind the scanner can discover —
   // a flow-only or workflow-only project must still write metadata

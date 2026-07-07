@@ -253,6 +253,14 @@ interface BrowserOptionsBase {
    * ```
    */
   launchOptions?: Record<string, unknown>;
+  /**
+   * PASSIVE mode (GLU-234 · `glubean qa attach`): instrument an existing,
+   * agent-owned page for OBSERVATION only — record network + console but do NOT
+   * mutate the browser (no dialog auto-resolve takeover, no
+   * `Browser.setDownloadBehavior`), so the recorder cannot change the journey it
+   * is watching (codex R6).
+   */
+  passive?: boolean;
 }
 
 /**
@@ -532,6 +540,7 @@ export class GlubeanPage {
     const downloadDir = options.downloadDir ?? ".glubean/downloads";
     const actionTimeout = options.actionTimeout ?? 30_000;
     const dialogMode: DialogMode = options.dialogMode ?? "dismiss";
+    const passive = options.passive ?? false;
 
     const gp = new GlubeanPage(
       page,
@@ -548,7 +557,9 @@ export class GlubeanPage {
     // Puppeteer auto-dismisses unhandled dialogs UNLESS a 'dialog' listener is
     // registered — once we register one, WE are responsible for resolving
     // every dialog (custom handler via onDialog(), else `dialogMode`).
-    page.on("dialog", (dialog) => {
+    // PASSIVE mode skips this: taking over dialog resolution would mutate the
+    // agent-owned browser we are only meant to observe (codex R6).
+    if (!passive) page.on("dialog", (dialog) => {
       ctx.event({
         type: "browser:dialog",
         data: {
@@ -656,9 +667,11 @@ export class GlubeanPage {
       },
     };
 
-    // Downloads are always captured as evidence (like dialog/popup) — the
-    // save directory must exist before Chrome is told to use it.
-    await _ensureDir(downloadDir);
+    // Downloads are captured as evidence (like dialog/popup) — the save
+    // directory must exist before Chrome is told to use it. PASSIVE mode skips
+    // download tracking: `Browser.setDownloadBehavior` is browser-global and
+    // would mutate the agent-owned browser (codex R6).
+    if (!passive) await _ensureDir(downloadDir);
 
     gp._evidence = await EvidenceSession.attach(page, {
       trace: networkTraceOpt !== false ? (t) => ctx.trace(t) : undefined,
@@ -671,7 +684,7 @@ export class GlubeanPage {
       emulate: options.emulate,
       storageState: options.storageState,
       screenshots: screenshotsOpt,
-      downloads: {
+      downloads: passive ? undefined : {
         dir: downloadDir,
         onDownload: (entry, state) => {
           // Only terminal states are evidence — "inProgress" fires repeatedly

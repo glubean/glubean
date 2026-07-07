@@ -316,7 +316,7 @@ export async function qaAttachCommand(opts: {
     // blank tab (the agent's traffic would be missed). Pick the agent's active
     // journey tab: the last non-blank page, else the first page.
     const raw = await connectChrome(opts.endpoint);
-    const options = { endpoint: "attached", consoleForward: true, networkTrace: true } as never;
+    const options = { endpoint: "attached", consoleForward: true, networkTrace: true, passive: true } as never;
     const rawPages = (await raw.pages()).filter(
       (p: { url(): string }) => !p.url().startsWith("devtools://"),
     );
