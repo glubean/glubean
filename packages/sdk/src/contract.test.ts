@@ -349,6 +349,47 @@ test("bootstrap ctx.cleanup callbacks run LIFO after case execution", async () =
   expect(cleanupIdx[2]).toBeLessThan(cleanupIdx[3]);
 });
 
+test("named bootstrap: define + { use } resolves and runs the shared overlay (GLU-236)", async () => {
+  const log: string[] = [];
+  const adapter = makeMockAdapter({ executionLog: log });
+  adapter.executeCase = async () => {
+    log.push("executeCase");
+  };
+  contract.register("mock_named_bs", adapter);
+  const c = (contract as any).mock_named_bs("svc", {
+    target: "/x",
+    cases: { ok: { description: "d" } },
+  }) as ProtocolContract<MockSpec>;
+
+  (contract.bootstrap as any).define("signed-in-session", async () => {
+    log.push("named-bootstrap-ran");
+    return { session: "abc" };
+  });
+  contract.bootstrap(c.case("ok"), { use: "signed-in-session" } as any);
+
+  await c[0].fn!(makeMockCtx());
+  expect(log).toContain("named-bootstrap-ran");
+});
+
+test("named bootstrap: an unknown name throws at attach time (GLU-236)", () => {
+  const adapter = makeMockAdapter({ executionLog: [] });
+  contract.register("mock_named_bs_unknown", adapter);
+  const c = (contract as any).mock_named_bs_unknown("svc", {
+    target: "/x",
+    cases: { ok: { description: "d" } },
+  }) as ProtocolContract<MockSpec>;
+  expect(() => contract.bootstrap(c.case("ok"), { use: "no-such-bootstrap" } as any)).toThrow(
+    /unknown named bootstrap/,
+  );
+});
+
+test("named bootstrap: a duplicate define throws (GLU-236)", () => {
+  (contract.bootstrap as any).define("dup-named-bs", async () => ({}));
+  expect(() => (contract.bootstrap as any).define("dup-named-bs", async () => ({}))).toThrow(
+    /duplicate named bootstrap/,
+  );
+});
+
 test("needs schema validates bootstrap output before executeCase", async () => {
   const log: string[] = [];
   const adapter = makeMockAdapter({ executionLog: log });

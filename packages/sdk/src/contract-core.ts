@@ -30,7 +30,13 @@ import type {
   ProtocolContract,
 } from "./contract-types.js";
 import { registerTest } from "./internal.js";
-import { getBootstrap, registerBootstrap } from "./bootstrap-registry.js";
+import {
+  defineNamedBootstrap,
+  getBootstrap,
+  isNamedBootstrapUse,
+  registerBootstrap,
+  type NamedBootstrapUse,
+} from "./bootstrap-registry.js";
 import {
   getExplicitInput,
   getBootstrapInput,
@@ -747,7 +753,7 @@ function makeContractCaseRef(
 
 type ContractNamespace = {
   register: typeof register;
-  bootstrap: typeof bootstrap;
+  bootstrap: typeof bootstrap & { define: typeof defineNamedBootstrap };
   [protocol: string]: unknown;
 };
 
@@ -763,7 +769,7 @@ type ContractNamespace = {
  */
 export function bootstrap<Needs, Params = void>(
   ref: ContractCaseRef<Needs, unknown>,
-  spec: Bootstrap<Params, NoInfer<Needs>>,
+  spec: Bootstrap<Params, NoInfer<Needs>> | NamedBootstrapUse,
 ): BootstrapAttachment<Needs, Params> {
   if ((ref as { direction?: string }).direction === "inbound") {
     throw new Error(
@@ -772,12 +778,20 @@ export function bootstrap<Needs, Params = void>(
         `overlay has no meaning for it.`,
     );
   }
-  return registerBootstrap(ref, spec as Bootstrap<Params, Needs>);
+  return isNamedBootstrapUse(spec)
+    ? registerBootstrap(ref, spec)
+    : registerBootstrap(ref, spec as Bootstrap<Params, Needs>);
 }
+
+// `contract.bootstrap.define(name, spec)` registers a reusable named overlay
+// (GLU-236 / P1-6); attach it to a case with `contract.bootstrap(ref, { use })`.
+(bootstrap as typeof bootstrap & {
+  define: typeof defineNamedBootstrap;
+}).define = defineNamedBootstrap;
 
 export const contract: ContractNamespace = {
   register,
-  bootstrap,
+  bootstrap: bootstrap as typeof bootstrap & { define: typeof defineNamedBootstrap },
 };
 
 /**
