@@ -100,8 +100,9 @@ describe("sealQaReport", () => {
       executor: { kind: "agent", model: "m" },
     });
     expect(report.steps.map((s) => s.id)).toEqual(["open", "submit"]);
-    // completed steps need >=1 evidence (validator §5).
-    expect(report.steps.every((s) => s.status !== "completed" || (s.evidence?.length ?? 0) > 0)).toBe(true);
+    // A passive recorder must NOT fabricate `completed` (codex R3) — synthesized
+    // steps are `skipped` with a note (valid; no evidence required).
+    expect(report.steps.every((s) => s.status === "skipped" && !!s.note)).toBe(true);
   });
 
   test("agent answers CANNOT override a runtime-judged url/calls/console verdict (codex R1)", () => {

@@ -239,26 +239,26 @@ export async function qaAttachCommand(opts: {
     const { contractId, caseSpec, revision } = await loadBrowserCase(opts.file, opts.case);
     const reportPath = opts.report ?? `.glubean/qa/${opts.case}.report.json`;
     const collector = makeCollector();
-    // Connect to the agent's OWN running browser and instrument the tabs it is
-    // already driving (plus any it opens later) — do NOT create a fresh tab, or
-    // the agent's journey traffic is missed.
+    // Connect to the agent's OWN running browser and instrument the SINGLE
+    // journey tab it is driving — NOT every tab (background tabs would leak
+    // unrelated network/console into the evidence, per codex R3) and NOT a fresh
+    // blank tab (the agent's traffic would be missed). Pick the agent's active
+    // journey tab: the last non-blank page, else the first page.
     const raw = await connectChrome(opts.endpoint);
     const options = { endpoint: "attached", consoleForward: true, networkTrace: true } as never;
-    const instrumented: InstrumentedPage[] = [];
-    const instrument = async (rp: { url(): string } & Parameters<typeof GlubeanPage._create>[0]) => {
-      if (rp.url().startsWith("devtools://")) return;
-      instrumented.push(await GlubeanPage._create(rp, undefined, collector.ctx, options));
-    };
-    for (const rp of await raw.pages()) await instrument(rp as never);
-    raw.on("targetcreated", (t: { page(): Promise<unknown> }) => {
-      void t
-        .page()
-        .then((p) => (p ? instrument(p as never) : undefined))
-        .catch(() => undefined);
-    });
+    const rawPages = (await raw.pages()).filter(
+      (p: { url(): string }) => !p.url().startsWith("devtools://"),
+    );
+    const journeyRaw =
+      [...rawPages].reverse().find((p: { url(): string }) => {
+        const u = p.url();
+        return u && u !== "about:blank";
+      }) ?? rawPages[0];
+    if (!journeyRaw) throw new Error("qa attach: the attached browser has no page to record.");
+    const page = await GlubeanPage._create(journeyRaw as never, undefined, collector.ctx, options);
     writeSession({ pid: process.pid, wsEndpoint: opts.endpoint, file: opts.file, caseKey: opts.case, reportPath, startedAt: new Date().toISOString() });
     // eslint-disable-next-line no-console
-    console.log(`qa: attached + recording ${instrumented.length} tab(s) for ${contractId}#${opts.case}. Run \`glubean qa stop\` when done.`);
+    console.log(`qa: attached + recording ${safeUrl(page) || "(blank)"} for ${contractId}#${opts.case}. Run \`glubean qa stop\` when done.`);
     await record({
       contractId,
       caseKey: opts.case,
@@ -266,14 +266,7 @@ export async function qaAttachCommand(opts: {
       revision,
       reportPath,
       collector,
-      // Final URL = the last non-blank tab the agent had open.
-      getFinalUrl: () => {
-        const active = [...instrumented].reverse().find((p) => {
-          const u = safeUrl(p);
-          return u && u !== "about:blank";
-        });
-        return safeUrl(active ?? instrumented[instrumented.length - 1]);
-      },
+      getFinalUrl: () => safeUrl(page),
       cleanup: async () => {
         raw.disconnect();
       },

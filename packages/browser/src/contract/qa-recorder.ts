@@ -157,10 +157,13 @@ export function sealQaReport(input: SealQaRunInput): AgentQaReport {
   const steps: QaStep[] = (input.caseSpec.steps ?? []).map(
     (s) =>
       stepsById.get(s.id) ?? {
+        // A passive recorder does NOT observe step boundaries or whether the
+        // journey completed — never fabricate `completed`. `skipped` + a note is
+        // the honest, validator-valid default; the agent supplies real outcomes
+        // via agent:step when it knows them.
         id: s.id,
-        status: "completed",
-        note: "recorded passively — the recorder did not attribute per-step boundaries; the agent may supply step outcomes",
-        evidence: ["passive-recording"],
+        status: "skipped",
+        note: "not observed by the passive recorder — the agent supplies step outcomes via agent:step",
       },
   );
 
