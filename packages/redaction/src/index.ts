@@ -67,7 +67,6 @@ export type { RedactableEvent } from "./adapter.js";
 // Defaults
 export {
   BUILTIN_SCOPES,
-  CREDENTIAL_KEYS,
   DEFAULT_CONFIG,
   DEFAULT_GLOBAL_RULES,
   PATTERN_SOURCES,

@@ -37,7 +37,7 @@ import type {
  * same class as the `token`/`tokenCount` tradeoff — a redaction library must
  * not corrupt `author` to catch it).
  */
-export const CREDENTIAL_KEYS = [
+const CREDENTIAL_KEYS = [
   "authorization",
   "proxy-authorization",
   "bearer",

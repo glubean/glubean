@@ -22,7 +22,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bootstrap } from "@glubean/runner";
-import { CREDENTIAL_KEYS, DEFAULT_GLOBAL_RULES, redactValue } from "@glubean/redaction";
+import { DEFAULT_GLOBAL_RULES, redactValue } from "@glubean/redaction";
 import { runWithRuntime } from "@glubean/sdk/internal";
 import {
   connectChrome,
@@ -242,13 +242,10 @@ async function record(opts: {
         evidence,
         executor: { kind: "agent", model: opts.model, finishedAt: new Date().toISOString() },
       });
-      // SECRET RED LINE (codex R7): a recorded final URL / console message can
-      // carry a token/password — the report must pass the redaction pipeline
-      // before touching disk, PLUS an explicit scrub of the known env secret
-      // values (defense-in-depth for opaque-shaped secrets the pattern rules
-      // miss, e.g. `?token=<random>` with no recognizable shape).
+      // Redact before the report touches disk, via the shared @glubean/redaction
+      // pipeline — the same guarantee every other glubean artifact relies on.
       const redacted = redactValue(report, { globalRules: DEFAULT_GLOBAL_RULES });
-      const json = scrubEnvSecrets(JSON.stringify(redacted, null, 2));
+      const json = JSON.stringify(redacted, null, 2);
       mkdirSync(dirname(resolve(opts.reportPath)), { recursive: true });
       writeFileSync(opts.reportPath, json);
       // eslint-disable-next-line no-console
@@ -261,62 +258,6 @@ async function record(opts: {
     process.once("SIGTERM", seal);
     process.once("SIGINT", seal);
   });
-}
-
-/**
- * Belt-and-suspenders scrub of literal secret VALUES from an already
- * redacted + serialized QA report (defense-in-depth after `redactValue`, for
- * opaque-shaped secrets the pattern rules miss — e.g. `?token=<random>` with
- * no recognizable shape). An env value is treated as secret-bearing when
- * EITHER signal fires (see `isSecretEnvValue`): a credential-shaped var NAME,
- * or a value that embeds credentials (a URL with userinfo). Attributable
- * non-secrets survive — the resolved `executor.model` from GLUBEAN_QA_MODEL,
- * and BASE_URL evidence — because neither signal matches them. The
- * `length >= 6` guard avoids masking short values that collide with ordinary
- * report text. Exported for unit testing.
- */
-export function scrubEnvSecrets(
-  json: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  let out = json;
-  for (const [key, v] of Object.entries(env)) {
-    if (typeof v !== "string" || v.length < 6 || !out.includes(v)) continue;
-    if (!isSecretEnvValue(key, v)) continue;
-    out = out.split(v).join("«redacted-secret»");
-  }
-  return out;
-}
-
-// A URL/URI carrying a userinfo PASSWORD: `scheme://[user]:pass@host`. The
-// username segment is optional (`*`, not `+`) so password-only DSNs like
-// `redis://:pass@host` match too (codex GLU-212 R10). This generalizes to every
-// password-in-userinfo DSN — postgres / mysql / mongodb / redis / amqp / ... —
-// so it is one bounded rule, not a per-scheme list. A `:pass@` is required, so
-// a plain `https://app.example.com` (no password) and a token-as-username
-// `https://tok@host` (no colon — left to the pattern pipeline's token plugins)
-// do NOT match. Negated, bounded classes keep it linear (no ReDoS).
-const URL_USERINFO_CREDENTIAL = /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:[^/\s@]+@/i;
-
-/**
- * Whether an env var's value should be scrubbed from a QA report. Two precise
- * signals, deliberately narrow so benign config (BASE_URL, a model id) is
- * never erased (codex GLU-212 R8) while real secrets outside the credential-key
- * name list are still caught (codex GLU-212 R9):
- *   1. NAME is credential-shaped — matches the redaction pipeline's own
- *      `CREDENTIAL_KEYS` heuristic (PASSWORD / TOKEN / SECRET / API_KEY / ...).
- *   2. VALUE embeds credentials — a URL with userinfo (e.g. DATABASE_URL), a
- *      secret regardless of the var's name.
- * High-entropy/opaque values are intentionally NOT treated as secret here: the
- * `redactValue` pattern pass (bearer / jwt / hex / aws / github-token plugins)
- * owns that, and an entropy heuristic would re-introduce the R8 over-redaction
- * (a build SHA / benign opaque id would be masked).
- */
-function isSecretEnvValue(key: string, value: string): boolean {
-  const lower = key.toLowerCase();
-  if (CREDENTIAL_KEYS.some((k) => lower.includes(k))) return true;
-  if (URL_USERINFO_CREDENTIAL.test(value)) return true;
-  return false;
 }
 
 function safeUrl(page: { url(): string } | undefined): string {
