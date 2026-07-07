@@ -433,6 +433,17 @@ export class GlubeanBrowser {
     browser.disconnect();
   }
 
+  /**
+   * The underlying browser's CDP WebSocket endpoint (`ws://…`). A separate
+   * glubean process — e.g. `glubean qa attach` — can connect to it to passively
+   * record (network / console / screenshots) while an agent drives this browser
+   * (GLU-234 / P1-4, proposal §2.5: "our emitter on the agent's browser").
+   */
+  async wsEndpoint(): Promise<string> {
+    const browser = await this._getBrowser();
+    return browser.wsEndpoint();
+  }
+
   /** Close the browser and terminate the Chrome process. */
   async close(): Promise<void> {
     const browser = await this._getBrowser();

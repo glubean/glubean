@@ -20,6 +20,15 @@ export {
   describeLocator,
 } from "./matchers.js";
 export { defineBrowserCase } from "./types.js";
+export { judgeRecordedExpects, sealQaReport } from "./qa-recorder.js";
+export type {
+  AgentQaReport,
+  QaExpectAnswer,
+  QaExtraFinding,
+  QaStep,
+  QaVerdict,
+  SealQaRunInput,
+} from "./qa-recorder.js";
 export type {
   BrowserConsoleError,
   BrowserContractCase,

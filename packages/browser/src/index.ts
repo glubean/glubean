@@ -44,6 +44,7 @@ import type { BrowserContractRoot } from "./contract/index.js";
 
 export { browser } from "./plugin.js";
 export { GlubeanBrowser, GlubeanPage } from "./page.js";
+export { connectChrome, resolveEndpoint, launchChrome } from "./chrome.js";
 
 /**
  * Plugin manifest — installs the `contract.browser` adapter (Mode A).

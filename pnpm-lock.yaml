@@ -63,6 +63,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@glubean/browser':
+        specifier: workspace:*
+        version: link:../browser
       '@glubean/redaction':
         specifier: workspace:*
         version: link:../redaction

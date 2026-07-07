@@ -35,6 +35,7 @@ import { upgradeCommand } from "./commands/upgrade.js";
 import { migrateCommand } from "./commands/migrate.js";
 
 import { envShowCommand, envUseCommand, envResetCommand, envListCommand } from "./commands/env.js";
+import { qaOpenCommand, qaAttachCommand, qaStopCommand } from "./commands/qa.js";
 import { abortUpdateCheck, checkForUpdates } from "./update_check.js";
 
 const program = new Command();
@@ -1017,6 +1018,40 @@ envCmd
   .description("List available .env.<name> files")
   .action(async () => {
     await envListCommand();
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// qa — Mode B QA recorder (GLU-234/235 · P1-4/P1-5): passively record the agent's
+// browser and seal an agent-qa-report/v1.
+// ─────────────────────────────────────────────────────────────────────────────
+const qaCmd = program.command("qa").description("Mode B QA recorder (passive record + seal an agent-qa-report/v1)");
+
+qaCmd
+  .command("open")
+  .description("Launch an instrumented browser, print its CDP endpoint, and record until `qa stop`")
+  .requiredOption("--file <path>", "path to the .browser.ts contract")
+  .requiredOption("--case <key>", "case key to record")
+  .option("--report <path>", "where to write the sealed report")
+  .action(async (opts) => {
+    await qaOpenCommand({ file: opts.file, case: opts.case, report: opts.report });
+  });
+
+qaCmd
+  .command("attach")
+  .description("Attach to the agent's already-running browser (CDP endpoint) and record")
+  .requiredOption("--endpoint <ws>", "CDP endpoint (ws:// or http:// discovery URL) of the agent's browser")
+  .requiredOption("--file <path>", "path to the .browser.ts contract")
+  .requiredOption("--case <key>", "case key to record")
+  .option("--report <path>", "where to write the sealed report")
+  .action(async (opts) => {
+    await qaAttachCommand({ endpoint: opts.endpoint, file: opts.file, case: opts.case, report: opts.report });
+  });
+
+qaCmd
+  .command("stop")
+  .description("Seal the current recording session into an agent-qa-report/v1")
+  .action(() => {
+    qaStopCommand();
   });
 
 // ─────────────────────────────────────────────────────────────────────────────

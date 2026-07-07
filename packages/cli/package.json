@@ -30,13 +30,14 @@
     "access": "public"
   },
   "dependencies": {
-    "@glubean/sdk": "workspace:*",
+    "@glubean/browser": "workspace:*",
+    "@glubean/redaction": "workspace:*",
     "@glubean/runner": "workspace:*",
     "@glubean/scanner": "workspace:*",
-    "@glubean/redaction": "workspace:*",
-    "commander": "^13.0.0",
+    "@glubean/sdk": "workspace:*",
     "@inquirer/prompts": "^7.0.0",
     "archiver": "^7.0.0",
+    "commander": "^13.0.0",
     "dotenv": "^16.4.0",
     "tsx": "^4.22.4",
     "yaml": "^2.7.0"
