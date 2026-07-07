@@ -281,6 +281,17 @@ export interface ResolvedRunPlan {
   };
   upload?: UploadConfig;
   envFile: string;
+  /**
+   * True when `envFile` came from an EXPLICIT source (CLI `--env-file`,
+   * `profile.envFile`, or `defaults.envFile`) rather than falling through to
+   * the built-in default (`".env"`). Callers (e.g. `executeRun`'s "only
+   * forward a real override, else let active-env resolution apply" trick)
+   * MUST branch on this flag, not on `envFile !== ".env"` — a profile or
+   * `defaults` block can legitimately set `envFile: .env` explicitly (e.g.
+   * to force plain `.env` over active-env resolution), and that string
+   * equals the builtin default (codex GLU-244 R2 P2).
+   */
+  envFileExplicit: boolean;
   redaction: RedactionConfig;
   /**
    * Resolved metric thresholds (defaults.thresholds ∪ profile.thresholds,
@@ -1533,6 +1544,15 @@ export function resolveRunPlan(
   // silently ignore it (codex GLU-244 R1 P2).
   const envFile =
     cliOverrides.envFile ?? profile.envFile ?? defaults.envFile ?? builtin.envFile;
+  // Distinguish "explicitly set (by CLI/profile/defaults)" from "fell
+  // through to the builtin default" — see `ResolvedRunPlan.envFileExplicit`'s
+  // doc. A value-equality check (`envFile !== ".env"`) can't tell these apart
+  // when the explicit value happens to equal the default string itself
+  // (codex GLU-244 R2 P2).
+  const envFileExplicit =
+    cliOverrides.envFile !== undefined ||
+    profile.envFile !== undefined ||
+    defaults.envFile !== undefined;
   const redaction = resolveRedactionConfig(defaults.redaction);
 
   // ── Thresholds ─────────────────────────────────────────────────────────
@@ -1562,6 +1582,7 @@ export function resolveRunPlan(
     reporters,
     ...(upload !== undefined && { upload }),
     envFile,
+    envFileExplicit,
     redaction,
     thresholds,
   };
@@ -1602,6 +1623,11 @@ export interface ResolvedLoadPlan {
    *  single entry when `--plan` narrowed it). */
   plans: ResolvedLoadPlanEntry[];
   envFile: string;
+  /** Same meaning/reason as `ResolvedRunPlan.envFileExplicit` — true when
+   *  `envFile` came from an explicit CLI/profile/defaults source rather than
+   *  the builtin default, so callers can tell "explicitly `.env`" apart from
+   *  "no override at all" (codex GLU-244 R2 P2). */
+  envFileExplicit: boolean;
   /** Same shape/precedence as `ResolvedRunPlan.upload` — `glubean load
    *  --profile <name> --upload` reuses this rather than a separate
    *  load-specific upload config surface. */
@@ -1681,12 +1707,17 @@ export function resolveLoadPlan(
     profile.envFile ??
     defaults.envFile ??
     RESOLVED_PLAN_BUILTIN_DEFAULTS.envFile;
+  const envFileExplicit =
+    cliOverrides.envFile !== undefined ||
+    profile.envFile !== undefined ||
+    defaults.envFile !== undefined;
 
   return {
     profile: profileName,
     configPath,
     plans,
     envFile,
+    envFileExplicit,
     ...(profile.upload !== undefined && { upload: profile.upload }),
   };
 }

@@ -264,4 +264,66 @@ profiles:
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     }
   }, 30_000);
+
+  test("--project SUPPLYING the profile's missing projectId (not overriding a different one) keeps the profile's targetId (codex GLU-244 R2 P2)", async () => {
+    const requests: string[] = [];
+    const server: Server = createServer((req, res) => {
+      requests.push(req.url ?? "");
+      if (req.url === "/v1/projects/prj_supplied") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "prj_supplied", name: "Supplied" }));
+        return;
+      }
+      if (req.url === "/v1/projects/prj_supplied/targets/tgt_a") {
+        // The CORRECT path: the profile's own targetId is validated against
+        // the CLI-supplied project (which the profile itself left unset).
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "tgt_a", name: "Target A" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not_found" }));
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const addr = server.address();
+    const apiUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : addr}`;
+
+    try {
+      await writeFile(join(dir, "plan-a.load.ts"), "// placeholder\n");
+      // NOTE: this profile's upload block has NO projectId — --project is
+      // the ONLY source of the project, not an override of a different one.
+      const yaml = `version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+load:
+  plans:
+    plan-a: { target: ./plan-a.load.ts }
+profiles:
+  local: { suites: [tests] }
+  perf:
+    load:
+      plans: [plan-a]
+    upload:
+      targetId: tgt_a
+`;
+      await writeFile(join(dir, "glubean.yaml"), yaml, "utf-8");
+
+      await runCli(
+        [
+          "load", "--profile", "perf", "--upload",
+          "--project", "prj_supplied", "--token", "faketoken", "--api-url", apiUrl,
+        ],
+        { cwd: dir },
+      );
+
+      // The profile's targetId (tgt_a) must survive — proven by the explicit
+      // target-validation GET actually firing against the supplied project.
+      expect(requests).toContain("/v1/projects/prj_supplied/targets/tgt_a");
+      // The pre-fix bug would have dropped the target and hit the
+      // default-target LIST endpoint instead.
+      expect(requests).not.toContain("/v1/projects/prj_supplied/targets");
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    }
+  }, 30_000);
 });

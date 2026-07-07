@@ -16,7 +16,6 @@ import {
   resolveRunPlan,
   resolveLoadPlan,
   GlubeanConfigError,
-  RESOLVED_PLAN_BUILTIN_DEFAULTS,
   type CliProfileOverrides,
   type ResolvedRunPlan,
   type CliLoadProfileOverrides,
@@ -531,13 +530,15 @@ async function executeRun(
       excludeTags: (cliExcludeTags && cliExcludeTags.length > 0)
         ? cliExcludeTags
         : resolvedPlan?.selection.excludeTags,
-      // envFile: only set when CLI explicitly or profile sets non-default
-      // value. runCommand treats any envFile as user-specified and fails
-      // hard if the file doesn't exist; falling back silently to ".env"
-      // (the plan builtin default) would break projects without a .env.
-      envFile: options.envFile ?? (resolvedPlan && resolvedPlan.envFile !== ".env"
-        ? resolvedPlan.envFile
-        : undefined),
+      // envFile: only set when CLI explicitly or profile/defaults sets it.
+      // runCommand treats any envFile as user-specified and fails hard if
+      // the file doesn't exist; falling back silently to ".env" (the plan
+      // builtin default) would break projects without a .env. Branch on
+      // `envFileExplicit` (NOT `envFile !== ".env"`) — a profile/defaults
+      // block can legitimately set `envFile: .env` explicitly, and a
+      // value-equality check can't tell that apart from "no override at
+      // all" (codex GLU-244 R2 P2).
+      envFile: options.envFile ?? (resolvedPlan?.envFileExplicit ? resolvedPlan.envFile : undefined),
       logFile: options.logFile,
       pretty: options.pretty,
       verbose: options.verbose,
@@ -881,24 +882,31 @@ async function executeLoad(
   const loadTargets = target ? [target] : resolvedLoadPlan.plans.map((p) => p.target);
 
   // Upload TARGET (runs live under a target — ADR 0007): CLI --upload-target
-  // wins; otherwise inherit the profile's upload.targetId ONLY when --project
-  // didn't override the destination project (mirrors executeRun's identical
-  // guard) — a profile target belongs to the profile's project, so pairing it
-  // with an overridden --project would post to the WRONG project's target.
+  // wins; otherwise inherit the profile's upload.targetId UNLESS --project
+  // genuinely overrides a DIFFERENT project than the profile itself declared
+  // — a profile target belongs to the profile's own project, so pairing it
+  // with a genuinely different project would post to the wrong project's
+  // target. When the profile declares NO projectId at all, --project is
+  // simply supplying the missing piece (not overriding anything), so the
+  // profile's target is still valid and must be kept (codex GLU-244 R2 P2 —
+  // a bare `options.project ? undefined : …` here would also drop the
+  // target when --project only SUPPLIES the project, not overrides it).
+  const profileProjectOverridden =
+    options.project !== undefined &&
+    resolvedLoadPlan.upload?.projectId !== undefined &&
+    options.project !== resolvedLoadPlan.upload.projectId;
   const effectiveUploadTarget =
     (options.uploadTarget as string | undefined) ??
-    (options.project ? undefined : resolvedLoadPlan.upload?.targetId);
+    (profileProjectOverridden ? undefined : resolvedLoadPlan.upload?.targetId);
 
   await loadCommand(loadTargets, {
-    // Only forward the profile's envFile when it's NOT the builtin default —
-    // when nothing overrode it, pass `undefined` so loadCommand's own
-    // active-env-file resolution (resolveEnvFileName) still applies (mirrors
-    // executeRun's identical trick for resolvedPlan.envFile).
-    envFile:
-      options.envFile ??
-      (resolvedLoadPlan.envFile !== RESOLVED_PLAN_BUILTIN_DEFAULTS.envFile
-        ? resolvedLoadPlan.envFile
-        : undefined),
+    // Only forward the profile's envFile when it came from an EXPLICIT
+    // source — when nothing overrode it, pass `undefined` so loadCommand's
+    // own active-env-file resolution (resolveEnvFileName) still applies
+    // (mirrors executeRun's identical trick). Branch on `envFileExplicit`,
+    // NOT a value-equality check against the builtin default — a profile
+    // can legitimately set `envFile: .env` explicitly (codex GLU-244 R2 P2).
+    envFile: options.envFile ?? (resolvedLoadPlan.envFileExplicit ? resolvedLoadPlan.envFile : undefined),
     // profile.upload.enabled auto-triggers upload without a CLI --upload
     // flag — same as `run`'s `resolvedPlan?.upload?.enabled` fallback. CLI
     // `--upload` still forces it on regardless of the profile's bit.

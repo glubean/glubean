@@ -138,6 +138,34 @@ describe("resolveRunPlan", () => {
     });
   });
 
+  describe("envFileExplicit (codex GLU-244 R2 P2 — distinguish explicit `.env` from no override)", () => {
+    it("is false when nothing sets envFile", () => {
+      const plan = resolveRunPlan(makeConfig(), "/p", "local");
+      expect(plan.envFile).toBe(".env");
+      expect(plan.envFileExplicit).toBe(false);
+    });
+
+    it("is true when a profile explicitly sets envFile to the SAME string as the builtin default", () => {
+      const config = makeConfig({
+        profiles: { local: { suites: ["tests"], envFile: ".env" } },
+      });
+      const plan = resolveRunPlan(config, "/p", "local");
+      expect(plan.envFile).toBe(".env");
+      expect(plan.envFileExplicit).toBe(true);
+    });
+
+    it("is true when only config.defaults.envFile is set (even to '.env')", () => {
+      const config = makeConfig({ defaults: { envFile: ".env" } });
+      const plan = resolveRunPlan(config, "/p", "local");
+      expect(plan.envFileExplicit).toBe(true);
+    });
+
+    it("is true when only the CLI --env-file override is given", () => {
+      const plan = resolveRunPlan(makeConfig(), "/p", "local", { envFile: ".env" });
+      expect(plan.envFileExplicit).toBe(true);
+    });
+  });
+
   describe("arrays REPLACE per layer (not concat)", () => {
     it("CLI tags fully replace profile tags", () => {
       const config = makeConfig({

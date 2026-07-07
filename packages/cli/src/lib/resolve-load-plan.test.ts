@@ -139,6 +139,46 @@ describe("resolveLoadPlan", () => {
     });
   });
 
+  describe("envFileExplicit (codex GLU-244 R2 P2 — distinguish explicit `.env` from no override)", () => {
+    it("is false when nothing sets envFile (falls through to the builtin default)", () => {
+      const config = makeConfig();
+      const plan = resolveLoadPlan(config, "/p", "perf");
+      expect(plan.envFile).toBe(".env");
+      expect(plan.envFileExplicit).toBe(false);
+    });
+
+    it("is true when a profile explicitly sets envFile to the SAME string as the builtin default", () => {
+      // The bug this guards: `envFile !== ".env"` can't tell "profile
+      // explicitly chose .env" apart from "nothing set it" — both produce
+      // the string ".env". `envFileExplicit` must still read true here.
+      const config = makeConfig({
+        profiles: {
+          local: { suites: ["local-suite"] },
+          perf: {
+            suites: [],
+            envFile: ".env",
+            load: { plans: ["runtime-comparison"] },
+          },
+        },
+      });
+      const plan = resolveLoadPlan(config, "/p", "perf");
+      expect(plan.envFile).toBe(".env");
+      expect(plan.envFileExplicit).toBe(true);
+    });
+
+    it("is true when only config.defaults.envFile is set (even to '.env')", () => {
+      const config = makeConfig({ defaults: { envFile: ".env" } });
+      const plan = resolveLoadPlan(config, "/p", "perf");
+      expect(plan.envFileExplicit).toBe(true);
+    });
+
+    it("is true when only the CLI --env-file override is given", () => {
+      const config = makeConfig();
+      const plan = resolveLoadPlan(config, "/p", "perf", { envFile: ".env" });
+      expect(plan.envFileExplicit).toBe(true);
+    });
+  });
+
   describe("upload passthrough (profile.upload, GLU-244 reuses run's shape)", () => {
     it("carries profile.upload through unchanged", () => {
       const config = makeConfig({
