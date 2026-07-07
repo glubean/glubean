@@ -144,6 +144,26 @@ async function walkLoadFiles(dir: string, out: string[]): Promise<void> {
   }
 }
 
+/**
+ * Resolve MULTIPLE file/directory/glob targets (e.g. each plan in a
+ * `glubean load --profile <name>` selection, GLU-244) to one deduped file
+ * list, preserving each target's own resolution order and dropping
+ * duplicates a later target re-discovers (a plan target that overlaps an
+ * earlier one shouldn't double-run it). Exported for unit testing.
+ */
+export async function resolveManyLoadTargets(targets: string[]): Promise<string[]> {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const target of targets) {
+    for (const file of await resolveLoadFiles(target)) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      out.push(file);
+    }
+  }
+  return out;
+}
+
 /** Resolve a file / directory / glob target to a sorted, deduped `.load.ts` list. */
 async function resolveLoadFiles(target: string): Promise<string[]> {
   const abs = resolve(target);
@@ -278,6 +298,10 @@ export interface LoadCommandOptions {
   /** Auth token (or GLUBEAN_TOKEN). */
   token?: string;
   apiUrl?: string;
+  /** Profile-driven (GLU-244): read the upload token EXCLUSIVELY from this env
+   *  var (after an explicit `--token`) — mirrors `run`'s per-profile
+   *  `upload.tokenEnv`. No silent fallback to GLUBEAN_TOKEN when set. */
+  tokenEnv?: string;
 }
 
 /**
@@ -330,13 +354,19 @@ async function resolveLoadUploadContext(
     apiUrl: options.apiUrl,
   };
   const sources = { envFileVars };
-  const token = await resolveToken(authOpts, sources);
+  const token = await resolveToken(authOpts, sources, options.tokenEnv);
   const projectId = await resolveProjectId(authOpts, sources);
   const apiUrl = await resolveApiUrl(authOpts, sources);
 
   if (!token) {
     console.error(`${colors.red}Upload failed: no auth token found.${colors.reset}`);
-    console.error(`${colors.dim}Set GLUBEAN_TOKEN / --token (a glb_ project token), or add it to .env.secrets.${colors.reset}`);
+    if (options.tokenEnv) {
+      console.error(
+        `${colors.dim}This profile's upload.tokenEnv points at '${options.tokenEnv}', but it's empty/unset. Set it in .env.secrets or the environment.${colors.reset}`,
+      );
+    } else {
+      console.error(`${colors.dim}Set GLUBEAN_TOKEN / --token (a glb_ project token), or add it to .env.secrets.${colors.reset}`);
+    }
     process.exit(1);
   }
   if (!projectId) {
@@ -525,9 +555,14 @@ async function uploadLoadOutcomes(
  * `glubean load [target]` — discover + run load plans under `target` (a file,
  * directory, or glob; defaults to the cwd), write results, and exit non-zero if
  * any plan fails.
+ *
+ * `target` also accepts an array (GLU-244: `glubean load --profile <name>`
+ * resolves a profile's `load.plans` to one target per named plan) — each is
+ * resolved independently (file/dir/glob) and the results are deduped in
+ * declaration order, so overlapping plan targets don't double-run a file.
  */
 export async function loadCommand(
-  target: string | undefined,
+  target: string | string[] | undefined,
   options: LoadCommandOptions = {},
 ): Promise<void> {
   console.log(`\n${colors.bold}${colors.blue}⚡ Glubean Load${colors.reset}\n`);
@@ -541,10 +576,14 @@ export async function loadCommand(
     process.exit(1);
   }
 
-  const files = await resolveLoadFiles(target ?? process.cwd());
+  const targets = target === undefined ? undefined : Array.isArray(target) ? target : [target];
+  const files = targets
+    ? await resolveManyLoadTargets(targets)
+    : await resolveLoadFiles(process.cwd());
   if (files.length === 0) {
+    const label = targets?.map((t) => `"${t}"`).join(", ");
     console.log(
-      `${colors.yellow}No .load.ts files found${target ? ` for "${target}"` : ` in ${process.cwd()}`}.${colors.reset}`,
+      `${colors.yellow}No .load.ts files found${label ? ` for ${label}` : ` in ${process.cwd()}`}.${colors.reset}`,
     );
     process.exit(1);
   }

@@ -246,6 +246,196 @@ profiles:
     });
   });
 
+  describe("load plans (GLU-244)", () => {
+    // NOTE: `${BASE}` deliberately carries NO `profiles:` block — every test
+    // below declares its own (a second top-level `profiles:` key in the same
+    // YAML doc is a parse-time DUPLICATE_KEY error, not a merge).
+    const BASE = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+`;
+
+    it("loads a top-level load.plans block and a profile referencing it", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    runtime-comparison:
+      target: ./tests/load/runtime-comparison.load.ts
+    large-json:
+      target: ./tests/load/large-json.load.ts
+profiles:
+  local: { suites: [tests] }
+  perf:
+    envFile: .env.staging
+    load:
+      plans: [runtime-comparison, large-json]
+    upload:
+      projectId: prj_abc
+      targetId: tgt_abc
+      tokenEnv: GLUBEAN_TOKEN_PERF
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.load?.plans).toEqual({
+          "runtime-comparison": { target: "./tests/load/runtime-comparison.load.ts" },
+          "large-json": { target: "./tests/load/large-json.load.ts" },
+        });
+        expect(config.profiles.perf.envFile).toBe(".env.staging");
+        expect(config.profiles.perf.load?.plans).toEqual(["runtime-comparison", "large-json"]);
+        expect(config.profiles.perf.upload).toEqual({
+          projectId: "prj_abc",
+          targetId: "tgt_abc",
+          tokenEnv: "GLUBEAN_TOKEN_PERF",
+        });
+        // A load-only profile doesn't need `suites` — defaults to [].
+        expect(config.profiles.perf.suites).toEqual([]);
+      });
+    });
+
+    it("rejects a profile.load.plans reference to an undeclared load plan", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    runtime-comparison: { target: ./tests/load/runtime-comparison.load.ts }
+profiles:
+  local: { suites: [tests] }
+  perf:
+    load:
+      plans: [runtime-comparison, nope]
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /references undefined load plan "nope"/,
+        );
+      });
+    });
+
+    it("rejects load.plans.<name> missing target", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    bad: {}
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Missing required field `load\.plans\.bad\.target`/,
+        );
+      });
+    });
+
+    it("rejects an empty load.plans map", async () => {
+      const yaml = `${BASE}
+load:
+  plans: {}
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/`load\.plans` cannot be empty/);
+      });
+    });
+
+    it("rejects an unknown key in load.plans.<name>", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    bad: { target: ./x.load.ts, bogus: 1 }
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Unknown key\(s\) at `load\.plans\.bad`.*bogus/s,
+        );
+      });
+    });
+
+    it("rejects an unknown top-level key inside load:", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    ok: { target: ./x.load.ts }
+  bogus: true
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(/Unknown key\(s\) at `load`.*bogus/s);
+      });
+    });
+
+    it("rejects profiles.<name>.load with an empty plans array", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    ok: { target: ./x.load.ts }
+profiles:
+  local: { suites: [tests] }
+  perf:
+    load:
+      plans: []
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`profiles\.perf\.load\.plans` cannot be empty/,
+        );
+      });
+    });
+
+    it("rejects profiles.<name>.load.plans with a non-string entry", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    ok: { target: ./x.load.ts }
+profiles:
+  local: { suites: [tests] }
+  perf:
+    load:
+      plans: [42]
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`profiles\.perf\.load\.plans` must be an array of load-plan-name strings/,
+        );
+      });
+    });
+
+    it("rejects a blank profiles.<name>.envFile", async () => {
+      const yaml = `${BASE}
+profiles:
+  local: { suites: [tests] }
+  perf:
+    suites: [tests]
+    envFile: "  "
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /profiles\.perf\.envFile.*non-empty/,
+        );
+      });
+    });
+
+    it("accepts a profile with only `load` and no `suites` at all", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    ok: { target: ./x.load.ts }
+profiles:
+  perf:
+    load:
+      plans: [ok]
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.profiles.perf.suites).toEqual([]);
+        expect(config.profiles.perf.load?.plans).toEqual(["ok"]);
+      });
+    });
+  });
+
   describe("mcp config (plan 06 P3 — MCP trace settings)", () => {
     it("accepts a top-level mcp.trace block", async () => {
       const yaml = `

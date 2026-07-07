@@ -14,9 +14,12 @@ import { CLI_VERSION } from "./version.js";
 import {
   loadProjectConfigV1,
   resolveRunPlan,
+  resolveLoadPlan,
   GlubeanConfigError,
+  RESOLVED_PLAN_BUILTIN_DEFAULTS,
   type CliProfileOverrides,
   type ResolvedRunPlan,
+  type CliLoadProfileOverrides,
 } from "./lib/config.js";
 import { formatResolvedPlan } from "./lib/print-plan.js";
 import { initCommand } from "./commands/init.js";
@@ -794,6 +797,15 @@ program
 program
   .command("load [target]")
   .description("Run loadRunner() performance plans (.load.ts) and write LoadArtifacts")
+  .option(
+    "--profile <name>",
+    "Run the load plan(s) configured under `profiles.<name>.load.plans` in glubean.yaml (GLU-244)",
+  )
+  .option(
+    "--plan <name>",
+    "With --profile, run only this one plan from the profile's `load.plans` list",
+  )
+  .option("--config <paths>", "Config file(s), comma-separated or repeatable", collect, [])
   .option("--env-file <name>", "Env file basename (default: active env, else .env; prod-like active envs are refused implicitly)")
   .option("--upload", "Upload each plan's LoadArtifact to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt(s) JSON after --upload")
@@ -802,6 +814,25 @@ program
   .option("--token <token>", "Auth token for cloud upload (or GLUBEAN_TOKEN env)")
   .addOption(hiddenApiUrlOption())
   .action(async (target, options) => {
+    await executeLoad(target, options);
+  });
+
+// `--plan` narrows a profile's `load.plans` — it's meaningless without
+// `--profile` (mirrors run's `--suite requires --profile` guard).
+async function executeLoad(
+  target: string | undefined,
+  options: Record<string, unknown> & Record<string, any>,
+): Promise<void> {
+  if (options.plan && !options.profile) {
+    console.error(
+      `\x1b[31m--plan requires --profile (the plan name is looked up in ` +
+        `the profile's \`load.plans\` list).\x1b[0m`,
+    );
+    process.exit(1);
+  }
+
+  if (!options.profile) {
+    // Unchanged pre-GLU-244 behavior: bare `glubean load [target]`.
     await loadCommand(target, {
       envFile: options.envFile,
       upload: options.upload,
@@ -811,7 +842,61 @@ program
       token: options.token,
       apiUrl: options.apiUrl,
     });
+    return;
+  }
+
+  // ── Profile mode (GLU-244) ──────────────────────────────────────────────
+  const configFiles = options.config && options.config.length > 0
+    ? (options.config as string[]).flatMap((v: string) =>
+        v.split(",").map((s: string) => s.trim()).filter(Boolean),
+      )
+    : undefined;
+  const profileConfigPath = configFiles && configFiles.length > 0 ? configFiles[0] : undefined;
+
+  let resolvedLoadPlan;
+  try {
+    const { config, configPath } = await loadProjectConfigV1(
+      process.cwd(),
+      profileConfigPath ? { configPath: profileConfigPath } : {},
+    );
+    const cliOverrides: CliLoadProfileOverrides = {
+      plan: options.plan,
+      envFile: options.envFile,
+    };
+    resolvedLoadPlan = resolveLoadPlan(config, configPath, options.profile as string, cliOverrides);
+  } catch (err) {
+    if (err instanceof GlubeanConfigError) {
+      console.error(`\x1b[31m${err.message}\x1b[0m`);
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  // An explicit positional target (rare alongside --profile) overrides the
+  // profile's resolved plan targets entirely — mirrors `run`'s "explicit
+  // target overrides suite expansion" rule. The profile's envFile/upload
+  // still apply.
+  const loadTargets = target ? [target] : resolvedLoadPlan.plans.map((p) => p.target);
+
+  await loadCommand(loadTargets, {
+    // Only forward the profile's envFile when it's NOT the builtin default —
+    // when nothing overrode it, pass `undefined` so loadCommand's own
+    // active-env-file resolution (resolveEnvFileName) still applies (mirrors
+    // executeRun's identical trick for resolvedPlan.envFile).
+    envFile:
+      options.envFile ??
+      (resolvedLoadPlan.envFile !== RESOLVED_PLAN_BUILTIN_DEFAULTS.envFile
+        ? resolvedLoadPlan.envFile
+        : undefined),
+    upload: options.upload,
+    uploadReceiptJson: options.uploadReceiptJson,
+    project: options.project ?? resolvedLoadPlan.upload?.projectId,
+    target: options.uploadTarget ?? resolvedLoadPlan.upload?.targetId,
+    token: options.token,
+    apiUrl: options.apiUrl,
+    tokenEnv: resolvedLoadPlan.upload?.tokenEnv,
   });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // contracts command

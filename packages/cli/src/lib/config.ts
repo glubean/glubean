@@ -122,9 +122,22 @@ export interface UploadConfig {
   tokenEnv?: string;
 }
 
-/** Profile = one named run plan. References suites by name. */
+/** Profile-scoped reference into the top-level `load.plans` block — which
+ *  named load plans `glubean load --profile <name>` runs (GLU-244). */
+export interface ProfileLoadConfig {
+  /** Names of top-level `load.plans` entries this profile runs. */
+  plans: string[];
+}
+
+/**
+ * Profile = one named run plan. References suites by name (for `glubean run
+ * --profile`) and/or load plans (for `glubean load --profile`, GLU-244) — a
+ * profile intended only for load doesn't need `suites` at all.
+ */
 export interface ProfileConfig {
-  /** Names of suites (top-level `suites:` block) this profile includes. */
+  /** Names of suites (top-level `suites:` block) this profile includes.
+   *  Only meaningful for `glubean run --profile` — always `[]` (not
+   *  undefined) when the profile declares none. */
   suites: string[];
   selection?: SelectionConfig;
   execution?: ExecutionConfig;
@@ -133,6 +146,13 @@ export interface ProfileConfig {
   upload?: UploadConfig;
   /** Metric thresholds (e.g. stricter latency gates on `ci` than `local`). */
   thresholds?: ThresholdConfig;
+  /** Env file basename for THIS profile (e.g. `.env.staging`). Read by both
+   *  `glubean run --profile` and `glubean load --profile` (GLU-244); falls
+   *  back to `defaults.envFile`, then the built-in default. */
+  envFile?: string;
+  /** Which top-level `load.plans` this profile runs under `glubean load
+   *  --profile <name>` (GLU-244). Absent = this profile isn't load-capable. */
+  load?: ProfileLoadConfig;
 }
 
 /** Top-level `defaults:` — merged into every profile before profile-specific values. */
@@ -185,6 +205,24 @@ export interface ProjectionsConfig {
   contracts?: Record<string, ContractProjectionConfig>;
 }
 
+/**
+ * One named load plan (`load.plans.<name>`) — a `.load.ts` file/dir/glob
+ * target `glubean load --profile <profile> [--plan <name>]` runs (GLU-244).
+ * Kept as its OWN top-level block (not a suite `kind`) — `kinds.ts`
+ * deliberately excludes `"load"` from `SUITE_KINDS`; load's execution model
+ * (child-process `runLoad`, its own artifact shape) is separate from the
+ * suite/run path, and this block preserves that separation in config.
+ */
+export interface LoadPlanConfig {
+  /** File path (typically a `.load.ts` module) run for this plan. */
+  target: string;
+}
+
+/** Top-level `load:` — named load plans referenced by profiles' `load.plans`. */
+export interface LoadConfig {
+  plans: Record<string, LoadPlanConfig>;
+}
+
 /** Canonical v1 project config — the entire `glubean.yaml` content. */
 export interface GlubeanProjectConfigV1 {
   version: 1;
@@ -193,6 +231,8 @@ export interface GlubeanProjectConfigV1 {
   suites: Record<string, SuiteConfig>;
   /** Named profiles. `glubean run --profile <name>` selects one. */
   profiles: Record<string, ProfileConfig>;
+  /** Named load plans (GLU-244). Referenced by `profiles.<name>.load.plans`. */
+  load?: LoadConfig;
   /** MCP-server settings (trace header allow-lists). Read by @glubean/mcp. */
   mcp?: McpConfig;
   /** Declarative projection outputs (e.g. multi-surface OpenAPI). */
@@ -262,7 +302,7 @@ export class GlubeanConfigError extends Error {
   }
 }
 
-const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles", "mcp", "projections"]);
+const V1_TOP_KEYS = new Set(["version", "defaults", "suites", "profiles", "load", "mcp", "projections"]);
 const V1_MCP_KEYS = new Set(["trace"]);
 const V1_MCP_TRACE_KEYS = new Set(["keepRequestHeaders", "keepResponseHeaders"]);
 const V1_PROJECTIONS_KEYS = new Set(["contracts"]);
@@ -310,7 +350,12 @@ const V1_PROFILE_KEYS = new Set([
   "reporters",
   "upload",
   "thresholds",
+  "envFile",
+  "load",
 ]);
+const V1_PROFILE_LOAD_KEYS = new Set(["plans"]);
+const V1_LOAD_KEYS = new Set(["plans"]);
+const V1_LOAD_PLAN_KEYS = new Set(["target"]);
 const V1_THRESHOLD_AGGREGATIONS = new Set([
   "avg",
   "min",
@@ -811,38 +856,137 @@ function validateThresholds(
   return out;
 }
 
+/**
+ * Validate `load.plans.<name>` — one named `.load.ts` target (GLU-244).
+ * Mirrors `validateSuite`'s shape/error style but has just one required field
+ * (`target`) since load's execution model is a single-file/dir/glob target,
+ * not a suite's `kinds` filter.
+ */
+function validateLoadPlan(name: string, raw: unknown, configPath: string): LoadPlanConfig {
+  const context = `load.plans.${name}`;
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_LOAD_PLAN_KEYS, context, configPath);
+  const p = raw as Record<string, unknown>;
+  if (p.target === undefined) {
+    throw new GlubeanConfigError(`Missing required field \`${context}.target\`.`, configPath);
+  }
+  assertType(p.target, "string", `${context}.target`, configPath);
+  assertNonEmpty(p.target as string, `${context}.target`, configPath);
+  return { target: p.target as string };
+}
+
+/** Validate the top-level `load:` block (GLU-244). */
+function validateLoad(raw: unknown, configPath: string): LoadConfig {
+  assertType(raw, "object", "load", configPath);
+  assertOnlyKnownKeys(raw, V1_LOAD_KEYS, "load", configPath);
+  const l = raw as Record<string, unknown>;
+  if (l.plans === undefined) {
+    throw new GlubeanConfigError(
+      `Missing required field \`load.plans\` (map of plan name → { target }).`,
+      configPath,
+    );
+  }
+  assertType(l.plans, "object", "load.plans", configPath);
+  const plansIn = l.plans as Record<string, unknown>;
+  const names = Object.keys(plansIn);
+  if (names.length === 0) {
+    throw new GlubeanConfigError("`load.plans` cannot be empty.", configPath);
+  }
+  const plans: Record<string, LoadPlanConfig> = {};
+  for (const name of names) {
+    plans[name] = validateLoadPlan(name, plansIn[name], configPath);
+  }
+  return { plans };
+}
+
+/**
+ * Validate `profiles.<name>.load` — which top-level `load.plans` entries this
+ * profile runs under `glubean load --profile <name>` (GLU-244). Each
+ * referenced name MUST already exist in the top-level `load.plans` map
+ * (loaded before profiles, so `loadPlanNames` is complete here) — an unknown
+ * reference is a clear config error, not a silent no-op at run time.
+ */
+function validateProfileLoad(
+  profileName: string,
+  raw: unknown,
+  loadPlanNames: Set<string>,
+  configPath: string,
+): ProfileLoadConfig {
+  const context = `profiles.${profileName}.load`;
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_PROFILE_LOAD_KEYS, context, configPath);
+  const l = raw as Record<string, unknown>;
+  if (l.plans === undefined) {
+    throw new GlubeanConfigError(
+      `Missing required field \`${context}.plans\` (array of load plan names).`,
+      configPath,
+    );
+  }
+  assertType(l.plans, "array", `${context}.plans`, configPath);
+  const rawPlans = l.plans as unknown[];
+  if (rawPlans.length === 0) {
+    throw new GlubeanConfigError(`\`${context}.plans\` cannot be empty.`, configPath);
+  }
+  const plans = rawPlans.map((p) => {
+    if (typeof p !== "string") {
+      throw new GlubeanConfigError(
+        `\`${context}.plans\` must be an array of load-plan-name strings.`,
+        configPath,
+      );
+    }
+    if (!loadPlanNames.has(p)) {
+      throw new GlubeanConfigError(
+        `\`${context}.plans\` references undefined load plan "${p}". ` +
+          `Defined load plans: ${[...loadPlanNames].join(", ") || "(none)"}.`,
+        configPath,
+      );
+    }
+    return p;
+  });
+  return { plans };
+}
+
 function validateProfile(
   name: string,
   raw: unknown,
   suiteNames: Set<string>,
+  loadPlanNames: Set<string>,
   configPath: string,
 ): ProfileConfig {
   assertType(raw, "object", `profiles.${name}`, configPath);
   assertOnlyKnownKeys(raw, V1_PROFILE_KEYS, `profiles.${name}`, configPath);
   const p = raw as Record<string, unknown>;
-  if (p.suites === undefined) {
-    throw new GlubeanConfigError(
-      `Missing required field \`profiles.${name}.suites\` (array of suite names).`,
-      configPath,
-    );
+  // `suites` is REQUIRED for a `glubean run --profile` plan, but a profile
+  // dedicated to `glubean load --profile` (GLU-244) has no suites at all —
+  // default to [] rather than hard-erroring here. `resolveRunPlan`'s
+  // zero-suites guard (main.ts) already catches a load-only profile
+  // mistakenly used with `glubean run --profile`.
+  let suites: string[] = [];
+  if (p.suites !== undefined) {
+    assertType(p.suites, "array", `profiles.${name}.suites`, configPath);
+    suites = (p.suites as unknown[]).map((s) => {
+      if (typeof s !== "string") {
+        throw new GlubeanConfigError(
+          `\`profiles.${name}.suites\` must be an array of suite-name strings.`,
+          configPath,
+        );
+      }
+      if (!suiteNames.has(s)) {
+        throw new GlubeanConfigError(
+          `\`profiles.${name}.suites\` references undefined suite "${s}". ` +
+            `Defined suites: ${[...suiteNames].join(", ") || "(none)"}.`,
+          configPath,
+        );
+      }
+      return s;
+    });
   }
-  assertType(p.suites, "array", `profiles.${name}.suites`, configPath);
-  const suites = (p.suites as unknown[]).map((s) => {
-    if (typeof s !== "string") {
-      throw new GlubeanConfigError(
-        `\`profiles.${name}.suites\` must be an array of suite-name strings.`,
-        configPath,
-      );
-    }
-    if (!suiteNames.has(s)) {
-      throw new GlubeanConfigError(
-        `\`profiles.${name}.suites\` references undefined suite "${s}". ` +
-          `Defined suites: ${[...suiteNames].join(", ") || "(none)"}.`,
-        configPath,
-      );
-    }
-    return s;
-  });
+  let envFile: string | undefined;
+  if (p.envFile !== undefined) {
+    assertType(p.envFile, "string", `profiles.${name}.envFile`, configPath);
+    assertNonEmpty(p.envFile as string, `profiles.${name}.envFile`, configPath);
+    envFile = p.envFile as string;
+  }
   return {
     suites,
     selection: validateSelection(p.selection, `profiles.${name}.selection`, configPath),
@@ -859,6 +1003,10 @@ function validateProfile(
     }),
     ...(p.thresholds !== undefined && {
       thresholds: validateThresholds(p.thresholds, `profiles.${name}.thresholds`, configPath),
+    }),
+    ...(envFile !== undefined && { envFile }),
+    ...(p.load !== undefined && {
+      load: validateProfileLoad(name, p.load, loadPlanNames, configPath),
     }),
   };
 }
@@ -1027,9 +1175,9 @@ function validateProjections(
  * - Any unknown key at any nesting level (drops the warning behavior of the
  *   legacy loader)
  * - Missing required fields (`suites`, `profiles`, `suite.target`, `suite.kinds`,
- *   `profile.suites`)
+ *   `load.plans.<name>.target`, `profile.load.plans`)
  * - Wrong type on any field
- * - Profile that references an undefined suite name
+ * - Profile that references an undefined suite name or load plan name (GLU-244)
  *
  * Returns the parsed + validated config plus the absolute path it loaded from
  * (used downstream so `ResolvedRunPlan.configPath` can be populated in sub-task D).
@@ -1108,12 +1256,18 @@ export async function loadProjectConfigV1(
       configPath,
     );
   }
+  // Load plans (GLU-244) are parsed BEFORE profiles so `loadPlanNames` is
+  // complete when validating each profile's `load.plans` cross-references
+  // (mirrors how `suites` is parsed before `profiles` above).
+  const load = root.load !== undefined ? validateLoad(root.load, configPath) : undefined;
+  const loadPlanNames = new Set(Object.keys(load?.plans ?? {}));
+
   assertType(root.profiles, "object", "profiles", configPath);
   const profilesIn = root.profiles as Record<string, unknown>;
   const suiteNames = new Set(Object.keys(suites));
   const profiles: Record<string, ProfileConfig> = {};
   for (const name of Object.keys(profilesIn)) {
-    profiles[name] = validateProfile(name, profilesIn[name], suiteNames, configPath);
+    profiles[name] = validateProfile(name, profilesIn[name], suiteNames, loadPlanNames, configPath);
   }
 
   const config: GlubeanProjectConfigV1 = {
@@ -1121,6 +1275,7 @@ export async function loadProjectConfigV1(
     defaults: validateDefaults(root.defaults, configPath),
     suites,
     profiles,
+    ...(load !== undefined && { load }),
     ...(root.mcp !== undefined && { mcp: validateMcp(root.mcp, configPath) }),
     ...(root.projections !== undefined && {
       projections: validateProjections(root.projections, suiteNames, configPath),
@@ -1403,6 +1558,130 @@ export function resolveRunPlan(
     envFile,
     redaction,
     thresholds,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V1 LOAD PLAN RESOLVER — `glubean load --profile <name>` (GLU-244)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** CLI-flag-shaped overrides for `resolveLoadPlan`. CLI flags beat the
+ *  profile (mirrors `resolveRunPlan`'s `CliProfileOverrides`). */
+export interface CliLoadProfileOverrides {
+  /** CLI `--plan <name>` — narrows the profile's `load.plans` to just this
+   *  one. Must already appear in `profile.load.plans` (same "narrow, don't
+   *  widen" rule as `run`'s `--suite`). */
+  plan?: string;
+  /** CLI `--env-file <name>`. */
+  envFile?: string;
+}
+
+/** One load plan resolved to its concrete file/dir/glob target. */
+export interface ResolvedLoadPlanEntry {
+  name: string;
+  target: string;
+}
+
+/**
+ * ResolvedLoadPlan — what `profiles.<name>.load` resolves to after merging
+ * defaults → profile → CLI overrides. `glubean load --profile <name>`
+ * consumes this (GLU-244) instead of assembling load options piecemeal.
+ */
+export interface ResolvedLoadPlan {
+  /** Profile name selected (e.g. "perf"). */
+  profile: string;
+  /** Absolute path of the loaded `glubean.yaml`. */
+  configPath: string;
+  /** The plan(s) to run, in `profile.load.plans` declaration order (or a
+   *  single entry when `--plan` narrowed it). */
+  plans: ResolvedLoadPlanEntry[];
+  envFile: string;
+  /** Same shape/precedence as `ResolvedRunPlan.upload` — `glubean load
+   *  --profile <name> --upload` reuses this rather than a separate
+   *  load-specific upload config surface. */
+  upload?: UploadConfig;
+}
+
+/**
+ * Resolve a profile's `load` block against a loaded config + optional CLI
+ * overrides (GLU-244).
+ *
+ * Throws `GlubeanConfigError` when:
+ * - `profileName` is not in `config.profiles` (lists available profiles).
+ * - The profile has no `load.plans` declared (it isn't load-capable).
+ * - `cliOverrides.plan` isn't one of the profile's declared load plans.
+ *
+ * Merge order for `envFile` (later layer wins): built-in default (".env") →
+ * `config.defaults.envFile` → `profile.envFile` → `cliOverrides.envFile` —
+ * same precedence chain as `resolveRunPlan`, with `profile.envFile` slotted
+ * in (load profiles set `envFile` directly on the profile, not on a nested
+ * `execution`-style block).
+ */
+export function resolveLoadPlan(
+  config: GlubeanProjectConfigV1,
+  configPath: string,
+  profileName: string,
+  cliOverrides: CliLoadProfileOverrides = {},
+): ResolvedLoadPlan {
+  const profile = config.profiles[profileName];
+  if (!profile) {
+    const available = Object.keys(config.profiles).sort();
+    throw new GlubeanConfigError(
+      `Profile "${profileName}" not found. Available profiles: ${
+        available.length > 0 ? available.join(", ") : "(none defined)"
+      }.`,
+      configPath,
+    );
+  }
+  if (!profile.load || profile.load.plans.length === 0) {
+    throw new GlubeanConfigError(
+      `Profile "${profileName}" has no \`load.plans\` declared. Add ` +
+        `\`profiles.${profileName}.load.plans: [<name>...]\`, referencing one ` +
+        `or more entries under the top-level \`load.plans\` block.`,
+      configPath,
+    );
+  }
+
+  let planNames = profile.load.plans;
+  if (cliOverrides.plan !== undefined) {
+    if (!planNames.includes(cliOverrides.plan)) {
+      throw new GlubeanConfigError(
+        `--plan "${cliOverrides.plan}" is not declared in profile ` +
+          `"${profileName}"'s load.plans (${planNames.join(", ") || "(none)"}).`,
+        configPath,
+      );
+    }
+    planNames = [cliOverrides.plan];
+  }
+
+  // `profile.load.plans` names are already validated (at load time) against
+  // the top-level `load.plans` map, so every lookup below is guaranteed to
+  // hit — the `declaredPlans[name]` guard is defense-in-depth only.
+  const declaredPlans = config.load?.plans ?? {};
+  const plans: ResolvedLoadPlanEntry[] = planNames.map((name) => {
+    const decl = declaredPlans[name];
+    if (!decl) {
+      throw new GlubeanConfigError(
+        `Profile "${profileName}" references undefined load plan "${name}".`,
+        configPath,
+      );
+    }
+    return { name, target: decl.target };
+  });
+
+  const defaults = config.defaults ?? {};
+  const envFile =
+    cliOverrides.envFile ??
+    profile.envFile ??
+    defaults.envFile ??
+    RESOLVED_PLAN_BUILTIN_DEFAULTS.envFile;
+
+  return {
+    profile: profileName,
+    configPath,
+    plans,
+    envFile,
+    ...(profile.upload !== undefined && { upload: profile.upload }),
   };
 }
 

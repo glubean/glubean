@@ -1,9 +1,15 @@
-import { mkdtemp, rm, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadResultFileName, printOutcome, writeLoadResults, type LoadRunOutcome } from "./load.js";
+import {
+  loadResultFileName,
+  printOutcome,
+  writeLoadResults,
+  resolveManyLoadTargets,
+  type LoadRunOutcome,
+} from "./load.js";
 
 // NOTE: plan execution (discover → run → collect) now happens in a child process
 // and is covered by `@glubean/runner`'s `runLoadFileInSubprocess` integration
@@ -55,6 +61,49 @@ describe("writeLoadResults (M4-c)", () => {
       expect(written[3]).toMatch(/-2\.load\.result\.json$/);
     } finally {
       await rm(outDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveManyLoadTargets (GLU-244 — profile load.plans → multiple targets)", () => {
+  it("resolves each explicit-file target and preserves declaration order", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-load-many-"));
+    try {
+      await writeFile(join(dir, "a.load.ts"), "// a\n", "utf-8");
+      await writeFile(join(dir, "b.load.ts"), "// b\n", "utf-8");
+      const files = await resolveManyLoadTargets([
+        join(dir, "b.load.ts"),
+        join(dir, "a.load.ts"),
+      ]);
+      expect(files).toEqual([resolve(dir, "b.load.ts"), resolve(dir, "a.load.ts")]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("dedupes a file discovered by more than one target (no double-run)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-load-many-dedupe-"));
+    try {
+      await mkdir(join(dir, "sub"), { recursive: true });
+      await writeFile(join(dir, "sub", "shared.load.ts"), "// shared\n", "utf-8");
+      // Both the directory AND the explicit file resolve to the same path.
+      const files = await resolveManyLoadTargets([
+        join(dir, "sub"),
+        join(dir, "sub", "shared.load.ts"),
+      ]);
+      expect(files).toEqual([resolve(dir, "sub", "shared.load.ts")]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns [] when a target resolves to no .load.ts files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-load-many-empty-"));
+    try {
+      const files = await resolveManyLoadTargets([join(dir, "does-not-exist.load.ts")]);
+      expect(files).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
