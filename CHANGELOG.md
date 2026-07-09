@@ -9,6 +9,13 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-07-09
+
+### Added
+- **`glubean load --profile` runs a named load plan from config** (`@glubean/cli`, GLU-244) — `glubean load --profile <name>` resolves and runs a load plan declared in the glubean config instead of assembling capacity runs from ad-hoc CLI args, so configured load runs are repeatable from one flag. Hardening (codex R1–R5): `--config` is threaded through bare `load --upload` too, a missing *explicit* `--config` is now fatal rather than a silent fallback, plus a precise `envFileExplicit` flag and target-drop condition.
+
+## [0.10.0] — 2026-07-07
+
 ### Added
 - **Structured session/cookie/header behavior + per-node assertions on workflow nodes** (`@glubean/sdk`, GLU-195) — the workflow-node projection schema gains author-declared `session` (cookie/header names + a coarse establish/refresh/read/revoke lifecycle badge) and `verify` (structured per-node assertion rows) hints, so the Specs workflow inspector can render them first-class instead of parsing free-text `reads`. All fields are optional and backward-compatible; cookie/header NAMES are validated against RFC-7230 token grammar (so a value can't be smuggled) and stay redaction-safe (names survive sync, real cookie values still mask — GLU-123 intact).
 
