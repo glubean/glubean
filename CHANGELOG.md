@@ -9,6 +9,12 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-07-10
+
+### Added
+- **Contract source capture — the authored declaration ships with the projection** (`@glubean/scanner`, `@glubean/cli`) — `glubean sync` captures each contract's `export const … = contract.…(…)` span verbatim (AST slice by EXPORT name, so scoped factories like `platformContract(...)` are covered — incl. multi-declarator statements per declarator, same-file `export { x as y }` aliases, and `export default` with TS wrappers like `satisfies` unwrapped) and attaches it to the uploaded projection as `sourceText`. Cloud's Specs view renders it as a per-contract "Source" disclosure, so reviewers see the `verify()` logic a data projection can't express. Deliberately published verbatim: keep secrets in env vars / out-of-span consts, never inlined in a contract (skill rule 22); the structured projection stays redacted exactly as before (pinned by test).
+- Boundaries & budgets for source capture: cross-file re-exports and symlinks escaping the project root fail CLOSED (no source captured); 64 KiB per-contract capture cap with an explicit `sourceTextOmitted` marker (never silent); the sync payload budget vs the platform's 8 MiB body cap is all-or-nothing (a large project can always sync, and an unchanged contract's revision hash never churns because a *neighbor* grew); `glubean_extract_contracts` MCP responses strip `sourceText` (the server runs locally — consumers read source from disk; `sourceFile`/`line` remain).
+
 ## [0.10.1] — 2026-07-09
 
 ### Added

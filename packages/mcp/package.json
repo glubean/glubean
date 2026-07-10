@@ -1,6 +1,6 @@
 {
   "name": "@glubean/mcp",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "engines": { "node": ">=22" },
   "type": "module",
   "bin": {
