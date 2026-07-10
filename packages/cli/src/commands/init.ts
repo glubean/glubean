@@ -439,12 +439,12 @@ export const getUser = usersApi("user-get", {
   cases: {
     found: {
       description: "returns the user profile when the ID exists",
-      params: { id: "1" },
+      pathParams: { id: "1" },
       expect: { status: 200, schema: UserSchema },
     },
     notFound: {
       description: "returns 404 when the user ID does not exist",
-      params: { id: "0" },
+      pathParams: { id: "0" },
       expect: { status: 404 },
     },
   },

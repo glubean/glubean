@@ -133,7 +133,7 @@ export type HttpStaticBody =
  *
  * `defineHttpCase<Needs, T>` captures `Needs` once via the explicit
  * generic; the case literal is then checked against
- * `ContractCase<T, Needs>` so all action fields (`body`, `params`,
+ * `ContractCase<T, Needs>` so all action fields (`body`, `pathParams`,
  * `query`, `headers`) are constrained to `(input: Needs) => ...`. Drift
  * between `needs` and any action field becomes a compile error.
  *
@@ -161,7 +161,7 @@ export type HttpStaticBody =
  * const successCase = defineHttpCase<{ email: string }>({
  *   description: "creates a user",
  *   needs: z.object({ email: z.string() }),
- *   // body, params, query, headers params now type-checked against
+ *   // body, pathParams, query, headers params now type-checked against
  *   // { email: string } — author can NOT write `({wrongKey}) => ...`.
  *   body: ({ email }) => ({ email }),
  *   expect: { status: 201 },
@@ -213,7 +213,20 @@ export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
   /** Request content type override for this case. */
   contentType?: string;
 
-  /** URL params. Values can be `ParamValue` objects for OpenAPI metadata. */
+  /**
+   * URL **path** parameters — values substituted into the endpoint's `:key`
+   * segments (e.g. `pathParams: { id: "u_1" }` resolves `GET /users/:id` to
+   * `GET /users/u_1`). Values can be `ParamValue` objects for OpenAPI
+   * metadata. Query-string parameters go in `query`, not here.
+   */
+  pathParams?: Record<string, ParamValue> | ((input: Needs) => Record<string, string>);
+
+  /**
+   * @deprecated Renamed to `pathParams` — this field only ever filled the
+   * endpoint's `:key` PATH segments, never the query string, and the bare
+   * name `params` hid that. Same type, same behavior; setting both on one
+   * case is a construction-time error. Will be removed in a future major.
+   */
   params?: Record<string, ParamValue> | ((input: Needs) => Record<string, string>);
 
   /** Query parameters. */
@@ -513,6 +526,8 @@ export interface HttpContractMeta {
  */
 export type InferHttpInputs<_P = HttpPayloadSchemas> = {
   body?: unknown;
+  pathParams?: Record<string, string>;
+  /** @deprecated Renamed to `pathParams` (same shape). */
   params?: Record<string, string>;
   query?: Record<string, string>;
   headers?: Record<string, string>;

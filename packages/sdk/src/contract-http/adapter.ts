@@ -16,7 +16,7 @@
  *   - toOpenApi / toMarkdown: delegate to ./openapi.ts / ./markdown.ts
  *
  * .case() fail-fast: rejects cases with function-valued input fields
- * (body/params/query/headers) because function fields reference case-local
+ * (body/pathParams/query/headers) because function fields reference case-local
  * setup state which is not available in flow mode.
  */
 
@@ -131,6 +131,34 @@ function resolveParams(
     resolved = resolved.replace(`:${key}`, encodeURIComponent(value));
   }
   return resolved;
+}
+
+/**
+ * Single read point for a case's path-parameter slot: `pathParams` is the
+ * canonical name, `params` its deprecated alias (they only ever filled the
+ * endpoint's `:key` PATH segments). Setting both is ambiguous — fail fast
+ * with the same message everywhere (projection catches it at construction;
+ * the execute paths keep the guard for specs built outside the factory).
+ */
+function casePathParams(
+  // `(input: never)` keeps the function branch assignable from any concrete
+  // `Needs` (parameter contravariance) — this helper never CALLS the slot.
+  caseSpec: {
+    pathParams?: Record<string, ParamValue> | ((input: never) => Record<string, string>);
+    params?: Record<string, ParamValue> | ((input: never) => Record<string, string>);
+  },
+  where: string,
+): Record<string, ParamValue> | ((input: unknown) => Record<string, string>) | undefined {
+  if (caseSpec.pathParams !== undefined && caseSpec.params !== undefined) {
+    throw new Error(
+      `${where}: both "pathParams" and "params" are set — "params" is the ` +
+        `deprecated alias of "pathParams". Keep only "pathParams".`,
+    );
+  }
+  return (caseSpec.pathParams ?? caseSpec.params) as
+    | Record<string, ParamValue>
+    | ((input: unknown) => Record<string, string>)
+    | undefined;
 }
 
 const STRUCTURED_REQUEST_FIELDS = [
@@ -483,7 +511,7 @@ function extractParamMetaSchemas(
  *
  * Differs from the legacy `executeCase<T, S>` helper above:
  *   - No setup / teardown. State is the `resolvedInput` argument.
- *   - Function-valued body / headers / params / query receive `resolvedInput`
+ *   - Function-valued body / headers / pathParams / query receive `resolvedInput`
  *     (typed per-case at the ref boundary; `unknown` here is runtime-only).
  *   - No `finally` cleanup block — standalone cleanup is owned by bootstrap
  *     overlay context via `ctx.cleanup`, registered outside this helper.
@@ -516,11 +544,12 @@ async function executeStandaloneCase(
     );
   }
 
-  // Resolve params/query/body/headers using resolvedInput (not setup state).
-  // Function-valued fields receive the logical input directly.
-  const rawParams = typeof caseSpec.params === "function"
-    ? (caseSpec.params as (input: unknown) => Record<string, string>)(resolvedInput)
-    : caseSpec.params;
+  // Resolve pathParams/query/body/headers using resolvedInput (not setup
+  // state). Function-valued fields receive the logical input directly.
+  const pathParamsSlot = casePathParams(caseSpec, `case (${spec.endpoint})`);
+  const rawParams = typeof pathParamsSlot === "function"
+    ? pathParamsSlot(resolvedInput)
+    : pathParamsSlot;
   const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
   const resolvedPath = resolveParams(path, params);
 
@@ -618,6 +647,7 @@ function validateInboundCase(
   const where = `inbound case "${key}" (${spec.endpoint})`;
   const outboundOnly = [
     ["body", "the counterparty sends the body — declare its shape in expect.bodySchema"],
+    ["pathParams", "inbound cases have no request to parameterize"],
     ["params", "inbound cases have no request to parameterize"],
     ["query", "inbound cases have no request to parameterize"],
     ["headers", "request headers are outbound vocabulary — header EXPECTATIONS go in expect.headers"],
@@ -750,7 +780,10 @@ function projectHttp(
       }
 
       const paramSchemas = extractParamMetaSchemas(
-        c.params as Record<string, unknown> | ((state: unknown) => Record<string, string>) | undefined,
+        casePathParams(c, `case "${key}" (${spec.endpoint})`) as
+          | Record<string, unknown>
+          | ((state: unknown) => Record<string, string>)
+          | undefined,
       );
       const querySchemas = extractParamMetaSchemas(
         c.query as Record<string, unknown> | ((state: unknown) => Record<string, string>) | undefined,
@@ -967,7 +1000,7 @@ async function executeCaseInFlowHttp(input: {
 
   // v10: `resolvedInputs` is the LOGICAL case input (matches the case's
   // `needs` shape), NOT an adapter patch. Same pattern as standalone
-  // executeStandaloneCase — function-valued body/params/query/headers
+  // executeStandaloneCase — function-valued body/pathParams/query/headers
   // receive resolvedInputs; static values pass through unchanged.
   //
   // Flow step's `in` lens returns this logical input; FlowBuilder.step()
@@ -985,9 +1018,13 @@ async function executeCaseInFlowHttp(input: {
   }
 
   // Resolve action fields using resolvedInputs for function-valued slots.
-  const rawParams = typeof caseSpec.params === "function"
-    ? (caseSpec.params as (input: unknown) => Record<string, string>)(resolvedInputs)
-    : caseSpec.params;
+  const pathParamsSlot = casePathParams(
+    caseSpec,
+    `case "${caseKey}" in contract "${contract._projection.id}"`,
+  );
+  const rawParams = typeof pathParamsSlot === "function"
+    ? pathParamsSlot(resolvedInputs)
+    : pathParamsSlot;
   const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
   const resolvedPath = resolveParams(path, params);
 

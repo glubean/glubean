@@ -245,10 +245,19 @@ import { defineHttpCase } from "./index.js";
     description: "fetch user",
     needs: s<{ token: string; userId: string }>(),
     headers: ({ token }) => ({ authorization: `Bearer ${token}` }),
-    params: ({ userId }) => ({ userId }),
+    pathParams: ({ userId }) => ({ userId }),
     expect: { status: 200 },
   });
   void _good2;
+
+  // ✅ Deprecated alias `params` keeps the same Needs type-lock until removal.
+  const _goodAlias = defineHttpCase<{ userId: string }>({
+    description: "fetch user via deprecated alias",
+    needs: s<{ userId: string }>(),
+    params: ({ userId }) => ({ userId }),
+    expect: { status: 200 },
+  });
+  void _goodAlias;
 
   // ❌ Drift: body destructures key not on Needs — must NOT compile.
   // This is the v3 P2 case that escaped TS without the factory.

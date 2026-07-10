@@ -162,6 +162,10 @@ test("outbound-only fields are rejected with field-specific errors", () => {
     .toThrow(/"verify" is not allowed/);
   expect(buildWith({ expect: { bodySchema: eventSchema }, needs: eventSchema }))
     .toThrow(/"needs" is not allowed/);
+  expect(buildWith({ expect: { bodySchema: eventSchema }, pathParams: { id: "1" } }))
+    .toThrow(/"pathParams" is not allowed/);
+  expect(buildWith({ expect: { bodySchema: eventSchema }, params: { id: "1" } }))
+    .toThrow(/"params" is not allowed/);
   expect(buildWith({ expect: { bodySchema: eventSchema }, headers: { a: "b" } }))
     .toThrow(/header EXPECTATIONS go in expect\.headers/);
 });

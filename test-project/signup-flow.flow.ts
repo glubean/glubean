@@ -115,7 +115,7 @@ export const fetchUser = api("fetch-user", {
     ok: {
       description: "Returns the user record",
       needs: s<{ compoundKey: string }>(),
-      params: ({ compoundKey }: { compoundKey: string }) => ({ compoundKey }),
+      pathParams: ({ compoundKey }: { compoundKey: string }) => ({ compoundKey }),
       expect: { status: 200 },
     },
   },

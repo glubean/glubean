@@ -158,7 +158,7 @@ export interface BaseCaseSpec {
 
   /**
    * Logical input schema for the case. The only public input contract.
-   * Protocol action fields (HTTP body/headers/params/query etc.) receive
+   * Protocol action fields (HTTP body/headers/pathParams/query etc.) receive
    * this typed input as their argument.
    *
    * Typed as `SchemaLike<unknown>` at the base to accept any concrete
@@ -590,7 +590,7 @@ export interface ContractProtocolAdapter<
    * Adapter responsibility (post-Spike-4; uniform across HTTP / gRPC /
    * GraphQL): treat `resolvedInputs` as the case's **logical input**
    * matching `needs`. Call function-valued action fields (HTTP:
-   * `body`/`params`/`query`/`headers`; gRPC: `request`/`metadata`;
+   * `body`/`pathParams`/`query`/`headers`; gRPC: `request`/`metadata`;
    * GraphQL: `variables`/`headers`) with it. The contract case has no
    * lifecycle in v10 — setup-style work belongs to a
    * `contract.bootstrap()` overlay, NOT to the case itself. Return an
@@ -755,7 +755,7 @@ export interface ProtocolContract<
    * Return a ContractCaseRef for use in `workflow().call/.poll(...)`.
    *
    * Runtime validation: adapter's `.case(key)` implementation MUST fail-fast
-   * if the case contains function-valued input fields (body/params/query/
+   * if the case contains function-valued input fields (body/pathParams/query/
    * headers as functions). Function fields reference case-local setup state
    * which is not available in flow mode. See contract-flow §5.1.1.
    */

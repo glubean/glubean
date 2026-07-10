@@ -9,6 +9,9 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ## [Unreleased]
 
+### Changed
+- **HTTP contract case `params` renamed to `pathParams`; `params` is now a deprecated alias** (`@glubean/sdk`) — the field only ever fills the endpoint's `:key` PATH segments (`pathParams: { id: "u_1" }` + `GET /users/:id` → `GET /users/u_1`), never the query string, and the bare name `params` hid that. `pathParams` is the canonical name (same type, static or `(input: Needs) => ...` function form, `ParamValue` metadata included); `params` keeps working with a `@deprecated` JSDoc marker until a future major. Setting both on one case throws at contract construction; inbound cases reject `pathParams` exactly like `params`. Projection wire format is unchanged (`schemas.params`), so Cloud/CLI/MCP/OpenAPI consumers are unaffected. `glubean init` templates, test-project fixtures, and the authoring skill docs now use `pathParams`.
+
 ## [0.10.2] — 2026-07-10
 
 ### Added

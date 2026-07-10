@@ -428,6 +428,91 @@ test("GLU-156: multiple `{{KEY}}` placeholders in one path param segment all res
 });
 
 // ---------------------------------------------------------------------------
+// pathParams — canonical name for the path-parameter slot (`params` is its
+// deprecated alias; the GLU-156 tests above double as alias back-compat
+// coverage until `params` is removed)
+// ---------------------------------------------------------------------------
+
+test("pathParams: static values resolve :key segments", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const c = api("projects.get5", {
+    endpoint: "GET /v1/projects/:projectId",
+    cases: {
+      ok: {
+        description: "fetch a project by id (canonical pathParams)",
+        pathParams: { projectId: "proj_new" },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await c[0].fn!(makeCtx());
+  expect(client._calls[0].url).toBe("/v1/projects/proj_new");
+});
+
+test("pathParams: function form receives the resolved logical input (bootstrap overlay)", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const c = api("orders.get", {
+    endpoint: "GET /projects/:projectId/orders/:orderId",
+    cases: {
+      ok: {
+        description: "fetch an order under a project",
+        pathParams: ({ projectId, orderId }: any) => ({ projectId, orderId }),
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  (contract.bootstrap as any)(c.case("ok"), async () => ({
+    projectId: "p_1",
+    orderId: "o_9",
+  }));
+
+  await c[0].fn!(makeCtx());
+  expect(client._calls[0].url).toBe("/projects/p_1/orders/o_9");
+});
+
+test("pathParams: ParamValue metadata projects into case schemas (wire name stays `params`)", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  const c = api("projects.get6", {
+    endpoint: "GET /v1/projects/:projectId",
+    cases: {
+      ok: {
+        description: "fetch a project by id",
+        pathParams: {
+          projectId: { value: "p_1", schema: z.string().min(1), description: "project id" },
+        },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  const projected = c._projection.cases.find((x) => x.key === "ok")!;
+  expect(projected.schemas?.params?.projectId?.description).toBe("project id");
+});
+
+test("setting both pathParams and its deprecated alias params throws at construction", () => {
+  const client = makeMockClient();
+  const api = contract.http.with("api", { client });
+  expect(() =>
+    api("projects.get7", {
+      endpoint: "GET /v1/projects/:projectId",
+      cases: {
+        ok: {
+          description: "ambiguous path-parameter slot",
+          pathParams: { projectId: "a" },
+          params: { projectId: "b" },
+          expect: { status: 200 },
+        },
+      },
+    }),
+  ).toThrow(/both "pathParams" and "params" are set/);
+});
+
+// ---------------------------------------------------------------------------
 // projection + normalize
 // ---------------------------------------------------------------------------
 
