@@ -50,6 +50,62 @@ export interface SyncCommandOptions {
   allowEmpty?: boolean;
 }
 
+/** A single hand-authored contract declaration beyond this is pathological
+ * (generated code, a pasted fixture) — its source stops being review material. */
+const SOURCE_TEXT_MAX_PER_CONTRACT_BYTES = 64 * 1024;
+/** Safety margin under the platform contract-projection route's 8 MiB
+ * `MAX_BODY_BYTES` — leaves headroom for the envelope (git provenance, JSON
+ * syntax) so the budget check can measure `{ contracts }` alone. */
+const CONTRACTS_BODY_SAFE_BYTES = 7 * 1024 * 1024;
+
+/**
+ * Drop `projection.sourceText` when the contracts POST body would exceed the
+ * server's cap. The verbatim source is a review EXTRA — it must never be what
+ * turns a large-but-valid project into a 413 that can't sync at all; structured
+ * projections are never dropped.
+ *
+ * ALL-OR-NOTHING by design (codex R4 P2): Cloud versions each contract by
+ * hashing its whole `projection`, so SELECTIVELY dropping source (largest-first)
+ * would let an unrelated contract's growth strip a DIFFERENT, unchanged
+ * contract's source — appending a false revision and churning its review-note
+ * hash. Including source for every contract or none keeps each contract's
+ * payload a function of the project state the author actually changed, at the
+ * cost of one collective flip on the (pathological) project that crosses the
+ * boundary. The per-contract cap stays: it depends only on the contract's OWN
+ * span, so it can never churn a neighbor.
+ *
+ * Mutates in place; returns how many contracts had their source omitted HERE
+ * (capture-time omissions carry their own marker — see `sourceTextOmitted`).
+ * Exported for tests.
+ */
+export function applySourceTextBudget(
+  contracts: Array<{ projection: unknown }>,
+  perContractMax = SOURCE_TEXT_MAX_PER_CONTRACT_BYTES,
+  bodySafeBytes = CONTRACTS_BODY_SAFE_BYTES,
+): number {
+  const carriers = contracts
+    .map((c) => c.projection)
+    .filter(
+      (p): p is Record<string, unknown> =>
+        p !== null && typeof p === "object" && !Array.isArray(p) && typeof (p as Record<string, unknown>).sourceText === "string",
+    );
+  let omitted = 0;
+  const drop = (p: Record<string, unknown>) => {
+    delete p.sourceText;
+    omitted++;
+  };
+  for (const p of carriers) {
+    if (Buffer.byteLength(p.sourceText as string, "utf8") > perContractMax) drop(p);
+  }
+  const bodyBytes = Buffer.byteLength(JSON.stringify({ contracts }), "utf8");
+  if (bodyBytes > bodySafeBytes) {
+    for (const p of carriers) {
+      if (typeof p.sourceText === "string") drop(p);
+    }
+  }
+  return omitted;
+}
+
 /**
  * `glubean sync` — sync the repo's test-definition projections (declared
  * metadata + dry-run shape) to Glubean Cloud for team review. PROJECT-scoped:
@@ -342,6 +398,22 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     return rebased;
   };
 
+  // Attach the contract's raw authored source to the (already redacted) projection
+  // body. Held out of redaction on purpose: the source span is clean by authoring
+  // convention (secrets live in env vars / out-of-span consts — a skill rule), and
+  // pattern redaction would corrupt otherwise-valid TypeScript. Rides inside
+  // `projection` (not a top-level sibling) so the server's `z.unknown()` projection
+  // field carries it through ingest → JSONB → read with no server changes.
+  const withSourceText = (projection: unknown, sourceText: string | undefined): unknown =>
+    sourceText !== undefined && projection !== null && typeof projection === "object" && !Array.isArray(projection)
+      ? { ...(projection as Record<string, unknown>), sourceText }
+      : projection;
+
+  // The source is an EXTRA on top of the structured snapshot — it must never be
+  // what tips a large project's contracts POST over the server's body cap into a
+  // 413 "can't sync at all" (codex R1 P2). Budgeted after assembly, see
+  // applySourceTextBudget below; the structured projections are never dropped.
+
   // Contracts/workflows: redact the free-text + the normalized `projection` body
   // (schemas/descriptions/notes), preserve identity/structural fields.
   const safeContracts = contracts.map((c) => ({
@@ -352,7 +424,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     deprecated: c.deprecated == null ? null : (redactField(c.deprecated) as string),
     tags: c.tags ?? [],
     caseCount: c.caseCount,
-    projection: redactStructure(rebaseEmbeddedSourceFiles(c.projection)),
+    projection: withSourceText(redactStructure(rebaseEmbeddedSourceFiles(c.projection)), c.sourceText),
     projectionComplete: c.projectionComplete,
     incompleteReason: c.incompleteReason ?? null,
     // GLU-221 phase 1 — best-effort source location (structural identity
@@ -363,6 +435,16 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     line: c.line ?? null,
     endLine: c.endLine ?? null,
   }));
+  // Omissions the author should hear about (never silent): spans the SCANNER
+  // withheld at capture (per-contract cap — carried as a marker in the meta,
+  // codex R4 P3) plus any stripped here by the payload budget.
+  const captureOmitted = safeContracts.filter(
+    (c) =>
+      c.projection !== null &&
+      typeof c.projection === "object" &&
+      (c.projection as Record<string, unknown>).sourceTextOmitted === true,
+  ).length;
+  const sourceTextOmitted = captureOmitted + applySourceTextBudget(safeContracts);
   const safeWorkflows = workflows.map((w) => ({
     workflowId: w.workflowId,
     name: w.name ?? null,
@@ -463,6 +545,13 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   if (partial > 0) {
     console.log(
       `${colors.yellow}  ◐ ${partial} partial — use ctx.when()/switch()/while() (tests) or resolve opaque nodes/unprojectable schemas (workflows/contracts) for full projection${colors.reset}`,
+    );
+  }
+  if (sourceTextOmitted > 0) {
+    // Never silent: the Specs "Source" view will be missing for these, and the
+    // author should know it was a size budget, not a capture failure.
+    console.log(
+      `${colors.yellow}  ◐ source omitted for ${sourceTextOmitted} contract(s) — payload size budget (structured projections still synced)${colors.reset}`,
     );
   }
   console.log();

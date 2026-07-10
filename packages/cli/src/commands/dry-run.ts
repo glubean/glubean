@@ -66,6 +66,10 @@ export interface ProjectedContract {
   sourceFile?: string;
   line?: number;
   endLine?: number;
+  /** The contract's authored source span (verbatim `export const X = …`). Held
+   * SEPARATE from `projection` so sync can splice it in AFTER redaction (raw,
+   * unredacted — see NormalizedContractMeta.sourceText + sync's redaction note). */
+  sourceText?: string;
 }
 
 /** One projected workflow (C1) — the scanner's static normalized workflow. */
@@ -200,25 +204,33 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
   // Contracts + workflows are DECLARATIVE — the scanner already produced their full
   // normalized projection statically (no dry-run). Map to the upload shape; the
   // normalized blob is the reviewable body, the head fields derive from it.
-  const contracts: ProjectedContract[] = (scanResult.contractsProjection ?? []).map((c) => ({
-    contractId: c.id,
-    protocol: c.protocol,
-    target: c.target,
-    description: c.description,
-    deprecated: c.deprecated,
-    tags: c.tags,
-    caseCount: c.cases?.length ?? 0,
-    projection: c,
-    projectionComplete: !(c.unprojectableSchemas && c.unprojectableSchemas.length > 0),
-    ...(c.unprojectableSchemas && c.unprojectableSchemas.length > 0
-      ? { incompleteReason: `${c.unprojectableSchemas.length} declared schema(s) couldn't be projected` }
-      : {}),
-    // GLU-221 phase 1 — carried through only when the scanner resolved them;
-    // absent for scoped/custom-factory contracts (see NormalizedContractMeta doc).
-    ...(c.sourceFile !== undefined ? { sourceFile: c.sourceFile } : {}),
-    ...(c.line !== undefined ? { line: c.line } : {}),
-    ...(c.endLine !== undefined ? { endLine: c.endLine } : {}),
-  }));
+  const contracts: ProjectedContract[] = (scanResult.contractsProjection ?? []).map((c) => {
+    // Hold sourceText OUT of the reviewable `projection` body: it's raw source
+    // that must NOT go through sync's projection redaction (it's clean by
+    // convention, and redaction would mangle valid TS). sync re-attaches it to
+    // the uploaded projection after redacting the rest.
+    const { sourceText, ...projectionBody } = c;
+    return {
+      contractId: c.id,
+      protocol: c.protocol,
+      target: c.target,
+      description: c.description,
+      deprecated: c.deprecated,
+      tags: c.tags,
+      caseCount: c.cases?.length ?? 0,
+      projection: projectionBody,
+      projectionComplete: !(c.unprojectableSchemas && c.unprojectableSchemas.length > 0),
+      ...(c.unprojectableSchemas && c.unprojectableSchemas.length > 0
+        ? { incompleteReason: `${c.unprojectableSchemas.length} declared schema(s) couldn't be projected` }
+        : {}),
+      // GLU-221 phase 1 — carried through only when the scanner resolved them;
+      // absent for scoped/custom-factory contracts (see NormalizedContractMeta doc).
+      ...(c.sourceFile !== undefined ? { sourceFile: c.sourceFile } : {}),
+      ...(c.line !== undefined ? { line: c.line } : {}),
+      ...(c.endLine !== undefined ? { endLine: c.endLine } : {}),
+      ...(sourceText !== undefined ? { sourceText } : {}),
+    };
+  });
   const workflows: ProjectedWorkflow[] = (scanResult.workflows ?? []).map((w) => {
     const g = w.gradeSummary ?? { full: 0, partial: 0, opaque: 0 };
     const nodeCount = (g.full ?? 0) + (g.partial ?? 0) + (g.opaque ?? 0);

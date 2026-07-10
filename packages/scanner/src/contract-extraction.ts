@@ -16,10 +16,11 @@
  */
 
 import { pathToFileURL } from "node:url";
-import { resolve, relative, basename } from "node:path";
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { resolve, relative, basename, isAbsolute } from "node:path";
+import { readdirSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { GLUBEAN_KINDS, buildSuffixes } from "./kinds.js";
 import { extractContractCases } from "./extractor-ast.js";
+import { parseSource, unwrapExpression, type AnyNode } from "./ast.js";
 
 // =============================================================================
 // Types — mirror sdk's ExtractedContractProjection / ExtractedFlowProjection
@@ -185,6 +186,30 @@ export interface NormalizedContractMeta {
   line?: number;
   /** 1-based end line of the export statement, when resolvable. */
   endLine?: number;
+  /**
+   * The contract's authored source span — the whole `export const X = ...`
+   * declaration, verbatim TypeScript (verify() bodies, symbolic param values,
+   * schemas). Captured by export NAME (form-independent), so a scoped/custom
+   * factory like `platformContract(...)` — invisible to the static case
+   * extractor above — still gets its source, unlike `line`/`endLine`. Powers a
+   * review surface that shows the authored contract, including the verify logic
+   * that isn't otherwise projectable (a runtime closure). Undefined on a parse
+   * failure or when the span exceeds the 64 KiB capture cap (see
+   * SOURCE_TEXT_CAPTURE_MAX_BYTES — enforced at capture so MCP consumers are
+   * bounded too, not only sync's payload budget). NOTE: published verbatim for
+   * review — authors must keep secrets in env vars / out-of-span consts, never
+   * inlined in a contract (skill rule).
+   */
+  sourceText?: string;
+  /**
+   * Set (true) when this contract's span EXISTED but exceeded the 64 KiB
+   * capture cap, so `sourceText` was withheld — lets sync tell the author
+   * "source omitted: declaration too large" instead of a silently missing
+   * Source view (codex R4 P3). Deterministic per contract (depends only on the
+   * contract's own span size), so it never churns an unchanged contract's
+   * projection hash.
+   */
+  sourceTextOmitted?: boolean;
 }
 
 /**
@@ -774,6 +799,127 @@ function contractLocationKey(contractId: string, exportName: string, protocol: s
   return JSON.stringify([contractId, exportName, protocol]);
 }
 
+/**
+ * Capture cap for one contract's `sourceText`, enforced AT the capture point so
+ * every consumer inherits it — `glubean sync` (which additionally budgets the
+ * whole POST body) and the MCP `glubean_extract_contracts` tool alike (codex R2
+ * P2: an MCP response must not balloon on a generated/pasted mega-declaration).
+ * A hand-authored contract declaration beyond this stops being review material.
+ */
+const SOURCE_TEXT_CAPTURE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Slice ONE declaration's authored span. A single-declarator statement slices
+ * the WHOLE statement (the verbatim authored line, `export const`/`const`
+ * keyword included). A multi-declarator statement (`export const a = …, b = …;`)
+ * slices just this declarator and re-prefixes the keyword — each contract gets
+ * ITS OWN source, not every sibling's (codex R1 P2).
+ */
+function sliceDeclarationSpan(
+  content: string,
+  statement: AnyNode,
+  declarator: AnyNode,
+  declaratorCount: number,
+  exported: boolean,
+): string | undefined {
+  if (declaratorCount === 1) {
+    if (statement.start == null || statement.end == null) return undefined;
+    return content.slice(statement.start, statement.end);
+  }
+  if (declarator.start == null || declarator.end == null) return undefined;
+  return `${exported ? "export " : ""}const ${content.slice(declarator.start, declarator.end)};`;
+}
+
+/**
+ * Map each EXPORTED name → its authored source span. Unlike
+ * `staticContractLocations` (which parses the literal `contract.<protocol>(...)`
+ * case shape and so sees nothing for a scoped factory), this keys purely on the
+ * module's export surface, so `platformContract(...)` and any other factory form
+ * are captured. Covers the SAME-FILE export forms the runtime import path can
+ * surface (codex R1/R2 P2 — `Object.entries(mod)` sees them all):
+ *   - `export const x = …` (incl. multi-declarator, sliced per declarator)
+ *   - `const x = …; export { x }` / `export { x as y }` (resolved to the local
+ *     declaration's span, keyed by the EXPORTED name — the runtime's key)
+ *   - `export default …` (keyed "default"; an identifier resolves to its local
+ *     declaration)
+ * DELIBERATE boundary (codex R3 P1): re-exports from another module
+ * (`export { x } from "./defs.js"`, `export *`) yield NO span — fail closed,
+ * pinned by test. Following the specifier would read source from any file a
+ * `../../` path can reach OUTSIDE the synced project (published raw and
+ * unredacted by sync), and would decouple the captured text from this file's
+ * provenance (`sourceFile`/`line`) and the mtime-keyed import-cache bust.
+ * Declare a contract in the file that exports it to get a Source view.
+ * Best-effort: a parse failure yields an empty map (the contracts are already
+ * valid without their source text).
+ */
+function contractSourceSpans(content: string, filePath: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const src = parseSource(content, filePath);
+  const body = (src.program.body as AnyNode[] | undefined) ?? [];
+
+  // `export { local as exported }` aliases (same file only), resolved after the
+  // declaration pass — the declaration may appear before OR after the export.
+  const aliases: Array<{ exported: string; local: string }> = [];
+  // Non-exported top-level const declarations — the targets of `export { x }`.
+  const localSpans = new Map<string, string>();
+
+  const collectDeclarators = (
+    statement: AnyNode,
+    declaration: AnyNode,
+    exported: boolean,
+    sink: Map<string, string>,
+  ) => {
+    const declarators = (declaration.declarations as AnyNode[] | undefined) ?? [];
+    for (const d of declarators) {
+      const id = d.id as AnyNode | undefined;
+      if (id?.type !== "Identifier" || typeof id.name !== "string") continue;
+      const span = sliceDeclarationSpan(content, statement, d, declarators.length, exported);
+      if (span !== undefined) sink.set(id.name, span);
+    }
+  };
+
+  for (const statement of body) {
+    if (statement.type === "ExportNamedDeclaration") {
+      const decl = statement.declaration as AnyNode | null | undefined;
+      if (decl?.type === "VariableDeclaration" && decl.kind === "const") {
+        collectDeclarators(statement, decl, true, out);
+      } else if (!decl && statement.source == null) {
+        // Same-file specifiers only — a `from` re-export is the fail-closed
+        // boundary documented above, so it never even enters the alias list.
+        for (const spec of (statement.specifiers as AnyNode[] | undefined) ?? []) {
+          if (spec.type !== "ExportSpecifier") continue;
+          const local = (spec.local as AnyNode | undefined)?.name;
+          const exportedNode = spec.exported as AnyNode | undefined;
+          const exported =
+            exportedNode?.type === "Identifier" ? exportedNode.name : exportedNode?.value;
+          if (typeof local === "string" && typeof exported === "string") {
+            aliases.push({ exported, local });
+          }
+        }
+      }
+    } else if (statement.type === "ExportDefaultDeclaration") {
+      // Unwrap TS expression wrappers (`export default x satisfies T`,
+      // `x as T`, `x!`, parens) so the identifier underneath still resolves to
+      // its local declaration (codex R5 P2).
+      const decl = unwrapExpression(statement.declaration as AnyNode | undefined);
+      if (decl?.type === "Identifier" && typeof decl.name === "string") {
+        aliases.push({ exported: "default", local: decl.name });
+      } else if (statement.start != null && statement.end != null) {
+        out.set("default", content.slice(statement.start, statement.end));
+      }
+    } else if (statement.type === "VariableDeclaration" && statement.kind === "const") {
+      collectDeclarators(statement, statement, false, localSpans);
+    }
+  }
+
+  for (const { exported, local } of aliases) {
+    // An `export const x` binding is ALSO a valid alias target (`export { x as y }`).
+    const span = localSpans.get(local) ?? out.get(local);
+    if (span !== undefined && !out.has(exported)) out.set(exported, span);
+  }
+  return out;
+}
+
 function staticContractLocations(content: string): Map<
   string,
   { line: number; endLine?: number; cases: Map<string, { line: number; endLine?: number }> }
@@ -883,14 +1029,57 @@ async function collectRawMaterials(filePath: string, projectRoot?: string): Prom
   // extraction into an error (the contracts are already valid without it).
   if (contracts.length > 0) {
     const sourceFile = projectRoot ? relative(projectRoot, absolutePath) : undefined;
-    let locations: ReturnType<typeof staticContractLocations> | undefined;
+    // codex R5 P1: a symlinked contract file (or directory) can point OUTSIDE
+    // the project root; following it would capture — and sync would upload,
+    // raw and unredacted — source the project doesn't own. Enforce the
+    // boundary on REAL paths: out-of-root files keep their structured
+    // extraction (the import already ran), but get no sourceText. Fail closed
+    // on any realpath error.
+    let sourceCaptureAllowed = true;
+    if (projectRoot !== undefined) {
+      try {
+        const rel = relative(realpathSync(projectRoot), realpathSync(absolutePath));
+        sourceCaptureAllowed = rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+      } catch {
+        sourceCaptureAllowed = false;
+      }
+    }
+    // Read the source ONCE, reused for both the (form-limited) case-location
+    // lookup and the (form-independent) source-span capture.
+    let content: string | undefined;
     try {
-      locations = staticContractLocations(readFileSync(absolutePath, "utf-8"));
+      content = readFileSync(absolutePath, "utf-8");
     } catch {
-      locations = undefined;
+      content = undefined;
+    }
+    let locations: ReturnType<typeof staticContractLocations> | undefined;
+    let sourceSpans: Map<string, string> | undefined;
+    if (content !== undefined) {
+      try {
+        locations = staticContractLocations(content);
+      } catch {
+        locations = undefined;
+      }
+      try {
+        sourceSpans = sourceCaptureAllowed ? contractSourceSpans(content, absolutePath) : undefined;
+      } catch {
+        sourceSpans = undefined;
+      }
     }
     for (const contract of contracts) {
       if (sourceFile !== undefined) contract.sourceFile = sourceFile;
+      // Authored source span, keyed by export name — present even for scoped
+      // factories that get no `line`/`endLine` below. Capped at capture so no
+      // downstream consumer inherits an unbounded span; the omission is MARKED
+      // (never silent — sync surfaces it to the author, codex R4 P3).
+      const span = sourceSpans?.get(contract.exportName);
+      if (span !== undefined) {
+        if (Buffer.byteLength(span, "utf8") <= SOURCE_TEXT_CAPTURE_MAX_BYTES) {
+          contract.sourceText = span;
+        } else {
+          contract.sourceTextOmitted = true;
+        }
+      }
       // GLU-221 phase 1 P2-3 fix — look up by the SAME composite key
       // `staticContractLocations` indexes by (contractId alone would merge
       // two different contracts that happen to share an author-chosen id).

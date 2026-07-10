@@ -18,7 +18,7 @@
  * requires (`contract.<protocol>("id", { cases: {...} })`) so both
  * extraction paths see the same declaration.
  */
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -89,6 +89,10 @@ describe("extractContractFromFile — GLU-221 source location merge", () => {
     expect(contract.sourceFile).toBe(join("contracts", "widgets.contract.ts"));
     expect(contract.line).toBe(EXPORT_LINE);
     expect(contract.endLine).toBe(EXPORT_END_LINE);
+    // The whole authored `export const … });` span, captured verbatim.
+    expect(contract.sourceText).toBe(
+      FIXTURE.slice(FIXTURE.indexOf("export const getWidget")).trimEnd(),
+    );
 
     const ok = contract.cases.find((c) => c.key === "ok");
     const notFound = contract.cases.find((c) => c.key === "notFound");
@@ -145,6 +149,189 @@ export const getWidget = api.get("get-widget", { endpoint: "GET /widgets/:id" })
     expect(contract.sourceFile).toBe("widgets.contract.ts");
     expect(contract.line).toBeUndefined();
     expect(contract.endLine).toBeUndefined();
+    // The KEY contrast: `line`/`endLine` are absent for a scoped factory (the
+    // static case extractor can't see it), but `sourceText` is captured anyway —
+    // it keys on the export declaration, not the call shape.
+    expect(contract.sourceText).toBe(
+      `export const getWidget = api.get("get-widget", { endpoint: "GET /widgets/:id" });`,
+    );
+  });
+});
+
+/** A minimal duck-typed factory expression, shared by the sourceText-form
+ * fixtures below (same shape the location fixtures use). */
+const FACTORY_PRELUDE = `const api = {
+  get(id, spec) {
+    const projection = { id, protocol: "http", target: spec.endpoint, cases: [] };
+    const arr = [];
+    Object.assign(arr, { _projection: projection, _extracted: projection });
+    return arr;
+  },
+};
+`;
+
+describe("extractContractFromFile — sourceText capture across export forms (codex R1)", () => {
+  test("aliased specifier export resolves to the local declaration's span", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-src-"));
+    const filePath = join(dir, "widgets.contract.ts");
+    writeFileSync(
+      filePath,
+      FACTORY_PRELUDE +
+        `
+const internalContract = api.get("get-widget", { endpoint: "GET /widgets/:id" });
+
+export { internalContract as publicContract };
+`,
+    );
+    const result = await extractContractFromFile(filePath, dir);
+    expect(result.contracts).toHaveLength(1);
+    const contract = result.contracts[0]!;
+    // Runtime keys by the EXPORTED name — the span must land under it.
+    expect(contract.exportName).toBe("publicContract");
+    expect(contract.sourceText).toBe(
+      `const internalContract = api.get("get-widget", { endpoint: "GET /widgets/:id" });`,
+    );
+  });
+
+  test("default export captures the export statement's span", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-src-"));
+    const filePath = join(dir, "widgets.contract.ts");
+    writeFileSync(
+      filePath,
+      FACTORY_PRELUDE +
+        `
+export default api.get("get-widget", { endpoint: "GET /widgets/:id" });
+`,
+    );
+    const result = await extractContractFromFile(filePath, dir);
+    expect(result.contracts).toHaveLength(1);
+    const contract = result.contracts[0]!;
+    expect(contract.exportName).toBe("default");
+    expect(contract.sourceText).toBe(
+      `export default api.get("get-widget", { endpoint: "GET /widgets/:id" });`,
+    );
+  });
+
+  test("cross-file re-export yields NO sourceText — the fail-closed boundary", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-src-"));
+    const defsPath = join(dir, "defs.ts");
+    const barrelPath = join(dir, "widgets.contract.ts");
+    writeFileSync(
+      defsPath,
+      FACTORY_PRELUDE +
+        `
+export const internalContract = api.get("get-widget", { endpoint: "GET /widgets/:id" });
+`,
+    );
+    writeFileSync(barrelPath, `export { internalContract as publicContract } from "./defs.ts";\n`);
+
+    const result = await extractContractFromFile(barrelPath, dir);
+    expect(result.errors).toEqual([]);
+    expect(result.contracts).toHaveLength(1);
+    const contract = result.contracts[0]!;
+    // Runtime extraction still works through the barrel…
+    expect(contract.exportName).toBe("publicContract");
+    expect(contract.id).toBe("get-widget");
+    // …but NO source is captured (codex R3 P1): following the specifier would
+    // read files a `../../` path can reach OUTSIDE the synced project (published
+    // raw + unredacted), and would mismatch this file's provenance/mtime cache.
+    // Declare the contract in the exporting file to get a Source view.
+    expect(contract.sourceText).toBeUndefined();
+  });
+
+  test("a span over the 64 KiB capture cap is dropped (bounds MCP consumers too)", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-src-"));
+    const filePath = join(dir, "widgets.contract.ts");
+    // Pad the declaration itself past the cap via an oversized description literal.
+    const pad = "x".repeat(70 * 1024);
+    writeFileSync(
+      filePath,
+      FACTORY_PRELUDE +
+        `
+export const getWidget = api.get("get-widget", { endpoint: "GET /widgets/:id", description: "${pad}" });
+`,
+    );
+    const result = await extractContractFromFile(filePath, dir);
+    expect(result.contracts).toHaveLength(1);
+    const contract = result.contracts[0]!;
+    // Extraction itself is unaffected; only the source extra is withheld —
+    // and the omission is MARKED so sync can tell the author (codex R4 P3).
+    expect(contract.id).toBe("get-widget");
+    expect(contract.sourceText).toBeUndefined();
+    expect(contract.sourceTextOmitted).toBe(true);
+  });
+
+  test("default export wrapped in `satisfies` still resolves the local declaration", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-src-"));
+    const filePath = join(dir, "widgets.contract.ts");
+    writeFileSync(
+      filePath,
+      FACTORY_PRELUDE +
+        `
+const localContract = api.get("get-widget", { endpoint: "GET /widgets/:id" });
+
+export default localContract satisfies Record<string, unknown>;
+`,
+    );
+    const result = await extractContractFromFile(filePath, dir);
+    expect(result.contracts).toHaveLength(1);
+    const contract = result.contracts[0]!;
+    expect(contract.exportName).toBe("default");
+    // The TS `satisfies` wrapper is unwrapped to the identifier, which resolves
+    // to the LOCAL declaration (verify bodies included) — not just the bare
+    // `export default …` line (codex R5 P2).
+    expect(contract.sourceText).toBe(
+      `const localContract = api.get("get-widget", { endpoint: "GET /widgets/:id" });`,
+    );
+  });
+
+  test("a contract file symlinked from OUTSIDE the project root gets no sourceText", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-src-"));
+    const outside = join(dir, "outside");
+    const project = join(dir, "project");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    const realFile = join(outside, "real.contract.ts");
+    writeFileSync(
+      realFile,
+      FACTORY_PRELUDE +
+        `
+export const getWidget = api.get("get-widget", { endpoint: "GET /widgets/:id" });
+`,
+    );
+    const linkPath = join(project, "widgets.contract.ts");
+    symlinkSync(realFile, linkPath);
+
+    const result = await extractContractFromFile(linkPath, project);
+    expect(result.contracts).toHaveLength(1);
+    const contract = result.contracts[0]!;
+    // Structured extraction still works (the import already executed the file)…
+    expect(contract.id).toBe("get-widget");
+    // …but the REAL path lives outside the project root, so no raw source is
+    // captured for upload (codex R5 P1 — the fail-closed boundary holds across
+    // symlinks, not just re-export specifiers).
+    expect(contract.sourceText).toBeUndefined();
+  });
+
+  test("multi-declarator export slices each contract's OWN declarator", async () => {
+    dir = mkdtempSync(join(tmpdir(), "glubean-contract-src-"));
+    const filePath = join(dir, "widgets.contract.ts");
+    writeFileSync(
+      filePath,
+      FACTORY_PRELUDE +
+        `
+export const getA = api.get("a-id", { endpoint: "GET /a" }), getB = api.get("b-id", { endpoint: "GET /b" });
+`,
+    );
+    const result = await extractContractFromFile(filePath, dir);
+    expect(result.contracts).toHaveLength(2);
+    const a = result.contracts.find((c) => c.id === "a-id")!;
+    const b = result.contracts.find((c) => c.id === "b-id")!;
+    // Each gets its own declarator (re-prefixed), never the whole statement —
+    // identical duplicated spans would multiply the payload and misattribute
+    // review source (codex R1 P2).
+    expect(a.sourceText).toBe(`export const getA = api.get("a-id", { endpoint: "GET /a" });`);
+    expect(b.sourceText).toBe(`export const getB = api.get("b-id", { endpoint: "GET /b" });`);
   });
 });
 

@@ -2895,11 +2895,17 @@ server.registerTool(
       };
     }
 
+    // Strip captured source spans: this MCP server runs LOCALLY, so the consumer
+    // can read any contract file straight from disk — carrying verbatim source in
+    // every response only duplicates that, and a many-contract project would
+    // balloon the payload far past the per-contract capture cap (codex R3/R4 P2).
+    // `sourceFile`/`line` stay — all a local consumer needs to find the code.
+    const contracts = result.contracts.map(({ sourceText: _sourceText, ...rest }) => rest);
     return {
       content: [{
         type: "text" as const,
         text: JSON.stringify({
-          contracts: result.contracts,
+          contracts,
           ...(result.errors.length > 0 ? { errors: result.errors } : {}),
         }, null, 2),
       }],

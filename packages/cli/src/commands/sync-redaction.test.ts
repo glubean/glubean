@@ -185,8 +185,15 @@ describe("GLU-123 — glubean sync redacts contract projection extensions before
     expect(contractBody.contracts).toHaveLength(1);
     const projection = contractBody.contracts[0].projection;
 
-    const serialized = JSON.stringify(projection);
-    // The actual secret VALUES must never appear in the uploaded payload.
+    // `sourceText` — the verbatim authored contract source — is published
+    // UN-redacted BY DESIGN (a reviewer reads the real contract, incl. verify
+    // bodies). It is deliberately OUTSIDE the structured-redaction guarantee:
+    // secrets belong in env vars / out-of-span consts, never inlined in a
+    // contract (authoring skill rule). Split it out before asserting the
+    // STRUCTURED projection is redacted.
+    const { sourceText, ...structured } = projection;
+    const serialized = JSON.stringify(structured);
+    // In the STRUCTURED projection, the secret VALUES must never appear.
     expect(serialized).not.toContain(REAL_COOKIE);
     expect(serialized).not.toContain(REAL_SET_COOKIE);
     expect(serialized).not.toContain(REAL_SESSIONID);
@@ -195,16 +202,31 @@ describe("GLU-123 — glubean sync redacts contract projection extensions before
     // The values were actually masked, not silently dropped (a masked
     // sentinel is present at each sensitive-keyed path) — proves this is
     // redaction, not e.g. a field being stripped for an unrelated reason.
-    expect(typeof projection.extensions.cookie).toBe("string");
-    expect(projection.extensions.cookie).not.toBe(REAL_COOKIE);
-    expect(typeof projection.extensions["set-cookie"]).toBe("string");
-    expect(projection.extensions["set-cookie"]).not.toBe(REAL_SET_COOKIE);
-    expect(typeof projection.extensions.sessionid).toBe("string");
-    expect(projection.extensions.sessionid).not.toBe(REAL_SESSIONID);
+    expect(typeof structured.extensions.cookie).toBe("string");
+    expect(structured.extensions.cookie).not.toBe(REAL_COOKIE);
+    expect(typeof structured.extensions["set-cookie"]).toBe("string");
+    expect(structured.extensions["set-cookie"]).not.toBe(REAL_SET_COOKIE);
+    expect(typeof structured.extensions.sessionid).toBe("string");
+    expect(structured.extensions.sessionid).not.toBe(REAL_SESSIONID);
 
-    const caseExt = projection.cases[0].extensions;
+    const caseExt = structured.cases[0].extensions;
     expect(typeof caseExt.session_id).toBe("string");
     expect(caseExt.session_id).not.toBe(REAL_SESSION_ID_ALT);
+
+    // Verbatim source is NOT redacted (owner decision). The captured span is
+    // exactly the `export const secretsContract = …` declaration, so its scope
+    // pins two things:
+    //  - a secret inlined DIRECTLY in the contract's own literal (`sessionid` in
+    //    its extensions) DOES appear — the deliberate consequence of no source
+    //    redaction (skill rule: keep secrets in env, never inline). Pinned so a
+    //    future "redact source too" change trips this and re-opens the call.
+    //  - a secret in a SEPARATE declaration (`REAL_COOKIE`, on the out-of-span
+    //    `const api = …` factory) does NOT — the span is the contract's own
+    //    export, not the whole file, so helper consts never ride along.
+    // (Fixture secrets are fake `..._do_not_upload_...` markers.)
+    expect(typeof sourceText).toBe("string");
+    expect(sourceText).toContain(REAL_SESSIONID);
+    expect(sourceText).not.toContain(REAL_COOKIE);
   });
 
   test("JSON-Schema property names literally called `password`/`cookie` keep their shape (key-based redaction recurses, never replaces the node wholesale)", async () => {
