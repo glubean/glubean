@@ -1,6 +1,6 @@
 {
   "name": "@glubean/oauth-code",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "engines": { "node": ">=22" },
   "type": "module",
   "exports": {
