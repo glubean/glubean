@@ -54,16 +54,34 @@ import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
 import { checkSdkCompat, type CompatResult } from "./version-compat.js";
 import {
   buildRunIngestBody,
+  API_COMPONENT_TYPES,
+  API_DOCUMENT_SECTIONS,
+  API_HTTP_METHODS,
+  appUrlForPath,
+  CloudApiError,
   cloudFetchJson,
   envLabelFromEnvFile,
+  editApiDraft,
+  listApiDrafts,
   loadUploadRedaction,
   MISSING_AUTH_MESSAGES,
   resolveCloudAuth,
   resolveDefaultTargetId,
+  readApiDraft,
+  RUN_INGEST_ERROR_HINTS,
+  RUN_READ_ERROR_HINTS,
   runIngestUrl,
   runTestEventsUrl,
   runTestResultsUrl,
   runUrl,
+  submitApiRelease,
+  getApiReleaseStatus,
+  listApiReleases,
+  createApiReleaseEditSession,
+  editApiReleaseSession,
+  applyApiReleaseFixToDraft,
+  validateApiDraft,
+  type CloudApiDraftEdit,
 } from "./cloud.js";
 
 type Vars = Record<string, string>;
@@ -2057,6 +2075,14 @@ export const MCP_TOOL_NAMES = {
   openUploadRun: "glubean_open_upload_run",
   openGetRun: "glubean_open_get_run",
   openGetRunEvents: "glubean_open_get_run_events",
+  apiList: "glubean_api_list",
+  apiReadDraft: "glubean_api_read_draft",
+  apiEditDraft: "glubean_api_edit_draft",
+  apiValidateDraft: "glubean_api_validate_draft",
+  apiSubmitRelease: "glubean_api_submit_release",
+  apiGetReleaseStatus: "glubean_api_get_release_status",
+  apiEditRelease: "glubean_api_edit_release",
+  apiApplyReleaseFixToDraft: "glubean_api_apply_release_fix_to_draft",
 } as const;
 
 server.registerTool(
@@ -2580,6 +2606,13 @@ const OPEN_AUTH_INPUT_SCHEMA = {
         "Dashboard API in projects that also dogfood it; set GLUBEAN_PLATFORM_API_URL " +
         "to disambiguate)",
     ),
+  appUrl: z
+    .string()
+    .optional()
+    .describe(
+      "Glubean app base URL used to make returned editor links clickable " +
+        "(default: GLUBEAN_APP_URL, else https://app.glubean.com)",
+    ),
   token: z
     .string()
     .optional()
@@ -2612,12 +2645,23 @@ const OPEN_AUTH_INPUT_SCHEMA = {
 
 interface OpenToolAuthInput {
   apiUrl?: string;
+  appUrl?: string;
   token?: string;
   projectId?: string;
   targetId?: string;
   dir?: string;
   envFile?: string;
 }
+
+type ApiAuthorAuthInput = Omit<OpenToolAuthInput, "targetId" | "token">;
+
+const API_AUTHOR_AUTH_INPUT_SCHEMA = {
+  apiUrl: OPEN_AUTH_INPUT_SCHEMA.apiUrl,
+  appUrl: OPEN_AUTH_INPUT_SCHEMA.appUrl,
+  projectId: OPEN_AUTH_INPUT_SCHEMA.projectId,
+  dir: OPEN_AUTH_INPUT_SCHEMA.dir,
+  envFile: OPEN_AUTH_INPUT_SCHEMA.envFile,
+};
 
 /**
  * Resolve Cloud credentials for the open* tools with the CLI's precedence
@@ -2651,6 +2695,25 @@ async function requireOpenToolAuth(
   };
 }
 
+async function requireApiAuthorAuth(
+  input: ApiAuthorAuthInput,
+  fallbackRoot?: string,
+): Promise<
+  | { ok: true; auth: { apiUrl: string; appUrl: string; token: string; projectId: string } }
+  | { ok: false; error: string }
+> {
+  const projectRoot = input.dir ? resolve(input.dir) : (fallbackRoot ?? process.cwd());
+  const envPath = await resolveEnvPath(projectRoot, input.envFile);
+  const { vars, secrets } = await loadProjectEnv(projectRoot, basename(envPath));
+  const auth = await resolveCloudAuth(input, { envFileVars: { ...vars, ...secrets } });
+  if (!auth.token) return { ok: false, error: MISSING_AUTH_MESSAGES.token };
+  if (!auth.projectId) return { ok: false, error: MISSING_AUTH_MESSAGES.projectId };
+  return {
+    ok: true,
+    auth: { apiUrl: auth.apiUrl, appUrl: auth.appUrl, token: auth.token, projectId: auth.projectId },
+  };
+}
+
 function errorContent(error: string, extra?: Record<string, unknown>) {
   return {
     content: [
@@ -2658,6 +2721,446 @@ function errorContent(error: string, extra?: Record<string, unknown>) {
     ],
   };
 }
+
+function jsonContent(value: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+  };
+}
+
+function apiAuthorErrorContent(error: unknown, extra?: Record<string, unknown>) {
+  if (error instanceof CloudApiError) {
+    return errorContent(error.message, {
+      status: error.status,
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.issues ? { issues: error.issues } : {}),
+      ...(error.meta ? { meta: error.meta } : {}),
+      ...extra,
+    });
+  }
+  return errorContent(error instanceof Error ? error.message : String(error), extra);
+}
+
+export interface ApiEditReleaseToolInput {
+  apiId: string;
+  releaseId?: string;
+  releaseLabel?: string;
+  reason: string;
+  edits: CloudApiDraftEdit[];
+}
+
+export interface ApiEditReleaseToolAuth {
+  apiUrl: string;
+  appUrl: string;
+  projectId: string;
+  token: string;
+}
+
+export interface ApiEditReleaseToolDependencies {
+  listReleases: typeof listApiReleases;
+  createSession: typeof createApiReleaseEditSession;
+  editSession: typeof editApiReleaseSession;
+}
+
+const apiEditReleaseToolDependencies: ApiEditReleaseToolDependencies = {
+  listReleases: listApiReleases,
+  createSession: createApiReleaseEditSession,
+  editSession: editApiReleaseSession,
+};
+
+/** Handler core kept separate from MCP transport/auth so its recovery contract
+ * can be regression-tested without a stdio server. Submission is intentionally
+ * absent: the user must review and submit the edit session in the web editor. */
+export async function handleApiEditRelease(
+  input: ApiEditReleaseToolInput,
+  auth: ApiEditReleaseToolAuth,
+  dependencies: ApiEditReleaseToolDependencies = apiEditReleaseToolDependencies,
+) {
+  let recovery: {
+    releaseId: string;
+    sessionId: string;
+    editorUrl: string;
+  } | undefined;
+  try {
+    const { apiUrl, appUrl, projectId, token } = auth;
+    if (!input.releaseId && !input.releaseLabel) {
+      return errorContent("Provide releaseId or releaseLabel.");
+    }
+    const releases = await dependencies.listReleases(apiUrl, projectId, input.apiId, token);
+    const target = input.releaseId
+      ? releases.find((item) => item.release.id === input.releaseId)
+      : releases.find((item) => item.release.label === input.releaseLabel);
+    if (!target) {
+      return errorContent(
+        `Release ${input.releaseId ?? input.releaseLabel} was not found for API ${input.apiId}.`,
+      );
+    }
+    const releaseId = target.release.id;
+    const started = await dependencies.createSession(
+      apiUrl,
+      projectId,
+      input.apiId,
+      releaseId,
+      token,
+      target.activeRevision.id,
+      input.reason,
+    );
+    recovery = {
+      releaseId,
+      sessionId: started.session.id,
+      editorUrl: appUrlForPath(appUrl, started.editorPath),
+    };
+    const edited = await dependencies.editSession(
+      apiUrl, projectId, input.apiId, releaseId, started.session.id, token,
+      { baseRevision: started.session.editRevision, edits: input.edits },
+    );
+    return jsonContent({
+      summary: `Edited release ${started.release.label} in an isolated session. Review it in the editor, then submit explicitly.`,
+      warning: started.warning,
+      live: started.live,
+      releaseId,
+      baseReleaseRevisionId: target.activeRevision.id,
+      sessionId: started.session.id,
+      editRevision: edited.session.editRevision,
+      editorUrl: recovery.editorUrl,
+      nextActions: [{ action: "review_and_submit_release_edit", url: recovery.editorUrl }],
+    });
+  } catch (error) {
+    return apiAuthorErrorContent(error, recovery ? { recovery } : undefined);
+  }
+}
+
+const apiDraftTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("info") }),
+  z.object({ kind: z.literal("document"), section: z.enum(API_DOCUMENT_SECTIONS) }),
+  z.object({ kind: z.literal("operation"), path: z.string().min(1), method: z.enum(API_HTTP_METHODS) }),
+  z.object({ kind: z.literal("path"), path: z.string().min(1) }),
+  z.object({ kind: z.literal("component"), componentType: z.enum(API_COMPONENT_TYPES), name: z.string().min(1) }),
+]);
+
+const apiDraftFieldSchema = z.array(z.union([z.string().min(1), z.number().int().nonnegative()])).optional();
+const apiDraftEditSchema = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("set"), target: apiDraftTargetSchema, field: apiDraftFieldSchema, value: z.unknown() }),
+  z.object({ op: z.literal("remove"), target: apiDraftTargetSchema, field: apiDraftFieldSchema }),
+]);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiList,
+  {
+    description: "List Glubean API drafts in the configured project, including optimistic revisions and editor URLs.",
+    inputSchema: API_AUTHOR_AUTH_INPUT_SCHEMA,
+  },
+  async (input: ApiAuthorAuthInput) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    try {
+      const { apiUrl, appUrl, projectId, token } = check.auth;
+      const drafts = await listApiDrafts(apiUrl, projectId, token);
+      return jsonContent(
+        drafts.map((draft) => ({ ...draft, editorUrl: appUrlForPath(appUrl, draft.editorPath) })),
+      );
+    } catch (error) {
+      return apiAuthorErrorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiReadDraft,
+  {
+    description: "Read one living Glubean API draft with its effective OpenAPI document and draftRevision.",
+    inputSchema: { ...API_AUTHOR_AUTH_INPUT_SCHEMA, apiId: z.string().min(1).describe("Glubean API id") },
+  },
+  async (input: ApiAuthorAuthInput & { apiId: string }) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    try {
+      const { apiUrl, appUrl, projectId, token } = check.auth;
+      const draft = await readApiDraft(apiUrl, projectId, input.apiId, token);
+      return jsonContent({ ...draft, editorUrl: appUrlForPath(appUrl, draft.editorPath) });
+    } catch (error) {
+      return apiAuthorErrorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiEditDraft,
+  {
+    description:
+      "Apply a typed batch to a Glubean API draft. Requires the draftRevision returned by glubean_api_read_draft; " +
+      "returns canonical editor deep links for every affected node. Imported API edits remain overlays.",
+    inputSchema: {
+      ...API_AUTHOR_AUTH_INPUT_SCHEMA,
+      apiId: z.string().min(1).describe("Glubean API id"),
+      baseRevision: z.number().int().positive().describe("draftRevision returned by the latest read"),
+      idempotencyKey: z.string().min(1).max(200).optional().describe("Stable retry key; generated when omitted"),
+      workspace: z.string().min(1).max(500).optional(),
+      references: z.array(z.string().min(1).max(1000)).max(100).optional(),
+      edits: z.array(apiDraftEditSchema).min(1).max(200),
+    },
+  },
+  async (
+    input: ApiAuthorAuthInput & {
+      apiId: string;
+      baseRevision: number;
+      idempotencyKey?: string;
+      workspace?: string;
+      references?: string[];
+      edits: CloudApiDraftEdit[];
+    },
+  ) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    const idempotencyKey = input.idempotencyKey ?? randomUUID();
+    try {
+      const { apiUrl, appUrl, projectId, token } = check.auth;
+      const result = await editApiDraft(apiUrl, projectId, input.apiId, token, {
+        baseRevision: input.baseRevision,
+        idempotencyKey,
+        source: {
+          kind: "ide-agent",
+          ...(input.workspace ? { workspace: input.workspace } : {}),
+          ...(input.references ? { references: input.references } : {}),
+        },
+        edits: input.edits,
+      });
+      return jsonContent({
+        summary: result.changed
+          ? `Updated draft revision ${result.draftRevision} at ${result.changes.length} node${result.changes.length === 1 ? "" : "s"}.`
+          : `Draft revision ${result.draftRevision} already matched the requested edits.`,
+        ...result,
+        changes: result.changes.map((change) => ({
+          ...change,
+          editorUrl: appUrlForPath(appUrl, change.editorPath),
+        })),
+        warnings: result.validation.valid ? [] : result.validation.issues,
+        idempotencyKey,
+        nextActions: [
+          ...result.changes.map((change) => ({
+            action: "open_affected_node",
+            nodeId: change.nodeId,
+            url: appUrlForPath(appUrl, change.editorPath),
+          })),
+          { action: "validate_draft", apiId: input.apiId },
+        ],
+      });
+    } catch (error) {
+      return apiAuthorErrorContent(error, { idempotencyKey });
+    }
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiValidateDraft,
+  {
+    description: "Compile and validate one living Glubean API draft without modifying it.",
+    inputSchema: { ...API_AUTHOR_AUTH_INPUT_SCHEMA, apiId: z.string().min(1).describe("Glubean API id") },
+  },
+  async (input: ApiAuthorAuthInput & { apiId: string }) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    try {
+      const { apiUrl, projectId, token } = check.auth;
+      return jsonContent(await validateApiDraft(apiUrl, projectId, input.apiId, token));
+    } catch (error) {
+      return apiAuthorErrorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiSubmitRelease,
+  {
+    description:
+      "Freeze the current API draft into an immutable release candidate. Returns the exact preview/review URL; " +
+      "skip_if_safe is accepted only when the server classifies the diff as docs-only. Requires apis:submit.",
+    inputSchema: {
+      ...API_AUTHOR_AUTH_INPUT_SCHEMA,
+      apiId: z.string().min(1).describe("Glubean API id"),
+      draftRevision: z.number().int().positive().describe("draftRevision returned by the latest draft read"),
+      releaseLabel: z.string().min(1).describe("Release label to reserve, for example 1.4.0"),
+      title: z.string().min(1).max(300).optional(),
+      summary: z.string().max(4000).optional(),
+      previewMode: z.enum(["preview", "skip_if_safe"]).default("preview"),
+      reviewers: z.array(z.string().min(1)).max(100).optional(),
+      idempotencyKey: z.string().min(1).max(200).optional(),
+      acknowledgeHotfixRevertReason: z.string().min(1).max(1000).optional().describe(
+        "Required acknowledgement when intentionally superseding an unsynced emergency fix; the token also needs apis:release",
+      ),
+    },
+  },
+  async (
+    input: ApiAuthorAuthInput & {
+      apiId: string;
+      draftRevision: number;
+      releaseLabel: string;
+      title?: string;
+      summary?: string;
+      previewMode: "preview" | "skip_if_safe";
+      reviewers?: string[];
+      idempotencyKey?: string;
+      acknowledgeHotfixRevertReason?: string;
+    },
+  ) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    const idempotencyKey = input.idempotencyKey ?? randomUUID();
+    try {
+      const { apiUrl, projectId, token } = check.auth;
+      const result = await submitApiRelease(apiUrl, projectId, input.apiId, token, {
+        draftRevision: input.draftRevision,
+        releaseLabel: input.releaseLabel,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.summary ? { summary: input.summary } : {}),
+        previewMode: input.previewMode,
+        ...(input.reviewers ? { reviewers: input.reviewers } : {}),
+        idempotencyKey,
+        ...(input.acknowledgeHotfixRevertReason
+          ? { acknowledgeHotfixRevertReason: input.acknowledgeHotfixRevertReason }
+          : {}),
+      });
+      return jsonContent({
+        summary:
+          result.intentStatus === "completed"
+            ? `Released ${input.releaseLabel}.`
+            : result.previewRequired
+              ? "Preview is required because the server found contract changes."
+              : "Release candidate created. Open the preview URL to continue.",
+        ...result,
+        idempotencyKey,
+        nextActions:
+          result.intentStatus === "completed"
+            ? []
+            : [{ action: "open_preview", url: result.previewUrl }],
+      });
+    } catch (error) {
+      return apiAuthorErrorContent(error, { idempotencyKey });
+    }
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiGetReleaseStatus,
+  {
+    description:
+      "Read a frozen release candidate's review gate and return its canonical revision URL. This tool is read-only.",
+    inputSchema: {
+      ...API_AUTHOR_AUTH_INPUT_SCHEMA,
+      apiId: z.string().min(1).describe("Glubean API id"),
+      candidateId: z.string().min(1).describe("Candidate id returned by glubean_api_submit_release"),
+    },
+  },
+  async (input: ApiAuthorAuthInput & { apiId: string; candidateId: string }) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    try {
+      const { apiUrl, appUrl, projectId, token } = check.auth;
+      const result = await getApiReleaseStatus(
+        apiUrl,
+        projectId,
+        input.apiId,
+        input.candidateId,
+        token,
+      );
+      const revision = result.activeRevision?.revision ?? 1;
+      const statusUrl = appUrlForPath(
+        appUrl,
+        `/p/${encodeURIComponent(projectId)}/apis/${encodeURIComponent(input.apiId)}` +
+          `/candidates/${encodeURIComponent(input.candidateId)}?revision=${revision}`,
+      );
+      const awaitingAuthorConfirmation =
+        result.releaseIntent?.status === "awaiting_author_confirmation";
+      return jsonContent({
+        ...result,
+        statusUrl,
+        nextActions: awaitingAuthorConfirmation
+          ? [{ action: "confirm_preview_in_web", url: statusUrl }]
+          : result.gate.canRelease
+          ? [{ action: "release_in_web", url: statusUrl }]
+          : [{ action: "review_in_web", url: statusUrl }],
+      });
+    } catch (error) {
+      return apiAuthorErrorContent(error);
+    }
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiEditRelease,
+  {
+    description:
+      "Create an isolated emergency edit session for any release and apply typed edits. " +
+      "The living draft is not changed and the session is not submitted implicitly. Returns the exact editor URL for review and explicit submission.",
+    inputSchema: {
+      ...API_AUTHOR_AUTH_INPUT_SCHEMA,
+      apiId: z.string().min(1).describe("Glubean API id"),
+      releaseId: z.string().min(1).optional().describe("Exact release aggregate id; use this or releaseLabel"),
+      releaseLabel: z.string().min(1).optional().describe("Human release label, for example 1.2.0; use this or releaseId"),
+      reason: z.string().min(1).max(1000).describe("Required emergency-edit audit reason"),
+      edits: z.array(apiDraftEditSchema).min(1).max(200),
+    },
+  },
+  async (
+    input: ApiAuthorAuthInput & ApiEditReleaseToolInput,
+  ) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    return handleApiEditRelease(input, check.auth);
+  },
+);
+
+server.registerTool(
+  MCP_TOOL_NAMES.apiApplyReleaseFixToDraft,
+  {
+    description:
+      "Apply one published emergency release revision back to the living draft with optimistic concurrency and three-way conflict detection.",
+    inputSchema: {
+      ...API_AUTHOR_AUTH_INPUT_SCHEMA,
+      apiId: z.string().min(1).describe("Glubean API id"),
+      releaseId: z.string().min(1).describe("Release aggregate id"),
+      releaseRevisionId: z.string().min(1).describe("Emergency release revision id"),
+      expectedDraftRevision: z.number().int().positive().describe("Current living draft revision"),
+      idempotencyKey: z.string().min(1).max(200).optional().describe("Stable retry key; generated when omitted"),
+    },
+  },
+  async (
+    input: ApiAuthorAuthInput & {
+      apiId: string;
+      releaseId: string;
+      releaseRevisionId: string;
+      expectedDraftRevision: number;
+      idempotencyKey?: string;
+    },
+  ) => {
+    const check = await requireApiAuthorAuth(input, lastLocalRunSnapshot?.projectRoot);
+    if (!check.ok) return errorContent(check.error);
+    const idempotencyKey = input.idempotencyKey ?? randomUUID();
+    try {
+      const { apiUrl, appUrl, projectId, token } = check.auth;
+      const result = await applyApiReleaseFixToDraft(
+        apiUrl, projectId, input.apiId, input.releaseId, input.releaseRevisionId,
+        token, input.expectedDraftRevision, idempotencyKey,
+      );
+      return jsonContent({
+        summary: `Applied the emergency fix to draft revision ${result.draftRevision}.`,
+        ...result,
+        idempotencyKey,
+        editorUrls: result.changes.map((change) => appUrlForPath(appUrl, change.editorPath)),
+        nextActions: [
+          ...result.changes.map((change) => ({
+            action: "open_affected_node",
+            nodeId: change.nodeId,
+            url: appUrlForPath(appUrl, change.editorPath),
+          })),
+          { action: "validate_draft", apiId: input.apiId },
+        ],
+      });
+    } catch (error) {
+      return apiAuthorErrorContent(error, { idempotencyKey });
+    }
+  },
+);
 
 server.registerTool(
   MCP_TOOL_NAMES.openUploadRun,
@@ -2721,6 +3224,7 @@ server.registerTool(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       token,
+      errorHints: RUN_INGEST_ERROR_HINTS,
     })) as { id?: unknown } | null;
     const runId = typeof json?.id === "string" ? json.id : undefined;
     if (!runId) {
@@ -2764,7 +3268,7 @@ server.registerTool(
     const { apiUrl, token, projectId, targetId } = check.auth;
     const json = await cloudFetchJson(
       runUrl(apiUrl, projectId, targetId, input.runId),
-      { method: "GET", token },
+      { method: "GET", token, errorHints: RUN_READ_ERROR_HINTS },
     );
     return { content: [{ type: "text" as const, text: JSON.stringify(json) }] };
   },
@@ -2812,7 +3316,7 @@ server.registerTool(
     if (!input.testId) {
       const rows = await cloudFetchJson(
         runTestResultsUrl(apiUrl, projectId, targetId, input.runId),
-        { method: "GET", token },
+        { method: "GET", token, errorHints: RUN_READ_ERROR_HINTS },
       );
       const empty = Array.isArray(rows) && rows.length === 0;
       return {
@@ -2834,7 +3338,7 @@ server.registerTool(
 
     const events = await cloudFetchJson(
       runTestEventsUrl(apiUrl, projectId, targetId, input.runId, input.testId),
-      { method: "GET", token },
+      { method: "GET", token, errorHints: RUN_READ_ERROR_HINTS },
     );
     const all = Array.isArray(events) ? events : [];
     const filtered = input.type

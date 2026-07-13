@@ -16,6 +16,8 @@ import {
   SensitiveActiveEnvError,
   type LocalRunSnapshot,
   MCP_TOOL_NAMES,
+  handleApiEditRelease,
+  type ApiEditReleaseToolDependencies,
   toLocalDebugEvents,
 } from "./index.js";
 import { MCP_PACKAGE_VERSION, DEFAULT_GENERATED_BY } from "./version.js";
@@ -37,7 +39,68 @@ test("mcp tool name registry includes all tools", () => {
   expect(names).toContain("glubean_get_local_events");
   expect(names).toContain("glubean_diagnose_config");
   expect(names).toContain("glubean_project_contracts");
+  expect(names).toContain("glubean_api_list");
+  expect(names).toContain("glubean_api_read_draft");
+  expect(names).toContain("glubean_api_edit_draft");
+  expect(names).toContain("glubean_api_validate_draft");
+  expect(names).toContain("glubean_api_submit_release");
+  expect(names).toContain("glubean_api_get_release_status");
+  expect(names).toContain("glubean_api_edit_release");
+  expect(names).toContain("glubean_api_apply_release_fix_to_draft");
   expect(new Set(names).size).toBe(names.length);
+});
+
+test("api edit-release handler returns a resumable session when editing fails", async () => {
+  const dependencies: ApiEditReleaseToolDependencies = {
+    listReleases: async () => [{
+      release: { id: "rel_1", label: "1.2.0", activeRevisionId: "rr_2", releaseSequence: 1 },
+      activeRevision: { id: "rr_2", revision: 2, kind: "emergency_fix", reason: "prior fix" },
+      live: true,
+    }],
+    createSession: async () => ({
+      session: {
+        id: "ses_1",
+        releaseId: "rel_1",
+        baseReleaseRevisionId: "rr_2",
+        editRevision: 1,
+        reason: "Fix docs",
+        closedAt: null,
+      },
+      release: { id: "rel_1", label: "1.2.0", activeRevisionId: "rr_2" },
+      live: true,
+      warning: "You are editing the active live release.",
+      editorPath: "/p/project/apis/api/releases/rel_1/edit/ses_1",
+    }),
+    editSession: async () => {
+      throw new Error("The edit could not be applied.");
+    },
+  };
+
+  const result = await handleApiEditRelease(
+    {
+      apiId: "api_1",
+      releaseId: "rel_1",
+      reason: "Fix docs",
+      edits: [{ op: "set", target: { kind: "info" }, field: ["description"], value: "Clearer" }],
+    },
+    {
+      apiUrl: "https://api.test",
+      appUrl: "https://app.test",
+      projectId: "project_1",
+      token: "glb_secret",
+    },
+    dependencies,
+  );
+  const body = JSON.parse(result.content[0]!.text);
+
+  expect(body).toEqual({
+    error: "The edit could not be applied.",
+    recovery: {
+      releaseId: "rel_1",
+      sessionId: "ses_1",
+      editorUrl: "https://app.test/p/project/apis/api/releases/rel_1/edit/ses_1",
+    },
+  });
 });
 
 test("toLocalDebugEvents flattens local run results", () => {

@@ -27,6 +27,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@glubean/cloud-client": "workspace:*",
     "@glubean/redaction": "workspace:*",
     "@glubean/runner": "workspace:*",
     "@glubean/scanner": "workspace:*",

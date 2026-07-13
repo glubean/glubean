@@ -92,6 +92,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Runtime dependency of @glubean/mcp. This must reach npm first or the
+      # published MCP package will reference a package version npm cannot resolve.
+      - name: Publish @glubean/cloud-client
+        continue-on-error: true
+        run: pnpm --filter @glubean/cloud-client publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish @glubean/mcp
         continue-on-error: true
         run: pnpm --filter @glubean/mcp publish --access public --no-git-checks
@@ -119,7 +127,7 @@ jobs:
       - name: Verify every package is live at the tag version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          PKGS="@glubean/sdk @glubean/engine @glubean/scanner @glubean/redaction @glubean/runner @glubean/cli glubean @glubean/auth @glubean/browser @glubean/graphql @glubean/mcp @glubean/grpc @glubean/oauth-code"
+          PKGS="@glubean/sdk @glubean/engine @glubean/scanner @glubean/redaction @glubean/runner @glubean/cli glubean @glubean/auth @glubean/browser @glubean/graphql @glubean/cloud-client @glubean/mcp @glubean/grpc @glubean/oauth-code"
           echo "Verifying all packages at version $VERSION"
           FAIL=0
           for pkg in $PKGS; do

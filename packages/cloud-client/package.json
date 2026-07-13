@@ -1,0 +1,28 @@
+{
+  "name": "@glubean/cloud-client",
+  "version": "0.10.3",
+  "engines": { "node": ">=22" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run --root ../.. packages/cloud-client/src/index.test.ts"
+  },
+  "publishConfig": { "access": "public" },
+  "devDependencies": { "@types/node": "^22.0.0" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glubean/glubean.git",
+    "directory": "packages/cloud-client"
+  }
+}

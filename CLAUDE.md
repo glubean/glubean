@@ -4,14 +4,14 @@
 
 ## Repo Structure
 - Monorepo with pnpm workspaces
-- Packages (13 published): **core** — sdk, engine, scanner, redaction, runner, cli · **plugins** — auth, browser, graphql, grpc, mcp, oauth-code · **meta** — `glubean` (the `npx glubean` CLI). Intra-repo deps are all `workspace:*`.
+- Packages (14 published): **core** — sdk, engine, scanner, redaction, runner, cli · **clients** — cloud-client · **plugins** — auth, browser, graphql, grpc, mcp, oauth-code · **meta** — `glubean` (the `npx glubean` CLI). Intra-repo deps are all `workspace:*`.
 - Publish workflow triggers on git tags matching `v*`
 
 ## Version Policy
 
 ### Lockstep — every package shares ONE version (owner 2026-06-18)
-ALL 13 published packages (core + plugins + `glubean` meta) carry the **same version** and
-are bumped **together** on every release — even packages that didn't change. Currently `0.7.0`.
+ALL 14 published packages (core + clients + plugins + `glubean` meta) carry the **same version** and
+are bumped **together** on every release — even packages that didn't change. Currently `0.10.3`.
 
 - **Why lockstep (not per-package semver):** these are one product split into modules with
   hard internal coupling — e.g. the runner's workflow executor imports `@glubean/sdk/internal`,
@@ -55,12 +55,12 @@ are bumped **together** on every release — even packages that didn't change. C
   versions: X.Y.Z`). Always bump first.
 
 ## Publish Order (dependency chain)
-sdk → engine → scanner → redaction → runner → cli → glubean, then auth, browser, graphql, grpc,
-mcp, oauth-code.
+sdk → engine → scanner → redaction → runner → cli → glubean, then auth, browser, graphql,
+cloud-client → mcp, grpc, oauth-code.
 
 engine depends on sdk; runner on engine/sdk/scanner; cli on sdk/runner/scanner/redaction; glubean
-(meta) on cli; mcp on runner/scanner/sdk; the other plugins on sdk. The CI workflow encodes this
-order — keep `publish.yml` and this list in sync when packages are added/removed.
+(meta) on cli; mcp on cloud-client/runner/scanner/sdk; the other plugins on sdk. The CI workflow
+encodes this order — keep `publish.yml` and this list in sync when packages are added/removed.
 
 ## Branch Policy
 - Solo development: direct commits to main are OK.

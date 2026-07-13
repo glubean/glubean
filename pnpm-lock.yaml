@@ -110,6 +110,12 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/cloud-client:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+
   packages/engine:
     dependencies:
       '@glubean/sdk':
@@ -172,6 +178,9 @@ importers:
 
   packages/mcp:
     dependencies:
+      '@glubean/cloud-client':
+        specifier: workspace:*
+        version: link:../cloud-client
       '@glubean/redaction':
         specifier: workspace:*
         version: link:../redaction

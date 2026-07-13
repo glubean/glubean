@@ -8,13 +8,26 @@ import { join } from "node:path";
 
 import {
   DEFAULT_API_URL,
+  DEFAULT_APP_URL,
   MISSING_AUTH_MESSAGES,
   buildRunIngestBody,
+  appUrlForPath,
   cloudFetchJson,
   envLabelFromEnvFile,
   loadUploadRedaction,
+  listApiDrafts,
+  readApiDraft,
+  editApiDraft,
+  submitApiRelease,
+  getApiReleaseStatus,
+  listApiReleases,
+  createApiReleaseEditSession,
+  applyApiReleaseFixToDraft,
+  validateApiDraft,
   resolveCloudAuth,
   resolveDefaultTargetId,
+  RUN_INGEST_ERROR_HINTS,
+  RUN_READ_ERROR_HINTS,
   runIngestUrl,
   runTestEventsUrl,
   runTestResultsUrl,
@@ -29,6 +42,7 @@ const GLUBEAN_ENV_KEYS = [
   "GLUBEAN_TARGET_ID",
   "GLUBEAN_API_URL",
   "GLUBEAN_PLATFORM_API_URL",
+  "GLUBEAN_APP_URL",
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -63,6 +77,7 @@ describe("resolveCloudAuth", () => {
     );
     expect(auth).toEqual({
       apiUrl: "https://x.test",
+      appUrl: DEFAULT_APP_URL,
       token: "arg-token",
       projectId: "arg-proj",
       targetId: "arg-tgt",
@@ -117,6 +132,7 @@ describe("resolveCloudAuth", () => {
     process.env.HOME = await mkdtemp(join(tmpdir(), "glubean-mcp-nohome-"));
     const auth = await resolveCloudAuth({});
     expect(auth.apiUrl).toBe(DEFAULT_API_URL);
+    expect(auth.appUrl).toBe(DEFAULT_APP_URL);
     expect(auth.token).toBeUndefined();
     expect(auth.projectId).toBeUndefined();
   });
@@ -150,6 +166,13 @@ describe("resolveCloudAuth", () => {
     expect(auth.apiUrl).toBe("https://explicit.test");
   });
 
+  it("resolves the app origin independently for clickable editor links", async () => {
+    process.env.HOME = await mkdtemp(join(tmpdir(), "glubean-mcp-nohome-"));
+    process.env.GLUBEAN_APP_URL = "https://app.staging.test/";
+    const auth = await resolveCloudAuth({});
+    expect(auth.appUrl).toBe("https://app.staging.test");
+  });
+
   it("reads GLUBEAN_PLATFORM_API_URL from .env file vars, same precedence as process env", async () => {
     process.env.HOME = await mkdtemp(join(tmpdir(), "glubean-mcp-nohome-"));
     process.env.GLUBEAN_API_URL = "https://api.staging.glubean.com";
@@ -158,6 +181,14 @@ describe("resolveCloudAuth", () => {
       { envFileVars: { GLUBEAN_PLATFORM_API_URL: "https://platform.staging.glubean.com" } },
     );
     expect(auth.apiUrl).toBe("https://platform.staging.glubean.com");
+  });
+});
+
+describe("appUrlForPath", () => {
+  it("joins a configured app origin with a canonical editor path", () => {
+    expect(appUrlForPath("https://app.test/", "/p/prj/apis/api?node=info")).toBe(
+      "https://app.test/p/prj/apis/api?node=info",
+    );
   });
 });
 
@@ -253,10 +284,25 @@ describe("cloudFetchJson", () => {
       /Unauthorized \(401\).*GLUBEAN_TOKEN.*glubean login/s,
     );
 
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 403 })));
+    await expect(cloudFetchJson("https://x.test/u", {
+      token: "t",
+      errorHints: RUN_READ_ERROR_HINTS,
+    })).rejects.toThrow(/Forbidden \(403\).*runs:read/s);
+
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 404 })));
-    await expect(cloudFetchJson("https://x.test/u", { token: "t" })).rejects.toThrow(
-      /Not found \(404\).*projectId \/ targetId \/ runId/s,
+    await expect(cloudFetchJson("https://x.test/u", {
+      token: "t",
+      errorHints: RUN_READ_ERROR_HINTS,
+    })).rejects.toThrow(
+      /Not found \(404\).*projectId \/ targetId \/ runId.*GLUBEAN_PLATFORM_API_URL.*Dashboard API/s,
     );
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("too large", { status: 413 })));
+    await expect(cloudFetchJson("https://x.test/u", {
+      token: "t",
+      errorHints: RUN_INGEST_ERROR_HINTS,
+    })).rejects.toThrow(/Payload too large \(413\).*run body exceeds the ingest cap/s);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
     await expect(cloudFetchJson("https://x.test/u", { token: "t" })).rejects.toThrow(
@@ -283,6 +329,190 @@ describe("cloudFetchJson", () => {
     await expect(
       cloudFetchJson("https://x.test/u", { token: "t", timeoutMs: 123 }),
     ).rejects.toThrow(/timed out after 123ms/);
+  });
+});
+
+describe("API draft authoring client", () => {
+  it("maps list/read/edit/validate to project-scoped Platform API routes", async () => {
+    const fetchSpy = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url);
+      if (value.endsWith("/draft/edits")) {
+        return new Response(
+          JSON.stringify({ apiId: "api/1", draftRevision: 3, changed: true, changes: [], validation: { valid: true, issues: [] } }),
+        );
+      }
+      if (value.endsWith("/draft/validate")) {
+        return new Response(JSON.stringify({ valid: true, issues: [] }));
+      }
+      if (value.endsWith("/draft")) {
+        return new Response(JSON.stringify({ id: "api/1", draftRevision: 2, effectiveSpec: {} }));
+      }
+      return new Response(JSON.stringify([{ id: "api/1", draftRevision: 2 }]));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await listApiDrafts("https://api.test/", "project one", "tok");
+    await readApiDraft("https://api.test", "project one", "api/1", "tok");
+    await editApiDraft("https://api.test", "project one", "api/1", "tok", {
+      baseRevision: 2,
+      idempotencyKey: "turn-1",
+      edits: [{
+        op: "set",
+        target: { kind: "operation", path: "/users/{id}", method: "get" },
+        field: ["description"],
+        value: "Returns a user.",
+      }],
+    });
+    await validateApiDraft("https://api.test", "project one", "api/1", "tok");
+
+    expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://api.test/v1/projects/project%20one/apis",
+      "https://api.test/v1/projects/project%20one/apis/api%2F1/draft",
+      "https://api.test/v1/projects/project%20one/apis/api%2F1/draft/edits",
+      "https://api.test/v1/projects/project%20one/apis/api%2F1/draft/validate",
+    ]);
+    const [, editInit] = fetchSpy.mock.calls[2]! as [string, RequestInit];
+    expect(editInit.method).toBe("POST");
+    expect(JSON.parse(String(editInit.body))).toMatchObject({ baseRevision: 2, idempotencyKey: "turn-1" });
+    expect((editInit.headers as Record<string, string>).Authorization).toBe("Bearer tok");
+  });
+
+  it("maps release intent and candidate status to the task-level Platform API routes", async () => {
+    const fetchSpy = vi.fn(async (url: string | URL | Request) => {
+      const value = String(url);
+      if (value.endsWith("/release-intents")) {
+        return new Response(JSON.stringify({
+          intentId: "ri_1",
+          intentStatus: "awaiting_author_confirmation",
+          candidateId: "cand/1",
+          candidateRevision: 1,
+          candidateStatus: "approved",
+          previewRequired: false,
+          previewUrl: "https://app.test/p/p/apis/a/candidates/c?revision=1",
+          reviewUrl: null,
+          classification: { docsOnly: false, reasons: [] },
+          capabilities: { canApprove: false, canRelease: false },
+        }));
+      }
+      return new Response(JSON.stringify({
+        candidate: { id: "cand/1", label: "1.0.0", status: "approved", approvalPolicy: "none", activeRevisionId: "r1" },
+        releaseIntent: {
+          id: "ri_1",
+          candidateRevisionId: "r1",
+          previewMode: "preview",
+          status: "awaiting_author_confirmation",
+          classification: { docsOnly: false, reasons: [] },
+          createdByUserId: "u_author",
+          confirmedByUserId: null,
+          confirmedAt: null,
+          createdAt: "2026-07-13T00:00:00.000Z",
+        },
+        activeRevision: { id: "r1", revision: 1, artifactId: "art1" },
+        gate: { status: "approved", canRelease: true, pending: [] },
+      }));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const intent = await submitApiRelease("https://api.test", "project one", "api/1", "tok", {
+      draftRevision: 3,
+      releaseLabel: "1.0.0",
+      previewMode: "preview",
+      idempotencyKey: "release-1",
+    });
+    const status = await getApiReleaseStatus(
+      "https://api.test",
+      "project one",
+      "api/1",
+      "cand/1",
+      "tok",
+    );
+    expect(intent.candidateId).toBe("cand/1");
+    expect(status.gate.canRelease).toBe(true);
+    expect(status.releaseIntent?.id).toBe("ri_1");
+    expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://api.test/v1/projects/project%20one/apis/api%2F1/release-intents",
+      "https://api.test/v1/projects/project%20one/apis/api%2F1/candidates/cand%2F1",
+    ]);
+  });
+
+  it("returns a preview_required 409 as a usable release intent response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { code: "preview_required", message: "Preview required" },
+      intentId: "ri_2",
+      intentStatus: "awaiting_author_confirmation",
+      candidateId: "cand_2",
+      candidateRevision: 1,
+      candidateStatus: "approved",
+      previewRequired: true,
+      previewUrl: "https://app.test/review",
+      reviewUrl: null,
+      classification: { docsOnly: false, reasons: ["Added endpoint"] },
+      capabilities: { canApprove: false, canRelease: false },
+    }), { status: 409 })));
+    const result = await submitApiRelease("https://api.test", "p", "a", "tok", {
+      draftRevision: 4,
+      releaseLabel: "2.0.0",
+      previewMode: "skip_if_safe",
+      idempotencyKey: "release-2",
+    });
+    expect(result).toMatchObject({ previewRequired: true, previewUrl: "https://app.test/review" });
+    expect(result).not.toHaveProperty("error");
+  });
+
+  it("lists releases and starts an edit session against an explicit active revision", async () => {
+    const fetchSpy = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith("/releases")) {
+        return new Response(JSON.stringify([{
+          release: { id: "rel/1", label: "1.0.0", activeRevisionId: "rr_2", releaseSequence: 1 },
+          activeRevision: { id: "rr_2", revision: 2, kind: "emergency_fix", reason: "typo" },
+          live: true,
+        }]));
+      }
+      return new Response(JSON.stringify({
+        session: { id: "ses_1", baseReleaseRevisionId: "rr_2", editRevision: 1 },
+      }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const releases = await listApiReleases("https://api.test", "p", "a", "tok");
+    await createApiReleaseEditSession(
+      "https://api.test",
+      "p",
+      "a",
+      releases[0]!.release.id,
+      "tok",
+      releases[0]!.activeRevision.id,
+      "Correct docs",
+    );
+
+    expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://api.test/v1/projects/p/apis/a/releases",
+      "https://api.test/v1/projects/p/apis/a/releases/rel%2F1/edit-sessions",
+    ]);
+    const [, init] = fetchSpy.mock.calls[1]! as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      expectedActiveRevisionId: "rr_2",
+      reason: "Correct docs",
+    });
+  });
+
+  it("sends idempotency for apply-to-draft and preserves affected editor links", async () => {
+    const fetchSpy = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => new Response(JSON.stringify({
+      releaseId: "rel_1",
+      releaseRevisionId: "rr_2",
+      draftRevision: 7,
+      changes: [{ nodeId: "info", editorPath: "/p/p/apis/a?node=info" }],
+    })));
+    vi.stubGlobal("fetch", fetchSpy);
+    const result = await applyApiReleaseFixToDraft(
+      "https://api.test", "p", "a", "rel_1", "rr_2", "tok", 6, "apply-1",
+    );
+    expect(result.changes[0]?.editorPath).toContain("?node=info");
+    const [, init] = fetchSpy.mock.calls[0]! as [string, RequestInit];
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer tok",
+      "Idempotency-Key": "apply-1",
+    });
   });
 });
 

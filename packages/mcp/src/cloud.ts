@@ -35,16 +35,35 @@ import { randomUUID } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { DEFAULT_GLOBAL_RULES, redactValue } from "@glubean/redaction";
 import type { GlobalRules } from "@glubean/redaction";
+import type { CloudHttpErrorHints } from "@glubean/cloud-client";
 import { MCP_PACKAGE_VERSION } from "./version.js";
 
 /** Mirror of packages/cli/src/lib/constants.ts `DEFAULT_API_URL` (the
  *  platform/ingest API, `/v1/*`). */
 export const DEFAULT_API_URL = "https://api.glubean.com";
+export const DEFAULT_APP_URL = "https://app.glubean.com";
+
+const RUN_RESOURCE_HINT =
+  `Check projectId / targetId / runId. GLUBEAN_PLATFORM_API_URL must point to ` +
+  `the Platform API (default ${DEFAULT_API_URL}), not the Dashboard API (GLU-139).`;
+
+export const RUN_INGEST_ERROR_HINTS: CloudHttpErrorHints = {
+  403: "The upload token needs runs:write and active project membership.",
+  404: RUN_RESOURCE_HINT,
+  413: "The run body exceeds the ingest cap.",
+  429: "Too many runs were uploaded in the current window.",
+};
+
+export const RUN_READ_ERROR_HINTS: CloudHttpErrorHints = {
+  403: "The token needs runs:read and active project membership.",
+  404: RUN_RESOURCE_HINT,
+};
 
 // ── Credential resolution (mirror of packages/cli/src/lib/auth.ts) ──────────
 
 export interface CloudAuthArgs {
   apiUrl?: string;
+  appUrl?: string;
   token?: string;
   projectId?: string;
   targetId?: string;
@@ -57,6 +76,7 @@ export interface CloudAuthSources {
 
 export interface ResolvedCloudAuth {
   apiUrl: string;
+  appUrl: string;
   token?: string;
   projectId?: string;
   targetId?: string;
@@ -66,6 +86,7 @@ interface CredentialsFile {
   token?: string;
   projectId?: string;
   apiUrl?: string;
+  appUrl?: string;
 }
 
 async function readCredentialsFile(): Promise<CredentialsFile | null> {
@@ -130,7 +151,18 @@ export async function resolveCloudAuth(
     DEFAULT_API_URL
   ).replace(/\/+$/, "");
 
-  return { apiUrl, token, projectId, targetId };
+  const appUrl = (
+    args.appUrl ||
+    fromEnv("GLUBEAN_APP_URL") ||
+    (await creds())?.appUrl ||
+    DEFAULT_APP_URL
+  ).replace(/\/+$/, "");
+
+  return { apiUrl, appUrl, token, projectId, targetId };
+}
+
+export function appUrlForPath(appUrl: string, path: string): string {
+  return `${appUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 }
 
 /** Human-actionable message for a missing credential piece. */
@@ -229,89 +261,40 @@ export function runTestEventsUrl(
   return `${runUrl(apiUrl, projectId, targetId, runId)}/tests/${encodeURIComponent(testId)}/events`;
 }
 
-// ── Fetch with human-actionable error mapping ────────────────────────────────
+// ── API-document authoring client ──────────────────────────────────────────
 
-/**
- * Scrub bearer-token-shaped strings from server error text before it reaches
- * the MCP client — a misconfigured apiUrl / proxy can echo request headers
- * (including `Authorization: Bearer glb_…`) back in the error body.
- */
-function scrubTokens(text: string): string {
-  return text
-    .replace(/glb_[A-Za-z0-9_-]{6,}/g, "glb_[redacted]")
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, "Bearer [redacted]");
-}
-
-function friendlyHttpError(status: number, body: string): string {
-  const detail = scrubTokens(body.slice(0, 2000));
-  switch (status) {
-    case 401:
-      return (
-        `Unauthorized (401): the Cloud rejected the token. Check GLUBEAN_TOKEN ` +
-        `(is it expired or for a different environment?) or run \`glubean login\`. ${detail}`
-      );
-    case 403:
-      return (
-        `Forbidden (403): the token lacks the required scope (runs:read / ` +
-        `runs:write) or its user lost project membership. ${detail}`
-      );
-    case 404:
-      return (
-        `Not found (404): check projectId / targetId / runId — or the apiUrl ` +
-        `points at the wrong service (the ingest API is the platform API, ` +
-        `default ${DEFAULT_API_URL}). ${detail}`
-      );
-    case 413:
-      return `Payload too large (413): the run body exceeds the ingest cap. ${detail}`;
-    case 429:
-      return `Ingest quota exceeded (429): too many runs in the current window. ${detail}`;
-    default:
-      return `HTTP ${status}: ${detail}`;
-  }
-}
-
-/** Default request timeout — an MCP tool must not hang on a stalled network
- *  call (mirrors the spirit of the CLI's RESULTS_TIMEOUT_MS, slightly wider
- *  since ingest bodies can be larger than a status GET). */
-const CLOUD_FETCH_TIMEOUT_MS = 15_000;
-
-export async function cloudFetchJson(
-  url: string,
-  init: RequestInit & { token: string; timeoutMs?: number },
-): Promise<unknown> {
-  const { token, timeoutMs, ...fetchInit } = init;
-  const budget = timeoutMs ?? CLOUD_FETCH_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), budget);
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      ...fetchInit,
-      signal: controller.signal,
-      headers: {
-        ...(fetchInit.headers ?? {}),
-        Authorization: `Bearer ${token}`,
-      },
-    });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new Error(
-        `Request to Glubean Cloud timed out after ${budget}ms — check the apiUrl and your network.`,
-      );
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-  const text = await res.text();
-  if (!res.ok) throw new Error(friendlyHttpError(res.status, text));
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
+export {
+  API_COMPONENT_TYPES,
+  API_DOCUMENT_SECTIONS,
+  API_HTTP_METHODS,
+  CloudApiError,
+  GlubeanCloudClient,
+  cloudFetchJson,
+  listApiDrafts,
+  readApiDraft,
+  editApiDraft,
+  validateApiDraft,
+  submitApiRelease,
+  getApiReleaseStatus,
+  listApiReleases,
+  createApiReleaseEditSession,
+  getApiReleaseEditSession,
+  editApiReleaseSession,
+  submitApiReleaseEditSession,
+  applyApiReleaseFixToDraft,
+  type ApiDraftTarget as CloudApiDraftTarget,
+  type ApiDraftEdit as CloudApiDraftEdit,
+  type ApiDraftSummary as CloudApiDraftSummary,
+  type ApiDraft as CloudApiDraft,
+  type ApiDraftValidation as CloudApiDraftValidation,
+  type ApiDraftEditResponse as CloudApiDraftEditResponse,
+  type ApiReleaseIntentResponse as CloudApiReleaseIntentResponse,
+  type ApiCandidateStatus as CloudApiCandidateStatus,
+  type ApiReleaseHistory as CloudApiReleaseHistory,
+  type ApiReleaseEditSession as CloudApiReleaseEditSession,
+  type CloudApiErrorIssue,
+  type CloudHttpErrorHints,
+} from "@glubean/cloud-client";
 
 // ── Upload environment label (mirror of packages/cli/src/lib/upload.ts) ─────
 
