@@ -318,13 +318,41 @@ export interface LoadTimelineWindow {
   throughputPerSec: number;
   /** Request latency percentiles within this window. */
   latency: Percentiles;
-  /** Iterations COMPLETED (iteration:end) in this window — iteration throughput over time. */
+  /** Iterations COMPLETED (iteration:end) in this window — iteration throughput over time.
+   *  Includes any `endedUnknown` completions synthesized at an observation cutoff (a lost
+   *  source's in-flight iterations are closed there so they cannot ghost-carry forward). */
   iterations: number;
-  /** Peak concurrent in-flight iterations during this window — concurrency over time. It is
-   *  max(the peak sampled within the window, the count carried in from earlier windows), so a
-   *  long iteration spanning quiet windows keeps the curve up AND a short iteration that starts
-   *  and ends within one window still shows its concurrency (rather than netting to zero). */
+  /** Peak concurrent in-flight iterations during this window — concurrency over time.
+   *  Compatibility SCALAR for pre-bounds consumers: always equal to
+   *  `peakInFlightBounds.upper` (conservative — the true peak is never above it). For a
+   *  single-source timeline it is exact: max(the peak sampled within the window, the count
+   *  carried in from earlier windows), so a long iteration spanning quiet windows keeps the
+   *  curve up AND a short iteration that starts and ends within one window still shows its
+   *  concurrency (rather than netting to zero). */
   peakInFlight: number;
+  /** Peak concurrent in-flight iterations as an interval. Single-source: `lower === upper`
+   *  (the exact peak, `peakInFlight`'s historical value). Merged across sources (workers):
+   *  per-source peaks can occur at different instants, so only bounds survive —
+   *  `lower` = max over sources (∨ the combined carried-in count), `upper` = their sum.
+   *  These are OBSERVED-CONTRIBUTOR bounds: when `contributorsPartial` is true a source
+   *  did not observe this window at all (lost earlier) and its in-flight contribution is
+   *  unbounded — the interval then covers the observed sources only, NOT the true global
+   *  concurrency. Always written by the current emitter; absent on artifacts produced
+   *  before this field existed — readers fall back to the `peakInFlight` scalar (= this
+   *  interval's upper). The schemaVersion bump for the v2 field set lands in D0-8, not
+   *  here (§11.1 conservative-superset strategy: optional fields + compat scalar first,
+   *  one version bump at the end). */
+  peakInFlightBounds?: { lower: number; upper: number };
+  /** Iterations counted into `iterations` whose real completion was never observed: a lost
+   *  source's still-in-flight starts are closed at its observation-cutoff window so the
+   *  carried-in-flight baseline drops to zero instead of ghosting forever. Present only
+   *  when > 0 (only censored merges produce it). */
+  endedUnknown?: number;
+  /** True when at least one merge contributor did not observe this window (its observation
+   *  was cut off earlier). `peakInFlightBounds` then covers the observed contributors only
+   *  — consumers must not read it as a global concurrency bound. Omitted when every
+   *  contributor observed the window. */
+  contributorsPartial?: boolean;
 }
 
 /**
