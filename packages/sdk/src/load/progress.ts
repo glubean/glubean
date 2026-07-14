@@ -55,5 +55,15 @@ export interface LoadProgressSnapshot {
 export interface LoadReducer {
   apply(event: LoadEvent): void;
   snapshot(now?: number): LoadProgressSnapshot;
-  finalize(): LoadArtifact;
+  /** Finalize to the versioned artifact. `runEndMs` — optional AUTHORITATIVE run-end
+   *  instant (epoch ms, SAME clock domain as `LoadEvent.ts` / the reducer's injected
+   *  `timelineOrigin`): in a distributed run, the coordinator's `globalEndAt` (dispatch
+   *  deadline + drain completion, quota completion, or the abort instant). Supplied, it
+   *  becomes `durationMs` and every throughput denominator — a worker's own event extremes
+   *  close the window early when a lost worker / early quota finish stops emitting, which
+   *  inflates throughput. Absent, the end falls back to the last observed event's ts
+   *  (single-process semantics, unchanged). A value earlier than the last event is taken
+   *  at value — the coordinator is authoritative, no clamp. See the runner's
+   *  `LoadReducerImpl.finalize` jsdoc for the full contract. */
+  finalize(runEndMs?: number): LoadArtifact;
 }

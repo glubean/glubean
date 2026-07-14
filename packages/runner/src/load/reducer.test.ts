@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LoadEvent } from "@glubean/sdk/load";
+import type { LoadEvent, LoadReducer } from "@glubean/sdk/load";
 import { createLoadReducer } from "./reducer.js";
 
 let seq = 0;
@@ -338,6 +338,108 @@ describe("createLoadReducer — timelineOrigin (shared distributed axis)", () =>
     expect(art.samples.failureTraces[0].completedAtOffsetMs).toBe(100);
     expect(art.startedAt).toBe(new Date(T0).toISOString());
     expect(art.durationMs).toBe(100);
+  });
+});
+
+describe("finalize(runEndMs) — authoritative run interval (distributed D0), via the public LoadReducer contract", () => {
+  // Every reducer here is held as the SDK `LoadReducer` interface (createLoadReducer's
+  // return type) — proving `runEndMs` is reachable from the public surface, not an
+  // impl-only capability (codex R1 P1).
+  /** One completed iteration + one request; events span T0 .. T0+2_000 (lastTs = T0+2_000). */
+  function feedShard(r: LoadReducer): void {
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1, durationMs: 10_000 } }));
+    r.apply(ev(T0, { type: "iteration:start", scenarioId: "s", iterationId: "i1" }));
+    r.apply(
+      ev(T0 + 1_000, {
+        type: "request:observed",
+        scenarioId: "s",
+        stepId: "st",
+        method: "GET",
+        url: "u",
+        routeKey: "GET /x",
+        routeKeySource: "explicit",
+        routeKeyHeuristic: false,
+        status: 200,
+        ok: true,
+        durationMs: 50,
+      }),
+    );
+    r.apply(ev(T0 + 2_000, { type: "iteration:end", scenarioId: "s", iterationId: "i1", ok: true, durationMs: 2_000 }));
+  }
+
+  it("uses a supplied runEnd (> lastTs) as the duration + every throughput denominator", () => {
+    // Lost-worker / early-quota shape: the shard stops emitting at T0+2s but the RUN ran to
+    // T0+10s (coordinator globalEndAt). An event-extremum denominator (2s) would report
+    // 0.5 iter/s — 5× the real 0.1 — because no event lands at the deadline.
+    const r: LoadReducer = createLoadReducer({ timelineOrigin: T0 });
+    feedShard(r);
+    const art = r.finalize(T0 + 10_000);
+    expect(art.durationMs).toBe(10_000);
+    expect(art.summary.throughputPerSec).toBeCloseTo(0.1, 10); // 1 iteration / 10s
+    expect(art.endpoints[0].throughputPerSec).toBeCloseTo(0.1, 10); // 1 request / 10s
+    // The timeline zero-fill-extends to the boundary (trailing idle, not truncation):
+    // 250ms windows over [0, 10_000) → last window offset 9_750.
+    expect(art.timeline?.windows.at(-1)?.offsetMs).toBe(9_750);
+  });
+
+  it("falls back to lastTs when absent — single-process status quo (the inflated figure)", () => {
+    const r: LoadReducer = createLoadReducer({ timelineOrigin: T0 });
+    feedShard(r);
+    const art = r.finalize();
+    expect(art.durationMs).toBe(2_000);
+    expect(art.summary.throughputPerSec).toBeCloseTo(0.5, 10); // the inflation runEnd exists to fix
+  });
+
+  it("takes a runEnd < lastTs AT VALUE — coordinator is authoritative, no clamp to lastTs", () => {
+    // Trust model (owner 2026-07-14): globalEndAt is the single authority on the run
+    // interval; an event past it is clock jitter or a straggler the coordinator already
+    // cut. Clamping to lastTs would silently reintroduce the per-worker event-extremum
+    // denominator and make merged workers' denominators mutually inconsistent.
+    const r: LoadReducer = createLoadReducer({ timelineOrigin: T0 });
+    feedShard(r);
+    const art = r.finalize(T0 + 1_500);
+    expect(art.durationMs).toBe(1_500);
+    expect(art.summary.throughputPerSec).toBeCloseTo(1 / 1.5, 10);
+  });
+
+  it("floors a runEnd before the origin at an empty interval (no negative duration)", () => {
+    const r: LoadReducer = createLoadReducer({ timelineOrigin: T0 });
+    feedShard(r);
+    const art = r.finalize(T0 - 5_000);
+    expect(art.durationMs).toBe(0);
+    expect(art.summary.throughputPerSec).toBe(0);
+  });
+
+  it("reports the full authoritative window for an idle shard (origin injected, zero events)", () => {
+    // A worker that lost its dispatch (or had nothing to do) still describes the REAL run
+    // window: duration = globalEndAt − origin, throughput 0 over it — not NaN, not 0ms.
+    const r: LoadReducer = createLoadReducer({ timelineOrigin: T0 });
+    const art = r.finalize(T0 + 10_000);
+    expect(art.startedAt).toBe(new Date(T0).toISOString());
+    expect(art.durationMs).toBe(10_000);
+    expect(art.summary.throughputPerSec).toBe(0);
+    // …and a DENSE all-zero timeline over the interval (reducer-side synthesis — the
+    // timeline itself early-returns empty with no recorded window): 250ms windows over
+    // [0, 10_000) → 40 windows, offsets 0..9_750, every field zero.
+    expect(art.timeline?.windowMs).toBe(250);
+    expect(art.timeline?.windows).toHaveLength(40);
+    expect(art.timeline?.windows[0]?.offsetMs).toBe(0);
+    expect(art.timeline?.windows.at(-1)?.offsetMs).toBe(9_750);
+    expect(
+      art.timeline?.windows.every(
+        (w) =>
+          w.requests === 0 && w.errors === 0 && w.iterations === 0 && w.peakInFlight === 0 && w.throughputPerSec === 0,
+      ),
+    ).toBe(true);
+  });
+
+  it("mirrors the timeline's coarsening in the synthetic idle series (long run stays within the cap)", () => {
+    const r: LoadReducer = createLoadReducer({ timelineOrigin: T0 });
+    // 10 idle minutes: 250ms base → 2400 windows > 600 cap → doubled twice to 1s width.
+    const art = r.finalize(T0 + 600_000);
+    expect(art.timeline?.windowMs).toBe(1_000);
+    expect(art.timeline?.windows).toHaveLength(600);
+    expect(art.timeline?.windows.at(-1)?.offsetMs).toBe(599_000);
   });
 });
 

@@ -682,7 +682,12 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // user code, which no signal can cancel) and for the settle that lands post-seal.
   sink.seal();
 
-  const artifact = reducer.finalize();
+  // Authoritative run-end boundary: this orchestrator's own finalization instant. The
+  // `load:end` just emitted was stamped `now()` too, so this differs from the reducer's
+  // `lastTs` fallback only by the sub-ms emit→finalize gap — same instant, but supplied
+  // EXPLICITLY so the production finalization path exercises the same channel a distributed
+  // worker uses (the D0-7 merge path passes the coordinator's `globalEndAt` here instead).
+  const artifact = reducer.finalize(now());
   // Continuations the drain timeout abandoned are still in flight at finalize —
   // surface them (the reducer can't know the orchestrator's drain decision).
   if (artifact.summary.continuation) {

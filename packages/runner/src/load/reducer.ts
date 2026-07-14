@@ -48,6 +48,14 @@ const ZERO_PCT: Percentiles = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
 // runs' distributions line up bucket-for-bucket; a final overflow bucket carries the tail.
 const LATENCY_LADDER = [10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 2000, 5000];
 
+// Mirror of `LoadTimeline`'s constructor defaults (base window width / coarsening cap), used
+// ONLY by the reducer-side synthetic zero timeline (`syntheticZeroTimeline`). TODO(integration:
+// revisit after D0-3 timeline merge lands): the synthesis — and these mirrored constants —
+// should fold into `LoadTimeline` itself; kept out of timeline.ts for now because the parallel
+// D0-3 line is reworking that file and an edit here would collide mid-flight.
+const TIMELINE_BASE_WINDOW_MS = 250;
+const TIMELINE_MAX_WINDOWS = 600;
+
 // Per-metric cap on distinct tag-series. Beyond it, new tag combinations are folded into
 // the untagged total only (the metric is flagged `seriesTruncated` + an advisory) — a guard
 // against a high-cardinality tag (e.g. itemId) exploding the artifact. `class` (3 values) is
@@ -522,7 +530,8 @@ export class LoadReducerImpl implements LoadReducer {
    *  axes inside one artifact would make it uninterpretable). Its duration therefore
    *  includes the pre-start idle gap — correct semantics, not a bug. This origin only fixes
    *  the START of the axis; the run's authoritative END boundary (the coordinator's
-   *  `globalEndAt`, proposal §7.2) is a merge-time concern, wired in at D0-7. */
+   *  `globalEndAt`, proposal §7.2) is supplied — when known — via `finalize(runEndMs)`;
+   *  absent, the last observed event's ts closes the axis (single-process status quo). */
   private get originMs(): number | undefined {
     return this.timelineOrigin ?? this.firstTs;
   }
@@ -562,14 +571,46 @@ export class LoadReducerImpl implements LoadReducer {
     };
   }
 
-  finalize(): LoadArtifact {
+  /** Finalize the artifact.
+   *
+   *  `runEndMs` — OPTIONAL authoritative run-end instant (epoch ms, SAME clock domain as
+   *  `LoadEvent.ts` / `timelineOrigin`; the constructor's CLOCK-DOMAIN INVARIANT applies to
+   *  it verbatim): the coordinator's `globalEndAt` (proposal §7.2 — dispatchDeadline + drain
+   *  completion, quota completion, or the abort instant). When supplied,
+   *  `durationMs = max(0, runEndMs − originMs)` and every throughput denominator (summary /
+   *  phase / endpoint) follows it; the timeline zero-fill-extends to the same boundary
+   *  through its existing `finalize(runEndMs)` offset parameter. When absent, the end falls
+   *  back to the last observed event's ts — the single-process status quo, zero change.
+   *
+   *  WHY an explicit boundary: a worker's event EXTREMES are not the run INTERVAL. In a
+   *  distributed run a lost worker (or an early quota finish) simply stops emitting — no
+   *  event lands at the deadline, so a `lastTs` denominator closes the window early and the
+   *  shard's throughput reads HIGHER than reality. The coordinator knows the real interval;
+   *  supplying it makes the denominator authoritative.
+   *
+   *  A `runEndMs` EARLIER than the last observed event is taken AT VALUE (no clamp to
+   *  `lastTs`): under the D0 trust model the coordinator is the single authority on the run
+   *  interval — an event past `globalEndAt` is clock jitter or a straggler the coordinator
+   *  already cut — and clamping would silently reintroduce the per-worker event-extremum
+   *  denominator, making merged workers' denominators mutually inconsistent. Post-boundary
+   *  windows / samples are still emitted (the timeline never truncates observed data), so
+   *  `durationMs` may then sit below the largest offset. `max(0, …)` only floors the
+   *  pathological runEnd-before-origin case at an empty interval. */
+  finalize(runEndMs?: number): LoadArtifact {
     // The artifact's time metadata sits on the SAME axis as its offsets (see `originMs`):
-    // startedAt IS the axis origin and durationMs spans origin → last event, so a window at
-    // offset X is always inside [0, durationMs]. With an injected origin a late-starting
-    // worker's duration includes its pre-start gap (shared-run-axis semantics); the run-level
-    // end boundary (`globalEndAt`) stays a coordinator/merge concern (D0-7).
+    // startedAt IS the axis origin and durationMs spans origin → run end, where the run end
+    // is the supplied authoritative boundary (coordinator `globalEndAt`) or, absent one, the
+    // last observed event — under the fallback a window at offset X is always inside
+    // [0, durationMs]; an authoritative boundary may cut before a straggler (jsdoc above).
+    // With an injected origin a late-starting worker's duration includes its pre-start gap
+    // (shared-run-axis semantics).
     const startedAtMs = this.originMs ?? 0;
-    const durationMs = Math.max(0, this.lastTs - startedAtMs);
+    // No origin (no injected timelineOrigin AND no events) → no axis; `runEndMs` is a point
+    // ON the axis, so the interval stays empty — matching the prior behavior exactly:
+    // `lastTs` is 0 precisely when `originMs` is undefined (both are set by the first
+    // event), so the old `lastTs − 0` was 0 too.
+    const durationMs =
+      this.originMs === undefined ? 0 : Math.max(0, (runEndMs ?? this.lastTs) - this.originMs);
     const elapsedSec = durationMs / 1000;
     const endpoints = this.endpointSummaries(elapsedSec);
     const anyHeuristicEndpoint = endpoints.some((e) => e.routeKeyHeuristic);
@@ -583,6 +624,17 @@ export class LoadReducerImpl implements LoadReducer {
               `cap; excess tag-series were folded into the untagged total. Lower the tag cardinality.`,
           ]
         : [];
+
+    // Timeline: `durationMs` (already the authoritative interval when `runEndMs` was
+    // supplied) drives the zero-fill extension — same boundary, same axis. One gap the
+    // timeline can't fill itself: it early-returns EMPTY when it never recorded a window,
+    // so an idle / lost shard (authoritative `runEndMs` supplied, zero events) would break
+    // the shared axis's dense-series promise over [0, durationMs] — synthesize it here.
+    const rawTimeline = this.timeline.finalize(durationMs);
+    const timeline =
+      runEndMs !== undefined && durationMs > 0 && rawTimeline.windows.length === 0
+        ? this.syntheticZeroTimeline(durationMs)
+        : rawTimeline;
 
     return {
       schemaVersion: "glubean.load.v1",
@@ -647,7 +699,7 @@ export class LoadReducerImpl implements LoadReducer {
       steps: this.stepSummaries(),
       endpoints,
       matrix: this.matrixSummaries(),
-      timeline: this.timeline.finalize(durationMs),
+      timeline,
       samples: this.samples.finalize(),
     };
   }
@@ -944,6 +996,35 @@ export class LoadReducerImpl implements LoadReducer {
     };
   }
 
+  /** Reducer-side synthetic fallback: a DENSE all-zero timeline over the authoritative run
+   *  interval, for a reducer finalized with `runEndMs` that recorded no timeline events at
+   *  all (an idle worker / lost dispatch). `LoadTimeline.finalize` early-returns an EMPTY
+   *  series when it never saw a window, but the shared axis promises a dense series over
+   *  [0, durationMs] — a merge consumer should read "this worker sat idle the whole run",
+   *  not "this worker has no axis". Width mirrors the timeline's coarsening semantics
+   *  exactly (`runEndIndex`): the smallest baseWindowMs·2ⁿ whose last index fits the
+   *  maxWindows cap; indices 0..ceil(durationMs/width)−1; every field zero.
+   *  TODO(integration): revisit after D0-3 timeline merge lands — fold this into
+   *  `LoadTimeline` itself (see the mirrored-constants note at the top of this file). */
+  private syntheticZeroTimeline(durationMs: number): NonNullable<LoadArtifact["timeline"]> {
+    let windowMs = TIMELINE_BASE_WINDOW_MS;
+    while (Math.ceil(durationMs / windowMs) - 1 >= TIMELINE_MAX_WINDOWS) windowMs *= 2;
+    const count = Math.ceil(durationMs / windowMs);
+    return {
+      windowMs,
+      windows: Array.from({ length: count }, (_, i) => ({
+        offsetMs: i * windowMs,
+        requests: 0,
+        errors: 0,
+        errorRate: 0,
+        throughputPerSec: 0,
+        latency: ZERO_PCT,
+        iterations: 0,
+        peakInFlight: 0,
+      })),
+    };
+  }
+
   private attribution(anyHeuristicEndpoint: boolean): LoadArtifact["runtime"]["attribution"] {
     const canonical: LoadAttributionQuality = "canonical";
     return {
@@ -1069,7 +1150,12 @@ export class LoadReducerImpl implements LoadReducer {
  *    consumes: in-process / multi-core share the host clock (pass the epoch t0 as-is);
  *    a remote agent converts the coordinator's origin to the worker's local epoch via the
  *    handshake clock mapping BEFORE constructing the reducer. The reducer itself is
- *    deliberately clock-agnostic (see the constructor's invariant note). */
+ *    deliberately clock-agnostic (see the constructor's invariant note).
+ *
+ *  Distributed finalize: `finalize(runEndMs)` — on the SDK `LoadReducer` contract itself —
+ *  accepts the coordinator's authoritative run-end instant (`globalEndAt`, proposal §7.2)
+ *  as the duration / throughput denominator; absent, the last observed event closes the
+ *  interval (single-process status quo). */
 export function createLoadReducer(config?: {
   maxFailureTraces?: number;
   maxSlowTransactionSummaries?: number;
