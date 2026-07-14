@@ -237,9 +237,32 @@ export class LoadReducerImpl implements LoadReducer {
   // Bounded failure-trace / slow-transaction samples (the "show me one" view).
   private readonly samples: LoadSampleCollector;
 
-  /** @param reportCaps `report` sample caps (0 disables a sample type entirely). */
-  constructor(reportCaps: { maxFailureTraces?: number; maxSlowTransactionSummaries?: number } = {}) {
-    this.samples = new LoadSampleCollector(reportCaps);
+  // Injected time origin for every time quantity this reducer emits (see `originMs`).
+  // Absent → fall back to the first event's ts, the single-process run start.
+  private readonly timelineOrigin?: number;
+
+  /** @param config `report` sample caps (0 disables a sample type entirely), plus two optional
+   *  distributed-run knobs (single-process runs leave both unset):
+   *  - `workerId` — this shard's identity, stamped into sample identities (the shard runner
+   *    wires its `shard.workerId`). NOT the event `runnerId`, which is the plan's identity
+   *    and identical on every worker.
+   *  - `timelineOrigin` — epoch ms every emitted time quantity is computed against (see
+   *    `originMs` for the single-axis principle). CLOCK-DOMAIN INVARIANT: it MUST be
+   *    expressed in the same clock domain as the `LoadEvent.ts` values this reducer
+   *    consumes. In-process / multi-core workers share the host clock — pass the
+   *    coordinator's epoch t0 as-is. A REMOTE agent must FIRST convert the coordinator's
+   *    origin into this worker's local epoch via the clock mapping estimated at handshake
+   *    (proposal §8), THEN construct the reducer — the conversion is the agent's job and
+   *    happens before this constructor runs. The reducer is deliberately clock-agnostic:
+   *    it has no information to detect skew and must not pretend to, so normalization
+   *    lives in the layer that owns the mapping; cross-worker offset comparability is
+   *    exactly as good as that mapping's uncertainty budget (point-estimated, §7.3) —
+   *    the reducer neither amplifies nor masks it. */
+  constructor(
+    config: { maxFailureTraces?: number; maxSlowTransactionSummaries?: number; workerId?: string; timelineOrigin?: number } = {},
+  ) {
+    this.samples = new LoadSampleCollector(config);
+    if (config.timelineOrigin !== undefined) this.timelineOrigin = config.timelineOrigin;
   }
 
   apply(event: LoadEvent): void {
@@ -302,6 +325,9 @@ export class LoadReducerImpl implements LoadReducer {
           this.samples.endIteration(event.iterationId, {
             ok: event.ok,
             durationMs: event.durationMs,
+            // iteration:end offset from run start — the sample-merge ordering key (same
+            // clock basis as observation tsOffsetMs).
+            completedAtOffsetMs: this.offsetOf(event.ts),
             ...(event.errorKind !== undefined ? { errorKind: event.errorKind } : {}),
           });
           this.iterStepPhase.delete(event.iterationId); // bounded cleanup
@@ -321,7 +347,7 @@ export class LoadReducerImpl implements LoadReducer {
             scenarioRefId: event.scenarioRefId,
             iterationId: event.iterationId ?? "",
             errorKind: event.errorKind,
-            atMs: this.firstTs !== undefined ? event.ts - this.firstTs : 0,
+            atMs: this.offsetOf(event.ts), // same origin as every other offset (was a hand-rolled, unclamped fork)
           });
         }
         break;
@@ -486,14 +512,35 @@ export class LoadReducerImpl implements LoadReducer {
     }
   }
 
-  /** Ms from the run start (the first event's ts) — the timeline's window axis. */
+  /** The run's time origin (epoch ms): the injected `timelineOrigin`, else the first event's
+   *  ts (single-process: the run start). SINGLE-AXIS principle: once an origin is supplied,
+   *  EVERY time quantity this reducer emits — window/sample offsets, `startedAt`,
+   *  `durationMs`, `elapsedMs` (and thus throughput denominators) — is relative to it. That
+   *  is exactly what distributed semantics want: a worker's local artifact describes its
+   *  activity ON THE SHARED RUN AXIS (a late-starting worker's own firstTs would report
+   *  deceptively small offsets and corrupt the coordinator's first-N ordering — and mixing
+   *  axes inside one artifact would make it uninterpretable). Its duration therefore
+   *  includes the pre-start idle gap — correct semantics, not a bug. This origin only fixes
+   *  the START of the axis; the run's authoritative END boundary (the coordinator's
+   *  `globalEndAt`, proposal §7.2) is a merge-time concern, wired in at D0-7. */
+  private get originMs(): number | undefined {
+    return this.timelineOrigin ?? this.firstTs;
+  }
+
+  /** Ms from `originMs` — the axis every offset shares (timeline windows, sample
+   *  `completedAtOffsetMs` / `tsOffsetMs`, failure `atMs`). Clamped ≥ 0. */
   private offsetOf(ts: number): number {
-    return this.firstTs !== undefined ? Math.max(0, ts - this.firstTs) : 0;
+    const origin = this.originMs;
+    return origin !== undefined ? Math.max(0, ts - origin) : 0;
   }
 
   snapshot(now?: number): LoadProgressSnapshot {
     const at = now ?? this.lastTs;
-    const elapsedMs = this.firstTs !== undefined ? Math.max(0, at - this.firstTs) : 0;
+    // Same axis as every other time quantity (see `originMs`): with an injected origin this
+    // is elapsed on the shared RUN axis, not since this worker's first event — which also
+    // keeps the throughput denominator below on that axis.
+    const origin = this.originMs;
+    const elapsedMs = origin !== undefined ? Math.max(0, at - origin) : 0;
     const elapsedSec = elapsedMs / 1000;
     return {
       elapsedMs,
@@ -516,7 +563,12 @@ export class LoadReducerImpl implements LoadReducer {
   }
 
   finalize(): LoadArtifact {
-    const startedAtMs = this.firstTs ?? 0;
+    // The artifact's time metadata sits on the SAME axis as its offsets (see `originMs`):
+    // startedAt IS the axis origin and durationMs spans origin → last event, so a window at
+    // offset X is always inside [0, durationMs]. With an injected origin a late-starting
+    // worker's duration includes its pre-start gap (shared-run-axis semantics); the run-level
+    // end boundary (`globalEndAt`) stays a coordinator/merge concern (D0-7).
+    const startedAtMs = this.originMs ?? 0;
     const durationMs = Math.max(0, this.lastTs - startedAtMs);
     const elapsedSec = durationMs / 1000;
     const endpoints = this.endpointSummaries(elapsedSec);
@@ -1003,11 +1055,26 @@ export class LoadReducerImpl implements LoadReducer {
   }
 }
 
-/** Create a fresh streaming load reducer. `reportCaps` bounds the failure-trace /
- *  slow-transaction samples (from the plan's `report` config; 0 disables a type). */
-export function createLoadReducer(reportCaps?: {
+/** Create a fresh streaming load reducer. The cap fields bound the failure-trace /
+ *  slow-transaction samples (from the plan's `report` config; 0 disables a type). The other
+ *  two knobs exist for a DISTRIBUTED run's per-worker reducer; single-process callers omit
+ *  both:
+ *  - `workerId` — the shard identity, stamped into sample identities so the coordinator's
+ *    merge keys `(workerId, iterationId)` are unique and totally ordered across workers.
+ *  - `timelineOrigin` — epoch ms that EVERY emitted time quantity (timeline-window / sample
+ *    offsets, `startedAt`, `durationMs`, `elapsedMs`) is computed against — one axis, never
+ *    a mix. The coordinator hands all workers ONE shared origin so their artifacts are
+ *    globally comparable; when absent (single-process), the origin is the first event's
+ *    ts, as before. MUST be in the SAME clock domain as the events' `ts` this reducer
+ *    consumes: in-process / multi-core share the host clock (pass the epoch t0 as-is);
+ *    a remote agent converts the coordinator's origin to the worker's local epoch via the
+ *    handshake clock mapping BEFORE constructing the reducer. The reducer itself is
+ *    deliberately clock-agnostic (see the constructor's invariant note). */
+export function createLoadReducer(config?: {
   maxFailureTraces?: number;
   maxSlowTransactionSummaries?: number;
+  workerId?: string;
+  timelineOrigin?: number;
 }): LoadReducer {
-  return new LoadReducerImpl(reportCaps);
+  return new LoadReducerImpl(config);
 }

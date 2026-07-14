@@ -16,7 +16,8 @@ export interface LoadFailureSummary {
   errorKind?: LoadErrorKind;
   failedStepName?: string;
   message?: string;
-  /** Offset from run start, in ms. */
+  /** Offset from the run's time origin, in ms (single-process: run start; distributed: the
+   *  coordinator-issued shared `timelineOrigin`, comparable across workers). */
   atMs: number;
 }
 

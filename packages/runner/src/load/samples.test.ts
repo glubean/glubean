@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 
-import { LoadSampleCollector } from "./samples.js";
+import type { LoadSlowTransactionSummary } from "@glubean/sdk/load";
+
+import { compareSlow, LoadSampleCollector } from "./samples.js";
 
 describe("LoadSampleCollector", () => {
   it("keeps a failure trace with its observations and the failed step", () => {
@@ -34,15 +36,18 @@ describe("LoadSampleCollector", () => {
     expect(s.failureTraces).toHaveLength(0);
   });
 
-  it("caps failure traces at the max (keeps the first N)", () => {
+  it("caps failure traces at the max (keeps the first N to complete)", () => {
     const c = new LoadSampleCollector();
     for (let i = 0; i < 25; i++) {
       c.beginIteration(`f${i}`, { scenarioId: "s", producerSlotId: "p0" });
-      c.endIteration(`f${i}`, { ok: false, durationMs: 10, errorKind: "assertion" });
+      c.endIteration(`f${i}`, { ok: false, durationMs: 10, errorKind: "assertion", completedAtOffsetMs: i * 10 });
     }
     const s = c.finalize();
     expect(s.failureTraces).toHaveLength(20);
     expect(s.maxFailureTraces).toBe(20);
+    // The EARLIEST 20 completions are the kept set (the onset is the useful part).
+    expect(s.failureTraces[0].identity.iterationId).toBe("f0");
+    expect(s.failureTraces[19].identity.iterationId).toBe("f19");
   });
 
   it("caps observations per trace and records the dropped count", () => {
@@ -199,6 +204,110 @@ describe("LoadSampleCollector", () => {
     c.endIteration("it-7", { ok: true, durationMs: 50 });
     const t = c.finalize().slowTransactions[0];
     expect(t.identity.feeders).toEqual({ users: { key: "alice" }, region: { key: "us-east" } });
+  });
+
+  it("threads completedAtOffsetMs onto failure and slow samples (and omits it when absent)", () => {
+    const c = new LoadSampleCollector();
+    c.beginIteration("f1", { scenarioId: "s", producerSlotId: "p0" });
+    c.endIteration("f1", { ok: false, durationMs: 10, errorKind: "http", completedAtOffsetMs: 150 });
+    c.beginIteration("s1", { scenarioId: "s", producerSlotId: "p0" });
+    c.endIteration("s1", { ok: true, durationMs: 20, completedAtOffsetMs: 275 });
+    c.beginIteration("s2", { scenarioId: "s", producerSlotId: "p0" });
+    c.endIteration("s2", { ok: true, durationMs: 30 }); // caller without the field (older event path)
+    const s = c.finalize();
+    expect(s.failureTraces[0].completedAtOffsetMs).toBe(150);
+    const byId = Object.fromEntries(s.slowTransactions.map((t) => [t.identity.iterationId, t]));
+    expect(byId.s1.completedAtOffsetMs).toBe(275);
+    expect("completedAtOffsetMs" in byId.s2).toBe(false); // omitted, not undefined — the artifact is JSON
+  });
+
+  it("evicts deterministically on equal durations — total order, not arrival order", () => {
+    // Ties break on (workerId asc, iterationId asc) — with the cap at 2 the largest
+    // iterationId among the three equal-duration transactions is out, whatever order
+    // they arrive in. (Pre-D0 the incumbent always won a tie, so retention depended
+    // on arrival order and a distributed merge could not reproduce it.)
+    for (const arrival of [
+      ["it-b", "it-a", "it-c"],
+      ["it-c", "it-b", "it-a"],
+      ["it-a", "it-c", "it-b"],
+    ]) {
+      const c = new LoadSampleCollector({ maxSlowTransactionSummaries: 2 });
+      for (const id of arrival) {
+        c.beginIteration(id, { scenarioId: "s", producerSlotId: "p0" });
+        c.endIteration(id, { ok: true, durationMs: 100 });
+      }
+      expect(c.finalize().slowTransactions.map((t) => t.identity.iterationId)).toEqual(["it-a", "it-b"]);
+    }
+  });
+
+  it("stamps a configured workerId into both sample identities (absent by default)", () => {
+    const c = new LoadSampleCollector({ workerId: "w3" });
+    c.beginIteration("it-f", { scenarioId: "s", producerSlotId: "p0" });
+    c.endIteration("it-f", { ok: false, durationMs: 10, errorKind: "http", completedAtOffsetMs: 5 });
+    c.beginIteration("it-s", { scenarioId: "s", producerSlotId: "p0" });
+    c.endIteration("it-s", { ok: true, durationMs: 20, completedAtOffsetMs: 25 });
+    const s = c.finalize();
+    expect(s.failureTraces[0].identity.workerId).toBe("w3");
+    expect(s.slowTransactions[0].identity.workerId).toBe("w3");
+    // Single-process default: the key is OMITTED (not undefined) — the artifact is JSON.
+    const single = new LoadSampleCollector();
+    single.beginIteration("it-1", { scenarioId: "s", producerSlotId: "p0" });
+    single.endIteration("it-1", { ok: true, durationMs: 20 });
+    expect("workerId" in single.finalize().slowTransactions[0].identity).toBe(false);
+  });
+
+  it("compareSlow breaks equal-duration ties by workerId then iterationId (the merge order)", () => {
+    // The comparator is exported so the coordinator merge sorts by the SAME order the
+    // collectors retained under — exercise the cross-worker keys a single collector can't.
+    const s = (workerId: string | undefined, iterationId: string, durationMs: number): LoadSlowTransactionSummary => ({
+      identity: { scenarioId: "s", producerSlotId: "p0", iterationId, ...(workerId !== undefined ? { workerId } : {}) },
+      durationMs,
+      topEndpoints: [],
+      truncated: false,
+    });
+    expect(compareSlow(s("w9", "it-9", 200), s("w0", "it-0", 100))).toBeLessThan(0); // duration first
+    expect(compareSlow(s("w0", "it-2", 100), s("w1", "it-1", 100))).toBeLessThan(0); // then workerId
+    expect(compareSlow(s(undefined, "it-9", 100), s("w0", "it-1", 100))).toBeLessThan(0); // absent sorts first
+    expect(compareSlow(s("w0", "it-1", 100), s("w0", "it-2", 100))).toBeLessThan(0); // then iterationId
+    expect(compareSlow(s("w0", "it-1", 100), s("w0", "it-1", 100))).toBe(0); // reflexive — a true total order
+  });
+
+  it("keeps failure traces deterministically on same-millisecond completion ties", () => {
+    // Same three failures, same completion offset, three arrival orders → the SAME kept set:
+    // ties break on iterationId, not arrival. (Pre-D0 the first arrivals won, so a
+    // distributed merge could not reproduce local retention.)
+    for (const arrival of [
+      ["it-b", "it-a", "it-c"],
+      ["it-c", "it-b", "it-a"],
+      ["it-a", "it-c", "it-b"],
+    ]) {
+      const c = new LoadSampleCollector({ maxFailureTraces: 2 });
+      for (const id of arrival) {
+        c.beginIteration(id, { scenarioId: "s", producerSlotId: "p0" });
+        c.endIteration(id, { ok: false, durationMs: 5, errorKind: "http", completedAtOffsetMs: 100 });
+      }
+      expect(c.finalize().failureTraces.map((f) => f.identity.iterationId)).toEqual(["it-a", "it-b"]);
+    }
+  });
+
+  it("failure retention keeps the smallest completion offsets (a missing offset ranks last)", () => {
+    const c = new LoadSampleCollector({ maxFailureTraces: 2 });
+    for (const [id, at] of [["f-late", 300], ["f-early", 100], ["f-none", undefined], ["f-mid", 200]] as const) {
+      c.beginIteration(id, { scenarioId: "s", producerSlotId: "p0" });
+      c.endIteration(id, { ok: false, durationMs: 5, errorKind: "http", ...(at !== undefined ? { completedAtOffsetMs: at } : {}) });
+    }
+    // f-none (no offset → +∞) never displaces a stamped sample; f-mid displaces f-late.
+    expect(c.finalize().failureTraces.map((f) => f.identity.iterationId)).toEqual(["f-early", "f-mid"]);
+  });
+
+  it("still ranks duration above the identity tie-break", () => {
+    const c = new LoadSampleCollector({ maxSlowTransactionSummaries: 2 });
+    // "it-z" sorts LAST by id, but its duration wins — the tie-break only decides equals.
+    for (const [id, dur] of [["it-a", 100], ["it-z", 200], ["it-b", 100]] as const) {
+      c.beginIteration(id, { scenarioId: "s", producerSlotId: "p0" });
+      c.endIteration(id, { ok: true, durationMs: dur });
+    }
+    expect(c.finalize().slowTransactions.map((t) => t.identity.iterationId)).toEqual(["it-z", "it-a"]);
   });
 
   it("retains a deliberately-undefined assertion operand (presence flag)", () => {

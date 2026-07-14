@@ -14,6 +14,13 @@
  * are capped, the in-flight count is bounded by concurrency, and the kept-sample counts are
  * capped. The caps come from the plan's `report` config (0 disables a sample type entirely —
  * then nothing is even buffered for it).
+ *
+ * Retention is DETERMINISTIC, under total orders a distributed merge can share: the slow
+ * top-k competes on `compareSlow` (durationMs desc, workerId asc, iterationId asc — identity
+ * tie-break, no wall-clock key); failure traces keep the FIRST N under `compareFailure`
+ * (completedAtOffsetMs asc, workerId asc, iterationId asc). Both comparators are exported so
+ * the coordinator's merge re-sorts by the exact same order — a merge of per-worker bounded
+ * samples is only EXACT if every worker retained under the order the center sorts by.
  */
 import type {
   LoadArtifactSamples,
@@ -98,6 +105,39 @@ function isHighValue(o: LoadFailureObservation): boolean {
   return o.type === "assertion" || (o.type === "request" && !o.ok);
 }
 
+/** Shared identity tie-break: workerId asc, then iterationId asc. An absent workerId
+ *  (single-process runs — `iterationId` is already unique there) sorts before any present id;
+ *  ids compare as plain strings (UTF-16 order, deliberately not locale-sensitive), so a
+ *  distributed worker's `w0` / `it-N` keys need no special casing. */
+function compareIdentity(a: LoadSampleIdentity, b: LoadSampleIdentity): number {
+  const wa = a.workerId ?? "";
+  const wb = b.workerId ?? "";
+  if (wa !== wb) return wa < wb ? -1 : 1;
+  return a.iterationId < b.iterationId ? -1 : a.iterationId > b.iterationId ? 1 : 0;
+}
+
+/** Total order for slow top-k retention: durationMs DESC, then the identity tie-break —
+ *  no wall-clock key. Local retention and the coordinator's top-k merge over per-worker
+ *  samples must share ONE total order for the merged top-k to be exact (exported for that
+ *  merge), so equal-duration eviction is decided here, deterministically, not by arrival
+ *  order. Negative ⇒ `a` ranks ahead of (outlives) `b`. */
+export function compareSlow(a: LoadSlowTransactionSummary, b: LoadSlowTransactionSummary): number {
+  if (a.durationMs !== b.durationMs) return b.durationMs - a.durationMs;
+  return compareIdentity(a.identity, b.identity);
+}
+
+/** Total order for failure-trace retention: completedAtOffsetMs ASC (the onset failures are
+ *  the useful ones), then the identity tie-break. A missing completedAtOffsetMs (an event
+ *  path that predates the field) ranks +∞ — it never displaces a stamped sample, matching
+ *  the old "late arrivals don't get in" behavior. Exported for the coordinator merge, which
+ *  re-sorts the union of worker samples by this order and keeps the first N. */
+export function compareFailure(a: LoadFailureTraceSample, b: LoadFailureTraceSample): number {
+  const ta = a.completedAtOffsetMs ?? Number.POSITIVE_INFINITY;
+  const tb = b.completedAtOffsetMs ?? Number.POSITIVE_INFINITY;
+  if (ta !== tb) return ta - tb;
+  return compareIdentity(a.identity, b.identity);
+}
+
 type Phase = "primary" | "continuation";
 type EndpointSample = { routeKey: string; phase?: Phase; durationMs: number; status?: number };
 
@@ -116,15 +156,23 @@ interface IterBuffer {
 export class LoadSampleCollector {
   private readonly maxFailureTraces: number;
   private readonly maxSlow: number;
+  private readonly workerId?: string;
   private readonly buffers = new Map<string, IterBuffer>();
+  // Failed iterations, kept sorted by `compareFailure` (first `maxFailureTraces`, earliest first).
   private readonly failureTraces: LoadFailureTraceSample[] = [];
-  // Slowest successful transactions, kept sorted DESC by durationMs (top `maxSlow`).
+  // Slowest successful transactions, kept sorted by `compareSlow` (top `maxSlow`, slowest first).
   private readonly slow: LoadSlowTransactionSummary[] = [];
 
-  /** `report` caps (0 disables a sample type entirely; undefined → the default). */
-  constructor(caps: { maxFailureTraces?: number; maxSlowTransactionSummaries?: number } = {}) {
+  /** `report` caps (0 disables a sample type entirely; undefined → the default). `workerId` is
+   *  this collector's shard identity in a distributed run — stamped into every sample identity
+   *  so merged samples stay unique and totally ordered across workers. Single-process runs
+   *  leave it unset; the distributed shard runner (D1) wires its `shard.workerId` here. Do NOT
+   *  wire the event `runnerId` instead: that's the PLAN's identity, identical on every worker
+   *  of a distributed run, so it can't disambiguate anything. */
+  constructor(caps: { maxFailureTraces?: number; maxSlowTransactionSummaries?: number; workerId?: string } = {}) {
     this.maxFailureTraces = caps.maxFailureTraces ?? DEFAULT_MAX_FAILURE_TRACES;
     this.maxSlow = caps.maxSlowTransactionSummaries ?? DEFAULT_MAX_SLOW;
+    if (caps.workerId !== undefined) this.workerId = caps.workerId;
   }
 
   /** Whether any per-iteration buffering is needed at all. */
@@ -240,26 +288,31 @@ export class LoadSampleCollector {
     }
   }
 
-  endIteration(iterationId: string, end: { ok: boolean; durationMs: number; errorKind?: LoadErrorKind }): void {
+  /** `completedAtOffsetMs` = the iteration:end offset from run start (the caller's event clock —
+   *  same basis as observation `tsOffsetMs`). Optional so older event paths still work. */
+  endIteration(
+    iterationId: string,
+    end: { ok: boolean; durationMs: number; errorKind?: LoadErrorKind; completedAtOffsetMs?: number },
+  ): void {
     const b = this.buffers.get(iterationId);
     if (b === undefined) return;
     this.buffers.delete(iterationId);
     const identity = this.identityOf(iterationId, b);
     if (!end.ok) {
-      if (this.failureTraces.length < this.maxFailureTraces) {
-        this.failureTraces.push({
-          identity,
-          durationMs: end.durationMs,
-          ...(end.errorKind !== undefined ? { errorKind: end.errorKind } : {}),
-          ...(b.failedStep !== undefined ? { failedStepId: b.failedStep.stepId, failedStepName: b.failedStep.stepName } : {}),
-          observations: b.observations,
-          truncated: b.droppedObservations > 0,
-          droppedObservationCount: b.droppedObservations,
-        });
-      }
+      this.offerFailure({
+        identity,
+        ...(end.completedAtOffsetMs !== undefined ? { completedAtOffsetMs: end.completedAtOffsetMs } : {}),
+        durationMs: end.durationMs,
+        ...(end.errorKind !== undefined ? { errorKind: end.errorKind } : {}),
+        ...(b.failedStep !== undefined ? { failedStepId: b.failedStep.stepId, failedStepName: b.failedStep.stepName } : {}),
+        observations: b.observations,
+        truncated: b.droppedObservations > 0,
+        droppedObservationCount: b.droppedObservations,
+      });
     } else if (this.maxSlow > 0) {
       this.offerSlow({
         identity,
+        ...(end.completedAtOffsetMs !== undefined ? { completedAtOffsetMs: end.completedAtOffsetMs } : {}),
         durationMs: end.durationMs,
         ...(b.slowestStep !== undefined ? { slowStepId: b.slowestStep.stepId, slowStepName: b.slowestStep.stepName } : {}),
         topEndpoints: b.endpoints, // already a bounded top-k, sorted desc
@@ -315,6 +368,7 @@ export class LoadSampleCollector {
       ...(b.scenarioRefId !== undefined ? { scenarioRefId: b.scenarioRefId } : {}),
       producerSlotId: b.producerSlotId,
       iterationId,
+      ...(this.workerId !== undefined ? { workerId: this.workerId } : {}), // shard identity (see ctor)
       // Data-row attribution: which feeder key produced this sample (strategy isn't known here).
       ...(b.feederKeys !== undefined && Object.keys(b.feederKeys).length > 0
         ? { feeders: Object.fromEntries(Object.entries(b.feederKeys).map(([name, key]) => [name, { key }])) }
@@ -322,15 +376,36 @@ export class LoadSampleCollector {
     };
   }
 
-  /** Keep this transaction iff it's among the top `maxSlow` slowest (sorted DESC). */
+  /** Keep this failure iff it's among the FIRST `maxFailureTraces` under `compareFailure`
+   *  (completion order — the onset is the useful part). Single-process, arrival order here
+   *  already IS completion order (the reducer feeds monotone offsets), so vs. the old
+   *  "first N to arrive" rule the only observable difference is that a same-millisecond tie
+   *  is now decided by the identity tie-break, not by arrival. Eviction mirrors `offerSlow`:
+   *  the last-ranked of {kept ∪ candidate} is the one out. */
+  private offerFailure(f: LoadFailureTraceSample): void {
+    if (this.maxFailureTraces <= 0) return; // disabled (a buffer can still exist for the slow type)
+    if (this.failureTraces.length < this.maxFailureTraces) {
+      this.failureTraces.push(f);
+      this.failureTraces.sort(compareFailure);
+      return;
+    }
+    if (compareFailure(f, this.failureTraces[this.failureTraces.length - 1]) >= 0) return; // candidate ranks last — it's out
+    this.failureTraces[this.failureTraces.length - 1] = f;
+    this.failureTraces.sort(compareFailure);
+  }
+
+  /** Keep this transaction iff it's among the top `maxSlow` under the `compareSlow` total
+   *  order. Eviction is deterministic even on equal durations: the last-ranked of
+   *  {kept ∪ candidate} — the array's tail after sorting — is the one out, regardless of
+   *  arrival order. */
   private offerSlow(s: LoadSlowTransactionSummary): void {
     if (this.slow.length < this.maxSlow) {
       this.slow.push(s);
-      this.slow.sort((a, c) => c.durationMs - a.durationMs);
+      this.slow.sort(compareSlow);
       return;
     }
-    if (s.durationMs <= this.slow[this.slow.length - 1].durationMs) return;
+    if (compareSlow(s, this.slow[this.slow.length - 1]) >= 0) return; // candidate ranks last — it's out
     this.slow[this.slow.length - 1] = s;
-    this.slow.sort((a, c) => c.durationMs - a.durationMs);
+    this.slow.sort(compareSlow);
   }
 }

@@ -300,6 +300,47 @@ describe("LoadReducer — interrupted runs + attribution quality", () => {
   });
 });
 
+describe("createLoadReducer — timelineOrigin (shared distributed axis)", () => {
+  it("computes sample, failure and timeline offsets from the injected origin", () => {
+    // A worker whose first event lands 5s AFTER the coordinator's shared origin: every
+    // offset must be origin-based, not firstTs-based — a late-starting worker's own firstTs
+    // would report deceptively small offsets and corrupt the coordinator's first-N ordering.
+    const r = createLoadReducer({ timelineOrigin: T0 - 5_000 });
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1, durationMs: 60_000 } }));
+    r.apply(ev(T0, { type: "iteration:start", scenarioId: "s", iterationId: "i1" }));
+    r.apply(ev(T0 + 100, { type: "iteration:end", scenarioId: "s", iterationId: "i1", ok: false, durationMs: 100, errorKind: "http" }));
+    const art = r.finalize();
+    expect(art.samples.failureTraces[0].completedAtOffsetMs).toBe(5_100); // not 100
+    // ALL time metadata sits on the same axis — never two axes in one artifact: startedAt IS
+    // the origin, durationMs spans origin → last event (the pre-start idle gap is real run
+    // time for a late-starting worker, not a bug), so window offset 5000 + the 100ms of
+    // events land inside [0, durationMs].
+    expect(art.startedAt).toBe(new Date(T0 - 5_000).toISOString());
+    expect(art.durationMs).toBe(5_100);
+    // snapshot() shares the axis too (elapsed + throughput denominator), and
+    // recentFailures.atMs no longer forks off firstTs.
+    const snap = r.snapshot(T0 + 100);
+    expect(snap.elapsedMs).toBe(5_100);
+    expect(snap.recentFailures[0].atMs).toBe(5_100);
+    // Timeline windows: the activity lands in the window covering offset 5100 (250ms base
+    // width → offsetMs 5000), after zero-filled idle windows.
+    const active = art.timeline?.windows.find((w) => w.iterations === 1);
+    expect(active?.offsetMs).toBe(5_000);
+    expect(art.timeline?.windows[0]?.offsetMs).toBe(0);
+  });
+
+  it("falls back to the first event's ts when absent (single-process, unchanged)", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1 } }));
+    r.apply(ev(T0, { type: "iteration:start", scenarioId: "s", iterationId: "i1" }));
+    r.apply(ev(T0 + 100, { type: "iteration:end", scenarioId: "s", iterationId: "i1", ok: false, durationMs: 100, errorKind: "http" }));
+    const art = r.finalize();
+    expect(art.samples.failureTraces[0].completedAtOffsetMs).toBe(100);
+    expect(art.startedAt).toBe(new Date(T0).toISOString());
+    expect(art.durationMs).toBe(100);
+  });
+});
+
 describe("continuation summary — producer release (M6)", () => {
   it("aggregates releases, rejections, duplicates, backpressure, and coverage", () => {
     const r = createLoadReducer();

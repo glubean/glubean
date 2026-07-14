@@ -166,6 +166,13 @@ export interface LoadSampleIdentity {
   scenarioRefId?: string;
   producerSlotId: string;
   iterationId: string;
+  /** Id of the worker that ran this iteration. Absent on single-process runs (where
+   *  `iterationId` alone is unique); a distributed worker stamps its id so samples stay
+   *  unique across workers AND so the deterministic sample orders — slow top-k
+   *  `(durationMs desc, workerId asc, iterationId asc)`, failure-trace ties
+   *  `(workerId, iterationId)` — are total across a merged run. Absent sorts before any
+   *  present id. */
+  workerId?: string;
   feeders?: Record<string, { key?: string; strategy?: string }>;
 }
 
@@ -205,6 +212,15 @@ export type LoadFailureObservation =
 /** A bounded trace kept only for a failed iteration. */
 export interface LoadFailureTraceSample {
   identity: LoadSampleIdentity;
+  /** Offset of this iteration's completion (its `iteration:end`) from the run's time origin,
+   *  in ms. Single-process the origin is the run start (first event); a distributed worker
+   *  computes against the coordinator-issued shared `timelineOrigin`, so offsets are
+   *  comparable across workers. The primary retention/merge key for the "first N failures":
+   *  local retention keeps the smallest N under `(completedAtOffsetMs asc, workerId asc,
+   *  iterationId asc)`, and a coordinator re-sorts the union of worker samples by the same
+   *  order to keep the first N. Absent on artifacts produced before this field existed
+   *  (such samples rank last). */
+  completedAtOffsetMs?: number;
   durationMs: number;
   errorKind?: LoadErrorKind;
   failedStepId?: string;
@@ -217,6 +233,12 @@ export interface LoadFailureTraceSample {
 /** A slow-but-successful transaction summary (no request trace). */
 export interface LoadSlowTransactionSummary {
   identity: LoadSampleIdentity;
+  /** Offset of this iteration's completion (its `iteration:end`) from the run's time origin,
+   *  in ms (single-process: run start; distributed: the coordinator-issued shared
+   *  `timelineOrigin`, comparable across workers). Diagnostic timestamp only — slow top-k
+   *  retention/merge order is `(durationMs desc, workerId asc, iterationId asc)`, never
+   *  wall-clock. Absent on artifacts produced before this field existed. */
+  completedAtOffsetMs?: number;
   durationMs: number;
   slowStepId?: string;
   slowStepName?: string;
