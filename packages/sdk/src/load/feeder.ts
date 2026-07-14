@@ -64,6 +64,17 @@ export interface FeederDrawContext {
    *  slot — the per-slot DRAW index (the slot-scoped analogue of `drawIndex`). Built-in
    *  `partitionByVu` indexes by it; omitting it falls back to `slotIteration`. */
   slotDrawIndex?: number;
+  /**
+   * Keyed random stream for this draw, in [0,1). COUNTER-STYLE: a pure function of
+   * (the run seed, this feeder slot's identity, the global iteration index, `keys`)
+   * with no internal state — the same call on the same draw context always returns
+   * the same value (`rng()` twice is the same number; pass extra `keys` to derive
+   * more independent values). The load runtime binds it so a run's random draws are
+   * reproducible from its recorded `rngSeed` and independent of worker count / call
+   * order. Built-in `random` / `weightedRandom` use it when present and fall back
+   * to `Math.random()` when absent (standalone SDK use keeps working, unseeded).
+   */
+  rng?: (...keys: Array<string | number>) => number;
 }
 
 /** Result of a feeder draw. */
@@ -143,7 +154,13 @@ function drawIndexed<T extends object>(
   return missDraw(policy);
 }
 
-function pickWeighted<T extends object>(rows: readonly T[], weightField: string): T | undefined {
+/** Weighted pick driven by a caller-supplied random value in [0,1) — the draw is a
+ *  pure function of `rand`, so a keyed `ctx.rng` makes it reproducible. */
+function pickWeighted<T extends object>(
+  rows: readonly T[],
+  weightField: string,
+  rand: number,
+): T | undefined {
   let total = 0;
   const weights = rows.map((row) => {
     const raw = Number((row as Record<string, unknown>)[weightField]);
@@ -152,7 +169,7 @@ function pickWeighted<T extends object>(rows: readonly T[], weightField: string)
     return w;
   });
   if (total <= 0) return undefined;
-  let r = Math.random() * total;
+  let r = rand * total;
   for (let i = 0; i < rows.length; i++) {
     r -= weights[i];
     if (r < 0) return rows[i];
@@ -176,12 +193,15 @@ function makeBinding<T extends object>(
         // Index by THIS feeder's run-global draw count so a mix entry / overridden shared
         // feeder stays contiguous; `?? globalIteration` keeps single-scenario parity.
         return drawIndexed(rows, ctx.drawIndex ?? ctx.globalIteration, exhausted, key);
+      // `random` / `weightedRandom` draw from the keyed `ctx.rng` stream when the
+      // runtime provides one (reproducible, worker-count independent — §6.5) and
+      // fall back to `Math.random()` for standalone SDK use.
       case "random":
         return rows.length === 0
           ? missDraw(exhausted)
-          : toValueDraw(rows[Math.floor(Math.random() * rows.length)], key);
+          : toValueDraw(rows[Math.floor((ctx.rng?.() ?? Math.random()) * rows.length)], key);
       case "weightedRandom": {
-        const picked = weight ? pickWeighted(rows, weight) : undefined;
+        const picked = weight ? pickWeighted(rows, weight, ctx.rng?.() ?? Math.random()) : undefined;
         return picked === undefined ? missDraw(exhausted) : toValueDraw(picked, key);
       }
       case "partitionByVu": {

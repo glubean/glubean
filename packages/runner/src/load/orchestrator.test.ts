@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 
 import { feeder, loadRunner, loadScenario } from "@glubean/sdk/load";
 import type { FeederBinding } from "@glubean/sdk/load";
 
-import { rampDelayMs, runLoad } from "./orchestrator.js";
+import { rampDelayMs, runLoad, thinkDelay } from "./orchestrator.js";
+import { prng } from "./rng.js";
 
 // M3-f end-to-end: the local closed-model orchestrator drives a loadRunner() plan
 // to a finalized LoadArtifact against a REAL local mock server (network is never
@@ -1281,6 +1282,203 @@ describe("runLoad — traffic mix (weighted multi-scenario)", () => {
   it("rejects an empty traffic mix", async () => {
     const plan = loadRunner("empty-mix", { scenarios: [], concurrency: 1, iterations: 1 });
     await expect(runLoad(plan)).rejects.toThrow(/traffic mix needs at least one entry/);
+  });
+});
+
+// §6.5 keyed RNG streams: every random decision — traffic-mix selection, random /
+// weightedRandom feeder draws, pacing jitter — is `prng(rngSeed, ...global identity)`,
+// so one seed replays one run's decisions, and each decision is tied to the ITERATION,
+// not to which slot (or, later, worker) happens to execute it.
+describe("runLoad — seeded RNG streams (reproducibility, §6.5)", () => {
+  const rows = Array.from({ length: 50 }, (_, i) => ({ v: `r${i}`, w: (i % 5) + 1 }));
+  const noop = (id: string) => loadScenario(id).step("noop", async () => {}).build();
+
+  it("thinkDelay draws range jitter from the provided rng (min + r·(max−min))", () => {
+    expect(thinkDelay(5)).toBe(5); // fixed delay: no rng involved
+    expect(thinkDelay(undefined)).toBe(0);
+    expect(thinkDelay({ min: 10, max: 20 }, () => 0.5)).toBe(15);
+    expect(thinkDelay({ min: 10, max: 20 }, () => 0)).toBe(10);
+  });
+
+  /** One fully-captured mix run: which entry each iteration picked, which rows the
+   *  random/weightedRandom feeders drew, and the think-time jitter sequence. */
+  async function capturedRun(opts: { rngSeed?: string } = {}) {
+    const picks: string[] = [];
+    const drawn: string[] = [];
+    const cap = (id: string) => ({ feed }: { feed: Record<string, unknown> }) => {
+      picks.push(id);
+      drawn.push((feed.row as { v: string }).v, (feed.wrow as { v: string }).v);
+      return {};
+    };
+    const plan = loadRunner("seeded-mix", {
+      concurrency: 1, // sequential → the capture arrays are ordered by iteration
+      iterations: 6,
+      // Range think-time → jitter comes from the keyed pacing stream. The [20, 21)ms
+      // window makes the delays identifiable fractional setTimeout waits.
+      pacing: { thinkTime: { min: 20, max: 21 } },
+      feeders: {
+        row: feeder.fromArray(rows, { key: "v" }).random(),
+        wrow: feeder.fromArray(rows, { key: "v" }).weightedRandom({ weight: "w" }),
+      },
+      scenarios: [
+        { id: "a", scenario: noop("a"), weight: 50, input: cap("a") },
+        { id: "b", scenario: noop("b"), weight: 50, input: cap("b") },
+      ],
+    });
+    // Observe the pacing sequence via the delays handed to setTimeout — this noop plan
+    // schedules no other fractional timers in [20, 21).
+    const spy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const art = await runLoad(plan, opts);
+      const pacing = spy.mock.calls
+        .map((c) => c[1])
+        .filter((ms): ms is number => typeof ms === "number" && ms >= 20 && ms < 21);
+      return { picks, drawn, pacing, artifactSeed: art.config.rngSeed };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it("replays the same mix / feeder / pacing decisions for the same seed", async () => {
+    const r1 = await capturedRun({ rngSeed: "replay-seed" });
+    const r2 = await capturedRun({ rngSeed: "replay-seed" });
+    expect(r1.artifactSeed).toBe("replay-seed"); // the seed is recorded for replay
+    expect(r2.picks).toEqual(r1.picks); // scenario-selection sequence, iteration by iteration
+    expect(r2.drawn).toEqual(r1.drawn); // random + weightedRandom feeder row assignment
+    expect(r2.pacing).toEqual(r1.pacing); // think-time jitter sequence (exact doubles)
+    expect(r1.pacing.length).toBeGreaterThan(0); // the pacing capture really observed waits
+  });
+
+  it("diverges for a different seed (probabilistically certain)", async () => {
+    const r1 = await capturedRun({ rngSeed: "seed-one" });
+    const r2 = await capturedRun({ rngSeed: "seed-two" });
+    // 6 iterations × (2 draws from 50 rows + continuous jitter) → collision odds ≈ 0.
+    expect([r2.picks, r2.drawn, r2.pacing]).not.toEqual([r1.picks, r1.drawn, r1.pacing]);
+  });
+
+  it("defaults to a fresh seed, recorded in the artifact — unseeded runs differ but stay replayable", async () => {
+    const r1 = await capturedRun();
+    const r2 = await capturedRun();
+    expect(r1.artifactSeed).toBeTruthy(); // auto-generated seed lands in config.rngSeed…
+    expect(r2.artifactSeed).toBeTruthy();
+    expect(r2.artifactSeed).not.toBe(r1.artifactSeed); // …fresh per run
+    expect([r2.picks, r2.drawn, r2.pacing]).not.toEqual([r1.picks, r1.drawn, r1.pacing]);
+  });
+
+  it("separates feeder-slot RNG streams whose ids would collide under naive string joining", async () => {
+    // codex R1 P2: a shared feeder NAMED "entry:x:y" vs entry "x"'s own feeder "y" —
+    // colon-joined slot keys would both be "entry:x:y", merging the two slots into ONE
+    // random stream (identical draws every iteration). The canonical JSON-tuple id
+    // (["shared", name] vs ["entry", entryId, name]) keeps them distinct.
+    const manyRows = Array.from({ length: 100 }, (_, i) => ({ v: `m${i}` }));
+    const sharedDrawn: string[] = [];
+    const entryDrawn: string[] = [];
+    const plan = loadRunner("slot-collision", {
+      concurrency: 1,
+      iterations: 8,
+      feeders: { "entry:x:y": feeder.fromArray(manyRows, { key: "v" }).random() },
+      scenarios: [
+        {
+          id: "x",
+          scenario: noop("x"),
+          weight: 1,
+          feeders: { y: feeder.fromArray(manyRows, { key: "v" }).random() },
+          input: ({ feed }: { feed: Record<string, unknown> }) => {
+            sharedDrawn.push((feed["entry:x:y"] as { v: string }).v);
+            entryDrawn.push((feed.y as { v: string }).v);
+            return {};
+          },
+        },
+      ],
+    });
+    await runLoad(plan, { rngSeed: "collision-seed" });
+    expect(sharedDrawn).toHaveLength(8);
+    // A collided key would make the two feeders draw the SAME row index every single
+    // iteration; distinct streams diverge (P(8 identical draws from 100 rows) ≈ 1e-16,
+    // and deterministic for this fixed seed).
+    expect(entryDrawn).not.toEqual(sharedDrawn);
+  });
+
+  it("omits rngSeed from the artifact when the deprecated `random` override is in play", async () => {
+    // codex R1 P2: with mix selection driven by the override, replaying with the seed
+    // would take the PRNG branch and pick differently — recording the seed would be a
+    // false reproducibility promise, so the config omits it (even a user-supplied one).
+    const plan = loadRunner("override-no-seed", {
+      concurrency: 1,
+      iterations: 2,
+      scenarios: [
+        { id: "a", scenario: noop("a"), weight: 1, input: () => ({}) },
+        { id: "b", scenario: noop("b"), weight: 1, input: () => ({}) },
+      ],
+    });
+    const art = await runLoad(plan, { rngSeed: "unused-seed", random: () => 0.1 });
+    expect(art.summary.totalIterations).toBe(2);
+    expect(art.config.rngSeed).toBeUndefined();
+    expect(Object.keys(art.config)).not.toContain("rngSeed"); // absent, not just undefined
+  });
+
+  it("keeps rngSeed when the `random` override is set but never consulted (single scenario)", async () => {
+    // codex R2 P2: a single-workload run never calls the mix-selection override —
+    // every random decision (feeder / pacing streams) is still fully seeded, so the
+    // replay metadata must NOT be dropped just because the option was passed.
+    const plan = loadRunner("override-unused", {
+      concurrency: 1,
+      iterations: 2,
+      scenario: noop("solo"),
+    });
+    const art = await runLoad(plan, { rngSeed: "kept-seed", random: () => 0.1 });
+    expect(art.summary.totalIterations).toBe(2);
+    expect(art.config.rngSeed).toBe("kept-seed");
+  });
+
+  it("keys mix selection + feeder draws + pacing by the GLOBAL iteration index — concurrency doesn't change them", async () => {
+    // The worker-count-independence property at single-machine scale: iteration N's
+    // scenario pick, feeder rows AND think-time jitter are prng(seed, ..., N) — the
+    // same whichever slot claims N. The iteration→slot binding is completion-timing
+    // driven (non-deterministic), so a slot-keyed pacing stream (codex R2 P1) would
+    // produce different delays under concurrency 2 — the iteration-keyed stream must
+    // not.
+    const pacingFor = (n: number): number => 20 + prng("conc-seed", "pacing", n) * 1; // thinkDelay: min + r·(max−min)
+    const run = async (concurrency: number) => {
+      const byIteration = new Map<number, string>();
+      const cap = (id: string) =>
+        ({ feed, iteration }: { feed: Record<string, unknown>; iteration: { index: number } }) => {
+          byIteration.set(iteration.index, `${id}:${(feed.row as { v: string }).v}`);
+          return {};
+        };
+      const plan = loadRunner("conc-invariant", {
+        concurrency,
+        iterations: 6,
+        pacing: { thinkTime: { min: 20, max: 21 } },
+        feeders: { row: feeder.fromArray(rows, { key: "v" }).random() },
+        scenarios: [
+          { id: "a", scenario: noop("a"), weight: 50, input: cap("a") },
+          { id: "b", scenario: noop("b"), weight: 50, input: cap("b") },
+        ],
+      });
+      const spy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        await runLoad(plan, { rngSeed: "conc-seed" });
+        const pacing = spy.mock.calls
+          .map((c) => c[1])
+          .filter((ms): ms is number => typeof ms === "number" && ms >= 20 && ms < 21);
+        return { byIteration, pacing };
+      } finally {
+        spy.mockRestore();
+      }
+    };
+    const c1 = await run(1);
+    const c2 = await run(2);
+    expect(c2.byIteration).toEqual(c1.byIteration);
+    // Sequential concurrency-1 paces exactly after iterations 0..4 (the turn claiming
+    // the last iteration ends the run, skipping its pause) — the exact keyed sequence.
+    expect(c1.pacing).toEqual([0, 1, 2, 3, 4].map(pacingFor));
+    // Under concurrency 2, WHICH trailing turns still get to sleep before the run ends
+    // is timing-dependent — but every observed delay must be an iteration-keyed stream
+    // value. A slot-keyed stream would emit slot-1 values outside this set.
+    expect(c2.pacing.length).toBeGreaterThan(0);
+    const expected = new Set([0, 1, 2, 3, 4, 5].map(pacingFor));
+    for (const ms of c2.pacing) expect(expected.has(ms)).toBe(true);
   });
 });
 

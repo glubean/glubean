@@ -31,6 +31,7 @@ import type {
   LoadScenarioRef,
 } from "@glubean/sdk/load";
 import { parseDurationMs } from "@glubean/sdk/load";
+import { randomUUID } from "node:crypto";
 
 import { createEngineCore } from "../engine-bridge.js";
 import {
@@ -42,6 +43,7 @@ import {
 } from "./execute-iteration.js";
 import { ContinuationPool } from "./continuation-pool.js";
 import { createLoadReducer } from "./reducer.js";
+import { prng } from "./rng.js";
 import { LoadSink, type LoadIterationEnvelope } from "./sink.js";
 import { evaluateThresholds, validateLoadMetricsConfig } from "./threshold.js";
 
@@ -59,9 +61,31 @@ export interface RunLoadOptions {
   baseSession?: Record<string, unknown>;
   /** Clock for wall-clock timing + event ts (default `Date.now`). */
   now?: () => number;
-  /** RNG in [0,1) for weighted traffic-mix scenario selection (default `Math.random`).
-   *  Injectable so a mix run can be made deterministic in tests. Unused for a
-   *  single-scenario run (selection is trivial). */
+  /**
+   * Root seed for the run's counter-keyed RNG streams: traffic-mix scenario
+   * selection (`prng(seed, "mix", iterationIndex)`), `random`/`weightedRandom`
+   * feeder draws (`prng(seed, feederSlotKey, iterationIndex)`), and pacing
+   * think-time jitter (`prng(seed, "pacing", iterationIndex)`).
+   * Every random decision is a pure function of the seed and the decision's
+   * GLOBAL identity — same seed, same plan + data ⇒ the same decisions, in any
+   * process and any scheduling order (§6.5). Defaults to a fresh random seed.
+   * Recorded in `artifact.config.rngSeed` so any run can be replayed — but ONLY
+   * when every random decision came from the seeded streams: a run where the
+   * deprecated `random` override actually drove mix selection has the recording
+   * suppressed (see `random`).
+   */
+  rngSeed?: string;
+  /** RNG in [0,1) for weighted traffic-mix scenario selection. Unused for a
+   *  single-scenario run (selection is trivial).
+   *  @deprecated Prefer `rngSeed` — a seeded run is reproducible AND keyed by the
+   *  global iteration index (call-order independent), while this override is
+   *  consumed in slot-scheduling order. Retained as a test-injection override for
+   *  scripting EXACT selection sequences; when set it overrides ONLY mix
+   *  selection (feeder / pacing streams still come from `rngSeed`). A run where
+   *  the override ACTUALLY participated in selection is not seed-replayable, so
+   *  `artifact.config.rngSeed` is deliberately omitted there; a run that never
+   *  consulted it (single scenario / single-entry mix) stays fully seeded and
+   *  keeps its recorded seed. */
   random?: () => number;
 }
 
@@ -80,6 +104,17 @@ interface WorkloadFeeder {
   name: string;
   binding: FeederBinding;
   counterKey: object;
+  /** Stable STRING form of the same draw-scope identity as `counterKey` — the keyed
+   *  RNG stream key for this slot's random draws (§6.5), as a JSON-encoded component
+   *  tuple: `["shared", name]` or `["entry", entryId, name]`. JSON array encoding
+   *  keeps the components injectively separated (an entry id / feeder name may itself
+   *  contain any delimiter — naive `entry:<id>:<name>` joining collides for
+   *  `("a:b","c")` vs `("a","b:c")`, merging two slots' random streams). A single
+   *  canonical string (not a tuple) so it survives process boundaries and D1 can
+   *  reuse it directly as the `feederSegments` record key (the proposal's canonical
+   *  FeederSlotId); scoped like `counterKey` so two slots reusing one binding object
+   *  still draw independent random streams. */
+  slotKey: string;
 }
 
 /**
@@ -149,12 +184,17 @@ function normalizeThinkTime(
   return parseDurationMs(tt);
 }
 
-/** A single think-time delay (random within [min,max] for a range). */
-function thinkDelay(thinkTimeMs: number | { min: number; max: number } | undefined): number {
+/** A single think-time delay (random within [min,max) for a range, drawn from `rng` —
+ *  the orchestrator passes the keyed pacing stream so jitter is reproducible; the
+ *  `Math.random` default keeps direct callers working unseeded). Exported for tests. */
+export function thinkDelay(
+  thinkTimeMs: number | { min: number; max: number } | undefined,
+  rng: () => number = Math.random,
+): number {
   if (thinkTimeMs === undefined) return 0;
   if (typeof thinkTimeMs === "number") return thinkTimeMs;
   const { min, max } = thinkTimeMs;
-  return min + Math.random() * Math.max(0, max - min);
+  return min + rng() * Math.max(0, max - min);
 }
 
 function isMixConfig(config: AnyLoadRunnerConfig): boolean {
@@ -311,13 +351,24 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     // `name in entry` check would drop it via Object.prototype).
     for (const [name, binding] of Object.entries(sharedFeeders ?? {})) {
       if (!Object.prototype.hasOwnProperty.call(entry, name)) {
-        feeders.push({ name, binding, counterKey: sharedCounterKey(name) });
+        feeders.push({
+          name,
+          binding,
+          counterKey: sharedCounterKey(name),
+          slotKey: JSON.stringify(["shared", name]),
+        });
       }
     }
     // The entry's own feeders (entry wins a name clash): each gets a UNIQUE marker key, so
     // two entries reusing the same binding object still draw independent per-entry sequences.
+    // The RNG slotKey carries the same per-entry identity as a canonical JSON tuple.
     for (const [name, binding] of Object.entries(entry)) {
-      feeders.push({ name, binding, counterKey: {} });
+      feeders.push({
+        name,
+        binding,
+        counterKey: {},
+        slotKey: JSON.stringify(["entry", scenarioRefId ?? "", name]),
+      });
     }
     return {
       scenarioId: scenario.meta.id,
@@ -361,13 +412,36 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     workloads = [makeWorkload(single.scenario, 1, undefined, single.feeders, undefined, single.input)];
   }
 
-  // Weighted scenario selection for a mix; the sole workload for a single scenario (no
-  // RNG draw, so a single-scenario run is byte-identical to before).
-  const random = opts.random ?? Math.random;
+  // Root seed of the run's counter-keyed RNG streams (§6.5). Every random decision
+  // below — mix selection, random feeder draws, pacing jitter — is a pure function of
+  // this seed and the decision's global identity, so a seeded run is reproducible and
+  // (under distributed execution) independent of worker count. The default is a fresh
+  // random seed; it is recorded in `artifact.config.rngSeed` for replay unless the
+  // deprecated `random` override ACTUALLY drives mix selection (then the recorded
+  // seed is dropped at finalization — see the post-finalize step below).
+  const rngSeed = opts.rngSeed ?? randomUUID();
+
+  // Weighted scenario selection for a mix, keyed by the GLOBAL iteration index —
+  // `prng(seed, "mix", index)` — so the pick for iteration N is the same whichever
+  // slot (or worker) claims it. The deprecated `opts.random` override wins when set
+  // (test injection of exact sequences; consumed in slot-scheduling order). A single
+  // scenario draws nothing (selection is trivial), keeping such runs byte-identical.
+  // The override's use is TRACKED: only a run where it ACTUALLY drove a selection is
+  // non-seed-replayable (finalization then drops `rngSeed` from the artifact) — a
+  // single-workload run never consults it, so its seed replay promise stays intact.
+  let mixOverrideUsed = false;
+  const overrideRandom = opts.random;
+  const mixRandom: (iterationIndex: number) => number =
+    overrideRandom !== undefined
+      ? () => {
+          mixOverrideUsed = true;
+          return overrideRandom();
+        }
+      : (i) => prng(rngSeed, "mix", i);
   const totalWeight = workloads.reduce((sum, w) => sum + w.weight, 0);
-  const selectWorkload = (): Workload => {
+  const selectWorkload = (iterationIndex: number): Workload => {
     if (workloads.length === 1) return workloads[0];
-    let r = random() * totalWeight;
+    let r = mixRandom(iterationIndex) * totalWeight;
     for (const w of workloads) {
       r -= w.weight;
       if (r < 0) return w;
@@ -431,6 +505,12 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
 
   const resolvedConfig: LoadResolvedConfig = {
     concurrency,
+    // The seed is recorded (even when auto-generated) so the run's random decisions
+    // can be replayed. If the deprecated `random` override ends up ACTUALLY driving
+    // mix selection, finalization deletes it from the artifact — see below. (The wire
+    // `load:start` event still carries it as a runtime fact: whether the override is
+    // consulted isn't known yet at emit time, and feeder/pacing streams use it anyway.)
+    rngSeed,
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(iterations !== undefined ? { iterations } : {}),
     ...(rampUpMs !== undefined ? { rampUpMs } : {}),
@@ -542,12 +622,23 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     // per-entry (or partially-overridden) binding advances only when its entry runs — correct
     // even when only some entries override a shared name (codex). For a single scenario a
     // feeder is drawn every iteration, so its draw count equals the iteration index.
-    const drawCtxFor = (counterKey: object): FeederDrawContext => {
+    // `rng` is this draw's keyed random stream — `prng(seed, feederSlotKey, iterationIndex)`
+    // (§6.5): keyed by GLOBAL identity, not draw order, so a random/weightedRandom draw for
+    // iteration N is the same whichever slot (or worker) runs it.
+    const drawCtxFor = (counterKey: object, slotKey: string): FeederDrawContext => {
       const g = feederGlobalDraws.get(counterKey) ?? 0;
       feederGlobalDraws.set(counterKey, g + 1);
       const s = feederSlotDraws.get(counterKey) ?? 0;
       feederSlotDraws.set(counterKey, s + 1);
-      return { producerSlot: slotIndex, producerCount: concurrency, slotIteration, globalIteration, drawIndex: g, slotDrawIndex: s };
+      return {
+        producerSlot: slotIndex,
+        producerCount: concurrency,
+        slotIteration,
+        globalIteration,
+        drawIndex: g,
+        slotDrawIndex: s,
+        rng: (...keys: Array<string | number>) => prng(rngSeed, slotKey, globalIteration, ...keys),
+      };
     };
 
     const failSetup = (): "failed" => {
@@ -569,8 +660,8 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     let input: unknown;
     let skipped = false;
     try {
-      for (const { name, binding, counterKey } of workload.feeders) {
-        const draw = binding.allocate(drawCtxFor(counterKey));
+      for (const { name, binding, counterKey, slotKey } of workload.feeders) {
+        const draw = binding.allocate(drawCtxFor(counterKey, slotKey));
         if (draw.outcome === "value") {
           feed[name] = draw.value;
           if (draw.key !== undefined) feederKeys[name] = draw.key;
@@ -634,9 +725,10 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     for (;;) {
       const globalIteration = claimIteration();
       if (globalIteration < 0) break;
-      // Pick this iteration's workload (weighted-random for a mix, the sole one for a single
-      // scenario); the feeders it draws advance their own per-binding counters (see drawCtxFor).
-      const workload = selectWorkload();
+      // Pick this iteration's workload (weighted-random for a mix keyed by the global
+      // iteration index, the sole one for a single scenario); the feeders it draws
+      // advance their own per-binding counters (see drawCtxFor).
+      const workload = selectWorkload(globalIteration);
       const started = startOneIteration(slotIndex, producerSlotId, globalIteration, slotIteration, workload, feederSlotDraws);
       slotIteration += 1;
       if (started !== "skip") {
@@ -651,8 +743,19 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
         primaryIterations += 1;
       }
       // Pace EVERY slot turn — including a feeder skip/wait — so an exhausted
-      // skip/wait feeder doesn't spin the loop in a paced run.
-      if (thinkTimeMs !== undefined) await pausedSleep(thinkDelay(thinkTimeMs));
+      // skip/wait feeder doesn't spin the loop in a paced run. Range jitter draws
+      // from the keyed pacing stream, `prng(seed, "pacing", iterationIndex)`: the
+      // key is the just-run ITERATION's global identity, NOT (slot, slot-turn) —
+      // the iteration→slot binding is completion-timing driven and non-deterministic,
+      // so a slot-keyed stream would change with concurrency / scheduling and break
+      // seeded replay (and shift duration-bounded results). thinkTime semantics are
+      // "the pause after that iteration's turn", so the iteration IS the decision's
+      // identity. (Deliberate deviation from the §6.5 proposal text's
+      // `(globalSlotIndex, slotIteration)` key, which is scheduling-dependent —
+      // the proposal is being fixed to match.)
+      if (thinkTimeMs !== undefined) {
+        await pausedSleep(thinkDelay(thinkTimeMs, () => prng(rngSeed, "pacing", globalIteration)));
+      }
     }
     sink.emitProducerSlotEnd(slotIndex, primaryIterations);
   };
@@ -688,6 +791,12 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // EXPLICITLY so the production finalization path exercises the same channel a distributed
   // worker uses (the D0-7 merge path passes the coordinator's `globalEndAt` here instead).
   const artifact = reducer.finalize(now());
+  // The deprecated mix-selection override ACTUALLY drove at least one selection →
+  // this run is not replayable from the seed (a replay would take the PRNG branch
+  // and select differently), so drop the recorded seed rather than promise a false
+  // replay. A run where the override was never consulted (single workload, or zero
+  // iterations) stays fully seeded and keeps its seed.
+  if (mixOverrideUsed) delete artifact.config.rngSeed;
   // Continuations the drain timeout abandoned are still in flight at finalize —
   // surface them (the reducer can't know the orchestrator's drain decision).
   if (artifact.summary.continuation) {

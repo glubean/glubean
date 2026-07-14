@@ -391,6 +391,16 @@ export interface LoadArtifactConfig {
    *  with its weight. Records WHAT was configured so a low-weight entry that drew zero
    *  iterations still shows up (as a 0-iteration scenario), not as if it were never set. */
   scenarios?: { scenarioRefId: string; scenarioId: string; weight: number }[];
+  /** Root seed of the run's counter-keyed RNG streams — traffic-mix scenario
+   *  selection, `random`/`weightedRandom` feeder draws, and pacing think-time
+   *  jitter. Recorded whether user-supplied or auto-generated, FOR REPRODUCTION:
+   *  re-running the same plan + data with `rngSeed` set to this value replays
+   *  the same random decisions. Only present when EVERY random decision came from
+   *  the seeded streams — omitted when the deprecated `random` mix-selection
+   *  override actually drove a selection (such a run is not seed-replayable), on
+   *  artifacts produced before keyed RNG streams existed, and on external-adapter
+   *  artifacts. */
+  rngSeed?: string;
   pacing?: { thinkTimeMs?: number | { min: number; max: number } };
   continuation?: {
     maxOutstanding?: number;

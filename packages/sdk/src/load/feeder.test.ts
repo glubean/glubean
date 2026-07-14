@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { feeder, type FeederDrawContext } from "./index.js";
 
 // In-memory allocation tests — no HTTP. File-source tests use local temp files.
@@ -97,6 +97,47 @@ describe("feeder allocation", () => {
     const f = feeder.fromArray<{ id: string }>([]).roundRobin();
     expect(f.size).toBe(0);
     expect(f.allocate(ctx()).outcome).toBe("exhausted");
+  });
+
+  // The keyed RNG stream (ctx.rng): random/weightedRandom must be a pure function of
+  // the draw context — counter-style, no internal state — so a load runtime that binds
+  // rng to (seed, feeder slot, iteration index) gets reproducible draws.
+  describe("ctx.rng (keyed random stream)", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("random draws via ctx.rng, statelessly: the same ctx repeats the same row", () => {
+      const f = feeder.fromArray(rows, { key: "id" }).random();
+      const c = ctx({ rng: () => 0.5 }); // floor(0.5 * 3) = row 1
+      const first = f.allocate(c);
+      expect(first).toEqual({ outcome: "value", value: rows[1], key: "b" });
+      expect(f.allocate(c)).toEqual(first); // no internal state — same ctx, same draw
+      expect(f.allocate(ctx({ rng: () => 0.9 }))).toEqual({ outcome: "value", value: rows[2], key: "c" }); // different keyed value → different row
+    });
+
+    it("weightedRandom draws via ctx.rng, statelessly", () => {
+      const wrows = [
+        { id: "light", w: 1 },
+        { id: "heavy", w: 3 },
+      ];
+      const f = feeder.fromArray(wrows, { key: "id" }).weightedRandom({ weight: "w" });
+      // total weight 4: rng 0.1 → r=0.4 lands in light's [0,1); rng 0.5 → r=2 in heavy's [1,4).
+      const light = ctx({ rng: () => 0.1 });
+      const heavy = ctx({ rng: () => 0.5 });
+      expect(f.allocate(light)).toEqual({ outcome: "value", value: wrows[0], key: "light" });
+      expect(f.allocate(heavy)).toEqual({ outcome: "value", value: wrows[1], key: "heavy" });
+      expect(f.allocate(heavy)).toEqual(f.allocate(heavy)); // stateless repeat
+    });
+
+    it("falls back to Math.random when ctx.rng is absent (standalone SDK use)", () => {
+      const spy = vi.spyOn(Math, "random").mockReturnValue(0);
+      const f = feeder.fromArray(rows, { key: "id" }).random();
+      expect(f.allocate(ctx())).toEqual({ outcome: "value", value: rows[0], key: "a" });
+      expect(spy).toHaveBeenCalledTimes(1);
+      // With ctx.rng present, Math.random is NOT consulted.
+      spy.mockClear();
+      f.allocate(ctx({ rng: () => 0.5 }));
+      expect(spy).not.toHaveBeenCalled();
+    });
   });
 
   it("fromJson loads rows from a file and wraps them", async () => {
