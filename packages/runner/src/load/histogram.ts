@@ -350,6 +350,21 @@ export class LoadHistogram {
     }
   }
 
+  /** Deep copy: an independent histogram with identical state (same relativeError, so it
+   *  stays mergeable with the original's family). Threshold evaluation folds per-phase
+   *  histograms via `clone()` + `merge()` — the clone guarantees the reducer's live
+   *  aggregates are never mutated by an evaluation-time merge. */
+  clone(): LoadHistogram {
+    const h = new LoadHistogram(this.relativeError);
+    for (const [idx, c] of this.buckets) h.buckets.set(idx, c);
+    h.zeroCount = this.zeroCount;
+    h._count = this._count;
+    h._sum = this._sum;
+    h._min = this._min;
+    h._max = this._max;
+    return h;
+  }
+
   /** Serialize to the versioned wire form ({@link LoadHistogramJSON}); also the
    *  `JSON.stringify` hook, so a histogram embedded in a larger payload just works. */
   toJSON(): LoadHistogramJSON {

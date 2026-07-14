@@ -827,10 +827,12 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   }
 
   // Evaluate configured thresholds against the finalized artifact and refine the pass
-  // verdict (a crash-free run still fails if a threshold is breached). Thresholds are
-  // run-level — for a mix they apply to the aggregate, not per scenario.
+  // verdict (a crash-free run still fails if a threshold is breached OR unevaluable).
+  // Thresholds are run-level — for a mix they apply to the aggregate, not per scenario.
+  // The reducer's per-scope histograms feed interval evaluation of latency quantile
+  // gates (D0-T5): merged all-phase distributions, borderline intervals → unevaluable.
   if (config.thresholds !== undefined) {
-    const { thresholds, pass, advisories } = evaluateThresholds(artifact, config.thresholds);
+    const { thresholds, pass, advisories } = evaluateThresholds(artifact, config.thresholds, reducer.latencyQuantiles());
     artifact.summary.thresholds = thresholds;
     artifact.summary.pass = pass;
     // Configured-but-unevaluable gates (e.g. a custom metric that never recorded a

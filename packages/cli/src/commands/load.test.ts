@@ -249,3 +249,142 @@ describe("printOutcome — continuation + advisory display (M6-e)", () => {
     expect(out).toMatch(/Most producer slot time is spent after the primary request/);
   });
 });
+
+describe("printOutcome — tri-state thresholds (D0-T5)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const pct = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
+  const outcome = (thresholds: unknown[], customMetrics?: unknown[]): LoadRunOutcome =>
+    ({
+      runnerId: "gated",
+      artifact: {
+        summary: {
+          pass: false,
+          totalIterations: 10,
+          successfulIterations: 10,
+          failedIterations: 0,
+          errorRate: 0,
+          throughputPerSec: 5,
+          latency: { ...pct, p95: 120 },
+          thresholds,
+          ...(customMetrics !== undefined ? { customMetrics } : {}),
+        },
+      },
+    }) as unknown as LoadRunOutcome;
+
+  it("shows an unevaluable gate with its reason + interval, not as a plain ✗ breach", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome([
+        {
+          scope: "transaction",
+          metric: "p95",
+          expression: "<800ms",
+          actual: 800,
+          pass: false, // the conservative-degradation rule: unevaluable is never green
+          status: "unevaluable",
+          reason: "borderline-quantile",
+          quantileBounds: { lower: 793.7, upper: 800 },
+          source: "glubean",
+        },
+      ]),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/\? transaction\.p95 <800ms unevaluable \(borderline-quantile\)/);
+    expect(out).toMatch(/interval \[793\.7, 800\.0\]ms/);
+    // Not displayed as an ordinary breach (`.*` tolerates the ANSI reset after the mark).
+    expect(out).not.toMatch(/✗.*transaction\.p95/);
+  });
+
+  it("shows a no-observations gate with its reason (no interval to print)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome([
+        {
+          scope: "step",
+          target: "0:checkout",
+          metric: "errorRate",
+          expression: "<1%",
+          actual: 0,
+          pass: false,
+          status: "unevaluable",
+          reason: "no-observations",
+          source: "glubean",
+        },
+      ]),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/\? step\[0:checkout\]\.errorRate <1% unevaluable \(no-observations\)/);
+    expect(out).not.toMatch(/interval \[/);
+  });
+
+  it("labels a custom trend interval with the metric's DECLARED unit, not ms (codex R2)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome(
+        [
+          {
+            // Tagged target form — the unit must resolve through the `${metricId}:` prefix match.
+            scope: "customMetric",
+            target: "payload:class=big",
+            metric: "p95",
+            expression: ">1000",
+            actual: 1100,
+            pass: false,
+            status: "unevaluable",
+            reason: "borderline-quantile",
+            quantileBounds: { lower: 900, upper: 1100 },
+            source: "glubean",
+          },
+        ],
+        [{ metricId: "payload", kind: "trend", unit: "bytes", series: [] }],
+      ),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/interval \[900\.0, 1100\.0\]bytes/); // a byte interval is NOT milliseconds
+    expect(out).not.toMatch(/1100\.0\]ms/);
+  });
+
+  it("prints a bare-number interval for a trend with no declared unit", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome(
+        [
+          {
+            scope: "customMetric",
+            target: "score",
+            metric: "p95",
+            expression: ">90",
+            actual: 95,
+            pass: false,
+            status: "unevaluable",
+            reason: "borderline-quantile",
+            quantileBounds: { lower: 88, upper: 95 },
+            source: "glubean",
+          },
+        ],
+        [{ metricId: "score", kind: "trend", series: [] }], // no unit declared → gates are bare numbers
+      ),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    // Suffix-free: the interval closes straight into the ANSI reset escape.
+    expect(out).toMatch(/interval \[88\.0, 95\.0\]/);
+    expect(out).not.toMatch(/95\.0\]ms/);
+  });
+
+  it("keeps evaluated rows — and pre-v2 rows with no status — on the ✓/✗ path", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome([
+        // A pre-tri-state row (no `status` field, e.g. an old result file): missing
+        // status reads as evaluated → the ordinary breach display.
+        { scope: "transaction", metric: "errorRate", expression: "<1%", actual: 0.02, pass: false, source: "glubean" },
+        { scope: "transaction", metric: "p95", expression: "<800ms", actual: 120, pass: true, status: "evaluated", source: "glubean" },
+      ]),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    // `.*` tolerates the ANSI reset sequence between the mark and the text.
+    expect(out).toMatch(/✗.*transaction\.errorRate <1% \(actual 0\.02\)/);
+    expect(out).toMatch(/✓.*transaction\.p95 <800ms \(actual 120\)/);
+  });
+});

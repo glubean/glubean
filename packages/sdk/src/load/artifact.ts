@@ -123,7 +123,22 @@ export interface LoadEndToEndSummary {
   latency: Percentiles;
 }
 
-/** Result of evaluating one threshold expression against a scope/metric. */
+/**
+ * Result of evaluating one threshold expression against a scope/metric.
+ *
+ * Tri-state (schema v2, distributed-execution proposal §11): `status` distinguishes a
+ * gate that was EVALUATED (`pass` is a real verdict) from one that was UNEVALUABLE —
+ * the data cannot support a verdict (a quantile interval straddling the threshold, a
+ * target scope with zero observations). Artifacts written before this field existed
+ * carry no `status`; readers MUST treat a missing `status` as `"evaluated"`.
+ *
+ * CONSERVATIVE-DEGRADATION IRON RULE (§11.1): an `unevaluable` gate MUST carry
+ * `pass: false` — never omit or default the field. The deployed cloud UI makes a
+ * two-state assumption (app-next run-detail/load-body.tsx:123: `t.pass === false` →
+ * breached); an unevaluable gate without `pass: false` would render GREEN there — a
+ * false pass on a gate nobody evaluated. Until the UI learns the tri-state it shows
+ * unevaluable as breached (red): conservative in the right direction.
+ */
 export interface ThresholdEvaluation {
   scope:
     | "transaction"
@@ -150,8 +165,29 @@ export interface ThresholdEvaluation {
     | "sum"
     | "count";
   expression: string;
+  /** Point estimate of the measured value. For a histogram-backed quantile gate this is
+   *  the canonical upper-bound point estimate (the same number `summary.latency` reports);
+   *  the decision itself may have used `quantileBounds`, not this point. */
   actual: number;
+  /** The gate verdict. `false` for a breached gate AND for every `unevaluable` gate
+   *  (see the iron rule in the interface doc — old consumers must never show green). */
   pass: boolean;
+  /** `"evaluated"` — `pass` is a real verdict; `"unevaluable"` — the gate could not be
+   *  decided (`pass` is forced `false`; `reason` says why). OPTIONAL because the schema
+   *  is still `glubean.load.v1` and pre-tri-state artifacts carry no such field: a
+   *  missing `status` MUST be read as `"evaluated"` (the only semantics those rows ever
+   *  had). Every evaluation THIS version writes sets it explicitly. */
+  status?: "evaluated" | "unevaluable";
+  /** Why the gate was unevaluable — REQUIRED when `status === "unevaluable"`. Current
+   *  values: `"borderline-quantile"` (the quantile interval straddles the threshold at the
+   *  histogram's resolution) and `"no-observations"` (the target scope observed nothing —
+   *  its zero-filled fields are NOT measurements). Typed as an open string so D1 can add
+   *  `"feeder-gap"` / `"under-driven"` / `"partial-input"` without a breaking change. */
+  reason?: string;
+  /** The quantile interval a histogram-backed latency gate was decided on: the true
+   *  (nearest-rank) quantile lies in `[lower, upper]` (ms). Present whenever the gate was
+   *  evaluated from percentile bounds (including the borderline-unevaluable case). */
+  quantileBounds?: { lower: number; upper: number };
   source?: "glubean" | "engine" | "adapter";
   nativeExpression?: string;
   attributionQuality?: LoadAttributionQuality;

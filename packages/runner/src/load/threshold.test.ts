@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import type { LoadArtifact, LoadThresholds } from "@glubean/sdk/load";
 
+import { LoadHistogram } from "./histogram.js";
 import { evaluateThresholds, parseThresholdExpression } from "./threshold.js";
+
+/** A histogram folding the given values (default 1% relative error). */
+function histOf(values: number[]): LoadHistogram {
+  const h = new LoadHistogram();
+  for (const v of values) h.record(v);
+  return h;
+}
 
 describe("parseThresholdExpression (M4-a)", () => {
   it("parses operators", () => {
@@ -44,6 +52,7 @@ describe("parseThresholdExpression (M4-a)", () => {
 /** A minimal artifact stub carrying just the fields the evaluator reads. */
 function artifactStub(over: {
   pass?: boolean;
+  totalIterations?: number;
   errorRate?: number;
   throughputPerSec?: number;
   latency?: { p50: number; p90: number; p95: number; p99: number; max: number };
@@ -52,13 +61,15 @@ function artifactStub(over: {
   primary?: LoadArtifact["summary"]["primary"];
   endToEnd?: LoadArtifact["summary"]["endToEnd"];
   continuation?: LoadArtifact["summary"]["continuation"];
+  customMetrics?: LoadArtifact["summary"]["customMetrics"];
 }): LoadArtifact {
   const pct = over.latency ?? { p50: 10, p90: 20, p95: 30, p99: 40, max: 50 };
+  const totalIterations = over.totalIterations ?? 100;
   return {
     summary: {
       pass: over.pass ?? true,
-      totalIterations: 100,
-      successfulIterations: 100,
+      totalIterations,
+      successfulIterations: totalIterations,
       failedIterations: 0,
       errorRate: over.errorRate ?? 0,
       throughputPerSec: over.throughputPerSec ?? 200,
@@ -66,6 +77,7 @@ function artifactStub(over: {
       ...(over.primary !== undefined ? { primary: over.primary } : {}),
       ...(over.endToEnd !== undefined ? { endToEnd: over.endToEnd } : {}),
       ...(over.continuation !== undefined ? { continuation: over.continuation } : {}),
+      ...(over.customMetrics !== undefined ? { customMetrics: over.customMetrics } : {}),
       thresholds: [],
     },
     endpoints: over.endpoints ?? [],
@@ -74,6 +86,11 @@ function artifactStub(over: {
 }
 
 describe("evaluateThresholds (M4-a)", () => {
+  // NOTE (D0-T5 migration): the tests in this block call the evaluator WITHOUT a
+  // quantile source, exercising the artifact-point-value FALLBACK path (the adapter /
+  // imported-artifact case). Their point assertions are still exact there — the
+  // interval semantics live in the "interval evaluation" block below. Where a row's
+  // shape is pinned, `status: "evaluated"` is added (tri-state, schema v2).
   it("passes when transaction thresholds hold", () => {
     const art = artifactStub({ errorRate: 0.005, throughputPerSec: 250, latency: { p50: 10, p90: 20, p95: 700, p99: 900, max: 1000 } });
     const thresholds: LoadThresholds = {
@@ -83,11 +100,14 @@ describe("evaluateThresholds (M4-a)", () => {
     expect(pass).toBe(true);
     expect(evals).toHaveLength(3);
     expect(evals.every((e) => e.pass)).toBe(true);
+    // Every evaluated row carries the explicit tri-state marker.
+    expect(evals.every((e) => e.status === "evaluated")).toBe(true);
     expect(evals.find((e) => e.metric === "errorRate")).toMatchObject({
       scope: "transaction",
       expression: "<1%",
       actual: 0.005,
       pass: true,
+      status: "evaluated",
     });
   });
 
@@ -142,9 +162,14 @@ describe("evaluateThresholds (M4-a)", () => {
     throughputPerSec,
   });
 
-  it("combines an endpoint's phase rows for latency (slow continuation fails)", () => {
-    // A fast primary row must not let a slow continuation row pass: combined p95 is
-    // the max across phases.
+  it("combines an endpoint's phase rows for latency in the NO-SOURCE fallback (max-of-rows)", () => {
+    // MIGRATION NOTE (D0-T5): this used to be the ONLY latency-combination semantics.
+    // It remains correct for this test because no quantile source is supplied — the
+    // fallback (adapter artifacts) still refuses to let a fast primary row hide a slow
+    // continuation row (combined p95 = max across phases, conservative). With a
+    // histogram source the same shape is decided on the MERGED distribution instead —
+    // see "histogram direct evaluation replaces max-of-rows" below, where a tiny slow
+    // phase no longer causes this false breach.
     const art = artifactStub({
       endpoints: [mkEp("primary", 20, 25), mkEp("continuation", 900, 25)] as unknown as LoadArtifact["endpoints"],
     });
@@ -152,7 +177,7 @@ describe("evaluateThresholds (M4-a)", () => {
       endpoints: { "GET /status": { p95: "<800ms" } },
     });
     expect(evals).toHaveLength(1); // combined into one evaluation
-    expect(evals[0]).toMatchObject({ scope: "endpoint", metric: "p95", actual: 900, pass: false });
+    expect(evals[0]).toMatchObject({ scope: "endpoint", metric: "p95", actual: 900, pass: false, status: "evaluated" });
     expect(pass).toBe(false);
   });
 
@@ -261,5 +286,356 @@ describe("evaluateThresholds (M4-a)", () => {
     expect(pass).toBe(false);
     expect(evals.find((e) => e.scope === "primary")).toMatchObject({ metric: "p95", actual: 12, pass: true });
     expect(evals.find((e) => e.scope === "endToEnd")).toMatchObject({ metric: "p95", actual: 120, pass: false });
+  });
+});
+
+describe("interval evaluation of latency quantile gates (D0-T5)", () => {
+  // 100 identical 800ms samples: every quantile hits the log-bucket containing 800,
+  // whose interval is [~793.7 (the bucket's lower edge), 800 (upper, clamped to the
+  // exact max)]. The sanity assertions pin that window so the fixed thresholds below
+  // provably sit inside/outside it.
+  const hist = histOf(Array(100).fill(800));
+  const b = hist.percentileBounds().p95;
+
+  it("sanity: the p95 interval of 100×800ms is (793, 794) .. 800", () => {
+    expect(b.upper).toBe(800); // clamped to the observed max
+    expect(b.lower).toBeGreaterThan(793);
+    expect(b.lower).toBeLessThan(794);
+  });
+
+  const evalP95 = (expr: string) => {
+    const art = artifactStub({});
+    const { thresholds: evals, pass } = evaluateThresholds(
+      art,
+      { transaction: { p95: expr } },
+      { transaction: hist },
+    );
+    return { row: evals[0], pass };
+  };
+
+  // Four-operator × (clear pass / clear fail / borderline) matrix. Interval
+  // [L≈793.7, U=800]; `<`/`<=` are decided at U, `>`/`>=` at L; L-verdict ≠
+  // U-verdict → the threshold cuts through the interval → borderline.
+  const matrix: Array<[string, "pass" | "fail" | "borderline"]> = [
+    // <  : pass iff U < T; fail iff L ≥ T
+    ["<801ms", "pass"], // U=800 < 801
+    ["<793ms", "fail"], // L≈793.7 ≥ 793
+    ["<800ms", "borderline"], // L < 800 but U = 800 not < 800
+    // <= : pass iff U ≤ T; fail iff L > T
+    ["<=800ms", "pass"], // U=800 ≤ 800 (contrast with "<800ms" above)
+    ["<=793ms", "fail"], // L≈793.7 > 793
+    ["<=795ms", "borderline"], // L ≤ 795 < U
+    // >  : pass iff L > T; fail iff U ≤ T
+    [">793ms", "pass"], // L≈793.7 > 793
+    [">800ms", "fail"], // U=800 not > 800
+    [">795ms", "borderline"], // L ≤ 795 but U > 795
+    // >= : pass iff L ≥ T; fail iff U < T
+    [">=793ms", "pass"], // L≈793.7 ≥ 793
+    [">=801ms", "fail"], // U=800 < 801
+    [">=794ms", "borderline"], // L < 794 ≤ U
+  ];
+  for (const [expr, want] of matrix) {
+    it(`decides "${expr}" as ${want}`, () => {
+      const { row, pass } = evalP95(expr);
+      if (want === "borderline") {
+        expect(row).toMatchObject({
+          status: "unevaluable",
+          reason: "borderline-quantile",
+          pass: false, // the iron rule: unevaluable is NEVER green
+        });
+        expect(pass).toBe(false);
+      } else {
+        expect(row).toMatchObject({ status: "evaluated", pass: want === "pass" });
+        expect(pass).toBe(want === "pass");
+      }
+      // Every histogram-decided row records the interval it was decided on.
+      expect(row.quantileBounds).toEqual({ lower: b.lower, upper: b.upper });
+      // `actual` is the canonical point estimate (interval upper), matching summary.latency.
+      expect(row.actual).toBe(b.upper);
+    });
+  }
+});
+
+describe("histogram direct evaluation replaces max-of-rows (D0-T5)", () => {
+  const mkRow = (phase: "primary" | "continuation", p95: number, requestCount: number) => ({
+    routeKey: "GET /status",
+    phase,
+    routeKeySource: "normalized-url",
+    routeKeyHeuristic: true,
+    requestCount,
+    errorCount: 0,
+    errorRate: 0,
+    statusCounts: { "200": requestCount },
+    latency: { p50: p95 / 2, p90: p95 - 1, p95, p99: p95 + 5, max: p95 + 10 },
+    throughputPerSec: requestCount / 60,
+  });
+
+  it("a tiny slow phase no longer false-fails the scope quantile (the D0-T5 fix)", () => {
+    // 990 fast primary requests (10ms) + 10 slow continuation requests (900ms): the
+    // TRUE merged p95 sits in the 10ms bucket (rank 950 of 1000 ≤ 990 fast samples).
+    // Old max-of-rows synthesis read the continuation ROW's own p95 (900ms) and
+    // failed a "<800ms" gate — a false breach from 1% of the traffic.
+    const art = artifactStub({
+      endpoints: [mkRow("primary", 10, 990), mkRow("continuation", 900, 10)] as unknown as LoadArtifact["endpoints"],
+    });
+    const merged = histOf([...Array<number>(990).fill(10), ...Array<number>(10).fill(900)]);
+    const gates: LoadThresholds = { endpoints: { "GET /status": { p95: "<800ms" } } };
+
+    // New histogram path: clear pass on the merged distribution.
+    const withHist = evaluateThresholds(art, gates, { endpoint: (rk) => (rk === "GET /status" ? merged : undefined) });
+    expect(withHist.thresholds[0]).toMatchObject({ scope: "endpoint", metric: "p95", pass: true, status: "evaluated" });
+    expect(withHist.thresholds[0].actual).toBeLessThan(20); // merged p95 ≈ 10ms, not 900
+    expect(withHist.pass).toBe(true);
+
+    // Same artifact WITHOUT a source: the conservative fallback still max-of-rows
+    // fails — documents exactly the false breach the histogram path removes.
+    const without = evaluateThresholds(art, gates);
+    expect(without.thresholds[0]).toMatchObject({ actual: 900, pass: false, status: "evaluated" });
+    expect(without.pass).toBe(false);
+  });
+
+  it("keeps errorRate weighting and throughput summing from the phase rows (unchanged)", () => {
+    // The histogram source must NOT change the count-ratio metrics: errorRate stays
+    // request-weighted across rows, throughput stays additive.
+    const rows = [
+      { ...mkRow("primary", 10, 900), errorCount: 0, errorRate: 0, throughputPerSec: 60 },
+      { ...mkRow("continuation", 900, 100), errorCount: 50, errorRate: 0.5, throughputPerSec: 60 },
+    ];
+    const art = artifactStub({ endpoints: rows as unknown as LoadArtifact["endpoints"] });
+    const merged = histOf([...Array<number>(900).fill(10), ...Array<number>(100).fill(900)]);
+    const { thresholds: evals } = evaluateThresholds(
+      art,
+      { endpoints: { "GET /status": { errorRate: "<1%", throughputPerSec: ">100/s" } } },
+      { endpoint: () => merged },
+    );
+    expect(evals.find((e) => e.metric === "errorRate")).toMatchObject({
+      actual: 0.05, // (0·900 + 0.5·100) / 1000 — weighted, not max/avg of rates
+      pass: false,
+      status: "evaluated",
+    });
+    expect(evals.find((e) => e.metric === "throughputPerSec")).toMatchObject({
+      actual: 120, // 60 + 60 — additive
+      pass: true,
+      status: "evaluated",
+    });
+  });
+});
+
+describe("zero observations → unevaluable (D0-T5)", () => {
+  it("a 0-iteration run cannot pass transaction quantile/errorRate gates as 0", () => {
+    // An empty run reports ZERO_PCT latency and 0/0→0 errorRate — evaluating those
+    // as measurements would false-green the `<` gates below (the pre-D0-T5 behavior).
+    const art = artifactStub({
+      totalIterations: 0,
+      errorRate: 0,
+      throughputPerSec: 0,
+      latency: { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 },
+    });
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      transaction: { errorRate: "<1%", p95: "<800ms", throughputPerSec: ">100/s" },
+    });
+    expect(evals.find((e) => e.metric === "p95")).toMatchObject({
+      status: "unevaluable",
+      reason: "no-observations",
+      pass: false,
+    });
+    expect(evals.find((e) => e.metric === "errorRate")).toMatchObject({
+      status: "unevaluable",
+      reason: "no-observations",
+      pass: false,
+    });
+    // Throughput 0 over the run duration IS a measurement (the system did nothing):
+    // the `>100/s` floor fails on it as a real verdict, not as unevaluable.
+    expect(evals.find((e) => e.metric === "throughputPerSec")).toMatchObject({
+      status: "evaluated",
+      actual: 0,
+      pass: false,
+    });
+    expect(pass).toBe(false);
+  });
+
+  it("an all-skipped step (0 executed invocations) is unevaluable, not 0% errors", () => {
+    const step = {
+      scenarioId: "s",
+      stepId: "0:checkout",
+      stepName: "checkout",
+      phase: "primary",
+      invocationCount: 2,
+      skippedCount: 2, // every invocation skipped → 0 executed → 0/0 errorRate, ZERO_PCT latency
+      assertionFailureCount: 0,
+      errorCount: 0,
+      errorRate: 0,
+      latency: { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 },
+      requestCount: 0,
+    };
+    const art = artifactStub({ steps: [step] as unknown as LoadArtifact["steps"] });
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      steps: { "0:checkout": { errorRate: "<1%", p95: "<800ms" } },
+    });
+    expect(evals).toHaveLength(2);
+    for (const e of evals) {
+      expect(e).toMatchObject({ status: "unevaluable", reason: "no-observations", pass: false });
+    }
+    expect(pass).toBe(false);
+  });
+
+  it("a present-but-empty custom-metric series is unevaluable for rate/quantiles, evaluated for count/sum", () => {
+    // Count-0 series shapes a D1 pinned-key placeholder / adapter artifact would carry:
+    // rate 0/0→0 and trend ZERO_PCT are NOT measurements; count/sum 0 ARE (additive facts).
+    const art = artifactStub({
+      customMetrics: [
+        { metricId: "pollOk", kind: "rate", series: [{ tags: {}, count: 0, trueCount: 0, rate: 0 }] },
+        { metricId: "settleMs", kind: "trend", unit: "ms", series: [{ tags: {}, count: 0, latency: { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 } }] },
+        { metricId: "retries", kind: "counter", series: [{ tags: {}, count: 0, sum: 0 }] },
+      ] as unknown as LoadArtifact["summary"]["customMetrics"],
+    });
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      customMetric: {
+        pollOk: { rate: ">99%" },
+        settleMs: { p95: "<100ms" },
+        retries: { sum: "<100", count: ">10" },
+      },
+    });
+    expect(evals.find((e) => e.target === "pollOk")).toMatchObject({
+      status: "unevaluable",
+      reason: "no-observations",
+      pass: false, // 0/0 must not decide a ">99%" floor either way
+    });
+    expect(evals.find((e) => e.target === "settleMs")).toMatchObject({
+      status: "unevaluable",
+      reason: "no-observations",
+      pass: false, // ZERO_PCT would have false-passed "<100ms"
+    });
+    // Additive facts on an empty series stay real verdicts:
+    expect(evals.find((e) => e.target === "retries" && e.metric === "sum")).toMatchObject({
+      status: "evaluated",
+      actual: 0,
+      pass: true, // sum 0 really is < 100
+    });
+    expect(evals.find((e) => e.target === "retries" && e.metric === "count")).toMatchObject({
+      status: "evaluated",
+      actual: 0,
+      pass: false, // count 0 really is not > 10
+    });
+    expect(pass).toBe(false);
+  });
+
+  it("keeps the absent-scope SKIP policy (no rows at all ≠ an empty present scope)", () => {
+    // Unchanged policy (module doc): a scope whose data isn't present at all —
+    // no phase split, no matching endpoint row — is skipped, not failed. D1's
+    // coverage reasons (feeder-gap / under-driven) take over from there.
+    const art = artifactStub({});
+    const { thresholds: evals, pass } = evaluateThresholds(
+      art,
+      { primary: { p95: "<800ms" }, endpoints: { "GET /missing": { p95: "<1ms" } } },
+      { endpoint: () => undefined },
+    );
+    expect(evals).toHaveLength(0);
+    expect(pass).toBe(true);
+  });
+});
+
+describe("unevaluable invariants (D0-T5)", () => {
+  it("every unevaluable row carries pass:false + a reason, and fails the run", () => {
+    // One evaluation producing BOTH unevaluable reasons at once: a borderline
+    // transaction quantile and a no-observations step gate.
+    const hist = histOf(Array(100).fill(800));
+    const step = {
+      scenarioId: "s", stepId: "st", stepName: "st", phase: "primary",
+      invocationCount: 0, skippedCount: 0, assertionFailureCount: 0, errorCount: 0,
+      errorRate: 0, latency: { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 }, requestCount: 0,
+    };
+    const art = artifactStub({ steps: [step] as unknown as LoadArtifact["steps"] });
+    const { thresholds: evals, pass } = evaluateThresholds(
+      art,
+      { transaction: { p95: "<800ms" }, steps: { st: { p95: "<10ms" } } },
+      { transaction: hist },
+    );
+    const unevaluable = evals.filter((e) => e.status === "unevaluable");
+    expect(unevaluable.map((e) => e.reason).sort()).toEqual(["borderline-quantile", "no-observations"]);
+    for (const e of unevaluable) {
+      expect(e.pass).toBe(false); // §11.1 iron rule: old `t.pass === false` consumers show breached, never green
+      expect(typeof e.reason).toBe("string");
+    }
+    expect(pass).toBe(false);
+  });
+});
+
+describe("custom trend quantile gates use interval evaluation (codex R1)", () => {
+  // Same 800ms-bucket shape as the latency-scope matrix above: interval ≈ [793.7, 800].
+  const hist = histOf(Array(100).fill(800));
+  const b = hist.percentileBounds().p95;
+  const pct800 = { p50: 800, p90: 800, p95: 800, p99: 800, max: 800 };
+  const art = artifactStub({
+    customMetrics: [
+      {
+        metricId: "settleMs",
+        kind: "trend",
+        unit: "ms",
+        series: [
+          { tags: {}, count: 100, latency: pct800 },
+          { tags: { class: "fast" }, count: 100, latency: pct800 },
+        ],
+      },
+    ] as unknown as LoadArtifact["summary"]["customMetrics"],
+  });
+  const source = {
+    custom: (id: string, _tags: Record<string, string>) => (id === "settleMs" ? hist : undefined),
+  };
+
+  it("a `>` gate inside the interval is borderline-unevaluable, not a point false-pass", () => {
+    // The codex R1 scenario: the point path compares actual=800 (the interval UPPER)
+    // against >794 and passes, but the true p95 lies anywhere in [793.7, 800] — the
+    // threshold cuts through the interval, so no verdict is supportable.
+    const gates = { customMetric: { settleMs: { p95: ">794ms" } } };
+    const { thresholds: evals, pass } = evaluateThresholds(art, gates, source);
+    expect(evals[0]).toMatchObject({
+      scope: "customMetric",
+      target: "settleMs",
+      metric: "p95",
+      status: "unevaluable",
+      reason: "borderline-quantile",
+      pass: false,
+    });
+    expect(evals[0].quantileBounds).toEqual({ lower: b.lower, upper: b.upper });
+    expect(pass).toBe(false);
+    // Without a source the point fallback still passes (it has no interval to see) —
+    // documents exactly the false pass the histogram path removes.
+    const fallback = evaluateThresholds(art, gates);
+    expect(fallback.thresholds[0]).toMatchObject({ status: "evaluated", pass: true, actual: 800 });
+  });
+
+  it("a tagged series target is decided on ITS OWN histogram, not the total's", () => {
+    const tagged = histOf(Array(50).fill(100)); // tagged distribution ≈ 100ms
+    const src = {
+      custom: (id: string, tags: Record<string, string>) =>
+        id === "settleMs" ? (tags.class === "fast" ? tagged : hist) : undefined,
+    };
+    const { thresholds: evals, pass } = evaluateThresholds(
+      art,
+      { customMetric: { "settleMs:class=fast": { p95: "<200ms" } } },
+      src,
+    );
+    // The total histogram (800ms bucket) would clean-FAIL "<200ms"; the tagged one
+    // (≈100ms) clean-passes — proves the tag routing reached the right series.
+    expect(evals[0]).toMatchObject({
+      target: "settleMs:class=fast",
+      metric: "p95",
+      status: "evaluated",
+      pass: true,
+    });
+    expect(evals[0].actual).toBeLessThan(200);
+    expect(pass).toBe(true);
+  });
+
+  it("`<` direction control: a threshold above the interval upper is a clean pass", () => {
+    const { thresholds: evals, pass } = evaluateThresholds(
+      art,
+      { customMetric: { settleMs: { p95: "<801ms" } } },
+      source,
+    );
+    expect(evals[0]).toMatchObject({ status: "evaluated", pass: true });
+    expect(evals[0].quantileBounds).toEqual({ lower: b.lower, upper: b.upper });
+    expect(pass).toBe(true);
   });
 });

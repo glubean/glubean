@@ -556,3 +556,65 @@ describe("continuation summary — producer release (M6)", () => {
     expect(art.summary.continuation?.releasedProducerSlots).toBe(0);
   });
 });
+
+describe("LoadReducer.latencyQuantiles (D0-T5)", () => {
+  it("merges an endpoint's phase rows into one all-phase histogram without mutating the live aggregates", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1 } }));
+    const req = (durationMs: number, phase?: string) =>
+      ev(T0 + 10, {
+        type: "request:observed",
+        scenarioId: "s",
+        method: "GET",
+        url: "https://x/st",
+        routeKey: "GET /st",
+        routeKeySource: "normalized-url",
+        routeKeyHeuristic: true,
+        status: 200,
+        ok: true,
+        durationMs,
+        ...(phase !== undefined ? { phase } : {}),
+      });
+    r.apply(req(10)); // primary row
+    r.apply(req(900, "continuation")); // continuation row (separate agg)
+
+    const q = r.latencyQuantiles();
+    const merged = q.endpoint?.("GET /st");
+    expect(merged?.count).toBe(2); // both phase rows folded into one distribution
+    expect(merged?.max).toBe(900);
+    expect(q.endpoint?.("GET /missing")).toBeUndefined();
+    // Asking again re-derives the same view — no accumulation across calls.
+    expect(r.latencyQuantiles().endpoint?.("GET /st")?.count).toBe(2);
+
+    // The merge ran on a CLONE: each per-phase artifact row still reports only its
+    // own observations (a polluted primary agg would show max 900 here).
+    const rows = r.finalize().endpoints.filter((e) => e.routeKey === "GET /st");
+    expect(rows.find((e) => e.phase === "primary")?.latency.max).toBe(10);
+    expect(rows.find((e) => e.phase === "continuation")?.latency.max).toBe(900);
+  });
+
+  it("exposes primary/endToEnd only when the phase split exists (matches summary presence)", () => {
+    const r = feedCheckoutRun(); // closed run, no primaryComplete boundary
+    const q = r.latencyQuantiles();
+    expect(q.transaction?.count).toBe(2); // both iterations folded
+    expect(q.primary).toBeUndefined();
+    expect(q.endToEnd).toBeUndefined();
+  });
+});
+
+describe("LoadReducer.latencyQuantiles — custom trend series (codex R1)", () => {
+  it("resolves the total and tagged trend histograms; rate/counter/unknown have none", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1 } }));
+    r.apply(ev(T0 + 1, { type: "metric:observed", metricId: "settleMs", kind: "trend", unit: "ms", value: 800 }));
+    r.apply(ev(T0 + 2, { type: "metric:observed", metricId: "settleMs", kind: "trend", unit: "ms", value: 100, tags: { class: "fast" } }));
+    r.apply(ev(T0 + 3, { type: "metric:observed", metricId: "pollOk", kind: "rate", value: 1 }));
+
+    const q = r.latencyQuantiles();
+    expect(q.custom?.("settleMs", {})?.count).toBe(2); // untagged total folds EVERY observation
+    expect(q.custom?.("settleMs", { class: "fast" })?.count).toBe(1); // located via canonicalTagKey
+    expect(q.custom?.("settleMs", { class: "slow" })).toBeUndefined(); // no such series
+    expect(q.custom?.("pollOk", {})).toBeUndefined(); // rate series carries no histogram
+    expect(q.custom?.("missing", {})).toBeUndefined();
+  });
+});

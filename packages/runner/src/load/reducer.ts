@@ -39,6 +39,7 @@ import type {
   Percentiles,
 } from "@glubean/sdk/load";
 import { LoadHistogram } from "./histogram.js";
+import type { ThresholdQuantileSource } from "./threshold.js";
 import { LoadTimeline } from "./timeline.js";
 import { LoadSampleCollector } from "./samples.js";
 
@@ -704,6 +705,43 @@ export class LoadReducerImpl implements LoadReducer {
     };
   }
 
+  /**
+   * Per-scope latency histograms for threshold interval evaluation (D0-T5).
+   * `transaction`/`primary`/`endToEnd` are the reducer's own histograms (read-only
+   * consumers — the evaluator never mutates them); the `endpoint`/`step` lookups
+   * return the target's ALL-PHASE MERGED histogram (primary + continuation rows
+   * folded into one distribution; steps also merge across scenarios, matching the
+   * evaluator's stepId-only row filter). Merging goes through `clone()` first so an
+   * evaluation-time merge can never pollute the live aggregates. `primary`/`endToEnd`
+   * follow the phase-split presence rule of `summary.primary`/`summary.endToEnd`.
+   * `custom` returns a TREND series' own histogram — the untagged total for `tags: {}`,
+   * else the series located by the same `canonicalTagKey` the fold uses — and
+   * undefined for rate/counter series (no histogram; those gates are exact counts).
+   */
+  latencyQuantiles(): ThresholdQuantileSource {
+    const mergedOver = (hists: LoadHistogram[]): LoadHistogram | undefined => {
+      if (hists.length === 0) return undefined;
+      if (hists.length === 1) return hists[0]; // read-only consumer → no merge, no clone needed
+      const merged = hists[0].clone();
+      for (let i = 1; i < hists.length; i++) merged.merge(hists[i]);
+      return merged;
+    };
+    return {
+      transaction: this.iterLatency,
+      ...(this.primaryBoundaries > 0 ? { primary: this.primaryLatency, endToEnd: this.iterLatency } : {}),
+      endpoint: (routeKey) =>
+        mergedOver([...this.endpoints.values()].filter((e) => e.routeKey === routeKey).map((e) => e.latency)),
+      step: (stepId) =>
+        mergedOver([...this.steps.values()].filter((x) => x.stepId === stepId).map((x) => x.latency)),
+      custom: (metricId, tags) => {
+        const m = this.customMetrics.get(metricId);
+        if (!m) return undefined;
+        const series = Object.keys(tags).length === 0 ? m.total : m.series.get(canonicalTagKey(tags));
+        return series?.hist; // only trend series carry a histogram
+      },
+    };
+  }
+
   // ── aggregate accessors ────────────────────────────────────────────────
 
   private phaseOf(event: LoadEvent): Phase {
@@ -1161,6 +1199,9 @@ export function createLoadReducer(config?: {
   maxSlowTransactionSummaries?: number;
   workerId?: string;
   timelineOrigin?: number;
-}): LoadReducer {
+}): LoadReducerImpl {
+  // Returns the concrete impl (still `implements LoadReducer`): the orchestrator needs
+  // `latencyQuantiles()` — the threshold evaluator's histogram source — which is a
+  // runner-internal surface, not part of the SDK reducer contract.
   return new LoadReducerImpl(config);
 }

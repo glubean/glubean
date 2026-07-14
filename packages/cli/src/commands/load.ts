@@ -215,6 +215,29 @@ function pct(fraction: number): string {
   return `${(fraction * 100).toFixed(2)}%`;
 }
 
+/** Unit suffix for a quantile-interval display. Latency scopes are always ms; a
+ *  `customMetric` gate's interval is in the trend's DECLARED unit (`trend({ unit:
+ *  "bytes" })` folds byte values — labelling them "ms" would misreport them), resolved
+ *  from the artifact's own folded metrics: an exact metricId match wins, else the
+ *  longest `${metricId}:` prefix (the `metricId:tag=val` target form — same
+ *  disambiguation the evaluator uses). No declared unit → no suffix (such a trend is
+ *  gated in bare numbers of its own unit). */
+function intervalUnit(
+  t: LoadArtifact["summary"]["thresholds"][number],
+  customMetrics: LoadArtifact["summary"]["customMetrics"],
+): string {
+  if (t.scope !== "customMetric") return "ms";
+  const target = t.target ?? "";
+  let best: { id: string; unit?: string } | undefined;
+  for (const m of customMetrics ?? []) {
+    if (m.metricId === target) return m.unit ?? "";
+    if (target.startsWith(`${m.metricId}:`) && (best === undefined || m.metricId.length > best.id.length)) {
+      best = { id: m.metricId, ...(m.unit !== undefined ? { unit: m.unit } : {}) };
+    }
+  }
+  return best?.unit ?? "";
+}
+
 /** Print a one-plan summary line block. The top `iterations` line is the
  *  end-to-end (whole-transaction) view; when a scenario calls
  *  `ctx.report.primaryComplete()` the artifact also carries a primary/end-to-end
@@ -293,8 +316,21 @@ export function printOutcome(o: LoadRunOutcome): void {
     }
   }
   for (const t of s.thresholds) {
-    const mark = t.pass ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
     const where = t.target ? `${t.scope}[${t.target}]` : t.scope;
+    // Tri-state (schema v2): an `unevaluable` gate is not an ordinary breach — its data
+    // couldn't decide the verdict (`pass` is still false, so the run fails conservatively).
+    // Show the reason (+ the quantile interval when the straddle is what blocked it)
+    // instead of a plain ✗. Old artifacts carry no `status` → read as evaluated.
+    if (t.status === "unevaluable") {
+      const bounds = t.quantileBounds
+        ? ` interval [${t.quantileBounds.lower.toFixed(1)}, ${t.quantileBounds.upper.toFixed(1)}]${intervalUnit(t, s.customMetrics)}`
+        : "";
+      console.log(
+        `${colors.yellow}  ? ${where}.${t.metric} ${t.expression} unevaluable (${t.reason ?? "unknown"})${bounds}${colors.reset}`,
+      );
+      continue;
+    }
+    const mark = t.pass ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
     console.log(`${colors.dim}  ${mark} ${where}.${t.metric} ${t.expression} (actual ${t.actual})${colors.reset}`);
   }
   // Non-fatal run-shape advisories (M6-d), e.g. a long tail poll that held the producer

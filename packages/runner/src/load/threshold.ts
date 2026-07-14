@@ -1,16 +1,29 @@
 /**
- * Structured threshold parsing + evaluation (M4-a).
+ * Structured threshold parsing + evaluation (M4-a; interval evaluation D0-T5).
  *
  * A `loadRunner({ thresholds })` config carries human expressions per scope/metric
  * (`errorRate: "<1%"`, `p95: "<800ms"`, `throughputPerSec: ">100/s"`). This module
  * parses those expressions, evaluates them against a finalized `LoadArtifact`, and
  * produces the `ThresholdEvaluation[]` + a refined pass verdict (a crash-free run
- * only passes if every configured-and-evaluable threshold holds).
+ * only passes if every configured threshold EVALUATES and holds).
  *
  * Evaluation runs OUTSIDE the reducer (which never sees the plan's thresholds) as a
  * post-finalize step in the orchestrator. Scopes whose data isn't present yet
  * (primary / endToEnd / continuation phase splits — M5/M6) and metrics N/A to a
  * scope (e.g. throughput on a step) are skipped rather than failed.
+ *
+ * Latency quantile gates (p50/p90/p95/p99) are TRI-STATE (proposal §7.3/§11): with a
+ * {@link ThresholdQuantileSource} they are decided on the scope's all-phase merged
+ * histogram's `percentileBounds()` interval — `<`/`<=` need the UPPER bound under the
+ * threshold to pass, `>`/`>=` need the LOWER bound over it (conservative in both
+ * directions); an interval that straddles the threshold is `unevaluable`
+ * (`"borderline-quantile"`) with `pass: false`, never a coin-flip verdict. A gate whose
+ * target scope observed NOTHING is `unevaluable` (`"no-observations"`) — an empty
+ * scope's zero-filled summary fields are not measurements and must not false-green a
+ * `<` gate. Custom-metric TREND quantile gates share the same interval path (via the
+ * source's `custom` lookup); errorRate/throughput/rate/counter gates stay
+ * point-evaluated (exact count arithmetic, no interval), except that a zero-observation
+ * denominator is also `"no-observations"`.
  */
 import type {
   LoadArtifact,
@@ -21,6 +34,7 @@ import type {
   LoadThresholds,
   ThresholdEvaluation,
 } from "@glubean/sdk/load";
+import type { LoadHistogram } from "./histogram.js";
 
 type Op = "<" | "<=" | ">" | ">=";
 
@@ -133,8 +147,13 @@ interface CombinableRow {
  *  - errorRate is weighted by each row's denominator (Σ rate·weight / Σ weight), so
  *    it stays request-based for endpoints and invocation-based for steps;
  *  - percentiles can't be merged from summaries, so each is the MAX across rows —
- *    exact for the usual `<` upper-bound threshold (every row under X ⟺ max under X
- *    ⟹ the merged distribution is under X), conservative otherwise.
+ *    a FALLBACK used only when no {@link ThresholdQuantileSource} is supplied (an
+ *    adapter-produced artifact with no reducer histograms). It is safe for the usual
+ *    `<` upper-bound threshold (max under X ⟹ the merged distribution is under X)
+ *    but over-conservative: a tiny slow phase (say 1% of traffic) drags the combined
+ *    quantile to ITS OWN quantile and produces a false breach. The primary path
+ *    (D0-T5) therefore evaluates latency quantiles on the scope's all-phase MERGED
+ *    histogram instead, and only errorRate/throughput still come from this synthesis.
  * A single row (the no-split common case) combines to its own values unchanged.
  */
 function combineRows(rows: CombinableRow[]): ScopeData {
@@ -360,14 +379,76 @@ function customActualFor(key: CustomMetricKey, series: LoadCustomMetricSeries): 
 }
 
 /**
+ * Latency-quantile source for interval evaluation (D0-T5): the reducer's per-scope
+ * `LoadHistogram`s, with endpoint/step lookups returning the ALL-PHASE MERGED
+ * histogram for the target (primary + continuation rows folded into one
+ * distribution — exactly what a scope-level quantile gate is about). Supplied by
+ * the orchestrator from the live reducer; when absent (an adapter-produced /
+ * imported artifact with no reducer behind it), latency quantile gates fall back
+ * to the artifact's per-row point values + `combineRows` max synthesis, as before.
+ *
+ * Trust model (owner 2026-07-14): these histograms come from our own same-version
+ * reducer, not from untrusted input — no defensive re-validation here.
+ */
+export interface ThresholdQuantileSource {
+  transaction?: LoadHistogram;
+  primary?: LoadHistogram;
+  endToEnd?: LoadHistogram;
+  /** All-phase merged latency histogram for a routeKey (undefined → no such endpoint). */
+  endpoint?: (routeKey: string) => LoadHistogram | undefined;
+  /** All-phase merged latency histogram for a stepId (undefined → no such step). */
+  step?: (stepId: string) => LoadHistogram | undefined;
+  /** A custom-metric TREND series' histogram: the untagged total (`tags: {}`) or the
+   *  series matching the tag combination (located by the reducer's own canonical tag
+   *  key). undefined → no histogram (a rate/counter series, or an unknown
+   *  metric/series). Trend quantile gates need this for the same reason the latency
+   *  scopes do: the folded point value IS the interval upper, so a `>` gate compared
+   *  at the point can false-pass while the true quantile sits anywhere in the interval. */
+  custom?: (metricId: string, tags: Record<string, string>) => LoadHistogram | undefined;
+}
+
+/** The quantile metrics decided on histogram intervals; narrows a metric/gate key to a
+ *  `PercentileBounds` key. Takes a plain string so both the scope metrics
+ *  (`ThresholdMetric`) and the custom-metric gate keys (`CustomMetricKey`) share it. */
+function quantileKeyOf(metric: string): "p50" | "p90" | "p95" | "p99" | undefined {
+  return metric === "p50" || metric === "p90" || metric === "p95" || metric === "p99" ? metric : undefined;
+}
+
+/**
+ * Decide a quantile gate on its `[lower, upper]` interval. Both endpoints agreeing
+ * decides the gate at its conservative endpoint for free (`<`/`<=` at upper, `>`/`>=`
+ * at lower — for monotone ops the endpoint verdicts can only disagree in the
+ * straddling direction); a disagreement means the threshold cuts through the interval
+ * → unevaluable, pass FORCED false (old two-state consumers must show it breached,
+ * never green). Shared by the latency scopes and custom trend gates.
+ */
+function quantileVerdict(
+  b: { lower: number; upper: number },
+  op: Op,
+  value: number,
+): Pick<ThresholdEvaluation, "pass" | "status" | "reason" | "quantileBounds"> {
+  const passLower = compare(b.lower, op, value);
+  const passUpper = compare(b.upper, op, value);
+  const quantileBounds = { lower: b.lower, upper: b.upper };
+  return passLower === passUpper
+    ? { pass: passUpper, status: "evaluated", quantileBounds }
+    : { pass: false, status: "unevaluable", reason: "borderline-quantile", quantileBounds };
+}
+
+/**
  * Evaluate every configured threshold against the artifact, returning the
- * `ThresholdEvaluation[]` and the refined run pass (crash-free AND every evaluable
- * threshold holds). Thresholds whose scope data is absent or whose metric is N/A
- * to the scope are skipped (not failed).
+ * `ThresholdEvaluation[]` and the refined run pass (crash-free AND every configured
+ * threshold evaluates and holds — an `unevaluable` gate carries `pass: false`, so it
+ * fails the run; see the conservative-degradation rule on `ThresholdEvaluation`).
+ * Thresholds whose scope data is absent or whose metric is N/A to the scope are
+ * skipped (not failed). `quantiles` (optional) supplies the reducer's per-scope
+ * histograms for interval evaluation of latency quantile gates — see
+ * {@link ThresholdQuantileSource} for the with/without semantics.
  */
 export function evaluateThresholds(
   artifact: LoadArtifact,
   thresholds: LoadThresholds,
+  quantiles?: ThresholdQuantileSource,
 ): { thresholds: ThresholdEvaluation[]; pass: boolean; advisories: string[] } {
   const out: ThresholdEvaluation[] = [];
   const advisories: string[] = [];
@@ -377,23 +458,48 @@ export function evaluateThresholds(
     target: string | undefined,
     data: ScopeData | undefined,
     cfg: LoadThresholdScope | undefined,
+    // Interval-evaluation inputs: the scope's merged latency histogram (bounds path)
+    // and its observation count (zero-observation guard). `observations` undefined =
+    // unknown (continuation counters) → no guard, evaluate as before.
+    quantile?: { hist?: LoadHistogram; observations?: number },
   ): void => {
     if (!data || !cfg) return;
+    const hist = quantile?.hist;
+    // Compute the interval set once per scope, not per metric.
+    const bounds = hist !== undefined && hist.count > 0 ? hist.percentileBounds() : undefined;
     for (const metric of THRESHOLD_METRICS) {
       const expr = cfg[metric];
       if (expr === undefined) continue;
       const actual = actualFor(metric, data);
       if (actual === undefined) continue; // metric not applicable to this scope
       const { op, value } = parseThresholdExpression(expr, metric);
-      out.push({
+      const base = {
         scope,
         ...(target !== undefined ? { target } : {}),
         metric,
         expression: expr,
-        actual,
-        pass: compare(actual, op, value),
-        source: "glubean",
-      });
+        source: "glubean" as const,
+      };
+      const qk = quantileKeyOf(metric);
+      // Zero observations: an empty scope reports zero-filled fields (ZERO_PCT
+      // latency, 0/0 errorRate) that are NOT measurements — evaluating them would
+      // false-green a `<` gate. Quantiles and errorRate are unevaluable; throughput
+      // stays evaluated (0 completions over the run duration really IS 0/s — a
+      // `>100/s` floor correctly fails on it).
+      if ((qk !== undefined || metric === "errorRate") && quantile?.observations === 0) {
+        out.push({ ...base, actual, pass: false, status: "unevaluable", reason: "no-observations" });
+        continue;
+      }
+      if (qk !== undefined && bounds !== undefined) {
+        // Interval decision (see `quantileVerdict`). `actual` = the histogram's
+        // canonical point estimate (interval upper — the same number
+        // `percentiles()`/`summary.latency` report), NOT the per-phase rows'
+        // max-of-rows synthesis, so the recorded point matches the decision data.
+        const b = bounds[qk];
+        out.push({ ...base, actual: b.upper, ...quantileVerdict(b, op, value) });
+        continue;
+      }
+      out.push({ ...base, actual, pass: compare(actual, op, value), status: "evaluated" });
     }
   };
 
@@ -403,22 +509,33 @@ export function evaluateThresholds(
     undefined,
     { errorRate: s.errorRate, latency: s.latency, throughputPerSec: s.throughputPerSec },
     thresholds.transaction,
+    { hist: quantiles?.transaction, observations: s.totalIterations },
   );
-  evalScope("primary", undefined, s.primary as ScopeData | undefined, thresholds.primary);
-  evalScope("endToEnd", undefined, s.endToEnd as ScopeData | undefined, thresholds.endToEnd);
+  evalScope("primary", undefined, s.primary as ScopeData | undefined, thresholds.primary, {
+    hist: quantiles?.primary,
+    observations: s.primary?.completed,
+  });
+  evalScope("endToEnd", undefined, s.endToEnd as ScopeData | undefined, thresholds.endToEnd, {
+    hist: quantiles?.endToEnd,
+    observations: s.endToEnd?.completed,
+  });
   // The continuation summary needs numeric projection: `backpressureMs` is a
   // percentile distribution (compare against p95), and the threshold-relevant
-  // backlog is the PEAK (`maxBacklog`), not the drained-to-0 live count.
+  // backlog is the PEAK (`maxBacklog`), not the drained-to-0 live count. Its gates
+  // are counters/point values (backlog, backpressureMs is outside the p50..p99
+  // interval family) — no quantile source.
   const continuationData: ScopeData | undefined = s.continuation
     ? { backlog: s.continuation.maxBacklog, backpressureMs: s.continuation.backpressureMs?.p95 ?? 0 }
     : undefined;
   evalScope("continuation", undefined, continuationData, thresholds.continuation);
 
   // Endpoints / steps can split into per-phase rows (M5: a route or step hit in
-  // both the primary and continuation phase appears twice). Combine the matching
-  // rows into one scope so additive metrics (throughput) sum and a slow phase still
-  // shows up (latency = max) — picking one row (e.g. `find`) would let a slow
-  // continuation hide behind a fast primary. No matching row → skipped, not failed.
+  // both the primary and continuation phase appears twice). errorRate/throughput
+  // combine across the matching rows (weighted / summed — exact count arithmetic);
+  // latency quantiles are decided on the scope's all-phase MERGED histogram when a
+  // source is supplied (the per-row max fallback would inflate a tiny slow phase
+  // into a false breach). No matching row → skipped, not failed (the documented
+  // absent-scope policy; D1's coverage reasons take over from there).
   if (thresholds.endpoints) {
     for (const [routeKey, cfg] of Object.entries(thresholds.endpoints)) {
       const eps = artifact.endpoints.filter((e) => e.routeKey === routeKey);
@@ -429,7 +546,10 @@ export function evaluateThresholds(
         throughputPerSec: e.throughputPerSec,
         latency: e.latency,
       }));
-      evalScope("endpoint", routeKey, rows.length > 0 ? combineRows(rows) : undefined, cfg);
+      evalScope("endpoint", routeKey, rows.length > 0 ? combineRows(rows) : undefined, cfg, {
+        hist: quantiles?.endpoint?.(routeKey),
+        observations: eps.reduce((n, e) => n + e.requestCount, 0),
+      });
     }
   }
   if (thresholds.steps) {
@@ -442,7 +562,10 @@ export function evaluateThresholds(
         errorWeight: Math.max(0, s.invocationCount - s.skippedCount),
         latency: s.latency,
       }));
-      evalScope("step", stepId, rows.length > 0 ? combineRows(rows) : undefined, cfg);
+      evalScope("step", stepId, rows.length > 0 ? combineRows(rows) : undefined, cfg, {
+        hist: quantiles?.step?.(stepId),
+        observations: sts.reduce((n, x) => n + Math.max(0, x.invocationCount - x.skippedCount), 0),
+      });
     }
   }
 
@@ -490,6 +613,50 @@ export function evaluateThresholds(
           continue;
         }
         const { op, value } = parseCustomExpression(expr, known, resolved?.metric.unit);
+        // A present-but-EMPTY series (count 0 — e.g. a D1 pinned-key placeholder, or
+        // an adapter artifact) folds `rate` as 0/0→0 and trend quantiles as ZERO_PCT:
+        // zero observations ≠ the value 0 (proposal §7.3) — evaluating them would
+        // false-green a `<` gate. `count`/`sum` stay evaluated: 0 observations really
+        // IS count 0 / sum 0 (additive facts a `>` floor should fail on).
+        if (series.count === 0 && known !== "count" && known !== "sum") {
+          out.push({
+            scope: "customMetric",
+            target: targetKey,
+            metric: known,
+            expression: expr,
+            actual,
+            pass: false,
+            status: "unevaluable",
+            reason: "no-observations",
+            source: "glubean",
+          });
+          continue;
+        }
+        // Trend quantile keys go through the SAME interval decision as the latency
+        // scopes when the series' histogram is available (codex R1): the folded
+        // point value is the interval upper, exact enough for `<` but a `>` gate
+        // compared at the point false-passes whenever the interval straddles the
+        // threshold. rate/counter keys stay point-evaluated (exact count ratios).
+        // The lookup goes by the series' OWN tags (`{}` = the untagged total), so
+        // both the total and a tagged `metricId:tag=val` target resolve.
+        const qk = quantileKeyOf(known);
+        const hist =
+          qk !== undefined && resolved !== undefined
+            ? quantiles?.custom?.(resolved.metric.metricId, series.tags)
+            : undefined;
+        if (qk !== undefined && hist !== undefined && hist.count > 0) {
+          const b = hist.percentileBounds()[qk];
+          out.push({
+            scope: "customMetric",
+            target: targetKey,
+            metric: known,
+            expression: expr,
+            actual: b.upper, // the canonical point estimate, matching the folded series row
+            ...quantileVerdict(b, op, value),
+            source: "glubean",
+          });
+          continue;
+        }
         out.push({
           scope: "customMetric",
           target: targetKey,
@@ -497,13 +664,16 @@ export function evaluateThresholds(
           expression: expr,
           actual,
           pass: compare(actual, op, value),
+          status: "evaluated",
           source: "glubean",
         });
       }
     }
   }
 
-  // A crash already fails the run; otherwise every evaluable threshold must hold.
+  // A crash already fails the run; otherwise every configured threshold must EVALUATE
+  // and hold — unevaluable rows carry pass:false (the iron rule), so they fail the run
+  // here with no extra branch (§7.4: pass requires all gates evaluated AND passing).
   const pass = s.pass && out.every((e) => e.pass);
   return { thresholds: out, pass, advisories };
 }
