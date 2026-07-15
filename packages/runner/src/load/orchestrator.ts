@@ -320,6 +320,16 @@ export interface RunLoadShardOptions {
   /** @deprecated mix-selection override — see {@link RunLoadOptions.random}. Carried so
    *  `runLoad` can pass it through; a distributed run never sets it. */
   random?: () => number;
+  /** Cooperative early-termination signal (proposal §5.1 / §10.5). When it fires the shard
+   *  STOPS opening new iterations, closes the continuation pool so parked producers wake at
+   *  once, drains in-flight continuations under the configured `drainTimeout`, and finalizes
+   *  with `endReason: "abort"` — the SAME clean wind-down as a natural end, just triggered
+   *  externally (a D1 coordinator's `abort` control frame, or the worker harness reacting to a
+   *  lost channel). Absent → no external termination hook (single-machine `runLoad` parity —
+   *  byte-identical behaviour). Already-aborted at call time ends dispatch before the first
+   *  slot opens (the `startAt` gate below is skipped so an aborted shard does not sleep to a
+   *  future start). */
+  abort?: AbortSignal;
 }
 
 /**
@@ -658,7 +668,10 @@ export async function runLoadShard(
   // startAt gate (a coordinator's synchronized dispatch instant): hold until the shared
   // start before opening any slot, so every worker's producer slots begin together on the
   // run axis. Omitted single-machine → no wait (byte-identical to the pre-D1 path).
-  if (startAt !== undefined) {
+  // Skip the pre-start sleep if the shard was aborted before it even started — an aborted
+  // shard must not block to a future `startAt` just to immediately end (the in-run abort
+  // listener below covers an abort that fires AFTER this gate).
+  if (startAt !== undefined && opts.abort?.aborted !== true) {
     const wait = startAt - now();
     if (wait > 0) await new Promise<void>((resolve) => setTimeout(resolve, wait));
   }
@@ -733,6 +746,10 @@ export async function runLoadShard(
   // resolved at once, so a slot never overruns the bound (late ramped slots that
   // will claim nothing, or a think-time after the final iteration, wake instantly).
   let ended = false;
+  // An external `abort` (opts.abort) requested this shard's termination. Recorded so
+  // markEnded stamps `endReason: "abort"` (proposal §7.4 / §5.1) rather than reconstructing
+  // "duration"/"iterations": an abort is what actually ended the run.
+  let abortRequested = false;
   // The ACTUAL end trigger, recorded AT the termination event (§7.4: endReason is
   // never reconstructed post-hoc). Set by markEnded below; read once at load:end.
   let recordedEndReason: LoadEndReason | undefined;
@@ -762,10 +779,29 @@ export async function runLoadShard(
     // earlier quota end: in a dual-bound run whose deadline cut the drain short,
     // the duration bound genuinely shaped the run's ending, so reconstructing
     // "iterations" from `claimed >= iterations` after the fact would misreport it.
-    if (wallClockUp) recordedEndReason = "duration";
+    // Priority: an external abort wins (it is the true cause); else duration > iterations.
+    if (abortRequested) recordedEndReason = "abort";
+    else if (wallClockUp) recordedEndReason = "duration";
     else if (recordedEndReason === undefined) recordedEndReason = "iterations";
-    if (wallClockUp) continuationPool.closeImmediate();
+    // Both a wall-clock deadline and an abort close the pool immediately so parked
+    // producers wake at once (an abort must not wait on a continuation slot to wind down).
+    if (wallClockUp || abortRequested) continuationPool.closeImmediate();
   };
+
+  // External abort hook (proposal §5.1 / §10.5): flip `abortRequested`, then `markEnded`
+  // stops new iterations, wakes ramp/think waiters, and closes the pool — the drain + seal
+  // that follow wind the shard down cleanly and finalize with `endReason: "abort"`. Only the
+  // in-run window is covered here; an abort BEFORE dispatch is handled by the `startAt` gate
+  // guard above (aborted shard skips the sleep, then claims nothing). `{ once: true }`
+  // auto-detaches on fire; the `finally` detaches a never-fired listener.
+  const onExternalAbort = (): void => {
+    abortRequested = true;
+    markEnded();
+  };
+  if (opts.abort !== undefined) {
+    if (opts.abort.aborted) onExternalAbort();
+    else opts.abort.addEventListener("abort", onExternalAbort, { once: true });
+  }
   // A duration deadline timer wakes ramp/think waiters at the bound even if no slot
   // happens to claim (and thus re-check) right then. A coordinator's absolute
   // `dispatchDeadline` takes precedence; else the plan's relative `duration` window
@@ -1040,6 +1076,9 @@ export async function runLoadShard(
     );
     abortedByDrainTimeout = await drainContinuations(continuations, shardContinuationCfg?.drainTimeoutMs);
   } finally {
+    // Detach the external-abort listener (no-op if it already fired via `{ once: true }` or
+    // was never attached) so a resolved shard leaves nothing bound to the caller's signal.
+    if (opts.abort !== undefined) opts.abort.removeEventListener("abort", onExternalAbort);
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     if (snapshotTimer !== undefined) clearInterval(snapshotTimer);
     // All primaries are done and the drain phase has run; abort whatever continuation

@@ -382,4 +382,56 @@ describe("runLoadShard — shard-aware execution kernel (D1-2)", () => {
     expect(terminalDelivered).toBe(true);
     expect(frames[frames.length - 1].endReason).toBe("iterations");
   });
+
+  it("external abort winds the shard down cleanly with endReason 'abort' (D1-3 hook)", async () => {
+    // A D1 coordinator's `abort` frame (or the worker harness reacting to a lost channel) trips
+    // this signal: the shard stops opening iterations, drains, and finalizes with endReason
+    // "abort" — the SAME clean path as a natural end, just triggered externally.
+    const plan = loadRunner("shard-abort", {
+      scenario: loadScenario("noop").step("noop", async () => { await new Promise((r) => setTimeout(r, 10)); }).build(),
+      concurrency: 2,
+      duration: "10s",
+    });
+    const { shards } = shardPlan(plan, 1);
+    const ac = new AbortController();
+    const frames: LoadReducerPartialV1[] = [];
+    const startedAt = Date.now();
+    const result = await runLoadShard(plan, {
+      shard: shards[0],
+      rngSeed: "s",
+      timelineOrigin: Date.now(),
+      snapshotIntervalMs: 15,
+      abort: ac.signal,
+      // Abort on the first PERIODIC frame — proof the run was underway when it was cut short.
+      onSnapshot: (p) => {
+        frames.push(p);
+        if (p.endReason === undefined) ac.abort();
+      },
+    });
+    expect(result.endReason).toBe("abort");
+    expect(frames[frames.length - 1].endReason).toBe("abort");
+    // Aborted well before the 10s duration bound (it did not run to the deadline).
+    expect(Date.now() - startedAt).toBeLessThan(9_000);
+  });
+
+  it("an already-aborted shard skips the startAt wait and ends immediately (abort before dispatch)", async () => {
+    const plan = loadRunner("shard-abort-prestart", {
+      scenario: loadScenario("noop").step("noop", async () => {}).build(),
+      concurrency: 1,
+      iterations: 5,
+    });
+    const { shards } = shardPlan(plan, 1);
+    const ac = new AbortController();
+    ac.abort();
+    const startedAt = Date.now();
+    const result = await runLoadShard(plan, {
+      shard: shards[0],
+      rngSeed: "s",
+      timelineOrigin: Date.now(),
+      startAt: Date.now() + 60_000, // 60s in the future — an aborted shard must NOT wait on it
+      abort: ac.signal,
+    });
+    expect(result.endReason).toBe("abort");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
 });
