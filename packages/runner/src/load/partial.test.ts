@@ -920,6 +920,40 @@ describe("finalizeMerged", () => {
     expect(art.summary.endReason).toBe("duration"); // the completeness downgrade is orthogonal
   });
 
+  it("a non-complete executionStatus downgrades every gate to partial-input (no self-contradiction)", () => {
+    // codex integration R: a partial/failed execution forced summary.pass false but the
+    // individual gates still evaluated the incomplete/placeholder data as passing — an
+    // artifact that overall FAILS while every gate shows GREEN. Now every gate is
+    // unevaluable/partial-input/pass:false, consistent with the overall verdict.
+    const { workerA, workerB, runEndMs } = richStream(true);
+    const a = feed(workerA, { timelineOrigin: T0, workerId: "w0" });
+    const b = feed(workerB, { timelineOrigin: T0, workerId: "w1" });
+    const merged = mergePartials([wirePartial(a), wirePartial(b)]);
+    const gates = {
+      transaction: { p95: "<100000ms" }, // would comfortably PASS on the data
+      endpoints: { "POST /login": { errorRate: "<0.9" } },
+    };
+    // Baseline (complete): the gates evaluate and pass.
+    const clean = finalizeMerged(merged, { runEndMs, provider: "multi-core", thresholds: gates });
+    expect(clean.summary.thresholds.every((t) => t.status === "evaluated" && t.pass)).toBe(true);
+    expect(clean.summary.pass).toBe(true);
+    // partial executionStatus: same passing gates, now all unevaluable/partial-input.
+    const art = finalizeMerged(merged, {
+      runEndMs,
+      provider: "multi-core",
+      executionStatus: "partial",
+      thresholds: gates,
+    });
+    expect(art.summary.thresholds.length).toBeGreaterThan(0);
+    for (const t of art.summary.thresholds) {
+      expect(t.status).toBe("unevaluable");
+      expect(t.reason).toBe("partial-input");
+      expect(t.pass).toBe(false);
+    }
+    expect(art.summary.pass).toBe(false);
+    expect(art.summary.executionStatus).toBe("partial");
+  });
+
   it("rejects a timelineOrigin that conflicts with the partial's axis", () => {
     const withOrigin = wirePartial(feed(richStream(false).all, { timelineOrigin: T0 }));
     expect(() => finalizeMerged(withOrigin, { timelineOrigin: T0 + 1 })).toThrow(/conflicts with the partial's/);

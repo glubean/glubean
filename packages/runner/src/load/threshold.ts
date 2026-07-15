@@ -454,11 +454,20 @@ function quantileVerdict(
  * skipped (not failed). `quantiles` (optional) supplies the reducer's per-scope
  * histograms for interval evaluation of latency quantile gates — see
  * {@link ThresholdQuantileSource} for the with/without semantics.
+ *
+ * `opts.partialInput` (a distributed merged run whose `executionStatus` is not
+ * `"complete"`, §7.4/§11): EVERY gate is decided on incomplete / placeholder data, so
+ * every one is downgraded to `unevaluable` (reason `"partial-input"`, pass forced
+ * false) — an artifact that overall FAILS on data-completeness must not also report
+ * individual gates as `evaluated`/`pass:true` (self-contradiction, codex integration
+ * R). The per-gate expression / actual / quantileBounds are kept for context; only the
+ * verdict is neutralized.
  */
 export function evaluateThresholds(
   artifact: LoadArtifact,
   thresholds: LoadThresholds,
   quantiles?: ThresholdQuantileSource,
+  opts: { partialInput?: boolean } = {},
 ): { thresholds: ThresholdEvaluation[]; pass: boolean; advisories: string[] } {
   const out: ThresholdEvaluation[] = [];
   const advisories: string[] = [];
@@ -586,13 +595,21 @@ export function evaluateThresholds(
     for (const [targetKey, cfg] of Object.entries(thresholds.customMetric)) {
       const resolved = resolveCustomTarget(s.customMetrics, targetKey);
       const series = resolved ? findCustomSeries(resolved.metric, resolved.suffix) : undefined;
-      // Fold completeness of the target series (codex R1): a merged run's hydrated
-      // state can know this series undercounts (§7.3 — a truncated worker folded the
-      // key into its total invisibly). Checked once per target; every configured gate
-      // on an incomplete series is unevaluable below.
+      // Fold completeness of the target series (codex R1): a merged run knows this
+      // series undercounts (§7.3 — a truncated worker folded the key into its total
+      // invisibly). Checked once per target; every configured gate on an incomplete
+      // series is unevaluable below. Two sources, in priority: the live reducer's
+      // `customSeriesComplete` (the with-quantile-source path), else — reading a
+      // serialized / imported v2 artifact with NO quantile source — the artifact row's
+      // own `complete` flag (D0-4/R3 stamps it onto `LoadCustomMetricSeries`). Without
+      // this second source a `complete: false` row false-passes its counter/rate/trend
+      // gates when no reducer is behind the artifact (codex integration R). Absent on
+      // either = complete (the single-process / pre-field default).
       const seriesComplete =
         resolved !== undefined && series !== undefined
-          ? (quantiles?.customSeriesComplete?.(resolved.metric.metricId, series.tags) ?? true)
+          ? (quantiles?.customSeriesComplete?.(resolved.metric.metricId, series.tags) ??
+             series.complete ??
+             true)
           : true;
       if (!series) {
         // Skip-on-absent is the module policy (a gate can't fail on missing data),
@@ -709,9 +726,24 @@ export function evaluateThresholds(
     }
   }
 
+  // Partial input (§7.4/§11): the whole artifact is built from incomplete / placeholder
+  // data, so no gate has a trustworthy verdict — downgrade EVERY row uniformly (after
+  // the per-gate logic, so this is the single authority) to unevaluable/partial-input.
+  // Keeps expression/actual/quantileBounds for context; forces status + pass. A row
+  // already unevaluable for a more specific reason (borderline-quantile,
+  // no-observations, series-incomplete) is left as-is — it's the sharper diagnosis and
+  // already carries pass:false, so the run still fails.
+  const rows = opts.partialInput
+    ? out.map((e) =>
+        e.status === "unevaluable"
+          ? e
+          : { ...e, pass: false, status: "unevaluable" as const, reason: "partial-input" },
+      )
+    : out;
+
   // A crash already fails the run; otherwise every configured threshold must EVALUATE
   // and hold — unevaluable rows carry pass:false (the iron rule), so they fail the run
   // here with no extra branch (§7.4: pass requires all gates evaluated AND passing).
-  const pass = s.pass && out.every((e) => e.pass);
-  return { thresholds: out, pass, advisories };
+  const pass = s.pass && rows.every((e) => e.pass);
+  return { thresholds: rows, pass, advisories };
 }

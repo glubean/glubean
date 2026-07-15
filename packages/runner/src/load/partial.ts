@@ -1260,9 +1260,10 @@ export function finalizeMerged(
   // (the single-state default); a non-complete status also forces the pass verdict
   // false — §7.4's necessary conditions require `complete` — BEFORE the threshold
   // evaluation below ANDs in the gate verdicts (it reads summary.pass as its base).
+  const partialInput = opts.executionStatus !== undefined && opts.executionStatus !== "complete";
   if (opts.executionStatus !== undefined) {
     artifact.summary.executionStatus = opts.executionStatus;
-    if (opts.executionStatus !== "complete") artifact.summary.pass = false;
+    if (partialInput) artifact.summary.pass = false;
   }
   artifact.runtime.attribution = weakestReport(artifact.runtime.attribution, p.attribution);
   if (p.advisories.length > 0) {
@@ -1271,10 +1272,15 @@ export function finalizeMerged(
     artifact.summary.advisories = advisories;
   }
   if (opts.thresholds !== undefined) {
+    // A partial/failed execution downgrades EVERY gate to unevaluable/partial-input
+    // (§7.4/§11): the whole artifact is built from incomplete data, so no gate carries
+    // a trustworthy verdict — an overall-failed artifact must not show individual gates
+    // as evaluated/passing (self-contradiction, codex integration R).
     const { thresholds, pass, advisories } = evaluateThresholds(
       artifact,
       opts.thresholds,
       reducer.latencyQuantiles(),
+      { partialInput },
     );
     artifact.summary.thresholds = thresholds;
     artifact.summary.pass = pass;

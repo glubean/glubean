@@ -203,11 +203,13 @@ export interface ThresholdEvaluation {
   /** Why the gate was unevaluable — REQUIRED when `status === "unevaluable"`. Current
    *  values: `"borderline-quantile"` (the quantile interval straddles the threshold at the
    *  histogram's resolution), `"no-observations"` (the target scope observed nothing —
-   *  its zero-filled fields are NOT measurements), and `"series-incomplete"` (a merged
+   *  its zero-filled fields are NOT measurements), `"series-incomplete"` (a merged
    *  run knows the targeted custom-metric tag series undercounts — a series-cap-truncated
-   *  worker folded that key into its untagged total invisibly, distributed proposal §7.3).
-   *  Typed as an open string so D1 can add `"feeder-gap"` / `"under-driven"` /
-   *  `"partial-input"` without a breaking change. */
+   *  worker folded that key into its untagged total invisibly, distributed proposal §7.3),
+   *  and `"partial-input"` (the whole artifact is a distributed merge whose
+   *  `summary.executionStatus` is not `"complete"`, so EVERY gate is decided on
+   *  incomplete/placeholder data — §7.4/§11). Typed as an open string so D1 can add
+   *  `"feeder-gap"` / `"under-driven"` without a breaking change. */
   reason?: string;
   /** The quantile interval a histogram-backed latency gate was decided on: the true
    *  (nearest-rank) quantile lies in `[lower, upper]` (ms). Present whenever the gate was

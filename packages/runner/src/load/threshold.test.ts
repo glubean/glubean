@@ -520,6 +520,86 @@ describe("zero observations → unevaluable (D0-T5)", () => {
     expect(pass).toBe(false);
   });
 
+  it("reads a v2 artifact row's own `complete: false` when no quantile source is supplied", () => {
+    // Reading a SERIALIZED / imported v2 artifact (no reducer behind it, so no
+    // ThresholdQuantileSource): a merged run stamped `complete: false` on the row
+    // (§7.3 — a series-cap-truncated worker folded this key into its total invisibly),
+    // and the retained count/sum UNDERCOUNT. Without the artifact-row fallback the gate
+    // false-passed (codex integration R). The tagged v0 row is complete → evaluates.
+    const art = artifactStub({
+      customMetrics: [
+        {
+          metricId: "bytes",
+          kind: "counter",
+          series: [
+            { tags: {}, count: 10, sum: 5000 }, // untagged total (always exact)
+            { tags: { k: "v60" }, count: 3, sum: 40, complete: false }, // undercounts
+            { tags: { k: "v0" }, count: 4, sum: 80 }, // complete (field absent)
+          ],
+        },
+      ] as unknown as LoadArtifact["summary"]["customMetrics"],
+    });
+    // No quantiles argument at all — the serialized-artifact read path.
+    const { thresholds: evals, pass } = evaluateThresholds(art, {
+      customMetric: {
+        "bytes:k=v60": { sum: "<1000" }, // would false-pass on the undercounting 40
+        "bytes:k=v0": { sum: "<1000" }, // complete → real verdict
+      },
+    });
+    expect(evals.find((e) => e.target === "bytes:k=v60")).toMatchObject({
+      status: "unevaluable",
+      reason: "series-incomplete",
+      pass: false,
+    });
+    expect(evals.find((e) => e.target === "bytes:k=v0")).toMatchObject({
+      status: "evaluated",
+      pass: true,
+    });
+    expect(pass).toBe(false);
+  });
+
+  it("downgrades every gate to partial-input when opts.partialInput is set (§7.4)", () => {
+    // A distributed merged run whose executionStatus is not "complete": every gate is
+    // decided on incomplete/placeholder data, so none carries a trustworthy verdict.
+    const art = artifactStub({ errorRate: 0, latency: { p50: 5, p90: 8, p95: 10, p99: 12, max: 15 } });
+    const gates = { transaction: { errorRate: "<1%", p95: "<800ms" } };
+    // Baseline: without partialInput both gates evaluate and pass.
+    const baseline = evaluateThresholds(art, gates);
+    expect(baseline.thresholds.every((e) => e.status === "evaluated" && e.pass)).toBe(true);
+    expect(baseline.pass).toBe(true);
+    // With partialInput: every gate unevaluable/partial-input/pass:false, run fails.
+    const { thresholds: evals, pass } = evaluateThresholds(art, gates, undefined, { partialInput: true });
+    expect(evals).toHaveLength(2);
+    expect(evals.every((e) => e.status === "unevaluable" && e.reason === "partial-input" && !e.pass)).toBe(true);
+    // Context is preserved (expression / actual), only the verdict is neutralized.
+    expect(evals.find((e) => e.metric === "p95")?.expression).toBe("<800ms");
+    expect(pass).toBe(false);
+  });
+
+  it("partial-input leaves a more-specific unevaluable reason intact", () => {
+    // A row already unevaluable (no-observations) keeps its sharper diagnosis rather
+    // than being rewritten to the blanket partial-input reason — it already carries
+    // pass:false, so the run still fails.
+    const art = artifactStub({
+      totalIterations: 0,
+      customMetrics: [
+        { metricId: "pollOk", kind: "rate", series: [{ tags: {}, count: 0, trueCount: 0, rate: 0 }] },
+      ] as unknown as LoadArtifact["summary"]["customMetrics"],
+    });
+    const { thresholds: evals, pass } = evaluateThresholds(
+      art,
+      { transaction: { errorRate: "<1%" }, customMetric: { pollOk: { rate: ">99%" } } },
+      undefined,
+      { partialInput: true },
+    );
+    // transaction errorRate: zero-observation → no-observations (kept); the count gate
+    // for transaction has none here. pollOk: no-observations (kept).
+    expect(evals.find((e) => e.scope === "transaction")).toMatchObject({ reason: "no-observations" });
+    expect(evals.find((e) => e.target === "pollOk")).toMatchObject({ reason: "no-observations" });
+    // A plain evaluated-would-be gate on a non-empty scope IS downgraded to partial-input.
+    expect(pass).toBe(false);
+  });
+
   it("keeps the absent-scope SKIP policy (no rows at all ≠ an empty present scope)", () => {
     // Unchanged policy (module doc): a scope whose data isn't present at all —
     // no phase split, no matching endpoint row — is skipped, not failed. D1's
