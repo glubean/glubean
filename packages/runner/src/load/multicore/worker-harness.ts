@@ -61,7 +61,7 @@ import {
 } from "./protocol.js";
 
 /** The inherited control fd (must match the provider's `CONTROL_FD`). fd 0/1/2 are the user's
- *  stdio; fd 3 is a `/dev/null` placeholder (the provider's `'ignore'`, held open so an accidental
+ *  stdio; fd 3 is a held-open null-device placeholder the provider passes (so an accidental
  *  writeSync(3) is harmlessly swallowed); fd 4 is the dedicated duplex control pipe. */
 const CONTROL_FD = 4;
 
@@ -91,11 +91,19 @@ try {
 }
 control.setEncoding("utf8");
 
-/** Send a worker frame as one NDJSON line on fd 3, resolving once the frame is handed to the
+// TEST-ONLY seam: override the protocol ENVELOPE version this worker stamps, so a test can
+// exercise the coordinator's version-incompatibility fast-fail (a version-skewed worker's hello).
+// Unset in production ⇒ no-op; the real version is always `MULTICORE_PROTOCOL_VERSION`.
+const TEST_ENVELOPE_V =
+  process.env.GLUBEAN_MC_TEST_PROTOCOL_V !== undefined ? Number(process.env.GLUBEAN_MC_TEST_PROTOCOL_V) : undefined;
+
+/** Send a worker frame as one NDJSON line on fd 4, resolving once the frame is handed to the
  *  kernel (so `runLoadShard` can AWAIT terminal-frame delivery before the shard resolves). */
 function send(msg: WorkerMessage): Promise<void> {
+  const wire = encodeWorkerMessage(msg);
+  if (TEST_ENVELOPE_V !== undefined) (wire as { v: number }).v = TEST_ENVELOPE_V;
   return new Promise<void>((resolve, reject) => {
-    control.write(JSON.stringify(encodeWorkerMessage(msg)) + "\n", (err) => (err ? reject(err) : resolve()));
+    control.write(JSON.stringify(wire) + "\n", (err) => (err ? reject(err) : resolve()));
   });
 }
 

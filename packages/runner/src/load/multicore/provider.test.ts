@@ -509,6 +509,46 @@ export const plan = loadRunner("mc-crash", { scenario, concurrency: 2, duration:
     ]);
     expect(closed).toBe("closed");
   });
+
+  it("fails acquire FAST on a version-incompatible worker hello, not after the join deadline (§4)", async () => {
+    // A version-skewed worker stamps a different protocol ENVELOPE version on its hello. The
+    // regression: the tolerant de-framer would DROP that undecodable frame, the explicit version
+    // check would never fire, and acquire would idle until the 60s join deadline. With the fix, a
+    // recognizable-but-wrong-version envelope is surfaced → acquire rejects immediately.
+    process.env.GLUBEAN_MC_TEST_PROTOCOL_V = "999"; // test-only harness seam: stamp envelope v=999
+    try {
+      const provider = newProvider();
+      const start = Date.now();
+      const err = await provider
+        .acquire(1, { abort: new AbortController().signal, joinDeadlineMs: 15_000 })
+        .then(
+          () => {
+            throw new Error("acquire should have rejected on a version-incompatible hello");
+          },
+          (e: Error) => e,
+        );
+      // A version-incompatibility reject (mentions the protocol), NOT a join-deadline timeout.
+      expect(err.message).toMatch(/protocol|incompatible/i);
+      expect(err.message).not.toMatch(/did not hello/);
+      // FAST: well under the 15s join deadline (proves it did not wait it out).
+      expect(Date.now() - start).toBeLessThan(8_000);
+    } finally {
+      delete process.env.GLUBEAN_MC_TEST_PROTOCOL_V;
+    }
+  });
+
+  it("fails EXPLICITLY on Windows (unsupported) rather than crashing in a confusing way", async () => {
+    // Multi-core relies on POSIX extra-fd inheritance (fd 4) that Node child_process does not
+    // provide on Windows; acquire must reject with a clear message, not an opaque openSync/spawn crash.
+    const orig = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      const provider = newProvider();
+      await expect(provider.acquire(1, { abort: new AbortController().signal })).rejects.toThrow(/not supported on Windows/i);
+    } finally {
+      if (orig) Object.defineProperty(process, "platform", orig);
+    }
+  });
 });
 
 /** A minimal ChildProcess stub for unit-testing Fd3WorkerChannel supervision without a real
@@ -613,5 +653,24 @@ describe("Fd3WorkerChannel supervision — error vs exit vs unreapable (P2)", ()
     expect(errors).toEqual([]); // garbage was dropped, not escalated
     expect(got).toHaveLength(1); // the valid hello got through
     expect(got[0].type).toBe("hello");
+  });
+
+  it("de-framer ESCALATES an incompatible-version envelope (fast-fail) but still DROPS pure garbage", async () => {
+    const live = new FakeChild(4242);
+    const ch = new Fd3WorkerChannel("w4", live as unknown as ChildProcess, 100, false);
+    const errors: Error[] = [];
+    ch.onError((e) => errors.push(e));
+
+    // Pure garbage: non-JSON, and JSON without a `v` envelope → DROP (no escalation).
+    live.control.write("not json\n");
+    live.control.write(JSON.stringify({ random: 1, type: "log" }) + "\n"); // has `type` but no `v` → drop
+    await new Promise((r) => setImmediate(r));
+    expect(errors).toEqual([]);
+
+    // A recognizable envelope carrying a WRONG version (`v` ≠ ours) → ESCALATE so acquire fails fast.
+    live.control.write(JSON.stringify({ v: 999, type: "hello", protocolVersion: 999, workerId: "w4", pid: 1 }) + "\n");
+    await new Promise((r) => setImmediate(r));
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/incompatible protocol version 999/i);
   });
 });

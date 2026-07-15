@@ -34,6 +34,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { closeSync, existsSync, openSync } from "node:fs";
+import { devNull } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { Duplex, Readable } from "node:stream";
@@ -274,16 +275,30 @@ export class Fd3WorkerChannel implements LoadWorkerChannel {
       const line = this.rxBuf.slice(0, nl);
       this.rxBuf = this.rxBuf.slice(nl + 1);
       if (line.length === 0) continue;
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        // Non-JSON garbage → DROP (trust-model tolerance): a stray non-protocol line that reached
+        // the control fd must not crash the run or fail acquire.
+        continue;
+      }
+
       let msg: WorkerMessage;
       try {
-        msg = decodeWorkerMessage(JSON.parse(line) as unknown);
-      } catch {
-        // TOLERATE garbage (trust-model hardening, symmetric with the harness de-framer): a
-        // non-JSON / non-protocol line is DROPPED, never escalated. Escalating to `errorCbs`
-        // would let a single stray line fail `awaitAllHellos` / an in-flight run — a same-version
-        // cooperative worker only ever sends valid frames, so a stray line is an anomaly to
-        // ignore, not a fatal transport error. (subprocess.ts's WIRE discipline: ignore
-        // unrecognized lines.)
+        msg = decodeWorkerMessage(parsed);
+      } catch (e) {
+        // Distinguish an INCOMPATIBLE-VERSION frame from non-envelope garbage. A frame that carries
+        // an explicit version envelope (`v`) whose value is not ours is a real peer speaking a
+        // different protocol (e.g. a version-skewed project-local worker's `hello`) — surface it so
+        // acquire FAILS FAST (§4 "不兼容在 assign 前失败") instead of dropping it and waiting out the
+        // 60s join deadline. A line with no `v` envelope (pure garbage / a stray non-protocol write)
+        // is dropped, as above. (The harness de-framer is symmetric but multi-core is same-version,
+        // so it only ever drops.)
+        if (typeof parsed === "object" && parsed !== null && "v" in parsed && (parsed as { v: unknown }).v !== MULTICORE_PROTOCOL_VERSION) {
+          for (const cb of this.errorCbs) cb(e instanceof Error ? e : new Error(String(e)));
+        }
         continue;
       }
       for (const cb of this.messageCbs) cb(msg);
@@ -421,6 +436,16 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   async acquire(n: number, opts: AcquireOptions): Promise<LoadWorkerChannel[]> {
     if (this.closed) throw new Error("MultiCoreProvider: acquire after close()");
     if (!Number.isInteger(n) || n < 1) throw new Error(`MultiCoreProvider: worker count must be a positive integer (got ${n})`);
+    // Windows is UNSUPPORTED for multi-core (v1 primary platforms: macOS / Linux). The dedicated
+    // control channel relies on inheriting an extra fd (fd 4) into the child, which Node's
+    // child_process provides on POSIX but NOT on Windows (only fds 0/1/2 + an 'ipc' channel are
+    // inheritable there). Rather than let the transport fail in a confusing way, fail EXPLICITLY.
+    // (This also pre-empts the `openSync(devNull)` below, which would otherwise be the first crash.)
+    if (process.platform === "win32") {
+      throw new Error(
+        "MultiCoreProvider: multi-core load is not supported on Windows yet — the dedicated control fd relies on POSIX extra-fd inheritance, which Node child_process does not provide on Windows. Use the in-process provider on Windows. (v1 primary platforms: macOS / Linux.)",
+      );
+    }
 
     const setup = computeSpawnSetup(this.cwd);
     // Keep the zero-project cleanup until close() — the temp package.json must survive for the
@@ -428,9 +453,10 @@ export class MultiCoreProvider implements LoadWorkerProvider {
     this.spawnCleanup = setup.cleanup;
 
     const command = this.nodeExecPath ?? process.execPath;
-    // A HELD-open /dev/null passed as every worker's fd 3 (see field doc): keeps fd 3 occupied +
-    // inert so an accidental writeSync(3) is swallowed and the number is never recycled.
-    if (this.devNullFd === undefined) this.devNullFd = openSync("/dev/null", "r+");
+    // A HELD-open null-device fd passed as every worker's fd 3 (see field doc): keeps fd 3 occupied
+    // + inert so an accidental writeSync(3) is swallowed and the number is never recycled. Uses the
+    // platform null device (`os.devNull`), though only POSIX reaches here (win32 threw above).
+    if (this.devNullFd === undefined) this.devNullFd = openSync(devNull, "r+");
     const joinDeadlineMs = opts.joinDeadlineMs ?? DEFAULT_JOIN_DEADLINE_MS;
     const channels: Fd3WorkerChannel[] = [];
     try {
