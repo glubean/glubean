@@ -455,13 +455,16 @@ function quantileVerdict(
  * histograms for interval evaluation of latency quantile gates — see
  * {@link ThresholdQuantileSource} for the with/without semantics.
  *
- * `opts.partialInput` (a distributed merged run whose `executionStatus` is not
- * `"complete"`, §7.4/§11): EVERY gate is decided on incomplete / placeholder data, so
- * every one is downgraded to `unevaluable` (reason `"partial-input"`, pass forced
- * false) — an artifact that overall FAILS on data-completeness must not also report
- * individual gates as `evaluated`/`pass:true` (self-contradiction, codex integration
- * R). The per-gate expression / actual / quantileBounds are kept for context; only the
- * verdict is neutralized.
+ * PARTIAL INPUT (a distributed run whose data completeness is not `"complete"`,
+ * §7.4/§11): EVERY gate is decided on incomplete / placeholder data, so every one is
+ * downgraded to `unevaluable` (reason `"partial-input"`, pass forced false) — an
+ * artifact that overall FAILS on data-completeness must not also report individual
+ * gates as `evaluated`/`pass:true` (self-contradiction, codex integration R). The
+ * per-gate expression / actual / quantileBounds are kept for context; only the verdict
+ * is neutralized. The signal comes from either source, so the live merged-run path and
+ * the imported-artifact path agree: explicit `opts.partialInput` (finalizeMerged passes
+ * it), else the artifact's own `summary.executionStatus !== "complete"` (evaluating a
+ * serialized v2 artifact directly, no opts).
  */
 export function evaluateThresholds(
   artifact: LoadArtifact,
@@ -733,7 +736,17 @@ export function evaluateThresholds(
   // already unevaluable for a more specific reason (borderline-quantile,
   // no-observations, series-incomplete) is left as-is — it's the sharper diagnosis and
   // already carries pass:false, so the run still fails.
-  const rows = opts.partialInput
+  //
+  // Two sources of the partial-input signal, so BOTH paths agree: the explicit
+  // `opts.partialInput` (finalizeMerged's live merged-run path), else the artifact's
+  // OWN `summary.executionStatus` (evaluating a serialized / imported v2 artifact
+  // directly — no opts). Without the executionStatus fallback, a `"partial"`/`"failed"`
+  // imported artifact evaluated straight would keep evaluated/pass:true gates while
+  // summary.pass is false — the same false-green gate contradiction this patch
+  // eliminates, on the mirror path (codex fix-review R).
+  const partialInput =
+    opts.partialInput ?? (s.executionStatus !== undefined && s.executionStatus !== "complete");
+  const rows = partialInput
     ? out.map((e) =>
         e.status === "unevaluable"
           ? e

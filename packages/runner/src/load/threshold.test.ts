@@ -62,6 +62,7 @@ function artifactStub(over: {
   endToEnd?: LoadArtifact["summary"]["endToEnd"];
   continuation?: LoadArtifact["summary"]["continuation"];
   customMetrics?: LoadArtifact["summary"]["customMetrics"];
+  executionStatus?: LoadArtifact["summary"]["executionStatus"];
 }): LoadArtifact {
   const pct = over.latency ?? { p50: 10, p90: 20, p95: 30, p99: 40, max: 50 };
   const totalIterations = over.totalIterations ?? 100;
@@ -78,6 +79,7 @@ function artifactStub(over: {
       ...(over.endToEnd !== undefined ? { endToEnd: over.endToEnd } : {}),
       ...(over.continuation !== undefined ? { continuation: over.continuation } : {}),
       ...(over.customMetrics !== undefined ? { customMetrics: over.customMetrics } : {}),
+      ...(over.executionStatus !== undefined ? { executionStatus: over.executionStatus } : {}),
       thresholds: [],
     },
     endpoints: over.endpoints ?? [],
@@ -574,6 +576,51 @@ describe("zero observations → unevaluable (D0-T5)", () => {
     // Context is preserved (expression / actual), only the verdict is neutralized.
     expect(evals.find((e) => e.metric === "p95")?.expression).toBe("<800ms");
     expect(pass).toBe(false);
+  });
+
+  it("derives partial-input from the artifact's own executionStatus when no opts are passed", () => {
+    // The IMPORTED-ARTIFACT mirror path: evaluating a serialized v2 artifact directly
+    // (no finalizeMerged, so no opts.partialInput). Its own summary.executionStatus
+    // "partial"/"failed" must downgrade every gate — otherwise the gates stay
+    // evaluated/pass:true while summary.pass is false (the false-green mirror of the
+    // finalizeMerged path, codex fix-review R).
+    const gates = { transaction: { errorRate: "<1%", p95: "<800ms" } };
+    const good = { errorRate: 0, latency: { p50: 5, p90: 8, p95: 10, p99: 12, max: 15 } };
+    for (const status of ["partial", "failed"] as const) {
+      const art = artifactStub({ ...good, executionStatus: status });
+      const { thresholds: evals, pass } = evaluateThresholds(art, gates); // no 4th arg
+      expect(evals).toHaveLength(2);
+      expect(evals.every((e) => e.status === "unevaluable" && e.reason === "partial-input" && !e.pass)).toBe(true);
+      expect(pass).toBe(false);
+    }
+    // A COMPLETE artifact with no opts behaves exactly as before — gates evaluate.
+    const complete = artifactStub({ ...good, executionStatus: "complete" });
+    const cEvals = evaluateThresholds(complete, gates);
+    expect(cEvals.thresholds.every((e) => e.status === "evaluated" && e.pass)).toBe(true);
+    expect(cEvals.pass).toBe(true);
+    // …and so does an artifact with no executionStatus field at all (single-process).
+    const noStatus = artifactStub(good);
+    const nEvals = evaluateThresholds(noStatus, gates);
+    expect(nEvals.thresholds.every((e) => e.status === "evaluated" && e.pass)).toBe(true);
+    expect(nEvals.pass).toBe(true);
+  });
+
+  it("explicit opts.partialInput:false is NOT overridden by a partial executionStatus", () => {
+    // `??` precedence: an explicit false wins over the executionStatus fallback (the
+    // caller has taken responsibility for the downgrade decision). finalizeMerged never
+    // does this, but the contract must be unambiguous.
+    const art = artifactStub({
+      errorRate: 0,
+      latency: { p50: 5, p90: 8, p95: 10, p99: 12, max: 15 },
+      executionStatus: "partial",
+    });
+    const { thresholds: evals } = evaluateThresholds(
+      art,
+      { transaction: { errorRate: "<1%" } },
+      undefined,
+      { partialInput: false },
+    );
+    expect(evals[0]).toMatchObject({ status: "evaluated", pass: true });
   });
 
   it("partial-input leaves a more-specific unevaluable reason intact", () => {
