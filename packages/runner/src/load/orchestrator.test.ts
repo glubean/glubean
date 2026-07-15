@@ -87,7 +87,7 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
     const art = await runLoad(plan);
 
     // Termination + config provenance.
-    expect(art.schemaVersion).toBe("glubean.load.v1");
+    expect(art.schemaVersion).toBe("glubean.load.v2");
     expect(art.runMode).toBe("load");
     expect(art.config).toMatchObject({ concurrency: 2, iterations: 6 });
     expect(art.runtime).toMatchObject({
@@ -97,6 +97,7 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
       requestedConcurrency: 2,
     });
     expect(art.summary.pass).toBe(true);
+    expect(art.summary.endReason).toBe("iterations"); // v2 §7.4: the global end reason lands in the summary
 
     // Exactly 6 iterations, all successful.
     expect(art.summary.totalIterations).toBe(6);
@@ -122,6 +123,7 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
     const art = await runLoad(plan);
     expect(art.config.durationMs).toBe(30);
     expect(art.summary.pass).toBe(true);
+    expect(art.summary.endReason).toBe("duration");
     expect(art.summary.totalIterations).toBeGreaterThanOrEqual(1);
     expect(art.summary.failedIterations).toBe(0);
   });
@@ -379,6 +381,30 @@ describe("runLoad — local closed-model orchestrator (M3-f)", () => {
     expect(art.summary.totalIterations).toBe(2);
     expect(art.summary.failedIterations).toBe(2);
     expect(art.summary.successfulIterations).toBe(0);
+    // A THROWING feeder is a broken data source, not exhaustion — stays setupError.
+    expect(art.samples.failureTraces.map((t) => t.errorKind)).toEqual(["setupError", "setupError"]);
+  });
+
+  it("attributes a fail-policy feeder exhaustion as `feederExhausted` (schema v2 — framework data ran out, not a SUT error)", async () => {
+    const rows = feeder.fromArray([{ v: "only-row" }], { key: "v" });
+    const plan = loadRunner("exhausted-feeder", {
+      scenario: loadScenario<{ v: string }>("u").step("s", async () => {}).build(),
+      concurrency: 1,
+      iterations: 3,
+      feeders: { row: rows.uniquePerIteration() }, // default exhausted policy: "fail"
+      input: ({ feed }) => feed.row,
+    });
+
+    const art = await runLoad(plan);
+    // Iteration 0 gets the row; 1 and 2 exhaust → recorded failed, run completes.
+    expect(art.summary.totalIterations).toBe(3);
+    expect(art.summary.successfulIterations).toBe(1);
+    expect(art.summary.failedIterations).toBe(2);
+    expect(art.samples.failureTraces).toHaveLength(2);
+    expect(art.samples.failureTraces.map((t) => t.errorKind)).toEqual([
+      "feederExhausted",
+      "feederExhausted",
+    ]);
   });
 });
 
@@ -596,6 +622,45 @@ describe("runLoad — producer release scheduling (M6-b)", () => {
     const art = await runLoad(plan);
     expect(Date.now() - startedAt).toBeLessThan(2000); // completes (no infinite hang)
     expect(art.summary.continuation?.rejectedReleaseSignals).toBeGreaterThanOrEqual(1);
+  });
+
+  it("records endReason from the ACTUAL trigger: a deadline firing mid-drain wins over a completed quota (§7.4 duration > iterations)", async () => {
+    // Dual-bound run: the 1-iteration quota is fully claimed almost immediately
+    // (recording a tentative "iterations" end), but its released continuation
+    // outlasts the 60ms duration deadline — the deadline timer fires DURING the
+    // drain and genuinely shapes the run's ending (closeImmediate). §7.4's
+    // priority (duration > iterations) requires "duration"; the pre-fix post-hoc
+    // reconstruction (`claimed >= iterations` → "iterations") misreported it.
+    const plan = loadRunner("dual-bound-drain-race", {
+      scenario: loadScenario("dual-bound-drain-race")
+        .step("submit", async (ctx) => {
+          await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+        })
+        .step("poll", async () => {
+          await new Promise((r) => setTimeout(r, 250)); // outlasts the 60ms deadline
+        })
+        .build(),
+      concurrency: 1,
+      iterations: 1,
+      duration: "60ms",
+      continuation: { drainTimeout: "500ms" }, // drain waits past the deadline
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.endReason).toBe("duration");
+  });
+
+  it("records endReason 'iterations' for a dual-bound run whose quota completes before the deadline ever fires", async () => {
+    // Same dual-bound shape, but the run (and its trivial drain) finishes well
+    // before the generous deadline — the timer is cleared without firing, so the
+    // recorded trigger stays the quota completion.
+    const plan = loadRunner("dual-bound-quota-first", {
+      scenario: loadScenario("dual-bound-quota-first").step("noop", async () => {}).build(),
+      concurrency: 1,
+      iterations: 2,
+      duration: "10s", // never reached
+    });
+    const art = await runLoad(plan);
+    expect(art.summary.endReason).toBe("iterations");
   });
 });
 

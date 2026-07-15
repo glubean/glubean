@@ -117,7 +117,7 @@ describe("runLoadFileInSubprocess", () => {
     expect(errors).toEqual([]);
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0].runnerId).toBe("ping-plan");
-    expect(outcomes[0].artifact.schemaVersion).toBe("glubean.load.v1");
+    expect(outcomes[0].artifact.schemaVersion).toBe("glubean.load.v2");
     expect(outcomes[0].artifact.summary.totalIterations).toBe(4);
     expect(outcomes[0].artifact.summary.successfulIterations).toBe(4);
     expect(outcomes[0].artifact.summary.pass).toBe(true);

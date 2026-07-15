@@ -112,7 +112,7 @@ describe("runLoadIteration — single iteration through the engine core", () => 
     expect(out.result?.status).toBe("ok");
 
     const art = reducer.finalize();
-    expect(art.schemaVersion).toBe("glubean.load.v1");
+    expect(art.schemaVersion).toBe("glubean.load.v2");
     expect(art.runMode).toBe("load");
 
     // Iteration / scenario aggregates.

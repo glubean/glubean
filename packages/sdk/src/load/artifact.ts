@@ -1,5 +1,5 @@
 /**
- * `glubean.load.v1` — the versioned load report artifact.
+ * `glubean.load.v2` — the versioned load report artifact.
  *
  * This is the stable boundary the CLI / Cloud read. `LoadEvent` (runtime fact
  * stream, M3) and external-engine native files are only inputs that produce a
@@ -9,6 +9,21 @@
  *   - scenario / step (which transaction step is slow or failing under load)
  *   - endpoint (which endpoint's p95/p99/errorRate degrades)
  *   - matrix (which endpoint inside which step)
+ *
+ * VERSION HISTORY — `schemaVersion`:
+ *   - `glubean.load.v1` — the original artifact. Readers treat a v1 artifact as
+ *     "none of the v2 fields are present".
+ *   - `glubean.load.v2` — the distributed-execution field set (proposal §11):
+ *     `summary.executionStatus`, `summary.endReason`, threshold tri-state
+ *     (`status`/`reason`/`quantileBounds`), `peakInFlightBounds` + contributor
+ *     masks, sample `completedAtOffsetMs`, `config.rngSeed`,
+ *     `runtime.execution`, `LoadErrorKind: "feederExhausted"`, `processModel:
+ *     "sharded-multi-process"`. Every v2 addition is OPTIONAL and conservative
+ *     (§11.1): a v1-era reader that ignores unknown fields can never turn a
+ *     failing run green — per-gate `pass` semantics are unchanged, unevaluable
+ *     gates still carry `pass: false`, and the one deliberate `summary.pass`
+ *     semantics change TIGHTENS it (§7.4: aborted / never-terminated runs are
+ *     now always `false` — red in every reader, never green).
  */
 import type { LoadMetricKind } from "./metrics.js";
 
@@ -83,7 +98,14 @@ export type LoadErrorKind =
   | "teardownError"
   | "continuationBacklogFull"
   | "aborted"
-  | "runnerCrash";
+  | "runnerCrash"
+  /** FRAMEWORK-side data exhaustion, not a SUT error: a feeder ran out of rows
+   *  under the `fail` exhaustion policy, so the iteration failed at setup without
+   *  ever touching the system under test. Single-machine emits it when a
+   *  `fail`-policy feeder draw returns `exhausted`; a D1 distributed run uses the
+   *  same kind when a worker's feeder SEGMENT runs dry, so cross-worker failure
+   *  attribution separates "we ran out of test data" from real SUT failures. */
+  | "feederExhausted";
 
 /** Continuation (bounded-open) subsystem summary (present when producer release is used). */
 export interface LoadContinuationSummary {
@@ -173,9 +195,9 @@ export interface ThresholdEvaluation {
    *  (see the iron rule in the interface doc — old consumers must never show green). */
   pass: boolean;
   /** `"evaluated"` — `pass` is a real verdict; `"unevaluable"` — the gate could not be
-   *  decided (`pass` is forced `false`; `reason` says why). OPTIONAL because the schema
-   *  is still `glubean.load.v1` and pre-tri-state artifacts carry no such field: a
-   *  missing `status` MUST be read as `"evaluated"` (the only semantics those rows ever
+   *  decided (`pass` is forced `false`; `reason` says why). OPTIONAL because
+   *  `glubean.load.v1` (pre-tri-state) artifacts carry no such field: a missing
+   *  `status` MUST be read as `"evaluated"` (the only semantics those rows ever
    *  had). Every evaluation THIS version writes sets it explicitly. */
   status?: "evaluated" | "unevaluable";
   /** Why the gate was unevaluable — REQUIRED when `status === "unevaluable"`. Current
@@ -374,10 +396,9 @@ export interface LoadTimelineWindow {
    *  did not observe this window at all (lost earlier) and its in-flight contribution is
    *  unbounded — the interval then covers the observed sources only, NOT the true global
    *  concurrency. Always written by the current emitter; absent on artifacts produced
-   *  before this field existed — readers fall back to the `peakInFlight` scalar (= this
-   *  interval's upper). The schemaVersion bump for the v2 field set lands in D0-8, not
-   *  here (§11.1 conservative-superset strategy: optional fields + compat scalar first,
-   *  one version bump at the end). */
+   *  before this field existed (`glubean.load.v1`) — readers fall back to the
+   *  `peakInFlight` scalar (= this interval's upper; §11.1 conservative-superset
+   *  strategy: optional field + compat scalar). */
   peakInFlightBounds?: { lower: number; upper: number };
   /** Iterations counted into `iterations` whose real completion was never observed: a lost
    *  source's still-in-flight starts are closed at its observation-cutoff window so the
@@ -447,13 +468,220 @@ export interface LoadArtifactConfig {
   };
 }
 
+/** Why a load run (or one worker of it) ended. Global full-order priority when
+ *  reasons compete (§7.4): `crash > abort > duration > iterations`. */
+export type LoadEndReason = "duration" | "iterations" | "abort" | "crash";
+
+/** An instant on the COORDINATOR's monotonic clock (ms), domain-tagged so a bare
+ *  number can never be mistaken for an epoch/worker-local time (proposal §5.1/§8).
+ *  All cross-worker instants in `LoadExecutionReport` use this domain — workers'
+ *  local clocks are mapped onto it via the clock handshake. */
+export interface LoadCoordTime {
+  domain: "coordMono";
+  ms: number;
+}
+
+/** Iteration-index ownership of one worker's shard — the same union the D1
+ *  coordinator's assign message uses (proposal §5.1):
+ *  - `range` — iterations-bounded run: this worker owns `[start, end)`; the union
+ *    of all workers' ranges is exactly `[0, N)`.
+ *  - `stride` — duration-only run: this worker owns `offset, offset+step, …`
+ *    (single-machine wrapping is the explicit `{ offset: 0, step: 1 }`, not an
+ *    undefined range). Only disjointness and the `it-${index}` shape are promised. */
+export type LoadShardIterationIndexes =
+  | { kind: "range"; start: number; end: number }
+  | { kind: "stride"; offset: number; step: number };
+
+/** Why one worker's participation ended — finer-grained than its `endReason`
+ *  (§7.4/§10): `normal` (ran to its own end), `abort` (coordinator-broadcast
+ *  abort), `no-progress` (wedged past its known deadline), `lease-expired`
+ *  (agent lease ran out), `channel-lost` (control channel dropped),
+ *  `coordinator-lost` (worker outlived a silent coordinator past the lease TTL),
+ *  `crash` (worker process died), `invalid-snapshot` (a protocol/schema-invalid
+ *  snapshot frame → the worker is judged lost; its last VALID snapshot still
+ *  counts, censored — §7.4). */
+export type LoadWorkerTerminationCause =
+  | "normal"
+  | "abort"
+  | "no-progress"
+  | "lease-expired"
+  | "channel-lost"
+  | "coordinator-lost"
+  | "crash"
+  | "invalid-snapshot";
+
+/** A worker's crash record in the execution block. Deliberately NOT
+ *  `LoadCrashSummary`: that shape's `atMs` is a bare number (its single-machine
+ *  run-offset semantics are a pre-v2 contract readers rely on), which is
+ *  ambiguous across workers — run offset? worker-local? epoch? Here the instant
+ *  is domain-tagged coordinator time, like every cross-worker instant in this
+ *  block. D1 fills it. */
+export interface LoadExecutionWorkerCrash {
+  /** What killed the worker (same classification as `LoadCrashSummary.kind`). */
+  cause: LoadCrashSummary["kind"];
+  message: string;
+  /** When it crashed, on the coordinator clock. Absent when the instant could
+   *  not be mapped (e.g. the worker died before its clock handshake). */
+  at?: LoadCoordTime;
+}
+
+/** One calibrated segment of a worker's clock mapping onto the coordinator clock
+ *  (§8): during `[from, to)` the worker's monotonic clock maps with `offsetMs`
+ *  (± `uncertaintyMs`). Slope is fixed at 1; re-syncs open a new segment. */
+export interface LoadExecutionClockSegment {
+  from: LoadCoordTime;
+  /** Open-ended (still current at run end) when absent. */
+  to?: LoadCoordTime;
+  offsetMs: number;
+  uncertaintyMs: number;
+}
+
+/** How much of the PLANNED run the merged result actually covers (§7.4) — the
+ *  quantitative backing for `summary.executionStatus`. */
+export interface LoadExecutionCoverage {
+  /** Workers that delivered a final-state snapshot. */
+  workersFinal: number;
+  workersExpected: number;
+  /** Producer-slot busy seconds actually observed across workers. */
+  slotSecondsAchieved: number;
+  /** Planned slot-seconds; absent when the plan has no fixed duration bound. */
+  slotSecondsExpected?: number;
+  /** Iterations-bounded runs only. */
+  iterationsCompleted?: number;
+  iterationsExpected?: number;
+  /** Window-level conformance summary (§6.2): the worst window's conformance and
+   *  how many windows fell below the gate threshold. */
+  conformance?: { min: number; belowThresholdWindows: number };
+  /** Latest coordinator-clock instant up to which EVERY merge contributor was
+   *  observed — data past it is censored for at least one lost worker. */
+  observedUntil?: LoadCoordTime;
+}
+
+/** Per-feeder delivery accounting across the run (§6.5): rows attempted/served,
+ *  framework-side failures (exhausted segments under `fail`), skipped draws, and
+ *  rows left unused. `perWorker` breaks the same counters down by worker. */
+export interface LoadExecutionFeederSummary {
+  /** Canonical feeder-slot id (the same identity the keyed RNG streams use). */
+  feederSlotId: string;
+  attempted: number;
+  served: number;
+  /** Draws that failed on the FRAMEWORK side (segment exhausted under `fail`) —
+   *  these surface as `feederExhausted` iterations, not SUT errors. */
+  frameworkFailed: number;
+  skipped: number;
+  unusedRows: number;
+  perWorker?: Array<{
+    workerId: string;
+    attempted: number;
+    served: number;
+    frameworkFailed: number;
+    skipped: number;
+    /** Rows of THIS worker's feeder segment left unused (same semantics as the
+     *  top-level `unusedRows`) — separates shard skew (one segment exhausted
+     *  while another sat on spare rows) from run-wide waste. D1 fills it. */
+    unusedRows?: number;
+  }>;
+}
+
+/** One worker's participation record (D1 emits one per worker; a single-machine
+ *  run omits the array — its one implicit worker is the process itself). */
+export interface LoadExecutionWorker {
+  id: string;
+  /** Remote provider only. */
+  host?: string;
+  /** The shard this worker owned (assign₁, §5.1). */
+  shard: {
+    /** First global producer-slot index of this worker's contiguous slot block. */
+    slotIndexBase: number;
+    slotCount: number;
+    iterationIndexes: LoadShardIterationIndexes;
+    /** Iteration quota for an iterations-bounded shard. */
+    iterations?: number;
+  };
+  /** Clock mapping onto the coordinator clock (§8). Remote workers REQUIRED;
+   *  multi-core may omit (IPC handshake uncertainty is negligible). */
+  clock?: {
+    segments: LoadExecutionClockSegment[];
+    /** Assumed max drift (ppm) used in the uncertainty budget. */
+    driftBoundPpm: number;
+    /** Measured drift, when the run was long enough to estimate one. */
+    driftPpmMeasured?: number;
+  };
+  /** How late past its absolute `startAt + rampDelay` instant this worker's first
+   *  slot actually started (§5.1). */
+  startLatenessMs?: number;
+  /** Set when this worker began load BEFORE a failed global commit was resolved —
+   *  the run records `partialStart` (§10). */
+  crossedStartAt?: LoadCoordTime;
+  /** This worker's continuation slice (conserved split of the run's quota, §5.1). */
+  continuation?: { quota: number; backpressureHits: number };
+  endReason: LoadEndReason;
+  /** REQUIRED for any non-normal ending; may be omitted for a clean `normal` end. */
+  terminationCause?: LoadWorkerTerminationCause;
+  /** Present when this worker crashed (see `LoadExecutionWorkerCrash` — its
+   *  instant is coordinator-clock, unlike the top-level `runtime.crash`). */
+  crash?: LoadExecutionWorkerCrash;
+  /** Where this worker's observed contribution was censored (lost workers, §7.3):
+   *  its data counts only up to here. */
+  observationCutoff?: LoadCoordTime;
+  /** Sequence number of the last VALID snapshot frame merged from this worker. */
+  lastSnapshotSeq?: number;
+}
+
+/**
+ * Execution-layer provenance for the run (proposal §11 — schema v2).
+ *
+ * WHO ran the plan and HOW COMPLETELY, as opposed to `config` (what was asked)
+ * and `summary` (what was measured). A single-machine run writes the minimal
+ * `{ provider: "in-process", workerCount: 1 }`; the D1 coordinator fills the
+ * full block (coverage / workers / feeders are CONDITIONALLY REQUIRED there —
+ * optional at the type level only because single-machine and v1 artifacts omit
+ * them). Absent entirely on artifacts produced before schema v2.
+ */
+export interface LoadExecutionReport {
+  /** `in-process` — single-machine `runLoad` (this process ran every slot);
+   *  `multi-core` / `remote` — D1 sharded providers. */
+  provider: "in-process" | "multi-core" | "remote";
+  /** Number of workers that participated (1 for in-process). */
+  workerCount: number;
+  /** Root RNG seed, REDUNDANT COPY: `config.rngSeed` is the authoritative record
+   *  (and the replay input); D1 repeats it here so the execution block is
+   *  self-contained for shard-level debugging. Single-machine omits it. */
+  rngSeed?: string;
+  /** Control-channel protocol version negotiated at enroll (§4). D1 only. */
+  protocolVersion?: string;
+  /** Digest of the workload manifest every worker verified before arming (§4).
+   *  Remote REQUIRED; multi-core may omit in D1 (§12). */
+  manifestDigest?: string;
+  /** Digest of the resolved plan (post-resolution canonical form). Remote
+   *  REQUIRED; multi-core may omit in D1 (§12). */
+  resolvedPlanDigest?: string;
+  /** REQUIRED for D1 multi-worker runs; the data behind `executionStatus`. */
+  coverage?: LoadExecutionCoverage;
+  /** True when some workers began load before a failed commit round resolved
+   *  (§10) — their head segment ran without full-quorum confirmation. */
+  partialStart?: boolean;
+  /** Human-readable execution notes (degradations, retries, clock re-syncs). */
+  notes?: string[];
+  /** Per-feeder delivery accounting. D1 emits it whenever feeders are used. */
+  feeders?: LoadExecutionFeederSummary[];
+  /** Per-worker participation records. REQUIRED for D1 multi-worker runs. */
+  workers?: LoadExecutionWorker[];
+}
+
 /** Runtime / engine provenance + saturation signals. */
 export interface LoadArtifactRuntime {
   engine: "local" | "k6" | "jmeter" | "custom";
   engineVersion?: string;
   adapterName?: string;
   adapterVersion?: string;
-  processModel: "single-process-async-producer-slot" | "external-engine" | "distributed-adapter";
+  /** `sharded-multi-process` — a D1 coordinator-merged run (multi-core or remote
+   *  workers); the other values are the single-process / adapter models. */
+  processModel:
+    | "single-process-async-producer-slot"
+    | "external-engine"
+    | "distributed-adapter"
+    | "sharded-multi-process";
   executionModel: "closed-back-to-back" | "closed-paced";
   slotModel: "end-to-end" | "end-to-end-measured" | "producer-released";
   requestedConcurrency: number;
@@ -466,6 +694,10 @@ export interface LoadArtifactRuntime {
   attribution: LoadAttributionReport;
   percentileSource: "glubean-reducer" | "engine-summary" | "adapter-computed" | "mixed";
   crash?: LoadCrashSummary;
+  /** Execution-layer provenance (schema v2, §11): who ran the plan and how
+   *  completely. Single-machine writes the minimal in-process block; the D1
+   *  coordinator fills coverage / workers / feeders. Absent on v1 artifacts. */
+  execution?: LoadExecutionReport;
 }
 
 /** One folded series of a custom metric: the aggregate for a single observed
@@ -505,9 +737,52 @@ export interface LoadCustomMetric {
   seriesTruncated?: boolean;
 }
 
+/**
+ * Data-completeness of the run's merged result — PURE data integrity, not a
+ * verdict (§7.4). Orthogonal to `pass` (the verdict) and `endReason` (why the
+ * run stopped):
+ *   - `"complete"` — every worker delivered its final-state snapshot (including
+ *     an abort whose workers still drained and delivered normally). A crashed
+ *     or aborted single-machine run is still `"complete"` — its one reducer IS
+ *     the final state; the failure lives in `pass` / `endReason` / `crash`.
+ *   - `"partial"` — ≥1 worker contributed usable data but never delivered a
+ *     final state (lost / censored / judged lost on an invalid snapshot — the
+ *     rejected FRAME is dropped, not the run; a worker with no valid snapshot
+ *     at all counts as a zero-contribution loss). Partial data produces
+ *     informational numbers only, never a pass.
+ *   - `"failed"` — post-start, no usable merged result at all. (Pre-start
+ *     failures — join timeout / manifest mismatch / commit-ACK failure — never
+ *     produce a `LoadArtifact`; the CLI reports the error directly.)
+ * `pass` REQUIRES `complete` (plus endReason ∈ {duration, iterations}, no
+ * worker crash, and every gate evaluated and passing).
+ */
+export type LoadExecutionStatus = "complete" | "partial" | "failed";
+
 /** Top-level summary (compatibility end-to-end fields + phase splits + thresholds). */
 export interface LoadArtifactSummary {
+  /** The run verdict. §7.4 NECESSARY conditions: `endReason` ∈ {`"duration"`,
+   *  `"iterations"`} AND no crash AND every configured gate evaluated and
+   *  passing (an `unevaluable` gate carries `pass: false`, so it fails this).
+   *  An aborted run — and a run that never terminated cleanly (no `endReason`)
+   *  — is therefore ALWAYS `false`. */
   pass: boolean;
+  /** Why the run ended (schema v2, §7.4). Global full-order priority when
+   *  reasons compete: `crash > abort > duration > iterations` (concurrent
+   *  instants are ordered by the coordinator's monotonic clock, so a
+   *  disconnect-vs-deadline race doesn't depend on scheduling). The v2 emitter
+   *  always writes it when the run terminated; ABSENT means the run never
+   *  terminated cleanly (finalized without a `load:end` — e.g. a snapshot-merge
+   *  artifact from a lost worker) or the artifact predates v2. Per-worker
+   *  endReason/terminationCause live in `runtime.execution.workers`. */
+  endReason?: LoadEndReason;
+  /** Data-completeness of this artifact (§7.4 — see `LoadExecutionStatus`).
+   *  Single-machine `runLoad` always writes `"complete"`; `"partial"`/`"failed"`
+   *  are judged and written by the D1 coordinator. Absent on v1 artifacts —
+   *  readers treat a missing value as `"complete"` (the only semantics a
+   *  single-machine artifact ever had). CONSERVATIVE (§11.1): when the status is
+   *  not `"complete"`, `pass` is ALWAYS false (§7.4's pass precondition), so a
+   *  pre-v2 reader that ignores this field still shows the run red. */
+  executionStatus?: LoadExecutionStatus;
   /** Compatibility alias for endToEnd.completed. */
   totalIterations: number;
   successfulIterations: number;
@@ -541,7 +816,12 @@ export interface LoadArtifactSamples {
 
 /** The complete versioned load report artifact. */
 export interface LoadArtifact {
-  schemaVersion: "glubean.load.v1";
+  /** `"glubean.load.v2"` is what current emitters write. `"glubean.load.v1"`
+   *  stays in the union for READERS: a v1 artifact (produced before the v2
+   *  field set) is a valid `LoadArtifact` with none of the v2 optional fields
+   *  present — see the version history in this file's header. Readers accept
+   *  both; they must not reject v1. */
+  schemaVersion: "glubean.load.v1" | "glubean.load.v2";
   runnerId: string;
   runMode: "load";
   startedAt: string;

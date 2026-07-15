@@ -110,7 +110,9 @@ export interface RunIngestMetric {
  */
 export interface UploadRunInput {
   kind: RunKind;
-  /** Payload schema version: "glubean.test.v1" | "glubean.load.v1". */
+  /** Payload schema version: "glubean.test.v1" | "glubean.load.v2" (older CLIs
+   *  sent "glubean.load.v1"). Forwarded opaquely — the server stores the result
+   *  blob without validating its internal structure (§11.1). */
   schemaVersion: string;
   status: RunStatus;
   /** ISO. */

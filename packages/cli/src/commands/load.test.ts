@@ -388,3 +388,147 @@ describe("printOutcome — tri-state thresholds (D0-T5)", () => {
     expect(out).toMatch(/✓.*transaction\.p95 <800ms \(actual 120\)/);
   });
 });
+
+describe("printOutcome — executionStatus display (D0-8, schema v2 §7.4)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const pct = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
+  const outcome = (over: {
+    executionStatus?: string;
+    endReason?: string;
+    pass?: boolean;
+    execution?: unknown;
+    crash?: unknown;
+  }): LoadRunOutcome =>
+    ({
+      runnerId: "sharded",
+      artifact: {
+        runtime: {
+          slotModel: "end-to-end",
+          ...(over.execution !== undefined ? { execution: over.execution } : {}),
+          ...(over.crash !== undefined ? { crash: over.crash } : {}),
+        },
+        summary: {
+          pass: over.pass ?? false,
+          totalIterations: 10,
+          successfulIterations: 8,
+          failedIterations: 2,
+          errorRate: 0.2,
+          throughputPerSec: 5,
+          latency: { ...pct, p95: 120 },
+          thresholds: [],
+          ...(over.executionStatus !== undefined ? { executionStatus: over.executionStatus } : {}),
+          ...(over.endReason !== undefined ? { endReason: over.endReason } : {}),
+        },
+      },
+    }) as unknown as LoadRunOutcome;
+
+  it("prints a prominent PARTIAL DATA warning with the coverage summary", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome({
+        executionStatus: "partial",
+        execution: {
+          provider: "multi-core",
+          workerCount: 4,
+          coverage: {
+            workersFinal: 3,
+            workersExpected: 4,
+            slotSecondsAchieved: 92.5,
+            slotSecondsExpected: 120,
+            iterationsCompleted: 700,
+            iterationsExpected: 1000,
+          },
+        },
+      }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/PARTIAL DATA/);
+    expect(out).toMatch(/informational only/);
+    expect(out).toMatch(/workers 3\/4 final/);
+    expect(out).toMatch(/slot-seconds 92\.5\/120\.0s/);
+    expect(out).toMatch(/iterations 700\/1000/);
+  });
+
+  it("prints the PARTIAL DATA warning even without a coverage block", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({ executionStatus: "partial" }));
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/PARTIAL DATA/);
+    expect(out).not.toMatch(/coverage:/);
+  });
+
+  it("renders an absent iterationsCompleted as unknown, never 0/N (a lost counter is not zero completions)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome({
+        executionStatus: "partial",
+        execution: {
+          provider: "multi-core",
+          workerCount: 4,
+          coverage: {
+            workersFinal: 3,
+            workersExpected: 4,
+            slotSecondsAchieved: 92.5,
+            iterationsExpected: 1000, // expected known, completed UNKNOWN (absent)
+          },
+        },
+      }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/iterations unknown\/1000/);
+    expect(out).not.toMatch(/iterations 0\//);
+  });
+
+  it("prints an EXECUTION FAILED line for a failed status and SKIPS all metric rendering (placeholder numbers must not read as measurements)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome({
+        executionStatus: "failed",
+      }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/EXECUTION FAILED/);
+    expect(out).toMatch(/no usable merged result/);
+    // No metric lines after the error: iterations/errorRate/p95/throughput are
+    // placeholders on a failed run, not measurements.
+    expect(out).not.toMatch(/iterations 10/);
+    expect(out).not.toMatch(/p95/);
+    expect(out).not.toMatch(/throughput/);
+  });
+
+  it("prints NOTHING extra for a complete run — and for a pre-v2 artifact with no status (zero noise on the single-machine path)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({ executionStatus: "complete", pass: true }));
+    printOutcome(outcome({ pass: true })); // pre-v2: no executionStatus field at all
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).not.toMatch(/PARTIAL DATA/);
+    expect(out).not.toMatch(/EXECUTION FAILED/);
+  });
+
+  it("surfaces an abnormal endReason: abort → warning line, crash → error line with the crash summary (§7.4)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({ executionStatus: "complete", endReason: "abort" }));
+    printOutcome(
+      outcome({
+        executionStatus: "complete",
+        endReason: "crash",
+        crash: { kind: "unhandledRejection", message: "boom", atMs: 10 },
+      }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/run aborted before completing \(endReason: abort\)/);
+    expect(out).toMatch(/run crashed \(endReason: crash\) — unhandledRejection: boom/);
+  });
+
+  it("prints NO endReason line for a normal duration/iterations end — or a pre-v2 artifact with no endReason", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({ executionStatus: "complete", pass: true, endReason: "duration" }));
+    printOutcome(outcome({ executionStatus: "complete", pass: true, endReason: "iterations" }));
+    printOutcome(outcome({ pass: true })); // pre-v2: no endReason field at all
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).not.toMatch(/run aborted/);
+    expect(out).not.toMatch(/run crashed/);
+    expect(out).not.toMatch(/endReason/);
+  });
+});

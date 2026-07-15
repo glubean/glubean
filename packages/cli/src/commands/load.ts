@@ -249,6 +249,59 @@ export function printOutcome(o: LoadRunOutcome): void {
     ? `${colors.green}PASS${colors.reset}`
     : `${colors.red}FAIL${colors.reset}`;
   console.log(`${colors.bold}${o.runnerId}${colors.reset}  ${verdict}`);
+  // Abnormal end reason (schema v2, §7.4): a run ending by duration/iterations
+  // is the normal case and prints nothing; abort/crash get a line (pass is
+  // already false for both — §7.4's necessary conditions). Absent endReason on
+  // a pre-v2 artifact also prints nothing (unknowable).
+  if (s.endReason === "abort") {
+    console.log(
+      `${colors.yellow}  ⚠ run aborted before completing (endReason: abort) — pass requires a` +
+        ` duration/iterations end${colors.reset}`,
+    );
+  } else if (s.endReason === "crash") {
+    const crash = o.artifact.runtime.crash;
+    console.log(
+      `${colors.red}  ✗ run crashed (endReason: crash)${crash ? ` — ${crash.kind}: ${crash.message}` : ""}${colors.reset}`,
+    );
+  }
+  // Data completeness (schema v2, §7.4). Single-machine runs are always
+  // "complete" (and pre-v2 artifacts carry no field — same semantics), so this
+  // prints NOTHING on the normal path; "partial"/"failed" are D1 coordinator
+  // judgments and get a prominent line — partial numbers are informational
+  // only, never a verdict basis.
+  if (s.executionStatus === "partial") {
+    console.log(
+      `${colors.yellow}  ⚠ PARTIAL DATA — ≥1 worker was lost before its final snapshot;` +
+        ` the numbers below are informational only (no pass verdict)${colors.reset}`,
+    );
+    const cov = o.artifact.runtime.execution?.coverage;
+    if (cov) {
+      const slotSec =
+        cov.slotSecondsExpected !== undefined
+          ? `${cov.slotSecondsAchieved.toFixed(1)}/${cov.slotSecondsExpected.toFixed(1)}s`
+          : `${cov.slotSecondsAchieved.toFixed(1)}s`;
+      // An absent iterationsCompleted is UNKNOWN, not zero — rendering `0/N`
+      // would falsely report "nothing completed" on a run that merely lost the
+      // counter (same ratio form as the adjacent workers/slot-seconds items).
+      const iters =
+        cov.iterationsExpected !== undefined
+          ? `  iterations ${cov.iterationsCompleted ?? "unknown"}/${cov.iterationsExpected}`
+          : "";
+      console.log(
+        `${colors.yellow}    coverage: workers ${cov.workersFinal}/${cov.workersExpected} final` +
+          `  slot-seconds ${slotSec}${iters}${colors.reset}`,
+      );
+    }
+  } else if (s.executionStatus === "failed") {
+    console.log(
+      `${colors.red}  ✗ EXECUTION FAILED — no usable merged result (post-start);` +
+        ` the run produced no trustworthy data${colors.reset}`,
+    );
+    // A failed run's aggregate fields are placeholders, not measurements —
+    // printing iterations/latency/thresholds under the error line would imply
+    // they mean something. Stop here.
+    return;
+  }
   console.log(
     `${colors.dim}  iterations ${s.totalIterations} (ok ${s.successfulIterations}, failed ${s.failedIterations})` +
       `  errorRate ${pct(s.errorRate)}  p95 ${Math.round(s.latency.p95)}ms` +

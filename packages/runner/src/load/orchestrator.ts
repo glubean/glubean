@@ -23,6 +23,7 @@ import type {
   LoadArtifact,
   LoadArtifactConfig,
   LoadEndReason,
+  LoadErrorKind,
   LoadMixConfig,
   LoadPlan,
   LoadResolvedConfig,
@@ -529,6 +530,9 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // resolved at once, so a slot never overruns the bound (late ramped slots that
   // will claim nothing, or a think-time after the final iteration, wake instantly).
   let ended = false;
+  // The ACTUAL end trigger, recorded AT the termination event (§7.4: endReason is
+  // never reconstructed post-hoc). Set by markEnded below; read once at load:end.
+  let recordedEndReason: LoadEndReason | undefined;
   const activeWaiters = new Map<ReturnType<typeof setTimeout>, () => void>();
   // The wall-clock (duration) deadline `closeImmediate()`s the pool: every parked
   // producer is cancelled at once (the run's hard bound is up) and any later park is
@@ -548,6 +552,15 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       }
       activeWaiters.clear();
     }
+    // Record the trigger (§7.4 priority: duration > iterations). A quota end
+    // records "iterations" once; the wall-clock deadline firing at ANY point while
+    // the run is still winding down — including MID-DRAIN, since the timer is only
+    // cleared after the drain completes — records "duration", overriding an
+    // earlier quota end: in a dual-bound run whose deadline cut the drain short,
+    // the duration bound genuinely shaped the run's ending, so reconstructing
+    // "iterations" from `claimed >= iterations` after the fact would misreport it.
+    if (wallClockUp) recordedEndReason = "duration";
+    else if (recordedEndReason === undefined) recordedEndReason = "iterations";
     if (wallClockUp) continuationPool.closeImmediate();
   };
   // A duration deadline timer wakes ramp/think waiters at the bound even if no slot
@@ -641,12 +654,15 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       };
     };
 
-    const failSetup = (): "failed" => {
+    const failSetup = (errorKind: LoadErrorKind = "setupError"): "failed" => {
       // A setup-time failure (feeder exhausted / input threw) still counts as a
-      // started+failed iteration so the artifact reflects it.
+      // started+failed iteration so the artifact reflects it. A `fail`-policy
+      // feeder exhaustion is attributed `feederExhausted` (schema v2): the
+      // FRAMEWORK ran out of data — not a SUT error, and not the same signal as
+      // a throwing feeder/input fn (those stay `setupError`).
       sink.beginIteration(envelope);
       sink.emitIterationStart(envelope, {});
-      sink.emitIterationEnd(envelope, { ok: false, durationMs: 0, errorKind: "setupError" });
+      sink.emitIterationEnd(envelope, { ok: false, durationMs: 0, errorKind });
       sink.endIteration(iterationId);
       return "failed";
     };
@@ -671,7 +687,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
           skipped = true;
           break;
         } else {
-          return failSetup(); // exhausted (fail policy)
+          return failSetup("feederExhausted"); // exhausted (fail policy) — framework data ran out
         }
       }
       if (skipped) return "skip";
@@ -775,8 +791,12 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     runAbort.abort();
   }
 
-  const endReason: LoadEndReason =
-    iterations !== undefined && claimed >= iterations ? "iterations" : durationMs !== undefined ? "duration" : "iterations";
+  // The reason recorded AT the actual termination event (markEnded), not a post-hoc
+  // reconstruction — `claimed >= iterations` alone can't tell a pure quota end from a
+  // dual-bound run whose duration deadline fired mid-drain (§7.4: duration wins then).
+  // The fallback is defensive only: every path that ends the run goes through
+  // markEnded, so a finished run always has a recorded reason.
+  const endReason: LoadEndReason = recordedEndReason ?? (durationMs !== undefined ? "duration" : "iterations");
   sink.emitLoadEnd(endReason);
   // Seal the sink so a continuation the drain timeout abandoned can't emit into the
   // reducer after the artifact is built. The `runAbort.abort()` above already cancelled

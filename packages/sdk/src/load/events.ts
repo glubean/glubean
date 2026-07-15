@@ -10,8 +10,13 @@
  * The implementation (LoadReducer, sink, orchestrator) lives in @glubean/runner;
  * this is the type contract those modules and external-engine adapters share.
  */
-import type { LoadArtifactConfig, LoadCrashSummary, LoadErrorKind } from "./artifact.js";
+import type { LoadArtifactConfig, LoadCrashSummary, LoadEndReason, LoadErrorKind } from "./artifact.js";
 import type { LoadMetricKind } from "./metrics.js";
+
+// Historically defined here; moved to artifact.js in schema v2 (the execution
+// block's per-worker `endReason` needs it on the artifact boundary). Re-exported
+// so existing `from "./events.js"` imports keep working.
+export type { LoadEndReason } from "./artifact.js";
 
 /** Resolved (ms-normalized) config emitted on `load:start`. */
 export type LoadResolvedConfig = LoadArtifactConfig;
@@ -35,9 +40,6 @@ export interface LoadEventEnvelope {
    */
   phase?: "primary" | "continuation";
 }
-
-/** Why a load run ended. */
-export type LoadEndReason = "duration" | "iterations" | "abort" | "crash";
 
 /** routeKey provenance for an observed request. */
 export type LoadRouteKeySource = "explicit" | "catalog" | "contract-metadata" | "normalized-url";

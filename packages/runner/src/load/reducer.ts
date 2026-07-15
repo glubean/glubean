@@ -638,7 +638,13 @@ export class LoadReducerImpl implements LoadReducer {
         : rawTimeline;
 
     return {
-      schemaVersion: "glubean.load.v1",
+      // Release-order constraint: cloud platform-api KNOWN_VERSIONS must whitelist
+      // glubean.load.v2 (deployed) BEFORE this ships in an OSS release — the run
+      // ingest rejects unknown versions with 400 unsupported_schema_version, so
+      // `glubean load --upload` would fail loudly until then. See the internal
+      // distributed-execution proposal §11.1. Cloud-side change tracked by
+      // orchestrator.
+      schemaVersion: "glubean.load.v2",
       runnerId: this.runnerId,
       runMode: "load",
       startedAt: new Date(startedAtMs).toISOString(),
@@ -673,10 +679,31 @@ export class LoadReducerImpl implements LoadReducer {
         attribution: this.attribution(anyHeuristicEndpoint),
         percentileSource: "glubean-reducer",
         ...(this.crash ? { crash: this.crash } : {}),
+        // Minimal execution-layer provenance (schema v2, §11): this process ran
+        // every slot. The D1 coordinator fills the full block (coverage/workers).
+        execution: { provider: "in-process", workerCount: 1 },
       },
       summary: {
-        // M4 evaluates thresholds and refines pass; here pass = "didn't crash".
-        pass: this.endReason !== "crash" && this.crash === undefined,
+        // §7.4 pass NECESSARY conditions (base verdict; the orchestrator then ANDs
+        // in "every gate evaluated and passing" via evaluateThresholds): endReason
+        // ∈ {duration, iterations} AND no crash. Abort → false; finalized without
+        // a load:end (endReason undefined — the run never terminated cleanly) →
+        // false. DELIBERATE v2 semantics change from the pre-v2 "didn't crash"
+        // rule: an aborted single-machine run could previously pass — now it never
+        // does (conservative direction: red, never green). Orthogonal to
+        // executionStatus below (data completeness, not a verdict).
+        pass:
+          (this.endReason === "duration" || this.endReason === "iterations") &&
+          this.crash === undefined,
+        // Why the run ended (§7.4 priority: crash > abort > duration > iterations).
+        // Omitted when no load:end was observed — "the run never terminated
+        // cleanly" — which the pass rule above already forces to false.
+        ...(this.endReason !== undefined ? { endReason: this.endReason } : {}),
+        // Data completeness (§7.4), NOT a verdict: single-machine, the reducer
+        // being finalized IS the run's one final state — always "complete", even
+        // for abort/crash (those live in pass/endReason/crash). "partial"/"failed"
+        // are D1 coordinator judgments.
+        executionStatus: "complete",
         totalIterations: this.iterCompleted,
         successfulIterations: this.iterSucceeded,
         failedIterations: this.iterFailed,

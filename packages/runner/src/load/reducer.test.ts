@@ -88,10 +88,14 @@ function feedCheckoutRun() {
 }
 
 describe("LoadReducer.finalize", () => {
-  it("assembles a glubean.load.v1 artifact from the event stream", () => {
+  it("assembles a glubean.load.v2 artifact from the event stream", () => {
     const art = feedCheckoutRun().finalize();
 
-    expect(art.schemaVersion).toBe("glubean.load.v1");
+    expect(art.schemaVersion).toBe("glubean.load.v2");
+    // Schema v2 (§7.4/§11): single-machine is ALWAYS data-complete, and the
+    // execution block carries the minimal in-process provenance.
+    expect(art.summary.executionStatus).toBe("complete");
+    expect(art.runtime.execution).toEqual({ provider: "in-process", workerCount: 1 });
     expect(art.runnerId).toBe("checkout-300");
     expect(art.runMode).toBe("load");
     expect(art.startedAt).toBe(new Date(T0).toISOString());
@@ -109,7 +113,8 @@ describe("LoadReducer.finalize", () => {
     expect(s.successfulIterations).toBe(1);
     expect(s.failedIterations).toBe(1);
     expect(s.errorRate).toBe(0.5);
-    expect(s.pass).toBe(true); // ended by duration, no crash
+    expect(s.pass).toBe(true); // ended by duration, no crash (§7.4 necessary conditions hold)
+    expect(s.endReason).toBe("duration"); // v2: the global end reason lands in the summary
     expect(s.thresholds).toEqual([]);
     expect(s.latency.max).toBe(200);
   });
@@ -186,8 +191,39 @@ describe("LoadReducer crash", () => {
     );
     const art = r.finalize();
     expect(art.summary.pass).toBe(false);
+    expect(art.summary.endReason).toBe("crash");
     expect(art.runtime.crash?.kind).toBe("unhandledRejection");
     expect(art.runtime.crash?.message).toBe("boom");
+  });
+});
+
+describe("LoadReducer — §7.4 pass necessary conditions (schema v2)", () => {
+  // pass REQUIRES endReason ∈ {duration, iterations} AND no crash (the gate
+  // condition is ANDed in later by evaluateThresholds). Deliberate v2 semantics
+  // change: pre-v2 pass was merely "didn't crash", so an aborted run could pass.
+
+  it("fails an aborted run — while executionStatus stays 'complete' (orthogonality: data completeness is not a verdict)", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1 } }));
+    r.apply(ev(T0 + 1, { type: "iteration:start", scenarioId: "c", iterationId: "i1" }));
+    r.apply(ev(T0 + 5, { type: "iteration:end", scenarioId: "c", iterationId: "i1", ok: true, durationMs: 4 }));
+    r.apply(ev(T0 + 10, { type: "load:end", reason: "abort" }));
+    const art = r.finalize();
+    expect(art.summary.pass).toBe(false); // abort ∉ {duration, iterations}
+    expect(art.summary.endReason).toBe("abort");
+    // The aborted run still delivered its (single-machine) final state in full.
+    expect(art.summary.executionStatus).toBe("complete");
+  });
+
+  it("fails a run finalized without a load:end (never terminated cleanly) — endReason omitted", () => {
+    const r = createLoadReducer();
+    r.apply(ev(T0, { type: "load:start", config: { concurrency: 1 } }));
+    r.apply(ev(T0 + 1, { type: "iteration:start", scenarioId: "c", iterationId: "i1" }));
+    r.apply(ev(T0 + 5, { type: "iteration:end", scenarioId: "c", iterationId: "i1", ok: true, durationMs: 4 }));
+    const art = r.finalize(); // no load:end observed
+    expect(art.summary.pass).toBe(false);
+    expect(art.summary.endReason).toBeUndefined(); // "run never terminated cleanly"
+    expect(art.summary.executionStatus).toBe("complete");
   });
 });
 
