@@ -47,28 +47,33 @@ if (typeof process.send !== "function") {
   process.exit(1);
 }
 
-// Capture the control channel's SEND handle, then REMOVE `process.send` from the process
-// global BEFORE any user code (the `.load.ts` and its libraries, imported in `handleAssign`)
-// runs. The harness keeps its private `sendRaw`; user code sees `process.send === undefined`,
-// so it cannot inject a control frame onto the coordinator's channel — and libraries that
-// auto-detect "am I a forked child?" via `process.send`/`process.connected` (some emit a
-// `process.send` on startup) now read "no IPC" and stay quiet.
+// Capture the control channel's SEND handle, then REPLACE `process.send` with a harmless
+// no-op FACADE BEFORE any user code (the `.load.ts` and its libraries, imported in
+// `handleAssign`) runs. The harness keeps its private `sendRaw`; user code's `process.send`
+// now returns `false` ("not delivered") and injects nothing onto the coordinator's channel.
+//
+// Why a callable `() => false` and NOT `undefined`: the legitimate, common
+// `if (process.connected) process.send(...)` pattern (fork-aware libraries) must not THROW.
+// With `undefined`, taking that branch calls `undefined(...)` and crashes the whole shard.
+// A no-op facade lets the branch run harmlessly — no throw, no injection, and `false` tells a
+// well-behaved caller its send did not go through.
+//
+// Why `process.connected` is deliberately LEFT `true`: it is the SAME property Node's internal
+// IPC `send` checks, so forcing it to `false` breaks the harness's OWN `sendRaw`
+// (`ERR_IPC_CHANNEL_CLOSED`) — verified empirically. Likewise `process.channel` stays in place:
+// nulling it tears down INBOUND delivery (Node gates `emit("message")` on `process.channel`),
+// so the harness would stop receiving `start`/`abort`/`heartbeat`. Inbound frames reach only
+// the harness's own `"message"` handler (attached below, before any user code).
 //
 // TRUST MODEL: isolation here is against ACCIDENTAL collision (a user file or library that
 // itself calls `process.send`), consistent with the cooperative same-version worker trust
-// model (D0). A determined adversary digging for the raw IPC fd is out of scope — a user
-// attacking their own coordinator is not a threat. This is the `process.send` analog of
-// moving control off the shared stdout `WIRE_PREFIX` (subprocess.ts).
-//
-// `process.channel` is deliberately LEFT in place: nulling it also tears down INBOUND
-// delivery (Node's internal message dispatch gates `emit("message")` on `process.channel`
-// being truthy — verified empirically), so the harness would stop receiving `start`/`abort`/
-// `heartbeat`. Inbound frames reach only the harness's own `"message"` handler (attached
-// below, before any user code); a library probing `process.channel` directly to snoop
-// inbound frames is the same out-of-scope adversarial case as fd-digging, and it still
-// cannot REPLY (its `process.send` is gone).
+// model (D0). A determined adversary digging for the raw IPC fd (or reading `process.channel`
+// directly to snoop inbound frames — which still cannot REPLY, since `process.send` no longer
+// delivers) is out of scope: a user attacking their own coordinator is not a threat. This is
+// the `process.send` analog of moving control off the shared stdout `WIRE_PREFIX`
+// (subprocess.ts).
 const sendRaw = process.send.bind(process);
-process.send = undefined;
+process.send = () => false;
 
 const { values: args } = parseArgs({
   args: process.argv.slice(2),

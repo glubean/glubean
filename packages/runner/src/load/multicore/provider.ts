@@ -159,8 +159,11 @@ const DEFAULT_JOIN_DEADLINE_MS = 60_000;
  * A {@link LoadWorkerChannel} backed by a forked child's IPC channel. Control frames ride
  * `process.send` / the `"message"` event; the child's stdout/stderr (user output) are
  * exposed but NEVER read as protocol — the structural guarantee behind §12 isolation.
+ *
+ * Exported for the D1-4 coordinator + supervision unit tests (which drive it with a stub
+ * `ChildProcess`); production callers construct it via {@link MultiCoreProvider.acquire}.
  */
-class IpcWorkerChannel implements LoadWorkerChannel {
+export class IpcWorkerChannel implements LoadWorkerChannel {
   readonly workerId: string;
   readonly pid: number;
   hello!: LoadWorkerHello;
@@ -201,7 +204,14 @@ class IpcWorkerChannel implements LoadWorkerChannel {
     child.on("exit", (code, signal) => settleClosed({ kind: "exit", code, signal }));
     child.on("error", (err) => {
       for (const cb of this.errorCbs) cb(err);
-      settleClosed({ kind: "error", error: err });
+      // ONLY a PRE-SPAWN failure — no pid was ever assigned (EMFILE / EAGAIN / a bad execPath) —
+      // never yields an `exit`, so synthesize the close here or `close()` / `awaitAllHellos`
+      // would wait forever. A post-spawn error on a LIVE process (it HAS a pid — e.g. an EPERM
+      // from `kill()`, or an IPC serialize error) must NOT be mistaken for an exit: the process
+      // is still running, so keep `_exited` false and the SIGKILL timer armed, and let the REAL
+      // `exit` (natural, or forced by `close()`'s SIGTERM→SIGKILL) settle it — otherwise the
+      // supervisor would skip termination and falsely report the worker reaped.
+      if (child.pid === undefined) settleClosed({ kind: "error", error: err });
     });
     child.on("message", (raw: unknown) => {
       let msg: WorkerMessage;
