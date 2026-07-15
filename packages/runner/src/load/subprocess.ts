@@ -127,6 +127,11 @@ export interface RunLoadFileResult {
   errors: LoadSubprocessError[];
 }
 
+/** Which execution provider the child harness drives each plan through (proposal §5).
+ *  Absent → the default single-process `in-process` path (`runLoad`); `multi-core` runs the
+ *  coordinator (`runLoadMultiCore`) which spawns `workerCount` worker child processes. */
+export type LoadProviderChoice = { kind: "in-process" } | { kind: "multi-core"; workerCount: number };
+
 /** Options for a single-file subprocess load run. */
 export interface RunLoadFileOptions {
   /** Resolved environment vars (raw — env fallback is applied in the child). */
@@ -135,6 +140,9 @@ export interface RunLoadFileOptions {
   secrets: Record<string, string>;
   /** Working dir for the child (the project root) — drives runner resolution. */
   cwd: string;
+  /** Execution provider (default: in-process). For `multi-core`, the child harness runs the
+   *  coordinator + spawns workers; the parent side (WIRE / artifact collection) is unchanged. */
+  provider?: LoadProviderChoice;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -202,7 +210,14 @@ export async function runLoadFileInSubprocess(
   const zp = prepareZeroProject(cwd, distDir, pkgRoot);
   try {
     const env: Record<string, string> = { ...process.env, ...zp.env } as Record<string, string>;
-    const child = spawn("node", [resolveTsxPath(), ...zp.tsxArgs, harnessPath, `--file=${file}`], {
+    // Multi-core: the harness runs `runLoadMultiCore` (which spawns workers) instead of
+    // `runLoad`. The provider choice + worker count ride the argv; everything else (WIRE,
+    // artifact collection, crash detection) is identical to the in-process path.
+    const providerArgs =
+      opts.provider?.kind === "multi-core"
+        ? [`--provider=multi-core`, `--workers=${opts.provider.workerCount}`]
+        : [];
+    const child = spawn("node", [resolveTsxPath(), ...zp.tsxArgs, harnessPath, `--file=${file}`, ...providerArgs], {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

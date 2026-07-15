@@ -172,6 +172,7 @@ export type {
   LoadSubprocessOutcome,
   LoadSubprocessError,
   LoadHarnessMessage,
+  LoadProviderChoice,
 } from "./load/subprocess.js";
 
 /**

@@ -50,6 +50,7 @@ import type {
   LoadPlan,
   LoadRunnerConfig,
 } from "@glubean/sdk/load";
+import { entryFeederSlotId, sharedFeederSlotId } from "./feeder-slot-id.js";
 
 /** A contiguous, half-open range `[start, end)` of GLOBAL iteration indexes — the
  *  iterations-bounded partition. Lengths sum to `iterations` and the ranges tile
@@ -233,9 +234,9 @@ function largestRemainder(total: number, weights: readonly number[]): number[] {
  *
  * `Object.entries` + `hasOwnProperty` are own-enumerable only, so a feeder named
  * `toString` survives (parity with the orchestrator's Object.prototype-safe checks).
- * This construction is DUPLICATED from the orchestrator by necessity (it is defined
- * inline there and refactoring it is out of scope for this file) — the two MUST stay in
- * sync; the shared contract is the §9 canonical JSON-tuple encoding.
+ * The canonical FeederSlotId strings come from the SHARED {@link sharedFeederSlotId} /
+ * {@link entryFeederSlotId} helpers the orchestrator's `makeWorkload` also uses, so the
+ * segment keys here can never drift from the `slotKey` the run loop draws against (§9).
  */
 function enumerateFeederSlots(config: AnyLoadRunnerConfig): FeederSlot[] {
   const slots: FeederSlot[] = [];
@@ -256,18 +257,18 @@ function enumerateFeederSlots(config: AnyLoadRunnerConfig): FeederSlot[] {
       const drawnAsShared = entries.some(
         (e) => !Object.prototype.hasOwnProperty.call(e.feeders ?? {}, name),
       );
-      if (drawnAsShared) push(JSON.stringify(["shared", name]), binding as FeederBinding);
+      if (drawnAsShared) push(sharedFeederSlotId(name), binding as FeederBinding);
     }
     for (const entry of entries) {
       const entryId = typeof entry.id === "string" ? entry.id : "";
       for (const [name, binding] of Object.entries(entry.feeders ?? {})) {
-        push(JSON.stringify(["entry", entryId, name]), binding as FeederBinding);
+        push(entryFeederSlotId(entryId, name), binding as FeederBinding);
       }
     }
   } else {
     const single = config as LoadRunnerConfig;
     for (const [name, binding] of Object.entries(single.feeders ?? {})) {
-      push(JSON.stringify(["shared", name]), binding as FeederBinding);
+      push(sharedFeederSlotId(name), binding as FeederBinding);
     }
   }
   return slots;

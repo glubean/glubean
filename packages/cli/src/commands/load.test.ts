@@ -8,6 +8,7 @@ import {
   printOutcome,
   writeLoadResults,
   resolveManyLoadTargets,
+  resolveLoadProviderChoice,
   LoadTargetResolutionError,
   type LoadRunOutcome,
 } from "./load.js";
@@ -530,5 +531,76 @@ describe("printOutcome — executionStatus display (D0-8, schema v2 §7.4)", () 
     expect(out).not.toMatch(/run aborted/);
     expect(out).not.toMatch(/run crashed/);
     expect(out).not.toMatch(/endReason/);
+  });
+
+  it("shows a multi-core worker line (complete run) and surfaces a clamp note as a warning", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(
+      outcome({
+        executionStatus: "complete",
+        pass: true,
+        execution: {
+          provider: "multi-core",
+          workerCount: 2,
+          notes: ["worker count clamped 4 → 2 (concurrency=2)"],
+        },
+      }),
+    );
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).toMatch(/multi-core: 2 worker\(s\)/);
+    expect(out).toMatch(/worker count clamped 4 → 2/);
+  });
+
+  it("prints NO multi-core line for a single-machine (in-process / pre-v2) run", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    printOutcome(outcome({ executionStatus: "complete", pass: true, execution: { provider: "in-process", workerCount: 1 } }));
+    printOutcome(outcome({ pass: true })); // pre-v2: no execution block at all
+    const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(out).not.toMatch(/multi-core:/);
+  });
+});
+
+describe("resolveLoadProviderChoice (proposal §5.2 — --provider / --workers)", () => {
+  const posix4 = { platform: "linux" as NodeJS.Platform, cpuCount: 4 };
+
+  it("defaults to in-process (and treats explicit in-process the same)", () => {
+    expect(resolveLoadProviderChoice(undefined, undefined, posix4).provider).toEqual({ kind: "in-process" });
+    expect(resolveLoadProviderChoice("in-process", undefined, posix4).provider).toEqual({ kind: "in-process" });
+  });
+
+  it("multi-core defaults the worker count to cores - 1", () => {
+    const r = resolveLoadProviderChoice("multi-core", undefined, posix4);
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 3 });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("honours the inline :N and lets --workers override it", () => {
+    expect(resolveLoadProviderChoice("multi-core:2", undefined, posix4).provider).toEqual({ kind: "multi-core", workerCount: 2 });
+    // --workers wins over the inline :N.
+    expect(resolveLoadProviderChoice("multi-core:2", 5, posix4).provider).toEqual({ kind: "multi-core", workerCount: 5 });
+  });
+
+  it("rejects an unknown provider and a non-positive worker count", () => {
+    expect(resolveLoadProviderChoice("distributed", undefined, posix4).error).toMatch(/Unknown --provider/);
+    expect(resolveLoadProviderChoice("multi-core:0", undefined, posix4).error).toMatch(/positive integer/);
+    expect(resolveLoadProviderChoice("multi-core", -1, posix4).error).toMatch(/positive integer/);
+  });
+
+  it("flags multi-core on Windows as unsupported (falls back to in-process for the caller to steer)", () => {
+    const r = resolveLoadProviderChoice("multi-core:2", undefined, { platform: "win32", cpuCount: 8 });
+    expect(r.windowsUnsupported).toBe(true);
+    expect(r.provider).toEqual({ kind: "in-process" });
+  });
+
+  it("warns (but proceeds) when multi-core is chosen on a single-core machine", () => {
+    const r = resolveLoadProviderChoice("multi-core", undefined, { platform: "linux", cpuCount: 1 });
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 1 });
+    expect(r.warnings.join(" ")).toMatch(/1 CPU core/);
+  });
+
+  it("warns that --workers has no effect without multi-core", () => {
+    const r = resolveLoadProviderChoice("in-process", 4, posix4);
+    expect(r.provider).toEqual({ kind: "in-process" });
+    expect(r.warnings.join(" ")).toMatch(/--workers has no effect/);
   });
 });

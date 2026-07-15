@@ -125,6 +125,36 @@ describe("runLoadFileInSubprocess", () => {
     expect(requestCount - before).toBe(4);
   });
 
+  it("runs the SAME file through the multi-core provider and produces a merged multi-core artifact", async () => {
+    // End-to-end of the CLI wiring: the subprocess threads `--provider=multi-core --workers=2`
+    // to the harness, which drives `runLoadMultiCore` (coordinator + 2 spawned workers) instead
+    // of `runLoad`. The parent side (WIRE / artifact collection) is unchanged, and the merged
+    // artifact's additive counts equal the single-machine run of the same iterations-bounded plan.
+    const fixture = join(TMP_DIR, "ping-mc.load.ts");
+    await writeFile(fixture, HTTP_FIXTURE, "utf-8");
+    const before = requestCount;
+
+    const { outcomes, errors } = await runLoadFileInSubprocess(fixture, {
+      vars: { BASE_URL: base },
+      secrets: {},
+      cwd: TMP_DIR,
+      provider: { kind: "multi-core", workerCount: 2 },
+    });
+
+    expect(errors).toEqual([]);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].runnerId).toBe("ping-plan");
+    const art = outcomes[0].artifact;
+    expect(art.summary.totalIterations).toBe(4); // same [0,4) index set as single-machine
+    expect(art.summary.successfulIterations).toBe(4);
+    expect(art.summary.pass).toBe(true);
+    expect(art.runtime.processModel).toBe("sharded-multi-process");
+    expect(art.runtime.execution?.provider).toBe("multi-core");
+    expect(art.runtime.execution?.workerCount).toBe(2);
+    expect(art.summary.executionStatus).toBe("complete");
+    expect(requestCount - before).toBe(4); // still exactly one request per iteration
+  }, 30_000);
+
   it("resolves BASE_URL from the child's process.env when absent from vars", async () => {
     const fixture = join(TMP_DIR, "env-fallback.load.ts");
     await writeFile(fixture, HTTP_FIXTURE, "utf-8");

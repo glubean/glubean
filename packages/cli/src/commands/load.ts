@@ -16,10 +16,11 @@
  */
 import { resolve, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { cpus } from "node:os";
 import { stat, readdir, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
-import { loadProjectEnv, runLoadFileInSubprocess } from "@glubean/runner";
+import { loadProjectEnv, runLoadFileInSubprocess, type LoadProviderChoice } from "@glubean/runner";
 import type { LoadArtifact } from "@glubean/sdk/load";
 import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 import { findProjectConfig } from "./run.js";
@@ -73,6 +74,80 @@ export interface RunLoadFilesResult {
   errors: LoadFileError[];
 }
 
+/** Outcome of interpreting the `--provider` / `--workers` flags (proposal §5.2). Pure +
+ *  exported for unit testing — the console/exit side effects stay in `loadCommand`. */
+export interface ResolvedLoadProvider {
+  provider: LoadProviderChoice;
+  /** Non-fatal warnings to print (e.g. a single-core machine choosing multi-core). */
+  warnings: string[];
+  /** A fatal input error (unknown provider / bad worker count) — the caller errors + exits. */
+  error?: string;
+  /** Multi-core requested on Windows (unsupported) — the caller errors + exits with a
+   *  friendly "use in-process" hint. */
+  windowsUnsupported?: boolean;
+}
+
+/**
+ * Resolve the execution provider from the CLI flags (proposal §5.2 configuration surface):
+ *  - default / `--provider in-process` → the unchanged single-process path;
+ *  - `--provider multi-core` / `--provider multi-core:N` → the coordinator with N workers.
+ *
+ * Worker count precedence: an explicit `--workers N` wins over the inline `:N`, which wins
+ * over the default `max(1, cores-1)`. `shardPlan` clamps the result again per plan (§5.2),
+ * so this is only the REQUESTED count. Windows is unsupported (the multi-core provider needs
+ * POSIX extra-fd inheritance) → flagged so the caller can steer the user to in-process.
+ */
+export function resolveLoadProviderChoice(
+  providerFlag: string | undefined,
+  workersFlag: number | undefined,
+  env: { platform: NodeJS.Platform; cpuCount: number } = { platform: process.platform, cpuCount: cpus().length },
+): ResolvedLoadProvider {
+  const raw = (providerFlag ?? "in-process").trim();
+  const [kind, inlineN] = raw.split(":");
+
+  if (kind === "in-process" || kind === "") {
+    if (workersFlag !== undefined) {
+      return { provider: { kind: "in-process" }, warnings: ["--workers has no effect without --provider multi-core."] };
+    }
+    return { provider: { kind: "in-process" }, warnings: [] };
+  }
+  if (kind !== "multi-core") {
+    return {
+      provider: { kind: "in-process" },
+      warnings: [],
+      error: `Unknown --provider "${raw}". Use "in-process" (default) or "multi-core[:N]".`,
+    };
+  }
+
+  // ── multi-core ──
+  if (env.platform === "win32") {
+    return { provider: { kind: "in-process" }, warnings: [], windowsUnsupported: true };
+  }
+  const defaultN = Math.max(1, env.cpuCount - 1);
+  const parseCount = (v: number | string | undefined): number | undefined => {
+    if (v === undefined || v === "") return undefined;
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isInteger(n) && n >= 1 ? n : NaN; // NaN → invalid (surface below)
+  };
+  const explicit = parseCount(workersFlag);
+  const inline = parseCount(inlineN);
+  if (Number.isNaN(explicit) || Number.isNaN(inline)) {
+    return {
+      provider: { kind: "in-process" },
+      warnings: [],
+      error: `Invalid worker count — --workers / --provider multi-core:N must be a positive integer.`,
+    };
+  }
+  const workerCount = explicit ?? inline ?? defaultN;
+  const warnings: string[] = [];
+  if (env.cpuCount < 2) {
+    warnings.push(
+      `This machine reports ${env.cpuCount} CPU core(s); multi-core load runs ${workerCount} worker(s) with no real parallelism here — consider --provider in-process.`,
+    );
+  }
+  return { provider: { kind: "multi-core", workerCount }, warnings };
+}
+
 /**
  * Run each load file's plans in a CHILD PROCESS (`runLoadFileInSubprocess`) so the
  * harness and the user file co-resolve one `@glubean/sdk`, and collect the
@@ -88,6 +163,9 @@ export async function runLoadFiles(
     secrets: Record<string, string>;
     /** Project root the child runs in — drives runner resolution + bare imports. */
     cwd: string;
+    /** Execution provider (default in-process). `multi-core` runs the coordinator in the
+     *  child, which spawns worker processes; the parent side is unchanged. */
+    provider?: LoadProviderChoice;
   },
 ): Promise<RunLoadFilesResult> {
   const outcomes: LoadRunOutcome[] = [];
@@ -97,6 +175,7 @@ export async function runLoadFiles(
       vars: opts.vars,
       secrets: opts.secrets,
       cwd: opts.cwd,
+      ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
     });
     for (const o of res.outcomes) outcomes.push({ file, runnerId: o.runnerId, artifact: o.artifact });
     for (const e of res.errors) errors.push({ file, message: e.message });
@@ -302,6 +381,18 @@ export function printOutcome(o: LoadRunOutcome): void {
     // they mean something. Stop here.
     return;
   }
+  // Multi-core provenance (schema v2, §11): show how many workers ran + any clamp note so
+  // a sharded run is visibly distinct from a single-process one (single-machine runs carry
+  // no execution block / an `in-process` one → this prints nothing).
+  const exec = o.artifact.runtime?.execution;
+  if (exec && exec.provider === "multi-core") {
+    console.log(`${colors.dim}  multi-core: ${exec.workerCount} worker(s)${colors.reset}`);
+    for (const note of exec.notes ?? []) {
+      if (note.startsWith("worker count clamped")) {
+        console.log(`${colors.yellow}  ⚠ ${note}${colors.reset}`);
+      }
+    }
+  }
   console.log(
     `${colors.dim}  iterations ${s.totalIterations} (ok ${s.successfulIterations}, failed ${s.failedIterations})` +
       `  errorRate ${pct(s.errorRate)}  p95 ${Math.round(s.latency.p95)}ms` +
@@ -421,6 +512,11 @@ export interface LoadCommandOptions {
    * `rootDir/glubean.yaml` path (bare `glubean load`, no --profile).
    */
   configPath?: string;
+  /** Execution provider (proposal §5): `in-process` (default) or `multi-core[:N]`. */
+  provider?: string;
+  /** Worker count for `--provider multi-core` (overrides the inline `:N`; default
+   *  `max(1, cores-1)`). */
+  workers?: number;
 }
 
 /**
@@ -769,6 +865,29 @@ export async function loadCommand(
     process.exit(1);
   }
 
+  // Resolve the execution provider (default in-process; multi-core spawns worker
+  // processes, proposal §5.2). Fail fast on a bad flag / Windows before any load traffic.
+  const resolvedProvider = resolveLoadProviderChoice(options.provider, options.workers);
+  if (resolvedProvider.error) {
+    console.log(`${colors.red}Error: ${resolvedProvider.error}${colors.reset}`);
+    process.exit(1);
+  }
+  if (resolvedProvider.windowsUnsupported) {
+    console.log(
+      `${colors.red}Error: multi-core load is not supported on Windows yet — the coordinator's dedicated` +
+        ` control channel relies on POSIX extra-fd inheritance. Use --provider in-process on Windows.${colors.reset}`,
+    );
+    process.exit(1);
+  }
+  for (const w of resolvedProvider.warnings) {
+    console.log(`${colors.yellow}⚠ ${w}${colors.reset}`);
+  }
+  if (resolvedProvider.provider.kind === "multi-core") {
+    console.log(
+      `${colors.dim}Provider: multi-core (${resolvedProvider.provider.workerCount} worker(s) requested; clamped per plan).${colors.reset}`,
+    );
+  }
+
   // Plugin bootstrap happens INSIDE each subprocess (the harness registers
   // matchers / protocol adapters before importing the load file), so the CLI no
   // longer bootstraps here.
@@ -786,7 +905,12 @@ export async function loadCommand(
   // earlier/later files still produce + persist results. Pass the raw resolved
   // env — the child re-applies the process.env fallback (a Proxy can't cross the
   // process boundary), so shell/CI-supplied vars/secrets still resolve.
-  const { outcomes, errors } = await runLoadFiles(files, { vars, secrets, cwd: rootDir });
+  const { outcomes, errors } = await runLoadFiles(files, {
+    vars,
+    secrets,
+    cwd: rootDir,
+    provider: resolvedProvider.provider,
+  });
 
   // Persist every completed artifact FIRST — a later broken file must not discard
   // an expensive successful plan's result.

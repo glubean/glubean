@@ -809,6 +809,8 @@ program
   )
   .option("--config <paths>", "Config file(s), comma-separated or repeatable", collect, [])
   .option("--env-file <name>", "Env file basename (default: active env, else .env; prod-like active envs are refused implicitly)")
+  .option("--provider <mode>", "Execution provider: in-process (default) or multi-core[:N] (N worker processes)")
+  .option("--workers <n>", "Worker count for --provider multi-core (default: CPU cores - 1)", (v) => parseInt(v, 10))
   .option("--upload", "Upload each plan's LoadArtifact to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt(s) JSON after --upload")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
@@ -863,6 +865,8 @@ async function executeLoad(
       token: options.token,
       apiUrl: options.apiUrl,
       configPath: explicitConfigPath,
+      provider: options.provider,
+      workers: options.workers,
     });
     return;
   }
@@ -930,6 +934,8 @@ async function executeLoad(
     target: effectiveUploadTarget,
     token: options.token,
     apiUrl: options.apiUrl,
+    provider: options.provider,
+    workers: options.workers,
     tokenEnv: resolvedLoadPlan.upload?.tokenEnv,
     // GLU-244 codex R1 P1: without this, --upload's redaction-config reload
     // (resolveLoadUploadContext) would re-read the DEFAULT glubean.yaml path

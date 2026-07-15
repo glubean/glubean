@@ -46,6 +46,7 @@ import { ContinuationPool } from "./continuation-pool.js";
 import { createLoadReducer, type LoadReducerImpl } from "./reducer.js";
 import type { LoadReducerPartialV1 } from "./partial.js";
 import type { LoadShard } from "./shard.js";
+import { entryFeederSlotId, sharedFeederSlotId } from "./feeder-slot-id.js";
 import { prng } from "./rng.js";
 import { LoadSink, type LoadIterationEnvelope } from "./sink.js";
 import { evaluateThresholds, validateLoadMetricsConfig } from "./threshold.js";
@@ -485,7 +486,7 @@ export async function runLoadShard(
           name,
           binding,
           counterKey: sharedCounterKey(name),
-          slotKey: JSON.stringify(["shared", name]),
+          slotKey: sharedFeederSlotId(name),
         });
       }
     }
@@ -497,7 +498,7 @@ export async function runLoadShard(
         name,
         binding,
         counterKey: {},
-        slotKey: JSON.stringify(["entry", scenarioRefId ?? "", name]),
+        slotKey: entryFeederSlotId(scenarioRefId ?? "", name),
       });
     }
     return {

@@ -22,6 +22,7 @@ import { writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { bootstrap } from "./bootstrap.js";
 import { runLoad } from "./load/orchestrator.js";
+import { runLoadMultiCore } from "./load/multicore/coordinator.js";
 import {
   collectLoadPlans,
   withProcessEnvFallback,
@@ -59,12 +60,26 @@ process.on("unhandledRejection", (reason: unknown) => {
 
 const { values: args } = parseArgs({
   args: process.argv.slice(2),
-  options: { file: { type: "string" } },
+  options: {
+    file: { type: "string" },
+    // Execution provider (proposal §5). Absent → in-process (`runLoad`). `multi-core` runs
+    // the coordinator, which spawns `--workers` worker processes.
+    provider: { type: "string" },
+    workers: { type: "string" },
+  },
   strict: false,
 });
 
 const file = args.file as string | undefined;
 if (!file) crash("load harness: missing required --file argument");
+
+const providerKind = (args.provider as string | undefined) ?? "in-process";
+// Worker count arrives already clamped by the CLI (cores-1); `shardPlan` clamps it again per
+// plan. A bad/absent value falls back to 1 (degenerate single-worker = single-node semantics).
+const workerCount = (() => {
+  const n = Number(args.workers);
+  return Number.isInteger(n) && n >= 1 ? n : 1;
+})();
 
 /** Read the full stdin payload (the `{ vars, secrets }` JSON). */
 async function readStdin(): Promise<string> {
@@ -99,12 +114,28 @@ try {
 const envVars = withProcessEnvFallback(vars);
 const envSecrets = withProcessEnvFallback(secrets);
 
+// A SIGINT reaching the coordinator winds workers down cleanly (abort → drain → finalize).
+// Bridged to an AbortSignal `runLoadMultiCore` broadcasts on; harmless on the in-process path.
+const runAbort = new AbortController();
+process.on("SIGINT", () => runAbort.abort());
+process.on("SIGTERM", () => runAbort.abort());
+
 for (const plan of collectLoadPlans(ns)) {
   try {
-    // runLoad can throw for an invalid plan (traffic-mix, no termination bound,
-    // bad bounds) — report it per-plan and keep going so other plans' completed
-    // artifacts still emit.
-    const artifact = await runLoad(plan, { vars: envVars, secrets: envSecrets });
+    // runLoad / runLoadMultiCore can throw for an invalid plan (traffic-mix, no termination
+    // bound, bad bounds) — report it per-plan and keep going so other plans' completed
+    // artifacts still emit. Multi-core additionally spawns + reaps its own workers.
+    const artifact =
+      providerKind === "multi-core"
+        ? await runLoadMultiCore(plan, {
+            file: file!,
+            workerCount,
+            cwd: process.cwd(),
+            vars: envVars,
+            secrets: envSecrets,
+            abort: runAbort.signal,
+          })
+        : await runLoad(plan, { vars: envVars, secrets: envSecrets });
     emit({ type: "artifact", runnerId: plan.id, artifact });
   } catch (e) {
     emit({
