@@ -173,21 +173,35 @@ class IpcWorkerChannel implements LoadWorkerChannel {
   /** Resolves when the child has exited — the supervisor awaits this for no-orphan close. */
   readonly exited: Promise<void>;
   private _exited = false;
+  private _closeReason: ChannelCloseReason | undefined;
 
-  constructor(workerId: string, child: ChildProcess, private readonly graceMs: number) {
+  constructor(
+    workerId: string,
+    child: ChildProcess,
+    private readonly graceMs: number,
+    private readonly forwardOutput: boolean,
+  ) {
     this.workerId = workerId;
     this.child = child;
     this.pid = child.pid ?? -1;
+    // Settle the channel on the FIRST of exit / error (deduped). A `fork` that fails to spawn
+    // (EMFILE / EAGAIN / a bad execPath) emits ONLY `error`, never `exit` — resolving `exited`
+    // here on error too is what stops `close()` (and `awaitAllHellos`) from awaiting forever.
+    let settleClosed!: (reason: ChannelCloseReason) => void;
     this.exited = new Promise<void>((resolveExit) => {
-      child.on("exit", (code, signal) => {
+      settleClosed = (reason: ChannelCloseReason): void => {
+        if (this._exited) return;
         this._exited = true;
+        this._closeReason = reason;
         if (this.sigkillTimer !== undefined) clearTimeout(this.sigkillTimer);
-        for (const cb of this.closeCbs) cb({ kind: "exit", code, signal });
+        for (const cb of this.closeCbs) cb(reason);
         resolveExit();
-      });
+      };
     });
+    child.on("exit", (code, signal) => settleClosed({ kind: "exit", code, signal }));
     child.on("error", (err) => {
       for (const cb of this.errorCbs) cb(err);
+      settleClosed({ kind: "error", error: err });
     });
     child.on("message", (raw: unknown) => {
       let msg: WorkerMessage;
@@ -199,6 +213,18 @@ class IpcWorkerChannel implements LoadWorkerChannel {
         return;
       }
       for (const cb of this.messageCbs) cb(msg);
+    });
+    // DRAIN the user stdout/stderr pipes continuously (attached at construction, before any
+    // assign): a verbose worker that fills the OS pipe buffer would otherwise BLOCK on its next
+    // stdout write — potentially before it can send `done` — and hang the whole run. A `data`
+    // listener keeps each stream flowing (drained); `forwardOutput` echoes it to the
+    // coordinator's own stdout/stderr (parity with subprocess.ts) or discards it. Additional
+    // `.stdout`/`.stderr` subscribers (a coordinator/test) still receive every chunk.
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (this.forwardOutput) process.stdout.write(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (this.forwardOutput) process.stderr.write(chunk);
     });
   }
 
@@ -232,8 +258,9 @@ class IpcWorkerChannel implements LoadWorkerChannel {
   }
   onClose(cb: (reason: ChannelCloseReason) => void): void {
     if (this._exited) {
-      // Already gone — fire immediately so a late subscriber isn't stranded.
-      cb({ kind: "exit", code: null, signal: null });
+      // Already gone — replay the real close reason so a late subscriber (e.g. `awaitAllHellos`
+      // registering after an async spawn `error`) isn't stranded and sees why.
+      cb(this._closeReason ?? { kind: "exit", code: null, signal: null });
       return;
     }
     this.closeCbs.push(cb);
@@ -283,11 +310,21 @@ export interface MultiCoreProviderOptions {
   cwd: string;
   /** Grace after SIGTERM before SIGKILL per worker (default 3s). */
   sigtermGraceMs?: number;
+  /** Echo each worker's stdout/stderr (user `console.log` / diagnostics) to the coordinator's
+   *  own stdout/stderr — parity with subprocess.ts. Default `true`. Regardless of this flag the
+   *  streams are always DRAINED (a `data` listener is attached) so a verbose worker can never
+   *  block on a full pipe; `false` drains-and-discards (quiet). */
+  forwardOutput?: boolean;
+  /** Node executable used to spawn workers. Default `process.execPath`. (Exposed so a
+   *  deployment can pin a specific node; a non-existent path surfaces as a spawn `error`.) */
+  nodeExecPath?: string;
 }
 
 export class MultiCoreProvider implements LoadWorkerProvider {
   private readonly cwd: string;
   private readonly graceMs: number;
+  private readonly forwardOutput: boolean;
+  private readonly nodeExecPath: string | undefined;
   private readonly channels: IpcWorkerChannel[] = [];
   private forkCleanup: (() => void) | undefined;
   private closed = false;
@@ -295,6 +332,8 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   constructor(opts: MultiCoreProviderOptions) {
     this.cwd = opts.cwd;
     this.graceMs = opts.sigtermGraceMs ?? DEFAULT_SIGTERM_GRACE_MS;
+    this.forwardOutput = opts.forwardOutput ?? true;
+    this.nodeExecPath = opts.nodeExecPath;
   }
 
   /**
@@ -321,11 +360,12 @@ export class MultiCoreProvider implements LoadWorkerProvider {
           cwd: setup.cwd,
           env: setup.env,
           execArgv: setup.execArgv,
+          ...(this.nodeExecPath !== undefined ? { execPath: this.nodeExecPath } : {}),
           // fd 0/1/2 piped (user stdio, kept OFF the control path); the 4th slot is the
           // DEDICATED IPC control channel.
           stdio: ["pipe", "pipe", "pipe", "ipc"],
         });
-        const channel = new IpcWorkerChannel(workerId, child, this.graceMs);
+        const channel = new IpcWorkerChannel(workerId, child, this.graceMs, this.forwardOutput);
         channels.push(channel);
         this.channels.push(channel);
       }

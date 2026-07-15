@@ -669,11 +669,27 @@ export async function runLoadShard(
   // start before opening any slot, so every worker's producer slots begin together on the
   // run axis. Omitted single-machine → no wait (byte-identical to the pre-D1 path).
   // Skip the pre-start sleep if the shard was aborted before it even started — an aborted
-  // shard must not block to a future `startAt` just to immediately end (the in-run abort
-  // listener below covers an abort that fires AFTER this gate).
+  // shard must not block to a future `startAt` just to immediately end. And if an abort fires
+  // DURING the wait (a coordinator can pick a `startAt` seconds/minutes out), wake at once so
+  // the shard winds down promptly instead of blocking to the barrier — the already-aborted
+  // handling at the in-run abort listener below then stamps `endReason: "abort"` and dispatches
+  // nothing. (This gate precedes the main abort listener, so it carries its own wake.)
   if (startAt !== undefined && opts.abort?.aborted !== true) {
     const wait = startAt - now();
-    if (wait > 0) await new Promise<void>((resolve) => setTimeout(resolve, wait));
+    if (wait > 0) {
+      await new Promise<void>((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const onAbortWake = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        timer = setTimeout(() => {
+          opts.abort?.removeEventListener("abort", onAbortWake);
+          resolve();
+        }, wait);
+        opts.abort?.addEventListener("abort", onAbortWake, { once: true });
+      });
+    }
   }
   const start = now();
   sink.emitLoadStart(resolvedConfig);

@@ -48,8 +48,10 @@ afterEach(async () => {
   await Promise.all(liveProviders.map((p) => p.close().catch(() => {})));
   liveProviders.length = 0;
 });
-function newProvider(): MultiCoreProvider {
-  const p = new MultiCoreProvider({ cwd: RUNNER_ROOT, sigtermGraceMs: 1_000 });
+function newProvider(extra: Partial<ConstructorParameters<typeof MultiCoreProvider>[0]> = {}): MultiCoreProvider {
+  // forwardOutput:false keeps the test runner's stdout quiet — the streams are still DRAINED
+  // (the provider always attaches a data listener), which is exactly what the anti-hang fix needs.
+  const p = new MultiCoreProvider({ cwd: RUNNER_ROOT, sigtermGraceMs: 1_000, forwardOutput: false, ...extra });
   liveProviders.push(p);
   return p;
 }
@@ -260,16 +262,25 @@ describe("MultiCoreProvider end-to-end", () => {
     assertAllReaped(pids);
   });
 
-  it("isolates the control channel: a worker flooding stdout with fake control frames cannot forge one", async () => {
-    // The scenario floods stdout with well-formed-looking control JSON (`abort`, `assign`).
+  it("isolates the control channel: user code cannot forge a control frame via stdout OR process.send", async () => {
+    // The scenario tries BOTH paths a user file could reach for: flooding stdout with
+    // control-looking JSON, and calling process.send directly (which some libraries do when
+    // they detect they are a forked child). Neither must reach the coordinator's control channel.
     const FLOOD = `
 import { loadScenario, loadRunner } from "@glubean/sdk/load";
 const scenario = loadScenario("noisy")
   .step("spam", async (ctx) => {
+    // (1) stdout flood — a separate stream from the IPC control channel.
     for (let i = 0; i < 40; i++) {
       console.log(JSON.stringify({ v: 1, type: "abort", reason: "INJECTED-VIA-STDOUT" }));
       process.stdout.write(JSON.stringify({ v: 1, type: "assign", assignment: {} }) + "\\n");
     }
+    // (2) process.send injection — the harness nulled it before user code ran, so it is gone.
+    const forged = { v: 1, type: "done", workerId: "w-FORGED-VIA-SEND" };
+    let threw = false;
+    try { process.send?.(forged); } catch { threw = true; }
+    // Report what user code observed (over stdout — the visible channel).
+    console.log("PROBE send=" + typeof process.send + " threw=" + threw);
     ctx.expect(1).toBe(1);
   })
   .build();
@@ -291,14 +302,18 @@ export const plan = loadRunner("mc-flood", { scenario, concurrency: 1, iteration
     expect(c.done).toBe(true);
     // The flood reached the child's stdout (a SEPARATE stream)…
     expect(c.stdout).toContain("INJECTED-VIA-STDOUT");
+    // …and user code confirmed process.send was REMOVED before it ran (isolation is active).
+    expect(c.stdout).toContain("PROBE send=undefined");
     // The real hello was consumed at acquire; the channel captured it there (over IPC, not
     // stdout) — proof the identity handshake itself rode the isolated channel.
     expect(channels[0].hello.protocolVersion).toBe(1);
-    // …but NONE of the decoded control frames is a forged coordinator→worker type. The worker
-    // only ever sends worker→coordinator frames; a stdout-injected `abort`/`assign` can never
-    // appear here because control frames are read exclusively from the IPC channel.
+    // NONE of the decoded control frames is a forged coordinator→worker type (stdout injection)…
     expect(c.messages.some((m) => (m.type as string) === "abort")).toBe(false);
     expect(c.messages.some((m) => (m.type as string) === "assign")).toBe(false);
+    // …and the process.send-forged `done` (workerId "w-FORGED-VIA-SEND") never reached the parent:
+    // the only real `done` carries the coordinator-minted workerId. This is the core fix — a
+    // library or user file calling process.send cannot inject onto the control channel.
+    expect(c.messages.some((m) => (m as { workerId?: string }).workerId === "w-FORGED-VIA-SEND")).toBe(false);
     // Every received frame is a legitimate worker→coordinator type.
     for (const m of c.messages) {
       expect(["hello", "progress", "snapshot", "result", "done", "error"]).toContain(m.type);
@@ -306,6 +321,41 @@ export const plan = loadRunner("mc-flood", { scenario, concurrency: 1, iteration
 
     await provider.close();
     assertAllReaped(channels.map((ch) => ch.pid));
+  });
+
+  it("does not hang when a worker floods stdout past the OS pipe buffer (streams are drained)", async () => {
+    // ~1.5MB of stdout across the run — far beyond the ~64KB OS pipe buffer. If the provider did
+    // not continuously drain the child's stdout, the worker would BLOCK on a write before it
+    // could send `done`, hanging the run. The provider drains, so the run finishes cleanly.
+    const HEAVY = `
+import { loadScenario, loadRunner } from "@glubean/sdk/load";
+const CHUNK = "x".repeat(4096);
+const scenario = loadScenario("verbose")
+  .step("shout", async (ctx) => {
+    for (let i = 0; i < 100; i++) console.log(CHUNK);
+    ctx.expect(1).toBe(1);
+  })
+  .build();
+export const plan = loadRunner("mc-heavy-stdout", { scenario, concurrency: 2, iterations: 4 });
+`;
+    const { file, plan } = await writeFixture("heavy-stdout", HEAVY);
+    const { shards } = shardPlan(plan, 2);
+    const provider = newProvider(); // forwardOutput:false → drain-and-discard, no test spam
+    const channels = await provider.acquire(2, { abort: new AbortController().signal });
+    const pids = channels.map((c) => c.pid);
+    const collected = await driveRun(channels, {
+      file,
+      planId: plan.id,
+      shards: shards.map((s) => ({ workerId: s.workerId, shard: s })),
+      vars: {},
+      snapshotIntervalMs: 25,
+    });
+    for (const c of collected) {
+      expect(c.done, `${c.workerId} should finish despite heavy stdout`).toBe(true);
+      expect(c.result).toBeDefined();
+    }
+    await provider.close();
+    assertAllReaped(pids);
   });
 
   it("propagates abort: workers wind down cleanly (endReason abort) and leave no orphan", async () => {
@@ -394,5 +444,27 @@ export const plan = loadRunner("mc-crash", { scenario, concurrency: 2, duration:
     await expect(provider.acquire(2, { abort: ac.signal })).rejects.toThrow(/aborted/);
     // acquire's failure path terminated anything it forked.
     for (const ch of provider.workers) assertAllReaped([ch.pid]);
+  });
+
+  it("rejects acquire on a spawn failure and close() does not hang (error settles the channel)", async () => {
+    // A non-existent node binary makes `fork` emit ONLY an `error` event, never `exit` — the
+    // regression: a channel whose `exited` resolves solely on `exit` would leave acquire's
+    // failure path (`await close()`) waiting forever. With the fix, `error` settles `exited`.
+    const provider = newProvider({ nodeExecPath: "/nonexistent/node-binary-xyz" });
+    const acquired = provider.acquire(2, { abort: new AbortController().signal });
+    // Guard: if the fix regressed, this whole promise would hang — bound it so the test fails
+    // loudly (times out at the assertion) instead of hanging the suite.
+    const outcome = await Promise.race([
+      acquired.then(() => "resolved").catch((e) => `rejected:${(e as Error).message}`),
+      new Promise<string>((r) => setTimeout(() => r("HUNG"), 8_000)),
+    ]);
+    expect(outcome).not.toBe("HUNG");
+    expect(outcome).toMatch(/^rejected:/);
+    // And close() (already invoked by acquire's catch) completes — bound it too.
+    const closed = await Promise.race([
+      provider.close().then(() => "closed"),
+      new Promise<string>((r) => setTimeout(() => r("HUNG"), 8_000)),
+    ]);
+    expect(closed).toBe("closed");
   });
 });

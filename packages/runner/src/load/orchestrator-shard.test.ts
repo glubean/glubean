@@ -434,4 +434,27 @@ describe("runLoadShard — shard-aware execution kernel (D1-2)", () => {
     expect(result.endReason).toBe("abort");
     expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
+
+  it("aborts DURING the start-barrier wait — wakes immediately, does not block to startAt", async () => {
+    // A coordinator can pick a `startAt` far in the future. If an abort arrives while the shard
+    // is parked at the barrier, it must wake at once — not sleep out the (here 60s) window.
+    const plan = loadRunner("shard-abort-barrier", {
+      scenario: loadScenario("noop").step("noop", async () => {}).build(),
+      concurrency: 1,
+      iterations: 5,
+    });
+    const { shards } = shardPlan(plan, 1);
+    const ac = new AbortController();
+    const startedAt = Date.now();
+    setTimeout(() => ac.abort(), 30); // abort mid-barrier-wait
+    const result = await runLoadShard(plan, {
+      shard: shards[0],
+      rngSeed: "s",
+      timelineOrigin: Date.now(),
+      startAt: Date.now() + 60_000,
+      abort: ac.signal,
+    });
+    expect(result.endReason).toBe("abort");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
 });

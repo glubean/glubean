@@ -38,7 +38,7 @@ import {
   type WorkerMessage,
 } from "./protocol.js";
 
-// ── Channel guard ────────────────────────────────────────────────────────────
+// ── Channel guard + isolation (§6 decision 6 / §12) ──────────────────────────
 
 // The harness is USELESS without the IPC control channel — it exists to speak the protocol.
 // A missing `process.send` means it was not forked with an `ipc` stdio slot; fail loudly.
@@ -46,7 +46,29 @@ if (typeof process.send !== "function") {
   process.stderr.write("multicore worker-harness: no IPC channel (must be spawned via child_process.fork with an 'ipc' stdio)\n");
   process.exit(1);
 }
+
+// Capture the control channel's SEND handle, then REMOVE `process.send` from the process
+// global BEFORE any user code (the `.load.ts` and its libraries, imported in `handleAssign`)
+// runs. The harness keeps its private `sendRaw`; user code sees `process.send === undefined`,
+// so it cannot inject a control frame onto the coordinator's channel — and libraries that
+// auto-detect "am I a forked child?" via `process.send`/`process.connected` (some emit a
+// `process.send` on startup) now read "no IPC" and stay quiet.
+//
+// TRUST MODEL: isolation here is against ACCIDENTAL collision (a user file or library that
+// itself calls `process.send`), consistent with the cooperative same-version worker trust
+// model (D0). A determined adversary digging for the raw IPC fd is out of scope — a user
+// attacking their own coordinator is not a threat. This is the `process.send` analog of
+// moving control off the shared stdout `WIRE_PREFIX` (subprocess.ts).
+//
+// `process.channel` is deliberately LEFT in place: nulling it also tears down INBOUND
+// delivery (Node's internal message dispatch gates `emit("message")` on `process.channel`
+// being truthy — verified empirically), so the harness would stop receiving `start`/`abort`/
+// `heartbeat`. Inbound frames reach only the harness's own `"message"` handler (attached
+// below, before any user code); a library probing `process.channel` directly to snoop
+// inbound frames is the same out-of-scope adversarial case as fd-digging, and it still
+// cannot REPLY (its `process.send` is gone).
 const sendRaw = process.send.bind(process);
+process.send = undefined;
 
 const { values: args } = parseArgs({
   args: process.argv.slice(2),
