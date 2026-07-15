@@ -13,7 +13,7 @@ import { runLoad } from "../orchestrator.js";
 import { shardPlan } from "../shard.js";
 import { mergePartials, finalizeMerged, type LoadReducerPartialV1 } from "../partial.js";
 import { Fd3WorkerChannel, MultiCoreProvider, type ChannelCloseReason, type LoadWorkerChannel } from "./provider.js";
-import type { ShardResultObservablesV1, WorkerMessage } from "./protocol.js";
+import { encodeWorkerMessage, type ShardResultObservablesV1, type WorkerMessage } from "./protocol.js";
 
 // The multi-core provider SPAWNS the BUILT dist/load/multicore/worker-harness.js, so the sdk +
 // runner must be built before this test (the CI build / pre-release `pnpm -r build` covers it).
@@ -138,7 +138,9 @@ async function driveRun(
   },
 ): Promise<Collected[]> {
   const rngSeed = randomUUID();
-  const startAt = Date.now() + (opts.startLeadMs ?? 200);
+  // Generous start lead: a shared absolute instant far enough out that spawn + assign + start all
+  // land on every worker before it (headroom for a slow/loaded CI; the run itself is unaffected).
+  const startAt = Date.now() + (opts.startLeadMs ?? 300);
   const timelineOrigin = startAt;
   const collected = channels.map(collect);
 
@@ -265,29 +267,37 @@ describe("MultiCoreProvider end-to-end", () => {
     assertAllReaped(pids);
   });
 
-  it("isolates the control channel structurally: the child has NO IPC surface for user code to reach", async () => {
-    // The control channel lives on a dedicated fd 3, not Node IPC, so the child process has no
-    // IPC surface at all. User code confirms process.send/channel/message are absent, floods
-    // stdout with control-looking JSON, and tries the fork-aware patterns — none can touch fd 3.
+  it("isolates the control channel structurally: no IPC surface, and the accidental fd-3 path is neutralized", async () => {
+    // The control channel lives on a dedicated fd 4, not Node IPC, so the child has no IPC surface
+    // at all; and the conventional fd 3 is a /dev/null placeholder, so an accidental writeSync(3)
+    // is harmlessly swallowed (never reaching control). User code probes every path —
+    // process.send/channel/message, an fd-3 write, a stdout flood — none reaches the control channel.
     const FLOOD = `
 import { loadScenario, loadRunner } from "@glubean/sdk/load";
+import { writeSync } from "node:fs";
 let sawMessageEvent = false;
 process.on("message", () => { sawMessageEvent = true; }); // must NEVER fire — there is no IPC
 const scenario = loadScenario("noisy")
   .step("spam", async (ctx) => {
-    // (1) stdout flood — a separate stream from the fd-3 control channel.
+    // (1) stdout flood — a separate stream from the fd-4 control channel.
     for (let i = 0; i < 40; i++) {
       console.log(JSON.stringify({ v: 1, type: "abort", reason: "INJECTED-VIA-STDOUT" }));
       process.stdout.write(JSON.stringify({ v: 1, type: "done", workerId: "w-FORGED-STDOUT" }) + "\\n");
     }
     // (2) the process IPC surface is simply GONE — the guarded pattern skips (connected falsy),
-    // and process.send is not even a function. Nothing here can reach the control channel.
+    // and process.send is not even a function.
     let guardedTried = false;
     if (process.connected && typeof process.send === "function") {
       guardedTried = true; process.send({ v: 1, type: "done", workerId: "w-FORGED-SEND" });
     }
+    // (3) an accidental write to the conventional fd 3 — a /dev/null placeholder, so it is
+    // swallowed (write succeeds, goes nowhere) and never reaches the control channel on fd 4.
+    let fd3Err = "swallowed";
+    try { writeSync(3, JSON.stringify({ v: 1, type: "done", workerId: "w-FORGED-FD3" }) + "\\n"); }
+    catch (e) { fd3Err = e.code || String(e); }
     console.log("PROBE send=" + typeof process.send + " connected=" + !!process.connected +
-      " channel=" + typeof process.channel + " msgEvent=" + sawMessageEvent + " guardedTried=" + guardedTried);
+      " channel=" + typeof process.channel + " msgEvent=" + sawMessageEvent + " guardedTried=" + guardedTried +
+      " fd3Err=" + fd3Err);
     ctx.expect(1).toBe(1);
   })
   .build();
@@ -309,18 +319,48 @@ export const plan = loadRunner("mc-flood", { scenario, concurrency: 1, iteration
     expect(c.done).toBe(true);
     // The flood reached the child's stdout (a SEPARATE stream)…
     expect(c.stdout).toContain("INJECTED-VIA-STDOUT");
-    // …and user code confirmed there is NO IPC surface: send undefined, connected falsy, no
-    // channel, and the 'message' event never fired. Isolation is structural, not defensive.
-    expect(c.stdout).toContain("PROBE send=undefined connected=false channel=undefined msgEvent=false guardedTried=false");
-    // The real hello was consumed at acquire — over the isolated fd 3, not stdout.
+    // …and user code confirmed: no IPC surface, and the fd-3 write was swallowed by /dev/null
+    // (write succeeded, went nowhere — never reaching control).
+    expect(c.stdout).toContain(
+      "PROBE send=undefined connected=false channel=undefined msgEvent=false guardedTried=false fd3Err=swallowed",
+    );
+    // The real hello was consumed at acquire — over the isolated fd 4, not stdout.
     expect(channels[0].hello.protocolVersion).toBe(1);
-    // NO forged control frame (stdout-injected or otherwise) ever reached the parent: the only
-    // frames are legitimate worker→coordinator types with the coordinator-minted workerId.
+    // NO forged control frame (stdout-injected, process.send, or fd-3) ever reached the parent:
+    // the only frames are legitimate worker→coordinator types with the coordinator-minted workerId.
     expect(c.messages.some((m) => (m.type as string) === "abort")).toBe(false);
     expect(c.messages.some((m) => String((m as { workerId?: string }).workerId ?? "").startsWith("w-FORGED"))).toBe(false);
     for (const m of c.messages) {
       expect(["hello", "progress", "snapshot", "result", "done", "error"]).toContain(m.type);
     }
+
+    await provider.close();
+    assertAllReaped(channels.map((ch) => ch.pid));
+  });
+
+  it("tolerates a garbage line on the control channel: the worker de-framer ignores it, run completes", async () => {
+    // Defense-in-depth (trust model): if a non-protocol line ever reaches the control fd, the
+    // worker's NDJSON de-framer must DROP it, not crash. Inject raw garbage onto a worker's
+    // control pipe (white-box) BEFORE assign; the worker ignores it and the run finishes cleanly.
+    const { file, plan } = await writeFixture("garbage", HTTP_FIXTURE("mc-garbage"));
+    const { shards } = shardPlan(plan, 1);
+    const provider = newProvider();
+    const channels = await provider.acquire(1, { abort: new AbortController().signal });
+    // Reach the private control stream and write raw, non-JSON bytes + a JSON-but-not-protocol
+    // line. Both must be dropped by the worker's de-framer.
+    const control = (channels[0] as unknown as { control: NodeJS.WritableStream }).control;
+    control.write("this is not json at all\n");
+    control.write(JSON.stringify({ hello: "wrong shape", nope: true }) + "\n");
+    const collected = await driveRun(channels, {
+      file,
+      planId: plan.id,
+      shards: shards.map((s) => ({ workerId: s.workerId, shard: s })),
+      vars: { BASE_URL: base },
+      snapshotIntervalMs: 25,
+    });
+    const c = collected[0];
+    expect(c.done, "worker should ignore garbage and finish").toBe(true);
+    expect(c.result?.endReason).toBe("iterations");
 
     await provider.close();
     assertAllReaped(channels.map((ch) => ch.pid));
@@ -426,7 +466,6 @@ export const plan = loadRunner("mc-crash", { scenario, concurrency: 2, duration:
       shards: shards.map((s) => ({ workerId: s.workerId, shard: s })),
       vars: { BASE_URL: base },
       snapshotIntervalMs: 25,
-      startLeadMs: 100,
     });
 
     for (const c of collected) {
@@ -473,7 +512,7 @@ export const plan = loadRunner("mc-crash", { scenario, concurrency: 2, duration:
 });
 
 /** A minimal ChildProcess stub for unit-testing Fd3WorkerChannel supervision without a real
- *  spawn: an EventEmitter with a controllable `pid`, a fake fd-3 control stream, and the
+ *  spawn: an EventEmitter with a controllable `pid`, a fake fd-4 control stream, and the
  *  members the channel touches. */
 class FakeChild extends EventEmitter {
   connected = true;
@@ -481,12 +520,13 @@ class FakeChild extends EventEmitter {
   lastSignal: NodeJS.Signals | number | undefined;
   readonly stdout = null;
   readonly stderr = null;
-  /** The fd-3 control pipe stub (a PassThrough duplex). */
+  /** The fd-4 control pipe stub (a PassThrough duplex). */
   readonly control = new PassThrough();
   readonly stdio: Array<PassThrough | null>;
   constructor(public pid: number | undefined) {
     super();
-    this.stdio = [null, null, null, this.control];
+    // fd 3 is a closed placeholder; the control pipe sits at fd 4 (matches the provider layout).
+    this.stdio = [null, null, null, null, this.control];
   }
   kill(signal?: NodeJS.Signals | number): boolean {
     this.killed = true;
@@ -550,5 +590,28 @@ describe("Fd3WorkerChannel supervision — error vs exit vs unreapable (P2)", ()
     expect(outcome).toBe("settled");
     expect(ch.hasExited).toBe(true);
     expect(closeReason).toEqual({ kind: "could-not-reap" });
+  });
+
+  it("de-framer TOLERATES garbage lines — drops them, never escalates, keeps decoding valid frames", async () => {
+    const live = new FakeChild(4242);
+    const ch = new Fd3WorkerChannel("w3", live as unknown as ChildProcess, 100, false);
+    const errors: Error[] = [];
+    const got: WorkerMessage[] = [];
+    ch.onError((e) => errors.push(e));
+    ch.onMessage((m) => got.push(m));
+
+    // Push garbage onto the inbound control stream: non-JSON, JSON-but-wrong-shape, and an empty
+    // line. None may throw or escalate to onError. (A newline terminates each — a genuinely
+    // partial frame just buffers until its newline, which the split-frame delivery exercises.)
+    live.control.write("not json at all\n");
+    live.control.write(JSON.stringify({ totally: "wrong" }) + "\n");
+    live.control.write("\n");
+    // A VALID frame after the garbage must still decode and be delivered (the de-framer recovered).
+    live.control.write(JSON.stringify(encodeWorkerMessage({ type: "hello", protocolVersion: 1, workerId: "w3", pid: 1 })) + "\n");
+    await new Promise((r) => setImmediate(r)); // let stream 'data' flush
+
+    expect(errors).toEqual([]); // garbage was dropped, not escalated
+    expect(got).toHaveLength(1); // the valid hello got through
+    expect(got[0].type).toBe("hello");
   });
 });

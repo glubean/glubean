@@ -8,15 +8,17 @@
  * so `close()` never leaves an orphan and never hangs.
  *
  * TRANSPORT (proposal §4 "专用控制通道 … 继承 fd"): the control channel is a dedicated
- * inherited pipe on fd 3, NOT Node's fork IPC. The child is `spawn`ed with
- * `stdio: ['pipe','pipe','pipe','pipe']` — fd 0/1/2 are the user's stdio (drained/forwarded),
- * and fd 3 is a duplex pipe carrying the protocol as NDJSON (one JSON frame per line). This is
- * what makes isolation STRUCTURAL rather than defensive: the child has NO IPC channel at all
- * (`process.send === undefined`, `process.on("message")` never fires, `process.connected`
- * false), so user code / libraries cannot observe or forge a control frame — there is nothing
- * on the process IPC surface to reach for. (The earlier fork-IPC transport shared that surface
- * with user code, which is why isolation had to be patched repeatedly.) The same protocol,
- * unchanged, is what D2 `remote` reuses over WebSocket — only the transport differs.
+ * inherited pipe on fd 4, NOT Node's fork IPC. The child is `spawn`ed with
+ * `stdio: ['pipe','pipe','pipe', <held /dev/null>, 'pipe']` — fd 0/1/2 are the user's stdio
+ * (drained/forwarded), fd 3 is a held /dev/null placeholder (an accidental writeSync(3) is
+ * swallowed, never a live descriptor), and fd 4 is a duplex pipe carrying the protocol as NDJSON
+ * (one JSON frame per line). This is what makes isolation STRUCTURAL rather than defensive: the
+ * child has NO IPC channel at all (`process.send === undefined`, `process.on("message")` never
+ * fires, `process.connected` false), so user code / libraries cannot observe or forge a control
+ * frame — there is nothing on the process IPC surface to reach for. (The earlier fork-IPC
+ * transport shared that surface with user code, which is why isolation had to be patched
+ * repeatedly.) The same protocol, unchanged, is what D2 `remote` reuses over WebSocket — only the
+ * transport differs.
  *
  * SCOPE (D1-3): this provider only PULLS N workers up, opens their channels, and manages their
  * lifecycle. It does NOT merge snapshots or finalize an artifact — the coordinator core
@@ -27,11 +29,11 @@
  * `prepareZeroProject`) so the worker and the user `.load.ts` co-resolve one `@glubean/sdk` —
  * spawning the built `.js` harness with tsx's ESM loader registered IN-PROCESS
  * (`--import tsx/esm`) rather than the `tsx` CLI (which re-spawns an inner node and would drop
- * the inherited fd 3).
+ * the inherited fd 4).
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { Duplex, Readable } from "node:stream";
@@ -67,7 +69,7 @@ export type ChannelCloseReason =
 
 /**
  * The coordinator's handle on ONE worker (proposal §5). Transport-agnostic by shape —
- * multi-core backs it with a dedicated fd-3 pipe; remote (D2) will back the same interface
+ * multi-core backs it with a dedicated fd-4 pipe; remote (D2) will back the same interface
  * with a WebSocket. `send` delivers a coordinator frame; `onMessage` receives worker frames;
  * `close` starts this worker's supervised termination.
  */
@@ -86,7 +88,7 @@ export interface LoadWorkerChannel {
   onClose(cb: (reason: ChannelCloseReason) => void): void;
   /** Subscribe to transport errors (e.g. a spawn failure). */
   onError(cb: (err: Error) => void): void;
-  /** Begin this worker's supervised termination (fd-3 EOF → SIGTERM → SIGKILL → hard deadline).
+  /** Begin this worker's supervised termination (fd-4 EOF → SIGTERM → SIGKILL → hard deadline).
    *  Idempotent. */
   close(): void;
 }
@@ -114,9 +116,10 @@ const BUNDLED_DIST_DIR = resolve(__dirname, "..", "..");
 const BUNDLED_PKG_ROOT = resolve(__dirname, "..", "..", "..");
 const BUNDLED_WORKER_HARNESS = resolve(__dirname, "worker-harness.js");
 
-/** The inherited control fd index. fd 0/1/2 are the user's stdio; fd 3 is the dedicated
- *  duplex control pipe the protocol rides (NDJSON). */
-const CONTROL_FD = 3;
+/** The inherited control fd index. fd 0/1/2 are the user's stdio; fd 3 is a `/dev/null`
+ *  placeholder (an accidental `writeSync(3)` is harmlessly swallowed, never reaching a live
+ *  descriptor); fd 4 is the dedicated duplex control pipe the protocol rides (NDJSON). */
+const CONTROL_FD = 4;
 
 let _tsxEsmUrl: string | undefined;
 /** Resolve tsx's ESM loader entry (`tsx/esm`) as an absolute `file://` URL, so `--import`
@@ -164,7 +167,7 @@ function computeSpawnSetup(cwd: string): SpawnSetup {
   return { harnessPath, cwd, env, execArgv, cleanup: zp.cleanup };
 }
 
-// ── fd-3 control channel ─────────────────────────────────────────────────────
+// ── fd-4 control channel ─────────────────────────────────────────────────────
 
 /** Grace given a child to exit after SIGTERM before SIGKILL. */
 const DEFAULT_SIGTERM_GRACE_MS = 3_000;
@@ -172,8 +175,8 @@ const DEFAULT_SIGTERM_GRACE_MS = 3_000;
 const DEFAULT_JOIN_DEADLINE_MS = 60_000;
 
 /**
- * A {@link LoadWorkerChannel} backed by a spawned child's DEDICATED fd-3 control pipe. Control
- * frames ride fd 3 as NDJSON (one JSON frame per line); the child's stdout/stderr (user output)
+ * A {@link LoadWorkerChannel} backed by a spawned child's DEDICATED fd-4 control pipe. Control
+ * frames ride fd 4 as NDJSON (one JSON frame per line); the child's stdout/stderr (user output)
  * are separate streams the provider drains but NEVER parses as protocol. The child has no IPC
  * surface, so user code cannot forge or observe a control frame — isolation is structural.
  *
@@ -227,7 +230,7 @@ export class Fd3WorkerChannel implements LoadWorkerChannel {
       if (child.pid === undefined) this.settleClosed({ kind: "error", error: err });
     });
 
-    // Inbound control frames: NDJSON on fd 3. Buffer to a newline, JSON.parse + decode each line.
+    // Inbound control frames: NDJSON on fd 4. Buffer to a newline, JSON.parse + decode each line.
     if (this.control !== undefined && this.control !== null) {
       this.control.setEncoding("utf8");
       this.control.on("data", (chunk: string) => this.onControlData(chunk));
@@ -274,9 +277,13 @@ export class Fd3WorkerChannel implements LoadWorkerChannel {
       let msg: WorkerMessage;
       try {
         msg = decodeWorkerMessage(JSON.parse(line) as unknown);
-      } catch (e) {
-        // A malformed / undecodable frame is a transport error, not silently dropped.
-        for (const cb of this.errorCbs) cb(e instanceof Error ? e : new Error(String(e)));
+      } catch {
+        // TOLERATE garbage (trust-model hardening, symmetric with the harness de-framer): a
+        // non-JSON / non-protocol line is DROPPED, never escalated. Escalating to `errorCbs`
+        // would let a single stray line fail `awaitAllHellos` / an in-flight run — a same-version
+        // cooperative worker only ever sends valid frames, so a stray line is an anomaly to
+        // ignore, not a fatal transport error. (subprocess.ts's WIRE discipline: ignore
+        // unrecognized lines.)
         continue;
       }
       for (const cb of this.messageCbs) cb(msg);
@@ -327,7 +334,7 @@ export class Fd3WorkerChannel implements LoadWorkerChannel {
   }
 
   /**
-   * Supervised termination (idempotent + BOUNDED): end the control pipe (the child's fd-3
+   * Supervised termination (idempotent + BOUNDED): end the control pipe (the child's fd-4
    * EOF backstop self-exits), SIGTERM as the escalation, SIGKILL after `graceMs`, and — because
    * even SIGKILL cannot reap an uninterruptible-sleep / EPERM / zombie process — a HARD deadline
    * at `2·graceMs` that settles the channel `could-not-reap` so `close()` can never hang forever.
@@ -337,7 +344,7 @@ export class Fd3WorkerChannel implements LoadWorkerChannel {
   close(): void {
     if (this.closing || this._exited) return;
     this.closing = true;
-    // End our write side of fd 3 → the child sees EOF on its control socket and self-exits
+    // End our write side of fd 4 → the child sees EOF on its control socket and self-exits
     // (the disconnect backstop), even if the parent later crashes.
     try {
       this.control?.end();
@@ -392,6 +399,10 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   private readonly nodeExecPath: string | undefined;
   private readonly channels: Fd3WorkerChannel[] = [];
   private spawnCleanup: (() => void) | undefined;
+  /** A held-open `/dev/null` fd passed as every worker's fd 3, so an accidental writeSync(3) in a
+   *  worker is harmlessly swallowed AND fd 3 is never recycled into a live descriptor. Closed by
+   *  `close()`. (`'ignore'` would leave fd 3 UNallocated → the first open() recycles the number.) */
+  private devNullFd: number | undefined;
   private closed = false;
 
   constructor(opts: MultiCoreProviderOptions) {
@@ -402,7 +413,7 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   }
 
   /**
-   * Spawn `n` workers, open their fd-3 control channels, and wait for every `hello`. On ANY
+   * Spawn `n` workers, open their fd-4 control channels, and wait for every `hello`. On ANY
    * failure before all have joined — a spawn error, a premature exit, an incompatible protocol
    * version, the join deadline, or the abort signal — every worker spawned so far is
    * supervised-terminated and the acquire rejects (no orphan, no half-open pool).
@@ -417,6 +428,9 @@ export class MultiCoreProvider implements LoadWorkerProvider {
     this.spawnCleanup = setup.cleanup;
 
     const command = this.nodeExecPath ?? process.execPath;
+    // A HELD-open /dev/null passed as every worker's fd 3 (see field doc): keeps fd 3 occupied +
+    // inert so an accidental writeSync(3) is swallowed and the number is never recycled.
+    if (this.devNullFd === undefined) this.devNullFd = openSync("/dev/null", "r+");
     const joinDeadlineMs = opts.joinDeadlineMs ?? DEFAULT_JOIN_DEADLINE_MS;
     const channels: Fd3WorkerChannel[] = [];
     try {
@@ -425,9 +439,10 @@ export class MultiCoreProvider implements LoadWorkerProvider {
         const child = spawn(command, [...setup.execArgv, setup.harnessPath, "--worker-id", workerId], {
           cwd: setup.cwd,
           env: setup.env,
-          // fd 0/1/2 piped (user stdio, kept OFF the control path); fd 3 is the DEDICATED
-          // duplex control pipe — the child has NO IPC channel, so user code cannot reach it.
-          stdio: ["pipe", "pipe", "pipe", "pipe"],
+          // fd 0/1/2 piped (user stdio, kept OFF the control path); fd 3 is a HELD /dev/null so an
+          // accidental writeSync(3) is swallowed (never a live descriptor); fd 4 is the DEDICATED
+          // duplex control pipe. The child has NO IPC channel, so user code cannot reach control.
+          stdio: ["pipe", "pipe", "pipe", this.devNullFd, "pipe"],
         });
         const channel = new Fd3WorkerChannel(workerId, child, this.graceMs, this.forwardOutput);
         channels.push(channel);
@@ -520,9 +535,9 @@ export class MultiCoreProvider implements LoadWorkerProvider {
 
   /**
    * Terminate every worker and wait for all to settle — the BOUNDED no-orphan guarantee. Each
-   * channel runs its own fd-3 EOF → SIGTERM → SIGKILL → hard-deadline escalation; this awaits
+   * channel runs its own fd-4 EOF → SIGTERM → SIGKILL → hard-deadline escalation; this awaits
    * all of them (each settles within `2×graceMs` even if the OS cannot reap it), then runs the
-   * zero-project cleanup. Idempotent.
+   * zero-project cleanup and closes the shared /dev/null fd. Idempotent.
    */
   async close(): Promise<void> {
     this.closed = true;
@@ -531,6 +546,14 @@ export class MultiCoreProvider implements LoadWorkerProvider {
     if (this.spawnCleanup !== undefined) {
       this.spawnCleanup();
       this.spawnCleanup = undefined;
+    }
+    if (this.devNullFd !== undefined) {
+      try {
+        closeSync(this.devNullFd);
+      } catch {
+        // already closed
+      }
+      this.devNullFd = undefined;
     }
   }
 }

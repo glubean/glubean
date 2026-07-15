@@ -4,16 +4,30 @@
  * protocol over a DEDICATED inherited pipe on fd 3 (NDJSON — one JSON frame per line), NEVER
  * over stdout and NOT over Node IPC.
  *
- * ISOLATION IS STRUCTURAL (§4 / §6 decision 6 / §12): the provider spawns this harness with
- * `stdio: ['pipe','pipe','pipe','pipe']`, so the process has NO IPC channel at all —
+ * ISOLATION (§4 / §6 decision 6 / §12): the provider spawns this harness with
+ * `stdio: ['pipe','pipe','pipe','ignore','pipe']`, so the process has NO IPC channel at all —
  * `process.send === undefined`, `process.on("message")` never fires, `process.connected` is
- * false. The user `.load.ts` and its libraries are imported INTO this process and share its
- * globals, but there is simply nothing on the process IPC surface for them to observe or forge:
- * the control channel lives on fd 3, which user code has no standard handle to. (This replaced
- * an earlier fork-IPC transport whose `process.send` surface was shared with user code and had
- * to be defended repeatedly.) User `console.log` / `stderr` flow to fd 1/2, which the parent
- * forwards as ordinary output. This is the two-way, dedicated-fd analog of subprocess.ts moving
- * control off the shared stdout `WIRE_PREFIX`.
+ * false. The control channel is the inherited pipe on fd 4; the conventional "first extra fd" 3 is
+ * a `/dev/null` placeholder (the provider's `'ignore'`) held open for the process lifetime, so an
+ * accidental `writeSync(3, …)` from a stray dependency is silently swallowed and never reaches
+ * anything live. (We deliberately do NOT close fd 3: a closed fd number is immediately RECYCLED by
+ * the next `open()` — and bootstrap / user-file import open many files — so `writeSync(3)` would
+ * then hit a random reused descriptor, which is both unreliable and dangerous. Holding it on
+ * /dev/null keeps the number occupied and the write harmless.) User `console.log` / `stderr` flow
+ * to fd 1/2, which the parent forwards as ordinary output.
+ *
+ * TRUST MODEL (owner decision 2026-07-15): control-frame isolation is against ACCIDENTAL
+ * collision (a dependency that auto-writes to a known fd / auto-calls process.send), consistent
+ * with the cooperative same-version single-tenant worker trust model applied throughout D0/D1. A
+ * DELIBERATE forge — user code crafting an exact protocol frame and hunting for the control
+ * descriptor (fd 4) — is out of scope: a user attacking their own single-tenant coordinator is not
+ * a threat model. Full structural isolation (user code in a grandchild process with no control fd)
+ * is a documented future hardening if untrusted multi-tenant execution is ever added. Accordingly
+ * the inbound de-framer IGNORES any non-protocol line rather than crashing, so a stray write that
+ * does reach the control fd cannot take the worker down. (This is the two-way, dedicated-fd analog
+ * of subprocess.ts moving control off the shared stdout `WIRE_PREFIX`, which replaced an earlier
+ * fork-IPC transport whose `process.send` surface was shared with user code and had to be defended
+ * repeatedly.)
  *
  * Why a spawned `.js` entry that imports the `.ts` in-process (not the `tsx` CLI): the CLI
  * re-spawns an inner node and forwards only fd 0/1/2, which would DROP the inherited fd 3.
@@ -47,8 +61,9 @@ import {
 } from "./protocol.js";
 
 /** The inherited control fd (must match the provider's `CONTROL_FD`). fd 0/1/2 are the user's
- *  stdio; fd 3 is the dedicated duplex control pipe. */
-const CONTROL_FD = 3;
+ *  stdio; fd 3 is a `/dev/null` placeholder (the provider's `'ignore'`, held open so an accidental
+ *  writeSync(3) is harmlessly swallowed); fd 4 is the dedicated duplex control pipe. */
+const CONTROL_FD = 4;
 
 const { values: args } = parseArgs({
   args: process.argv.slice(2),
@@ -61,10 +76,10 @@ const { values: args } = parseArgs({
 // Defaults keep a bare/manual launch from crashing.
 const workerId = (args["worker-id"] as string | undefined) ?? "w0";
 
-// ── Dedicated control channel on fd 3 ────────────────────────────────────────
+// ── Dedicated control channel on fd 4 (fd 3 = /dev/null placeholder) ──────────
 
-// Open the inherited fd-3 pipe as a duplex socket. The harness is USELESS without it; a missing
-// fd 3 means it was not spawned by MultiCoreProvider (or fd 3 was not wired) — fail loudly.
+// Open the inherited fd-4 pipe as a duplex socket. The harness is USELESS without it; a missing
+// fd 4 means it was not spawned by MultiCoreProvider (or fd 4 was not wired) — fail loudly.
 let control: Socket;
 try {
   control = new Socket({ fd: CONTROL_FD, readable: true, writable: true });
@@ -279,9 +294,13 @@ function handleControlLine(line: string): void {
   try {
     msg = decodeCoordinatorMessage(JSON.parse(line) as unknown);
   } catch (e) {
-    // A malformed / version-skewed frame from the coordinator is a protocol fault — crash
-    // loudly rather than silently ignore (a same-version cooperative peer never sends one).
-    crash(`multicore worker ${workerId}: ${e instanceof Error ? e.message : String(e)}`);
+    // TOLERATE garbage (trust-model hardening): a non-JSON / non-protocol line — e.g. a stray
+    // dependency write that somehow reached the control fd — is DROPPED, never crashes the
+    // worker. A same-version cooperative coordinator only ever sends valid frames, so a dropped
+    // line is an anomaly worth a one-line stderr note (not the control channel; won't confuse a
+    // reader). (This is subprocess.ts's WIRE discipline: unrecognized lines are ignored.)
+    process.stderr.write(`multicore worker ${workerId}: ignoring unparseable control line: ${e instanceof Error ? e.message : String(e)}\n`);
+    return;
   }
   switch (msg.type) {
     case "assign":
