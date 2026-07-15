@@ -1,29 +1,37 @@
 /**
- * Multi-core worker harness — the child-process entry a {@link MultiCoreProvider} forks,
- * one per worker. It runs ONE shard of a load plan (`runLoadShard`) and speaks the versioned
- * control protocol over the fork's DEDICATED IPC channel (`process.send` / `process.on
- * ("message")`), NEVER over stdout. The user `.load.ts` it imports shares this process, so
- * its `console.log` / `stderr` flow to the child's stdout/stderr (the parent forwards them
- * as ordinary output) — user code has no handle on the IPC channel and thus cannot read or
- * forge a control frame (the §6/§12 isolation requirement).
+ * Multi-core worker harness — the child-process entry a {@link MultiCoreProvider} spawns, one
+ * per worker. It runs ONE shard of a load plan (`runLoadShard`) and speaks the versioned control
+ * protocol over a DEDICATED inherited pipe on fd 3 (NDJSON — one JSON frame per line), NEVER
+ * over stdout and NOT over Node IPC.
  *
- * Why a forked `.js` entry that imports the `.ts` in-process (not `tsx <file>` spawned):
- * the `tsx` CLI re-spawns an inner node and forwards only fd 0/1/2, which would DROP the
- * IPC channel (the same reason `subprocess.ts` multiplexes on stdout). Instead the provider
- * forks THIS built `.js` with `--import tsx/esm` in `execArgv`, so tsx's ESM loader
- * registers IN-PROCESS (no re-spawn) and transforms the user TypeScript while the inherited
- * IPC channel stays intact. This harness and the user file therefore co-resolve one
- * `@glubean/sdk` (same runner-resolution machinery as `subprocess.ts`), so `runLoadShard`'s
- * engine carrier and the scenario's runtime carrier are identical (no split-brain).
+ * ISOLATION IS STRUCTURAL (§4 / §6 decision 6 / §12): the provider spawns this harness with
+ * `stdio: ['pipe','pipe','pipe','pipe']`, so the process has NO IPC channel at all —
+ * `process.send === undefined`, `process.on("message")` never fires, `process.connected` is
+ * false. The user `.load.ts` and its libraries are imported INTO this process and share its
+ * globals, but there is simply nothing on the process IPC surface for them to observe or forge:
+ * the control channel lives on fd 3, which user code has no standard handle to. (This replaced
+ * an earlier fork-IPC transport whose `process.send` surface was shared with user code and had
+ * to be defended repeatedly.) User `console.log` / `stderr` flow to fd 1/2, which the parent
+ * forwards as ordinary output. This is the two-way, dedicated-fd analog of subprocess.ts moving
+ * control off the shared stdout `WIRE_PREFIX`.
+ *
+ * Why a spawned `.js` entry that imports the `.ts` in-process (not the `tsx` CLI): the CLI
+ * re-spawns an inner node and forwards only fd 0/1/2, which would DROP the inherited fd 3.
+ * Instead the provider spawns THIS built `.js` with `--import tsx/esm`, so tsx's ESM loader
+ * registers IN-PROCESS (no re-spawn) and transforms the user TypeScript while fd 3 stays intact.
+ * This harness and the user file therefore co-resolve one `@glubean/sdk` (same runner-resolution
+ * machinery as `subprocess.ts`), so `runLoadShard`'s engine carrier and the scenario's runtime
+ * carrier are identical (no split-brain).
  *
  * Lifecycle (proposal §10.5, D1-3 subset): hello → assign (import + bind, no dispatch) →
- * start{startAt} → runLoadShard (streams snapshots) → final snapshot + result + done →
- * exit. An `abort` frame trips the shard's AbortSignal so it drains + finalizes cleanly
- * (endReason "abort"), then the same completion path runs. Losing the parent (IPC
- * `disconnect`) aborts and exits promptly — the orphan backstop from the child side.
+ * start{startAt} → runLoadShard (streams snapshots) → final snapshot + result + done → exit. An
+ * `abort` frame trips the shard's AbortSignal so it drains + finalizes cleanly (endReason
+ * "abort"), then the same completion path runs. Losing the parent (fd-3 EOF/close) aborts and
+ * exits promptly — the orphan backstop from the child side.
  */
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
+import { Socket } from "node:net";
 import type { LoadPlan } from "@glubean/sdk/load";
 import { bootstrap } from "../../bootstrap.js";
 import { runLoadShard } from "../orchestrator.js";
@@ -38,59 +46,41 @@ import {
   type WorkerMessage,
 } from "./protocol.js";
 
-// ── Channel guard + isolation (§6 decision 6 / §12) ──────────────────────────
-
-// The harness is USELESS without the IPC control channel — it exists to speak the protocol.
-// A missing `process.send` means it was not forked with an `ipc` stdio slot; fail loudly.
-if (typeof process.send !== "function") {
-  process.stderr.write("multicore worker-harness: no IPC channel (must be spawned via child_process.fork with an 'ipc' stdio)\n");
-  process.exit(1);
-}
-
-// Capture the control channel's SEND handle, then REPLACE `process.send` with a harmless
-// no-op FACADE BEFORE any user code (the `.load.ts` and its libraries, imported in
-// `handleAssign`) runs. The harness keeps its private `sendRaw`; user code's `process.send`
-// now returns `false` ("not delivered") and injects nothing onto the coordinator's channel.
-//
-// Why a callable `() => false` and NOT `undefined`: the legitimate, common
-// `if (process.connected) process.send(...)` pattern (fork-aware libraries) must not THROW.
-// With `undefined`, taking that branch calls `undefined(...)` and crashes the whole shard.
-// A no-op facade lets the branch run harmlessly — no throw, no injection, and `false` tells a
-// well-behaved caller its send did not go through.
-//
-// Why `process.connected` is deliberately LEFT `true`: it is the SAME property Node's internal
-// IPC `send` checks, so forcing it to `false` breaks the harness's OWN `sendRaw`
-// (`ERR_IPC_CHANNEL_CLOSED`) — verified empirically. Likewise `process.channel` stays in place:
-// nulling it tears down INBOUND delivery (Node gates `emit("message")` on `process.channel`),
-// so the harness would stop receiving `start`/`abort`/`heartbeat`. Inbound frames reach only
-// the harness's own `"message"` handler (attached below, before any user code).
-//
-// TRUST MODEL: isolation here is against ACCIDENTAL collision (a user file or library that
-// itself calls `process.send`), consistent with the cooperative same-version worker trust
-// model (D0). A determined adversary digging for the raw IPC fd (or reading `process.channel`
-// directly to snoop inbound frames — which still cannot REPLY, since `process.send` no longer
-// delivers) is out of scope: a user attacking their own coordinator is not a threat. This is
-// the `process.send` analog of moving control off the shared stdout `WIRE_PREFIX`
-// (subprocess.ts).
-const sendRaw = process.send.bind(process);
-process.send = () => false;
+/** The inherited control fd (must match the provider's `CONTROL_FD`). fd 0/1/2 are the user's
+ *  stdio; fd 3 is the dedicated duplex control pipe. */
+const CONTROL_FD = 3;
 
 const { values: args } = parseArgs({
   args: process.argv.slice(2),
   options: { "worker-id": { type: "string" } },
   strict: false,
 });
-// The coordinator MINTS the workerId at fork and passes it here; the harness echoes it in
-// `hello` and stamps it on every frame. The parent verifies `hello.workerId` against the id
-// it minted (proposal §5: "不信 payload 身份" — identity is coordinator-assigned, not
-// self-claimed). Defaults keep a bare/manual launch from crashing.
+// The coordinator MINTS the workerId at spawn and passes it here; the harness echoes it in
+// `hello` and stamps it on every frame. The parent verifies `hello.workerId` against the id it
+// minted (proposal §5: "不信 payload 身份" — identity is coordinator-assigned, not self-claimed).
+// Defaults keep a bare/manual launch from crashing.
 const workerId = (args["worker-id"] as string | undefined) ?? "w0";
 
-/** Send a worker frame over IPC, resolving once the channel has accepted it (so
- *  `runLoadShard` can AWAIT terminal-frame delivery before the shard resolves). */
+// ── Dedicated control channel on fd 3 ────────────────────────────────────────
+
+// Open the inherited fd-3 pipe as a duplex socket. The harness is USELESS without it; a missing
+// fd 3 means it was not spawned by MultiCoreProvider (or fd 3 was not wired) — fail loudly.
+let control: Socket;
+try {
+  control = new Socket({ fd: CONTROL_FD, readable: true, writable: true });
+} catch (e) {
+  process.stderr.write(
+    `multicore worker-harness: no control fd ${CONTROL_FD} (must be spawned by MultiCoreProvider): ${e instanceof Error ? e.message : String(e)}\n`,
+  );
+  process.exit(1);
+}
+control.setEncoding("utf8");
+
+/** Send a worker frame as one NDJSON line on fd 3, resolving once the frame is handed to the
+ *  kernel (so `runLoadShard` can AWAIT terminal-frame delivery before the shard resolves). */
 function send(msg: WorkerMessage): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    sendRaw(encodeWorkerMessage(msg), (err: Error | null) => (err ? reject(err) : resolve()));
+    control.write(JSON.stringify(encodeWorkerMessage(msg)) + "\n", (err) => (err ? reject(err) : resolve()));
   });
 }
 
@@ -101,6 +91,7 @@ function send(msg: WorkerMessage): Promise<void> {
 const abortController = new AbortController();
 let running = false;
 let finished = false;
+let parentLost = false;
 /** The assignment, once bound. */
 let bound: { plan: LoadPlan; assignment: ShardAssignmentV1 } | undefined;
 /** A `start` that arrived before `assign` finished (import is async) — replayed once bound. */
@@ -115,13 +106,13 @@ function finishClean(): never {
 }
 
 /** Report a crash (uncaught) on stderr and exit nonzero WITHOUT a `done` — the parent's
- *  supervisor detects the missing terminal + the exit and surfaces it (parity with the
- *  single-file harness). Sent best-effort as an `error` frame too, if the channel is up. */
+ *  supervisor detects the missing terminal + the exit (fd-3 close) and surfaces it. Best-effort
+ *  `error` frame first, if the pipe is still writable. */
 function crash(message: string): never {
   try {
-    sendRaw(encodeWorkerMessage({ type: "error", workerId, message }));
+    control.write(JSON.stringify(encodeWorkerMessage({ type: "error", workerId, message })) + "\n");
   } catch {
-    // channel already gone — stderr is the backstop
+    // pipe already gone — stderr + the fd-3 close are the backstop
   }
   process.stderr.write(message + "\n");
   process.exit(1);
@@ -134,16 +125,24 @@ process.on("unhandledRejection", (reason: unknown) => {
   crash(`multicore worker ${workerId} crashed: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
 });
 
-// Orphan backstop (child side): if the parent's end of the IPC closes (coordinator exited
-// or called close()), no one is left to receive frames — abort any in-flight run and exit
-// promptly so this process never lingers as an orphan (complements the parent supervisor's
-// SIGTERM→SIGKILL from the other direction). §10.5 "channel 丢失 → 终止".
-process.on("disconnect", () => {
-  if (finished) return;
+/** Orphan backstop (child side): if the parent's end of fd 3 closes (coordinator exited or
+ *  called close()), no one is left to receive frames — abort any in-flight run and exit promptly
+ *  so this process never lingers as an orphan (complements the parent supervisor's SIGTERM→
+ *  SIGKILL from the other direction). §10.5 "channel 丢失 → 终止". */
+function onParentLost(): void {
+  if (finished || parentLost) return;
+  parentLost = true;
   abortController.abort();
   // Give an in-flight drain a brief microtask window, then exit unconditionally.
   if (running) setTimeout(() => process.exit(0), 0).unref?.();
   else process.exit(0);
+}
+control.on("close", onParentLost);
+control.on("end", onParentLost);
+control.on("error", (e: Error) => {
+  // A control-pipe error (parent gone / EBADF) is a lost parent — wind down and exit.
+  process.stderr.write(`multicore worker ${workerId}: control channel error: ${e.message}\n`);
+  onParentLost();
 });
 
 /** Bind the assignment: import the user file (tsx transforms it in-process) and select the
@@ -187,9 +186,9 @@ async function handleAssign(assignment: ShardAssignmentV1): Promise<void> {
   }
 }
 
-/** Run the shard: `runLoadShard`, streaming snapshots over IPC, then final snapshot +
- *  result + done. The completion path is shared by a natural end AND an abort (the abort
- *  just makes `runLoadShard` wind down early with endReason "abort"). */
+/** Run the shard: `runLoadShard`, streaming snapshots over fd 3, then final snapshot + result +
+ *  done. The completion path is shared by a natural end AND an abort (the abort just makes
+ *  `runLoadShard` wind down early with endReason "abort"). */
 async function beginRun(startAt: number, dispatchDeadline: number | undefined): Promise<void> {
   if (bound === undefined || running || finished) return;
   running = true;
@@ -200,8 +199,8 @@ async function beginRun(startAt: number, dispatchDeadline: number | undefined): 
   // The LAST frame `runLoadShard` hands to `onSnapshot` is its terminal (final) export —
   // already `stampShardFrame`-stamped with this shard's `requestedConcurrency` /
   // `feederGuarantee` / advisories. We can't tell periodic from terminal at call time (the
-  // callback is unmarked), so we stream every frame as live progress (`final:false`) and,
-  // after the shard resolves, re-send the captured last (stamped) frame as the authoritative
+  // callback is unmarked), so we stream every frame as live progress (`final:false`) and, after
+  // the shard resolves, re-send the captured last (stamped) frame as the authoritative
   // `final:true` — the one a coordinator merges. (One redundant terminal frame; the merge
   // consumes only `final:true`.)
   let lastFrame: LoadReducerPartialV1 | undefined;
@@ -249,8 +248,8 @@ async function beginRun(startAt: number, dispatchDeadline: number | undefined): 
     await send({ type: "done", workerId });
     finishClean();
   } catch (e) {
-    // A per-shard runtime failure (invalid plan / bad bounds that `runLoadShard` throws for)
-    // is a HANDLED error, not a crash: report it + the terminal sentinel, then exit clean.
+    // A per-shard runtime failure (invalid plan / bad bounds that `runLoadShard` throws for) is
+    // a HANDLED error, not a crash: report it + the terminal sentinel, then exit clean.
     await send({
       type: "error",
       workerId,
@@ -262,12 +261,23 @@ async function beginRun(startAt: number, dispatchDeadline: number | undefined): 
   }
 }
 
-// ── Control-frame handling ───────────────────────────────────────────────────
+// ── Control-frame handling (NDJSON on fd 3) ──────────────────────────────────
 
-process.on("message", (raw: unknown) => {
+let rxBuf = "";
+control.on("data", (chunk: string) => {
+  rxBuf += chunk;
+  let nl: number;
+  while ((nl = rxBuf.indexOf("\n")) >= 0) {
+    const line = rxBuf.slice(0, nl);
+    rxBuf = rxBuf.slice(nl + 1);
+    if (line.length > 0) handleControlLine(line);
+  }
+});
+
+function handleControlLine(line: string): void {
   let msg: CoordinatorMessage;
   try {
-    msg = decodeCoordinatorMessage(raw);
+    msg = decodeCoordinatorMessage(JSON.parse(line) as unknown);
   } catch (e) {
     // A malformed / version-skewed frame from the coordinator is a protocol fault — crash
     // loudly rather than silently ignore (a same-version cooperative peer never sends one).
@@ -283,8 +293,8 @@ process.on("message", (raw: unknown) => {
       else pendingStart = msg; // arrived before import finished — replayed on bind
       break;
     case "abort":
-      // Trip the shard's signal so it drains + finalizes cleanly (endReason "abort"). If the
-      // run hasn't started yet, remember it so dispatch is skipped the instant it would begin.
+      // Trip the shard's signal so it drains + finalizes cleanly (endReason "abort"). If the run
+      // hasn't started yet, remember it so dispatch is skipped the instant it would begin.
       abortController.abort();
       if (!running) abortedBeforeStart = true;
       break;
@@ -293,13 +303,13 @@ process.on("message", (raw: unknown) => {
       // lease-kill-on-silence is D2; here it is a no-op beyond proving the channel is live.
       break;
   }
-});
+}
 
-// Announce readiness. The coordinator checks `protocolVersion` here and rejects an
-// incompatible worker BEFORE it ever sends `assign` (§4 "不兼容在 assign 前失败").
+// Announce readiness. The coordinator checks `protocolVersion` here and rejects an incompatible
+// worker BEFORE it ever sends `assign` (§4 "不兼容在 assign 前失败").
 await send({ type: "hello", protocolVersion: MULTICORE_PROTOCOL_VERSION, workerId, pid: process.pid });
 
-// If an abort somehow beat the run entirely (abort before start, nothing bound to run),
-// there is nothing to wind down — but keep the process alive for the parent's supervised
-// termination rather than exiting unilaterally (the parent owns the process group).
+// If an abort somehow beat the run entirely (abort before start, nothing bound to run), there is
+// nothing to wind down — but keep the process alive for the parent's supervised termination
+// rather than exiting unilaterally (the parent owns the process group).
 void abortedBeforeStart;

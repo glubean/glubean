@@ -5,16 +5,17 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 
 import type { LoadPlan } from "@glubean/sdk/load";
 import { runLoad } from "../orchestrator.js";
 import { shardPlan } from "../shard.js";
 import { mergePartials, finalizeMerged, type LoadReducerPartialV1 } from "../partial.js";
-import { IpcWorkerChannel, MultiCoreProvider, type ChannelCloseReason, type LoadWorkerChannel } from "./provider.js";
+import { Fd3WorkerChannel, MultiCoreProvider, type ChannelCloseReason, type LoadWorkerChannel } from "./provider.js";
 import type { ShardResultObservablesV1, WorkerMessage } from "./protocol.js";
 
-// The multi-core provider FORKS the BUILT dist/load/multicore/worker-harness.js, so the sdk +
+// The multi-core provider SPAWNS the BUILT dist/load/multicore/worker-harness.js, so the sdk +
 // runner must be built before this test (the CI build / pre-release `pnpm -r build` covers it).
 // Fixtures live UNDER the runner package so the child's `@glubean/sdk/load` import resolves
 // through the workspace — same approach as subprocess.test.ts.
@@ -206,7 +207,7 @@ export const plan = loadRunner("${id}", { scenario, concurrency: 4, iterations: 
 `;
 
 describe("MultiCoreProvider end-to-end", () => {
-  it("forks 2 workers, runs 2 shards, and the merged run equals a single-machine runLoad", async () => {
+  it("spawns 2 workers, runs 2 shards, and the merged run equals a single-machine runLoad", async () => {
     const { file, plan } = await writeFixture("e2e", HTTP_FIXTURE("mc-e2e"));
     const vars = { BASE_URL: base };
 
@@ -264,29 +265,29 @@ describe("MultiCoreProvider end-to-end", () => {
     assertAllReaped(pids);
   });
 
-  it("isolates the control channel: user code cannot forge a control frame via stdout OR process.send", async () => {
-    // The scenario tries BOTH paths a user file could reach for: flooding stdout with
-    // control-looking JSON, and calling process.send directly (which some libraries do when
-    // they detect they are a forked child). Neither must reach the coordinator's control channel.
+  it("isolates the control channel structurally: the child has NO IPC surface for user code to reach", async () => {
+    // The control channel lives on a dedicated fd 3, not Node IPC, so the child process has no
+    // IPC surface at all. User code confirms process.send/channel/message are absent, floods
+    // stdout with control-looking JSON, and tries the fork-aware patterns — none can touch fd 3.
     const FLOOD = `
 import { loadScenario, loadRunner } from "@glubean/sdk/load";
+let sawMessageEvent = false;
+process.on("message", () => { sawMessageEvent = true; }); // must NEVER fire — there is no IPC
 const scenario = loadScenario("noisy")
   .step("spam", async (ctx) => {
-    // (1) stdout flood — a separate stream from the IPC control channel.
+    // (1) stdout flood — a separate stream from the fd-3 control channel.
     for (let i = 0; i < 40; i++) {
       console.log(JSON.stringify({ v: 1, type: "abort", reason: "INJECTED-VIA-STDOUT" }));
-      process.stdout.write(JSON.stringify({ v: 1, type: "assign", assignment: {} }) + "\\n");
+      process.stdout.write(JSON.stringify({ v: 1, type: "done", workerId: "w-FORGED-STDOUT" }) + "\\n");
     }
-    // (2) process.send injection via BOTH the guarded fork-aware pattern AND a direct call.
-    // The harness swapped process.send for a harmless no-op facade before user code ran, so
-    // neither reaches the coordinator — and crucially the guarded pattern must NOT throw.
-    let guardedThrew = false;
-    if (process.connected) {
-      try { process.send({ v: 1, type: "done", workerId: "w-FORGED-GUARDED" }); } catch { guardedThrew = true; }
+    // (2) the process IPC surface is simply GONE — the guarded pattern skips (connected falsy),
+    // and process.send is not even a function. Nothing here can reach the control channel.
+    let guardedTried = false;
+    if (process.connected && typeof process.send === "function") {
+      guardedTried = true; process.send({ v: 1, type: "done", workerId: "w-FORGED-SEND" });
     }
-    const directRet = process.send({ v: 1, type: "done", workerId: "w-FORGED-DIRECT" });
-    // Report what user code observed (over stdout — the visible channel).
-    console.log("PROBE send=" + typeof process.send + " guardedThrew=" + guardedThrew + " directRet=" + directRet);
+    console.log("PROBE send=" + typeof process.send + " connected=" + !!process.connected +
+      " channel=" + typeof process.channel + " msgEvent=" + sawMessageEvent + " guardedTried=" + guardedTried);
     ctx.expect(1).toBe(1);
   })
   .build();
@@ -308,21 +309,15 @@ export const plan = loadRunner("mc-flood", { scenario, concurrency: 1, iteration
     expect(c.done).toBe(true);
     // The flood reached the child's stdout (a SEPARATE stream)…
     expect(c.stdout).toContain("INJECTED-VIA-STDOUT");
-    // …user code saw a CALLABLE facade (not a removed/undefined send that would crash the legit
-    // `if (process.connected) process.send(...)` pattern), and that guarded pattern did NOT throw.
-    expect(c.stdout).toContain("PROBE send=function");
-    expect(c.stdout).toContain("guardedThrew=false");
-    // The real hello was consumed at acquire; the channel captured it there (over IPC, not
-    // stdout) — proof the identity handshake itself rode the isolated channel.
+    // …and user code confirmed there is NO IPC surface: send undefined, connected falsy, no
+    // channel, and the 'message' event never fired. Isolation is structural, not defensive.
+    expect(c.stdout).toContain("PROBE send=undefined connected=false channel=undefined msgEvent=false guardedTried=false");
+    // The real hello was consumed at acquire — over the isolated fd 3, not stdout.
     expect(channels[0].hello.protocolVersion).toBe(1);
-    // NONE of the decoded control frames is a forged coordinator→worker type (stdout injection)…
+    // NO forged control frame (stdout-injected or otherwise) ever reached the parent: the only
+    // frames are legitimate worker→coordinator types with the coordinator-minted workerId.
     expect(c.messages.some((m) => (m.type as string) === "abort")).toBe(false);
-    expect(c.messages.some((m) => (m.type as string) === "assign")).toBe(false);
-    // …and NEITHER process.send-forged `done` (guarded or direct) reached the parent: the only
-    // real `done` carries the coordinator-minted workerId. This is the core fix — a library or
-    // user file calling process.send cannot inject onto the control channel.
     expect(c.messages.some((m) => String((m as { workerId?: string }).workerId ?? "").startsWith("w-FORGED"))).toBe(false);
-    // Every received frame is a legitimate worker→coordinator type.
     for (const m of c.messages) {
       expect(["hello", "progress", "snapshot", "result", "done", "error"]).toContain(m.type);
     }
@@ -450,12 +445,12 @@ export const plan = loadRunner("mc-crash", { scenario, concurrency: 2, duration:
     const ac = new AbortController();
     ac.abort();
     await expect(provider.acquire(2, { abort: ac.signal })).rejects.toThrow(/aborted/);
-    // acquire's failure path terminated anything it forked.
+    // acquire's failure path terminated anything it spawned.
     for (const ch of provider.workers) assertAllReaped([ch.pid]);
   });
 
   it("rejects acquire on a spawn failure and close() does not hang (error settles the channel)", async () => {
-    // A non-existent node binary makes `fork` emit ONLY an `error` event, never `exit` — the
+    // A non-existent node binary makes `spawn` emit ONLY an `error` event, never `exit` — the
     // regression: a channel whose `exited` resolves solely on `exit` would leave acquire's
     // failure path (`await close()`) waiting forever. With the fix, `error` settles `exited`.
     const provider = newProvider({ nodeExecPath: "/nonexistent/node-binary-xyz" });
@@ -477,16 +472,21 @@ export const plan = loadRunner("mc-crash", { scenario, concurrency: 2, duration:
   });
 });
 
-/** A minimal ChildProcess stub for unit-testing IpcWorkerChannel supervision without a real
- *  fork: an EventEmitter with a controllable `pid` and the members the channel touches. */
+/** A minimal ChildProcess stub for unit-testing Fd3WorkerChannel supervision without a real
+ *  spawn: an EventEmitter with a controllable `pid`, a fake fd-3 control stream, and the
+ *  members the channel touches. */
 class FakeChild extends EventEmitter {
   connected = true;
   killed = false;
   lastSignal: NodeJS.Signals | number | undefined;
   readonly stdout = null;
   readonly stderr = null;
+  /** The fd-3 control pipe stub (a PassThrough duplex). */
+  readonly control = new PassThrough();
+  readonly stdio: Array<PassThrough | null>;
   constructor(public pid: number | undefined) {
     super();
+    this.stdio = [null, null, null, this.control];
   }
   kill(signal?: NodeJS.Signals | number): boolean {
     this.killed = true;
@@ -496,18 +496,15 @@ class FakeChild extends EventEmitter {
   disconnect(): void {
     this.connected = false;
   }
-  send(): boolean {
-    return true;
-  }
 }
 
-describe("IpcWorkerChannel supervision — error vs exit (P2)", () => {
+describe("Fd3WorkerChannel supervision — error vs exit vs unreapable (P2)", () => {
   const resolved = <T>(p: Promise<T>): Promise<T | "PENDING"> =>
     Promise.race([p, new Promise<"PENDING">((r) => setTimeout(() => r("PENDING"), 50))]);
 
   it("settles on a PRE-SPAWN error (no pid) so close()/acquire never hang", async () => {
     const failed = new FakeChild(undefined); // spawn failed → no pid, never emits 'exit'
-    const ch = new IpcWorkerChannel("w0", failed as unknown as ChildProcess, 100, false);
+    const ch = new Fd3WorkerChannel("w0", failed as unknown as ChildProcess, 100, false);
     let closeReason: ChannelCloseReason | undefined;
     ch.onClose((r) => (closeReason = r));
     failed.emit("error", new Error("EMFILE"));
@@ -518,7 +515,7 @@ describe("IpcWorkerChannel supervision — error vs exit (P2)", () => {
 
   it("does NOT settle on a LIVE child's error (has pid) — waits for the real exit", async () => {
     const live = new FakeChild(4242); // spawned OK → has a pid, still running
-    const ch = new IpcWorkerChannel("w1", live as unknown as ChildProcess, 100, false);
+    const ch = new Fd3WorkerChannel("w1", live as unknown as ChildProcess, 100, false);
     let closeFired = false;
     ch.onClose(() => (closeFired = true));
 
@@ -534,5 +531,24 @@ describe("IpcWorkerChannel supervision — error vs exit (P2)", () => {
     live.emit("exit", 0, "SIGTERM");
     expect(ch.hasExited).toBe(true);
     expect(await resolved(ch.exited)).not.toBe("PENDING");
+  });
+
+  it("close() stays BOUNDED when the process cannot be reaped (never exits) — could-not-reap", async () => {
+    // A live child whose kill() is a no-op and which never emits 'exit' (uninterruptible sleep /
+    // EPERM). Without the hard deadline, close() would await `exited` forever.
+    const stuck = new FakeChild(9999);
+    const ch = new Fd3WorkerChannel("w2", stuck as unknown as ChildProcess, 50, false); // grace 50 → hard deadline 100ms
+    let closeReason: ChannelCloseReason | undefined;
+    ch.onClose((r) => (closeReason = r));
+    ch.close();
+    expect(stuck.killed).toBe(true); // SIGTERM was attempted
+    // No real 'exit' ever comes; the hard deadline (2×grace) must settle so close() can't hang.
+    const outcome = await Promise.race([
+      ch.exited.then(() => "settled"),
+      new Promise<string>((r) => setTimeout(() => r("HUNG"), 3_000)),
+    ]);
+    expect(outcome).toBe("settled");
+    expect(ch.hasExited).toBe(true);
+    expect(closeReason).toEqual({ kind: "could-not-reap" });
   });
 });

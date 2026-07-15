@@ -1,34 +1,40 @@
 /**
- * Multi-core load worker provider (parent side, proposal §5). `MultiCoreProvider` forks N
+ * Multi-core load worker provider (parent side, proposal §5). `MultiCoreProvider` spawns N
  * worker child processes (each running `worker-harness.js`), wraps each in a
- * {@link LoadWorkerChannel} over the fork's DEDICATED IPC channel, waits for every worker's
+ * {@link LoadWorkerChannel} over a DEDICATED inherited control fd, waits for every worker's
  * `hello`, and acts as the SUPERVISOR that holds the process group: it tracks each child's
  * pid and guarantees that every termination path (abort / channel loss / clean finish / a
- * future no-progress signal) reaps the child — limited-window SIGTERM then SIGKILL — so
- * `close()` never leaves an orphan.
+ * future no-progress signal) reaps the child — SIGTERM → SIGKILL → a hard bounded deadline —
+ * so `close()` never leaves an orphan and never hangs.
  *
- * SCOPE (D1-3): this provider only PULLS N workers up, opens their channels, and manages
- * their lifecycle. It does NOT merge snapshots or finalize an artifact — the coordinator
- * core (snapshot fan-in, `mergePartials` + `finalizeMerged`, threshold evaluation) is D1-4.
- * A caller drives the workers with the raw channel API (`send` / `onMessage`).
+ * TRANSPORT (proposal §4 "专用控制通道 … 继承 fd"): the control channel is a dedicated
+ * inherited pipe on fd 3, NOT Node's fork IPC. The child is `spawn`ed with
+ * `stdio: ['pipe','pipe','pipe','pipe']` — fd 0/1/2 are the user's stdio (drained/forwarded),
+ * and fd 3 is a duplex pipe carrying the protocol as NDJSON (one JSON frame per line). This is
+ * what makes isolation STRUCTURAL rather than defensive: the child has NO IPC channel at all
+ * (`process.send === undefined`, `process.on("message")` never fires, `process.connected`
+ * false), so user code / libraries cannot observe or forge a control frame — there is nothing
+ * on the process IPC surface to reach for. (The earlier fork-IPC transport shared that surface
+ * with user code, which is why isolation had to be patched repeatedly.) The same protocol,
+ * unchanged, is what D2 `remote` reuses over WebSocket — only the transport differs.
  *
- * Isolation (hard requirement §6/§12): control frames are read ONLY from the IPC channel
- * (`child.on("message")`). The child's stdout/stderr — where user `console.log` lands — are
- * SEPARATE streams the provider never parses as protocol, so user code cannot forge or
- * disturb a control frame no matter what it writes.
+ * SCOPE (D1-3): this provider only PULLS N workers up, opens their channels, and manages their
+ * lifecycle. It does NOT merge snapshots or finalize an artifact — the coordinator core
+ * (snapshot fan-in, `mergePartials` + `finalizeMerged`, threshold evaluation) is D1-4. A caller
+ * drives the workers with the raw channel API (`send` / `onMessage`).
  *
  * Runner resolution: reuses `subprocess.ts`'s machinery (`resolveRunnerRoot` +
- * `prepareZeroProject`) so the worker and the user `.load.ts` co-resolve one `@glubean/sdk`
- * — but forks the built `.js` harness with tsx's ESM loader registered IN-PROCESS
- * (`--import tsx/esm`) instead of spawning the `tsx` CLI, because the CLI re-spawns an inner
- * node and would drop the inherited IPC channel.
+ * `prepareZeroProject`) so the worker and the user `.load.ts` co-resolve one `@glubean/sdk` —
+ * spawning the built `.js` harness with tsx's ESM loader registered IN-PROCESS
+ * (`--import tsx/esm`) rather than the `tsx` CLI (which re-spawns an inner node and would drop
+ * the inherited fd 3).
  */
-import { fork, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
-import type { Readable } from "node:stream";
+import type { Duplex, Readable } from "node:stream";
 import { resolveRunnerRoot, prepareZeroProject, type ZeroProjectSetup } from "../../runner-resolve.js";
 import {
   MULTICORE_PROTOCOL_VERSION,
@@ -44,21 +50,25 @@ import {
 /** A worker's `hello` — its announced protocol version + coordinator-assigned identity. */
 export interface LoadWorkerHello {
   protocolVersion: number;
-  /** The workerId — echoed from the id the coordinator minted at fork (not self-claimed). */
+  /** The workerId — echoed from the id the coordinator minted at spawn (not self-claimed). */
   workerId: string;
   /** The child's OS process id (for supervision / diagnostics). */
   pid: number;
 }
 
-/** Why a channel closed (its child exited or the transport failed). */
+/** Why a channel closed. `exit` — the child process ended; `error` — a PRE-SPAWN failure (no
+ *  pid was ever assigned); `could-not-reap` — even SIGKILL did not yield an exit within the
+ *  hard teardown deadline (uninterruptible sleep / EPERM / zombie), settled so `close()` stays
+ *  bounded (a possible lingering process, surfaced rather than hidden). */
 export type ChannelCloseReason =
   | { kind: "exit"; code: number | null; signal: NodeJS.Signals | null }
-  | { kind: "error"; error: Error };
+  | { kind: "error"; error: Error }
+  | { kind: "could-not-reap" };
 
 /**
  * The coordinator's handle on ONE worker (proposal §5). Transport-agnostic by shape —
- * multi-core backs it with fork IPC; remote (D2) will back the same interface with a
- * WebSocket. `send` delivers a coordinator frame; `onMessage` receives worker frames;
+ * multi-core backs it with a dedicated fd-3 pipe; remote (D2) will back the same interface
+ * with a WebSocket. `send` delivers a coordinator frame; `onMessage` receives worker frames;
  * `close` starts this worker's supervised termination.
  */
 export interface LoadWorkerChannel {
@@ -76,16 +86,17 @@ export interface LoadWorkerChannel {
   onClose(cb: (reason: ChannelCloseReason) => void): void;
   /** Subscribe to transport errors (e.g. a spawn failure). */
   onError(cb: (err: Error) => void): void;
-  /** Begin this worker's supervised termination (disconnect → SIGTERM → SIGKILL). Idempotent. */
+  /** Begin this worker's supervised termination (fd-3 EOF → SIGTERM → SIGKILL → hard deadline).
+   *  Idempotent. */
   close(): void;
 }
 
 /** Options for `acquire` (proposal §5 `AcquireOptions`). */
 export interface AcquireOptions {
   /** Deadline (from listener-ready) for every worker to `hello`; default 60s (multi-core).
-   *  On timeout the acquire fails and every already-forked worker is terminated. */
+   *  On timeout the acquire fails and every already-spawned worker is terminated. */
   joinDeadlineMs?: number;
-  /** Abort the acquire (and terminate any workers forked so far). */
+  /** Abort the acquire (and terminate any workers spawned so far). */
   abort: AbortSignal;
 }
 
@@ -98,16 +109,20 @@ export interface LoadWorkerProvider {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // provider.js builds to dist/load/multicore/provider.js — the runner dist/ is two levels up,
-// the package root three; the sibling worker-harness.js is the bundled fork entry.
+// the package root three; the sibling worker-harness.js is the bundled spawn entry.
 const BUNDLED_DIST_DIR = resolve(__dirname, "..", "..");
 const BUNDLED_PKG_ROOT = resolve(__dirname, "..", "..", "..");
 const BUNDLED_WORKER_HARNESS = resolve(__dirname, "worker-harness.js");
 
+/** The inherited control fd index. fd 0/1/2 are the user's stdio; fd 3 is the dedicated
+ *  duplex control pipe the protocol rides (NDJSON). */
+const CONTROL_FD = 3;
+
 let _tsxEsmUrl: string | undefined;
 /** Resolve tsx's ESM loader entry (`tsx/esm`) as an absolute `file://` URL, so `--import`
  *  finds it regardless of the child's cwd (a user project rarely has tsx installed). Cached.
- *  This registers the TS transform IN-PROCESS in the forked worker (no CLI re-spawn), which
- *  is what keeps the inherited IPC channel alive. */
+ *  This registers the TS transform IN-PROCESS in the spawned worker (no CLI re-spawn), which
+ *  is what keeps the inherited control fd intact. */
 function resolveTsxEsmLoaderUrl(): string {
   if (_tsxEsmUrl) return _tsxEsmUrl;
   const req = createRequire(import.meta.url);
@@ -115,17 +130,18 @@ function resolveTsxEsmLoaderUrl(): string {
   return _tsxEsmUrl;
 }
 
-/** The fork parameters shared by every worker of one acquire (computed once). */
-interface ForkSetup {
+/** The spawn parameters shared by every worker of one acquire (computed once). */
+interface SpawnSetup {
   harnessPath: string;
   cwd: string;
   env: Record<string, string>;
+  /** node flags (tsx loader + zero-project resolver) that precede the harness on the argv. */
   execArgv: string[];
   /** Undo any temp package.json the zero-project setup created. */
   cleanup: () => void;
 }
 
-function computeForkSetup(cwd: string): ForkSetup {
+function computeSpawnSetup(cwd: string): SpawnSetup {
   // Resolve the runner exactly as `glubean run` / the single-file load spawn do, then prefer
   // the resolved runner's OWN multicore harness (co-resolves the project's sdk) and fall back
   // to the bundled sibling when the resolved runner predates multicore support (an older
@@ -148,7 +164,7 @@ function computeForkSetup(cwd: string): ForkSetup {
   return { harnessPath, cwd, env, execArgv, cleanup: zp.cleanup };
 }
 
-// ── IPC-backed channel ───────────────────────────────────────────────────────
+// ── fd-3 control channel ─────────────────────────────────────────────────────
 
 /** Grace given a child to exit after SIGTERM before SIGKILL. */
 const DEFAULT_SIGTERM_GRACE_MS = 3_000;
@@ -156,25 +172,33 @@ const DEFAULT_SIGTERM_GRACE_MS = 3_000;
 const DEFAULT_JOIN_DEADLINE_MS = 60_000;
 
 /**
- * A {@link LoadWorkerChannel} backed by a forked child's IPC channel. Control frames ride
- * `process.send` / the `"message"` event; the child's stdout/stderr (user output) are
- * exposed but NEVER read as protocol — the structural guarantee behind §12 isolation.
+ * A {@link LoadWorkerChannel} backed by a spawned child's DEDICATED fd-3 control pipe. Control
+ * frames ride fd 3 as NDJSON (one JSON frame per line); the child's stdout/stderr (user output)
+ * are separate streams the provider drains but NEVER parses as protocol. The child has no IPC
+ * surface, so user code cannot forge or observe a control frame — isolation is structural.
  *
  * Exported for the D1-4 coordinator + supervision unit tests (which drive it with a stub
- * `ChildProcess`); production callers construct it via {@link MultiCoreProvider.acquire}.
+ * `ChildProcess` + fake control stream); production callers construct it via
+ * {@link MultiCoreProvider.acquire}.
  */
-export class IpcWorkerChannel implements LoadWorkerChannel {
+export class Fd3WorkerChannel implements LoadWorkerChannel {
   readonly workerId: string;
   readonly pid: number;
   hello!: LoadWorkerHello;
   private readonly child: ChildProcess;
+  /** The dedicated control pipe (child.stdio[CONTROL_FD]). */
+  private readonly control: Duplex;
+  private rxBuf = "";
   private readonly messageCbs: Array<(msg: WorkerMessage) => void> = [];
   private readonly closeCbs: Array<(reason: ChannelCloseReason) => void> = [];
   private readonly errorCbs: Array<(err: Error) => void> = [];
   private sigkillTimer: ReturnType<typeof setTimeout> | undefined;
+  private reapTimer: ReturnType<typeof setTimeout> | undefined;
   private closing = false;
-  /** Resolves when the child has exited — the supervisor awaits this for no-orphan close. */
+  /** Resolves when the child has been reaped (or the hard deadline gave up) — the supervisor
+   *  awaits this for a bounded no-orphan close. */
   readonly exited: Promise<void>;
+  private resolveExit!: () => void;
   private _exited = false;
   private _closeReason: ChannelCloseReason | undefined;
 
@@ -187,43 +211,33 @@ export class IpcWorkerChannel implements LoadWorkerChannel {
     this.workerId = workerId;
     this.child = child;
     this.pid = child.pid ?? -1;
-    // Settle the channel on the FIRST of exit / error (deduped). A `fork` that fails to spawn
-    // (EMFILE / EAGAIN / a bad execPath) emits ONLY `error`, never `exit` — resolving `exited`
-    // here on error too is what stops `close()` (and `awaitAllHellos`) from awaiting forever.
-    let settleClosed!: (reason: ChannelCloseReason) => void;
-    this.exited = new Promise<void>((resolveExit) => {
-      settleClosed = (reason: ChannelCloseReason): void => {
-        if (this._exited) return;
-        this._exited = true;
-        this._closeReason = reason;
-        if (this.sigkillTimer !== undefined) clearTimeout(this.sigkillTimer);
-        for (const cb of this.closeCbs) cb(reason);
-        resolveExit();
-      };
+    this.control = child.stdio[CONTROL_FD] as unknown as Duplex;
+    this.exited = new Promise<void>((r) => {
+      this.resolveExit = r;
     });
-    child.on("exit", (code, signal) => settleClosed({ kind: "exit", code, signal }));
+
+    child.on("exit", (code, signal) => this.settleClosed({ kind: "exit", code, signal }));
     child.on("error", (err) => {
       for (const cb of this.errorCbs) cb(err);
       // ONLY a PRE-SPAWN failure — no pid was ever assigned (EMFILE / EAGAIN / a bad execPath) —
       // never yields an `exit`, so synthesize the close here or `close()` / `awaitAllHellos`
-      // would wait forever. A post-spawn error on a LIVE process (it HAS a pid — e.g. an EPERM
-      // from `kill()`, or an IPC serialize error) must NOT be mistaken for an exit: the process
-      // is still running, so keep `_exited` false and the SIGKILL timer armed, and let the REAL
-      // `exit` (natural, or forced by `close()`'s SIGTERM→SIGKILL) settle it — otherwise the
-      // supervisor would skip termination and falsely report the worker reaped.
-      if (child.pid === undefined) settleClosed({ kind: "error", error: err });
+      // would wait forever. A post-spawn error on a LIVE process (it HAS a pid) must NOT be
+      // mistaken for an exit: keep `_exited` false and let the REAL `exit` (natural, or forced by
+      // `close()`) settle it — else the supervisor skips termination and falsely reports reaped.
+      if (child.pid === undefined) this.settleClosed({ kind: "error", error: err });
     });
-    child.on("message", (raw: unknown) => {
-      let msg: WorkerMessage;
-      try {
-        msg = decodeWorkerMessage(raw);
-      } catch (e) {
-        // A malformed worker frame is a transport error, not silently dropped.
-        for (const cb of this.errorCbs) cb(e instanceof Error ? e : new Error(String(e)));
-        return;
-      }
-      for (const cb of this.messageCbs) cb(msg);
-    });
+
+    // Inbound control frames: NDJSON on fd 3. Buffer to a newline, JSON.parse + decode each line.
+    if (this.control !== undefined && this.control !== null) {
+      this.control.setEncoding("utf8");
+      this.control.on("data", (chunk: string) => this.onControlData(chunk));
+      // A transport error on the control pipe is surfaced (not silently dropped); the child's
+      // own `exit` still drives settlement.
+      this.control.on("error", (err: Error) => {
+        for (const cb of this.errorCbs) cb(err);
+      });
+    }
+
     // DRAIN the user stdout/stderr pipes continuously (attached at construction, before any
     // assign): a verbose worker that fills the OS pipe buffer would otherwise BLOCK on its next
     // stdout write — potentially before it can send `done` — and hang the whole run. A `data`
@@ -236,6 +250,37 @@ export class IpcWorkerChannel implements LoadWorkerChannel {
     child.stderr?.on("data", (chunk: Buffer) => {
       if (this.forwardOutput) process.stderr.write(chunk);
     });
+  }
+
+  /** Frame + fire close callbacks + resolve `exited` exactly once. */
+  private settleClosed(reason: ChannelCloseReason): void {
+    if (this._exited) return;
+    this._exited = true;
+    this._closeReason = reason;
+    if (this.sigkillTimer !== undefined) clearTimeout(this.sigkillTimer);
+    if (this.reapTimer !== undefined) clearTimeout(this.reapTimer);
+    for (const cb of this.closeCbs) cb(reason);
+    this.resolveExit();
+  }
+
+  /** NDJSON de-framer for inbound control data (handles split / coalesced frames). */
+  private onControlData(chunk: string): void {
+    this.rxBuf += chunk;
+    let nl: number;
+    while ((nl = this.rxBuf.indexOf("\n")) >= 0) {
+      const line = this.rxBuf.slice(0, nl);
+      this.rxBuf = this.rxBuf.slice(nl + 1);
+      if (line.length === 0) continue;
+      let msg: WorkerMessage;
+      try {
+        msg = decodeWorkerMessage(JSON.parse(line) as unknown);
+      } catch (e) {
+        // A malformed / undecodable frame is a transport error, not silently dropped.
+        for (const cb of this.errorCbs) cb(e instanceof Error ? e : new Error(String(e)));
+        continue;
+      }
+      for (const cb of this.messageCbs) cb(msg);
+    }
   }
 
   /** The child's stdout (user `console.log`) — exposed for forwarding/inspection; the
@@ -253,11 +298,13 @@ export class IpcWorkerChannel implements LoadWorkerChannel {
 
   send(msg: CoordinatorMessage): Promise<void> {
     return new Promise<void>((resolveSend, reject) => {
-      if (this._exited || !this.child.connected) {
-        reject(new Error(`worker ${this.workerId} channel is closed`));
+      if (this._exited || this.control === undefined || this.control === null || this.control.destroyed) {
+        reject(new Error(`worker ${this.workerId} control channel is closed`));
         return;
       }
-      this.child.send(encodeCoordinatorMessage(msg), (err: Error | null) =>
+      // One NDJSON frame. Resolve on the write callback (frame handed to the kernel) so a caller
+      // — e.g. the harness awaiting terminal-frame delivery — knows it is on the wire.
+      this.control.write(JSON.stringify(encodeCoordinatorMessage(msg)) + "\n", (err) =>
         err ? reject(err) : resolveSend(),
       );
     });
@@ -280,19 +327,22 @@ export class IpcWorkerChannel implements LoadWorkerChannel {
   }
 
   /**
-   * Supervised termination (idempotent): close the IPC (the child's `disconnect` backstop
-   * self-exits), SIGTERM as the escalation if that stalls, then SIGKILL after `graceMs` — a
-   * bounded window so a wedged worker can never linger. Because tsx runs IN the worker (no
-   * CLI re-spawn), a worker has NO child processes, so killing its pid fully terminates it —
-   * no process-group (`setsid`/`-pid`) gymnastics are needed for this topology.
+   * Supervised termination (idempotent + BOUNDED): end the control pipe (the child's fd-3
+   * EOF backstop self-exits), SIGTERM as the escalation, SIGKILL after `graceMs`, and — because
+   * even SIGKILL cannot reap an uninterruptible-sleep / EPERM / zombie process — a HARD deadline
+   * at `2·graceMs` that settles the channel `could-not-reap` so `close()` can never hang forever.
+   * Because tsx runs IN the worker (no CLI re-spawn), a worker has NO child processes, so killing
+   * its pid fully terminates it — no process-group (`setsid`/`-pid`) gymnastics for this topology.
    */
   close(): void {
     if (this.closing || this._exited) return;
     this.closing = true;
+    // End our write side of fd 3 → the child sees EOF on its control socket and self-exits
+    // (the disconnect backstop), even if the parent later crashes.
     try {
-      if (this.child.connected) this.child.disconnect();
+      this.control?.end();
     } catch {
-      // already disconnected
+      // already ended
     }
     try {
       this.child.kill("SIGTERM");
@@ -309,6 +359,10 @@ export class IpcWorkerChannel implements LoadWorkerChannel {
       }
     }, this.graceMs);
     this.sigkillTimer.unref?.();
+    // Bounded teardown backstop: if no real `exit` has arrived a full grace window after SIGKILL,
+    // give up waiting and settle synthetically rather than leave `close()` pending forever.
+    this.reapTimer = setTimeout(() => this.settleClosed({ kind: "could-not-reap" }), this.graceMs * 2);
+    this.reapTimer.unref?.();
   }
 }
 
@@ -318,7 +372,8 @@ export class IpcWorkerChannel implements LoadWorkerChannel {
 export interface MultiCoreProviderOptions {
   /** Project root: drives runner resolution + is the workers' cwd. */
   cwd: string;
-  /** Grace after SIGTERM before SIGKILL per worker (default 3s). */
+  /** Grace after SIGTERM before SIGKILL per worker (default 3s); the hard teardown deadline is
+   *  `2×` this. */
   sigtermGraceMs?: number;
   /** Echo each worker's stdout/stderr (user `console.log` / diagnostics) to the coordinator's
    *  own stdout/stderr — parity with subprocess.ts. Default `true`. Regardless of this flag the
@@ -335,8 +390,8 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   private readonly graceMs: number;
   private readonly forwardOutput: boolean;
   private readonly nodeExecPath: string | undefined;
-  private readonly channels: IpcWorkerChannel[] = [];
-  private forkCleanup: (() => void) | undefined;
+  private readonly channels: Fd3WorkerChannel[] = [];
+  private spawnCleanup: (() => void) | undefined;
   private closed = false;
 
   constructor(opts: MultiCoreProviderOptions) {
@@ -347,35 +402,34 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   }
 
   /**
-   * Fork `n` workers, open their IPC channels, and wait for every `hello`. On ANY failure
-   * before all have joined — a spawn error, a premature exit, an incompatible protocol
-   * version, the join deadline, or the abort signal — every worker forked so far is
+   * Spawn `n` workers, open their fd-3 control channels, and wait for every `hello`. On ANY
+   * failure before all have joined — a spawn error, a premature exit, an incompatible protocol
+   * version, the join deadline, or the abort signal — every worker spawned so far is
    * supervised-terminated and the acquire rejects (no orphan, no half-open pool).
    */
   async acquire(n: number, opts: AcquireOptions): Promise<LoadWorkerChannel[]> {
     if (this.closed) throw new Error("MultiCoreProvider: acquire after close()");
     if (!Number.isInteger(n) || n < 1) throw new Error(`MultiCoreProvider: worker count must be a positive integer (got ${n})`);
 
-    const setup = computeForkSetup(this.cwd);
+    const setup = computeSpawnSetup(this.cwd);
     // Keep the zero-project cleanup until close() — the temp package.json must survive for the
-    // whole run (workers import the user file lazily on assign), not just past fork.
-    this.forkCleanup = setup.cleanup;
+    // whole run (workers import the user file lazily on assign), not just past spawn.
+    this.spawnCleanup = setup.cleanup;
 
+    const command = this.nodeExecPath ?? process.execPath;
     const joinDeadlineMs = opts.joinDeadlineMs ?? DEFAULT_JOIN_DEADLINE_MS;
-    const channels: IpcWorkerChannel[] = [];
+    const channels: Fd3WorkerChannel[] = [];
     try {
       for (let i = 0; i < n; i++) {
         const workerId = `w${i}`;
-        const child = fork(setup.harnessPath, ["--worker-id", workerId], {
+        const child = spawn(command, [...setup.execArgv, setup.harnessPath, "--worker-id", workerId], {
           cwd: setup.cwd,
           env: setup.env,
-          execArgv: setup.execArgv,
-          ...(this.nodeExecPath !== undefined ? { execPath: this.nodeExecPath } : {}),
-          // fd 0/1/2 piped (user stdio, kept OFF the control path); the 4th slot is the
-          // DEDICATED IPC control channel.
-          stdio: ["pipe", "pipe", "pipe", "ipc"],
+          // fd 0/1/2 piped (user stdio, kept OFF the control path); fd 3 is the DEDICATED
+          // duplex control pipe — the child has NO IPC channel, so user code cannot reach it.
+          stdio: ["pipe", "pipe", "pipe", "pipe"],
         });
-        const channel = new IpcWorkerChannel(workerId, child, this.graceMs, this.forwardOutput);
+        const channel = new Fd3WorkerChannel(workerId, child, this.graceMs, this.forwardOutput);
         channels.push(channel);
         this.channels.push(channel);
       }
@@ -383,7 +437,7 @@ export class MultiCoreProvider implements LoadWorkerProvider {
       await this.awaitAllHellos(channels, joinDeadlineMs, opts.abort);
       return channels;
     } catch (e) {
-      // Tear down everything forked in this acquire before surfacing the failure.
+      // Tear down everything spawned in this acquire before surfacing the failure.
       await this.close();
       throw e;
     }
@@ -392,7 +446,7 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   /** Wait for every channel's `hello`, validating the protocol version (an incompatible
    *  worker fails the acquire BEFORE any assign, §4). Rejects on deadline / abort / a worker
    *  dying or erroring before it says hello. */
-  private awaitAllHellos(channels: IpcWorkerChannel[], deadlineMs: number, abort: AbortSignal): Promise<void> {
+  private awaitAllHellos(channels: Fd3WorkerChannel[], deadlineMs: number, abort: AbortSignal): Promise<void> {
     return new Promise<void>((resolveAll, reject) => {
       let remaining = channels.length;
       let settled = false;
@@ -429,7 +483,7 @@ export class MultiCoreProvider implements LoadWorkerProvider {
           fail(
             new Error(
               `worker ${channel.workerId} exited before hello` +
-                (reason.kind === "exit" ? ` (code ${reason.code}, signal ${reason.signal})` : ""),
+                (reason.kind === "exit" ? ` (code ${reason.code}, signal ${reason.signal})` : ` (${reason.kind})`),
             ),
           ),
         );
@@ -465,17 +519,18 @@ export class MultiCoreProvider implements LoadWorkerProvider {
   }
 
   /**
-   * Terminate every worker and wait for all to exit — the no-orphan guarantee. Each channel
-   * runs its own disconnect → SIGTERM → SIGKILL escalation; this awaits all exits (bounded by
-   * the SIGKILL that each channel arms), then runs the zero-project cleanup. Idempotent.
+   * Terminate every worker and wait for all to settle — the BOUNDED no-orphan guarantee. Each
+   * channel runs its own fd-3 EOF → SIGTERM → SIGKILL → hard-deadline escalation; this awaits
+   * all of them (each settles within `2×graceMs` even if the OS cannot reap it), then runs the
+   * zero-project cleanup. Idempotent.
    */
   async close(): Promise<void> {
     this.closed = true;
     for (const channel of this.channels) channel.close();
     await Promise.all(this.channels.map((c) => c.exited));
-    if (this.forkCleanup !== undefined) {
-      this.forkCleanup();
-      this.forkCleanup = undefined;
+    if (this.spawnCleanup !== undefined) {
+      this.spawnCleanup();
+      this.spawnCleanup = undefined;
     }
   }
 }
