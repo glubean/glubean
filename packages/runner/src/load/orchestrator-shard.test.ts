@@ -333,4 +333,53 @@ describe("runLoadShard — shard-aware execution kernel (D1-2)", () => {
     expect(result.maxStartLatenessMs).toBe(50_000);
     expect(result.endReason).toBe("iterations");
   });
+
+  it("records start lateness even with NO rampUp (startAt-only distributed plan) (follow-up P2)", async () => {
+    // A startAt-only plan (no rampUp) is a common distributed shape: the ramp is zero-delay,
+    // but a late worker must STILL record its lateness (the old `if (rampUp)` guard skipped it).
+    const plan = loadRunner("late-no-ramp", {
+      scenario: loadScenario("noop").step("noop", async () => {}).build(),
+      concurrency: 1,
+      iterations: 1,
+      // no rampUp
+    });
+    const { shards } = shardPlan(plan, 1);
+    const result = await runLoadShard(plan, {
+      shard: shards[0],
+      rngSeed: "s",
+      startAt: 50_000,
+      now: () => 80_000, // 30s past startAt, zero ramp delay → 30s late
+      onSnapshot: () => {},
+    });
+    expect(result.maxStartLatenessMs).toBe(30_000);
+  });
+
+  it("AWAITS the terminal snapshot's async delivery before resolving (follow-up P1)", async () => {
+    // D1-3 delivers frames over IPC/network (async). The shard must not resolve (a worker must
+    // not exit) until the TERMINAL frame's delivery completes, or the final state is lost.
+    const plan = loadRunner("async-snap", {
+      scenario: loadScenario("noop").step("noop", async () => {}).build(),
+      concurrency: 1,
+      iterations: 2,
+    });
+    const { shards } = shardPlan(plan, 1);
+    let terminalDelivered = false;
+    const frames: LoadReducerPartialV1[] = [];
+    await runLoadShard(plan, {
+      shard: shards[0],
+      rngSeed: "s",
+      timelineOrigin: Date.now(),
+      onSnapshot: async (p) => {
+        frames.push(p);
+        if (p.endReason !== undefined) {
+          // Terminal frame: simulate a slow async (IPC) delivery. If runLoadShard did NOT await
+          // it, `terminalDelivered` would still be false right after the run resolved.
+          await new Promise<void>((r) => setTimeout(r, 30));
+          terminalDelivered = true;
+        }
+      },
+    });
+    expect(terminalDelivered).toBe(true);
+    expect(frames[frames.length - 1].endReason).toBe("iterations");
+  });
 });

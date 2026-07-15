@@ -295,10 +295,14 @@ export interface RunLoadShardOptions {
    *  deadline, §6). Omitted → the plan's `duration` is used as a relative window
    *  (single-machine parity); absent from both → an iterations-only run. */
   dispatchDeadline?: number;
-  /** Cumulative-partial sink: called PERIODICALLY (every `snapshotIntervalMs`) and ONCE
-   *  at run end (the terminal frame the coordinator merges). Omitted → no frames are
-   *  exported (the `runLoad` single-machine path, which finalizes from the reducer). */
-  onSnapshot?: (partial: LoadReducerPartialV1) => void;
+  /** Cumulative-partial sink: called PERIODICALLY (every `snapshotIntervalMs`) and ONCE at
+   *  run end (the terminal frame the coordinator merges). MAY be async — D1-3 delivers frames
+   *  over IPC / the network: the shard AWAITS the terminal frame's delivery before resolving
+   *  (so a worker never exits before the coordinator has the final frame), while periodic
+   *  frames are best-effort (an in-flight guard prevents overlap; delivery failures are
+   *  swallowed and the coordinator re-polls). Omitted → no frames are exported (the `runLoad`
+   *  single-machine path, which finalizes from the reducer). */
+  onSnapshot?: (partial: LoadReducerPartialV1) => void | Promise<void>;
   /** Periodic snapshot cadence (ms); default {@link DEFAULT_SNAPSHOT_INTERVAL_MS}. */
   snapshotIntervalMs?: number;
   /** Resolved environment vars for the engine core (ctx.vars). */
@@ -697,11 +701,27 @@ export async function runLoadShard(
   // omits `onSnapshot`, so no timer is created and there is zero added work there.
   // `exportPartial` never mutates live state, so a mid-run snapshot is safe between the
   // loop's await points; `unref` keeps the timer from holding a standalone process open.
+  //
+  // `onSnapshot` MAY be async (D1-3 IPC / network delivery). Periodic frames are
+  // BEST-EFFORT: an in-flight guard skips a tick while the previous frame is still being
+  // delivered (no overlap, no back-pressure buildup), and a delivery failure is swallowed
+  // (the coordinator re-polls; the terminal frame below carries the authoritative final
+  // state and IS awaited). `periodicInFlight` is tracked so the terminal frame can let a
+  // pending periodic settle before it, staying genuinely last.
   let snapshotTimer: ReturnType<typeof setInterval> | undefined;
+  let periodicInFlight: Promise<void> | undefined;
   if (onSnapshot !== undefined) {
+    const deliver = onSnapshot;
     const intervalMs = opts.snapshotIntervalMs ?? DEFAULT_SNAPSHOT_INTERVAL_MS;
     snapshotTimer = setInterval(() => {
-      onSnapshot(stampShardFrame(reducer.exportPartial(now())));
+      if (periodicInFlight !== undefined) return; // previous frame still delivering — skip this tick
+      // The async wrapper turns a synchronous throw in `deliver` into a rejection too, so the
+      // `.catch` swallows both (a periodic delivery failure must never crash the run loop).
+      periodicInFlight = (async () => deliver(stampShardFrame(reducer.exportPartial(now()))))()
+        .catch(() => {})
+        .finally(() => {
+          periodicInFlight = undefined;
+        });
     }, intervalMs);
     snapshotTimer.unref?.();
   }
@@ -946,22 +966,24 @@ export async function runLoadShard(
   let maxStartLatenessMs = 0;
 
   const runSlot = async (globalSlotIndex: number): Promise<void> => {
-    if (rampUpMs !== undefined) {
-      // Ramp timing is a GLOBAL-slot function (§6.1): a shard's slots ramp at their global
-      // positions, so the whole run's ramp curve is worker-count independent.
-      const rampDelay = rampDelayMs(globalSlotIndex, concurrency, rampUpMs);
-      if (startAt !== undefined) {
-        // Distributed: align each slot to the ABSOLUTE instant `startAt + rampDelay` (§5.1),
-        // so a worker that woke late does not shift its whole ramp curve forward (which would
-        // eat the dispatch window before the deadline). A slot already past its target opens
-        // at once; the overshoot is recorded as start lateness.
-        const wait = startAt + rampDelay - now();
-        if (wait > 0) await pausedSleep(wait);
-        else if (-wait > maxStartLatenessMs) maxStartLatenessMs = -wait;
-      } else {
-        // Single-machine: relative to the run start (unchanged — byte-identical).
-        await pausedSleep(rampDelay);
-      }
+    // Ramp timing is a GLOBAL-slot function (§6.1): a shard's slots ramp at their global
+    // positions, so the whole run's ramp curve is worker-count independent. A plan with no
+    // `rampUp` is a ZERO-delay ramp — every slot's delay is 0 — which still matters under a
+    // distributed `startAt` (a startAt-only plan is common), so it is NOT skipped there.
+    const rampDelay = rampUpMs !== undefined ? rampDelayMs(globalSlotIndex, concurrency, rampUpMs) : 0;
+    if (startAt !== undefined) {
+      // Distributed: align each slot to the ABSOLUTE instant `startAt + rampDelay` (§5.1;
+      // rampDelay is 0 when the plan has no rampUp), so a worker that woke late does not shift
+      // its whole ramp curve forward (which would eat the dispatch window before the deadline)
+      // AND its lateness is always accounted. A slot already past its target opens at once; the
+      // overshoot is recorded as start lateness.
+      const wait = startAt + rampDelay - now();
+      if (wait > 0) await pausedSleep(wait);
+      else if (-wait > maxStartLatenessMs) maxStartLatenessMs = -wait;
+    } else if (rampUpMs !== undefined) {
+      // Single-machine ramp: relative to the run start (unchanged — byte-identical; a plan
+      // with no rampUp and no startAt opens every slot immediately, exactly as before).
+      await pausedSleep(rampDelay);
     }
     sink.emitProducerSlotStart(globalSlotIndex);
     const producerSlotId = `p${globalSlotIndex}`;
@@ -1062,7 +1084,13 @@ export async function runLoadShard(
   // sink/orchestrator-level unreleased-tail-poll advisory (not reducer-derivable) is
   // stamped onto the frame's reserved `advisories` slot.
   if (onSnapshot !== undefined) {
-    onSnapshot(stampShardFrame(reducer.exportPartial(finalizeNow)));
+    // Let any in-flight periodic frame settle first, so the terminal frame is genuinely the
+    // LAST one delivered; then AWAIT the terminal's delivery so the shard does not resolve
+    // (and a D1-3 worker does not exit) before the coordinator has the final frame. Unlike a
+    // periodic frame, a terminal delivery failure is NOT swallowed — it propagates so the
+    // caller sees that the final state never reached the coordinator.
+    if (periodicInFlight !== undefined) await periodicInFlight;
+    await onSnapshot(stampShardFrame(reducer.exportPartial(finalizeNow)));
   }
 
   // A shard evaluates NO thresholds and finalizes NO artifact (coordinator work, §6.1); it
