@@ -43,7 +43,9 @@ import {
   type RunLoadIterationResult,
 } from "./execute-iteration.js";
 import { ContinuationPool } from "./continuation-pool.js";
-import { createLoadReducer } from "./reducer.js";
+import { createLoadReducer, type LoadReducerImpl } from "./reducer.js";
+import type { LoadReducerPartialV1 } from "./partial.js";
+import type { LoadShard } from "./shard.js";
 import { prng } from "./rng.js";
 import { LoadSink, type LoadIterationEnvelope } from "./sink.js";
 import { evaluateThresholds, validateLoadMetricsConfig } from "./threshold.js";
@@ -251,18 +253,131 @@ function resolveContinuationConfig(
   };
 }
 
+/** Default periodic snapshot cadence for a distributed shard (proposal §7.1: 15s). A
+ *  worker exports a cumulative `LoadReducerPartialV1` this often so a coordinator can
+ *  render live progress; injectable (`snapshotIntervalMs`) so tests need not wait 15s. */
+const DEFAULT_SNAPSHOT_INTERVAL_MS = 15_000;
+
+/** The unreleased-tail-poll advisory — an iteration ran a long TAIL poll without asking
+ *  for producer release, so its slot stayed tied up. It is sink/orchestrator-level (not
+ *  reducer-derivable), so a shard STAMPS it onto its exported partial's `advisories`
+ *  (the slot `exportPartial` reserves for exactly this) AND `runLoad` pushes it onto the
+ *  single-machine artifact. One literal, two consumers. */
+const UNRELEASED_TAIL_POLL_ADVISORY =
+  "Most producer slot time is spent after the primary request; closed end-to-end scheduling may reduce upstream pressure. Call `await ctx.report.primaryComplete(..., { releaseProducerSlot: true })` after the primary load is issued if you want sustained ingress pressure.";
+
 /**
- * Run a load plan locally and return its finalized `LoadArtifact`. Handles BOTH a
- * single-scenario run and a traffic mix (`scenarios[]`): each is lowered to a list of
- * weighted `Workload`s, and every iteration picks one (weighted-random for a mix, the
- * sole workload otherwise). Throws on a plan with neither `duration` nor `iterations`
- * (it would run forever). Closed model; continuation / pacing / thresholds are
- * run-level (shared across a mix), per-scenario results attributed via each entry id.
+ * Options for running ONE shard of a load plan in-process (proposal §5.1
+ * `RunLoadShardOptions`). A shard runs only the slice of the run its {@link LoadShard}
+ * describes — a global sub-range of producer slots, a range/stride of the global
+ * iteration index set, and a contiguous row segment of each segmented feeder — while
+ * ramp timing, feeder slot-striping and every seeded RNG decision stay keyed by GLOBAL
+ * identity so the union of shards is byte-equivalent to a single-node run. The shard
+ * evaluates NO thresholds and finalizes NO artifact (coordinator work, §6.1); it folds
+ * its events into a reducer and emits cumulative `LoadReducerPartialV1` frames.
  */
-export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promise<LoadArtifact> {
+export interface RunLoadShardOptions {
+  /** This worker's static slice of the run (from `shardPlan`). */
+  shard: LoadShard;
+  /** Root seed for the run's counter-keyed RNG streams (§6.5) — the SAME seed on every
+   *  shard so mix selection / random feeder draws / pacing jitter are worker-count
+   *  independent. `runLoad` defaults it to a fresh UUID; a coordinator generates it once
+   *  and hands the identical value to every shard. */
+  rngSeed: string;
+  /** Shared run-axis origin (epoch ms) every emitted offset is computed against
+   *  (D0 reducer support). A coordinator passes its authoritative `t0`; absent, the
+   *  worker's first event anchors the axis (single-process semantics). */
+  timelineOrigin?: number;
+  /** Absolute epoch-ms instant this worker should begin dispatching (a coordinator's
+   *  synchronized start). Omitted single-machine → start immediately. */
+  startAt?: number;
+  /** Absolute epoch-ms instant dispatch stops (the run `duration` as a wall-clock
+   *  deadline, §6). Omitted → the plan's `duration` is used as a relative window
+   *  (single-machine parity); absent from both → an iterations-only run. */
+  dispatchDeadline?: number;
+  /** Cumulative-partial sink: called PERIODICALLY (every `snapshotIntervalMs`) and ONCE
+   *  at run end (the terminal frame the coordinator merges). Omitted → no frames are
+   *  exported (the `runLoad` single-machine path, which finalizes from the reducer). */
+  onSnapshot?: (partial: LoadReducerPartialV1) => void;
+  /** Periodic snapshot cadence (ms); default {@link DEFAULT_SNAPSHOT_INTERVAL_MS}. */
+  snapshotIntervalMs?: number;
+  /** Resolved environment vars for the engine core (ctx.vars). */
+  vars?: Record<string, string>;
+  /** Resolved secrets for the engine core (ctx.secrets). */
+  secrets?: Record<string, string>;
+  /** Run id stamped on every event (defaults to the runner id). */
+  runId?: string;
+  /** Runner id stamped on every event (defaults to the plan id). */
+  runnerId?: string;
+  /** Base session each iteration copies (copy-on-write isolation). Default `{}`. */
+  baseSession?: Record<string, unknown>;
+  /** Clock for wall-clock timing + event ts (default `Date.now`). */
+  now?: () => number;
+  /** @deprecated mix-selection override — see {@link RunLoadOptions.random}. Carried so
+   *  `runLoad` can pass it through; a distributed run never sets it. */
+  random?: () => number;
+}
+
+/**
+ * What a shard hands back beyond the streamed partials — the orchestrator-observed
+ * facts a coordinator (or the `runLoad` shell) needs to finalize that the cumulative
+ * reducer state does not itself carry. The live `reducer` is returned so the in-process
+ * single-machine shell can finalize LOSSLESSLY (byte-identical to the pre-refactor
+ * `runLoad`) instead of round-tripping through export/hydrate.
+ */
+export interface RunLoadShardResult {
+  /** The live reducer (finalize + `latencyQuantiles` substrate). Runner-internal. */
+  reducer: LoadReducerImpl;
+  /** The reason this shard's dispatch ended (§7.4), recorded at the termination event. */
+  endReason: LoadEndReason;
+  /** The `now()` captured at finalization — the run-end denominator the shell/coordinator
+   *  passes to `reducer.finalize`, and the terminal partial's `observedAt`. */
+  finalizeNow: number;
+  /** The deprecated `random` override actually drove a mix selection → the run is not
+   *  seed-replayable (the shell drops the recorded `rngSeed`). */
+  mixOverrideUsed: boolean;
+  /** Peak concurrent continuation tails this worker saw (incl. deadline-released ones the
+   *  pool never admitted) — the reducer's `maxBacklog` can't see those. */
+  peakContinuations: number;
+  /** Continuations the drain timeout abandoned (still in flight at finalize). */
+  abortedByDrainTimeout: number;
+  /** Some iteration ran an unreleased tail poll (the advisory condition). */
+  unreleasedTailPollRan: boolean;
+  /** Largest overshoot (ms) of a slot's absolute ramp target `startAt + rampDelay` — a
+   *  worker that woke late (§5.1). 0 single-machine (no `startAt`) and when no slot ran late. */
+  maxStartLatenessMs: number;
+}
+
+/**
+ * Run ONE shard of a load plan in-process — the shard-aware EXECUTION KERNEL that
+ * `runLoad` (single shard) and the D1 coordinator (N shards) both drive. Handles BOTH a
+ * single-scenario run and a traffic mix (`scenarios[]`): each is lowered to weighted
+ * `Workload`s, every iteration picks one (weighted-random keyed by the GLOBAL iteration
+ * index, the sole one otherwise). Throws on a plan with neither `duration` nor
+ * `iterations`. Closed model; continuation / pacing are run-level.
+ *
+ * Shard-awareness (proposal §6/§9): producer slots run at GLOBAL indices
+ * `[slotIndexBase, slotIndexBase + slotCount)` so `rampDelayMs` and slot-striped feeders
+ * span the whole run; iterations are claimed from the shard's `iterationIndexes` (a
+ * contiguous range, or a stride for a duration-only run) as GLOBAL indices; segmented
+ * feeders (`uniquePerIteration` / `roundRobin`) draw from their per-shard row segment via
+ * a draw-index offset; every seeded RNG key uses the global iteration index. The shard
+ * neither evaluates thresholds nor finalizes an artifact — it exports cumulative
+ * `LoadReducerPartialV1` frames (periodic + terminal) and returns the live reducer plus
+ * the orchestrator-observed extras a coordinator needs ({@link RunLoadShardResult}).
+ */
+export async function runLoadShard(
+  plan: LoadPlan,
+  opts: RunLoadShardOptions,
+): Promise<RunLoadShardResult> {
   const config = plan.config;
   const projection = plan.projection;
-  const { concurrency, durationMs, iterations, rampUpMs } = projection;
+  const { shard, startAt, dispatchDeadline, onSnapshot } = opts;
+  const { durationMs, iterations, rampUpMs } = projection;
+  // GLOBAL concurrency (Σ every shard's slotCount) — drives the ramp curve and the
+  // feeder `producerCount`, so both span the whole run, not just this worker's slots.
+  // Equal to `projection.concurrency`; validated below with the same message/value.
+  const concurrency = shard.globalConcurrency;
 
   if (durationMs === undefined && iterations === undefined) {
     throw new Error(
@@ -416,11 +531,11 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // Root seed of the run's counter-keyed RNG streams (§6.5). Every random decision
   // below — mix selection, random feeder draws, pacing jitter — is a pure function of
   // this seed and the decision's global identity, so a seeded run is reproducible and
-  // (under distributed execution) independent of worker count. The default is a fresh
-  // random seed; it is recorded in `artifact.config.rngSeed` for replay unless the
-  // deprecated `random` override ACTUALLY drives mix selection (then the recorded
-  // seed is dropped at finalization — see the post-finalize step below).
-  const rngSeed = opts.rngSeed ?? randomUUID();
+  // (under distributed execution) independent of worker count. The caller supplies it
+  // (`runLoad` defaults to a fresh UUID; a coordinator hands every shard the SAME seed);
+  // it is recorded in `artifact.config.rngSeed` for replay unless the deprecated `random`
+  // override ACTUALLY drives mix selection (then the shell drops the recorded seed).
+  const rngSeed = opts.rngSeed;
 
   // Weighted scenario selection for a mix, keyed by the GLOBAL iteration index —
   // `prng(seed, "mix", index)` — so the pick for iteration N is the same whichever
@@ -452,9 +567,18 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
 
   const thinkTimeMs = normalizeThinkTime(config.pacing);
 
+  // A distributed shard (one that streams frames to a coordinator via `onSnapshot`)
+  // stamps its `timelineOrigin` (the shared run axis, D0) and `workerId` (sample
+  // provenance for the cross-worker merge) into the reducer. The single-machine `runLoad`
+  // path passes neither — so its reducer anchors offsets to `firstTs` and leaves sample
+  // identities workerId-free, exactly the pre-D1 single-node artifact. (`workerId` is
+  // gated on `onSnapshot`, not on `shard.workerId`, precisely so runLoad's positional
+  // `w0` never leaks false provenance onto a single-node run's samples.)
   const reducer = createLoadReducer({
     maxFailureTraces: config.report?.failureTraces,
     maxSlowTransactionSummaries: config.report?.slowTransactionSummaries,
+    ...(opts.timelineOrigin !== undefined ? { timelineOrigin: opts.timelineOrigin } : {}),
+    ...(onSnapshot !== undefined ? { workerId: shard.workerId } : {}),
   });
   const sink = new LoadSink(reducer, runId, runnerId, now);
   const core = createEngineCore(sink.handleWire, {
@@ -475,14 +599,21 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // scheduled, so the two coincide); unset on both → unbounded. Default backlog
   // policy is block-producer (back-pressure). Continuations from released iterations
   // are drained before the run finalizes.
+  // The POOL bound is this SHARD's continuation slice (§6.4 splits maxOutstanding /
+  // maxConcurrent per worker so their backlogs sum to the global bound); the time/policy
+  // fields pass through unchanged. For the single shard `runLoad` builds, `shard.continuation`
+  // IS the whole `config.continuation`, so this is byte-identical to the global bound.
+  // (The resolved config recorded on `load:start` above stays GLOBAL — every shard reports
+  // the run's continuation config so the coordinator's replace-with-first merge sees it.)
+  const shardContinuationCfg = resolveContinuationConfig(shard.continuation);
   const continuationBound =
-    continuationCfg?.maxOutstanding !== undefined && continuationCfg?.maxConcurrent !== undefined
-      ? Math.min(continuationCfg.maxOutstanding, continuationCfg.maxConcurrent)
-      : continuationCfg?.maxOutstanding ?? continuationCfg?.maxConcurrent;
+    shardContinuationCfg?.maxOutstanding !== undefined && shardContinuationCfg?.maxConcurrent !== undefined
+      ? Math.min(shardContinuationCfg.maxOutstanding, shardContinuationCfg.maxConcurrent)
+      : shardContinuationCfg?.maxOutstanding ?? shardContinuationCfg?.maxConcurrent;
   const continuationPool = new ContinuationPool(
     continuationBound,
-    continuationCfg?.onBacklogFull ?? "block-producer",
-    continuationCfg?.drainTimeoutMs,
+    shardContinuationCfg?.onBacklogFull ?? "block-producer",
+    shardContinuationCfg?.drainTimeoutMs,
     now,
   );
   // In-flight continuations from released iterations. A Set with settle-time removal
@@ -520,8 +651,60 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     ...(mixScenarios !== undefined ? { scenarios: mixScenarios } : {}),
   };
 
+  // startAt gate (a coordinator's synchronized dispatch instant): hold until the shared
+  // start before opening any slot, so every worker's producer slots begin together on the
+  // run axis. Omitted single-machine → no wait (byte-identical to the pre-D1 path).
+  if (startAt !== undefined) {
+    const wait = startAt - now();
+    if (wait > 0) await new Promise<void>((resolve) => setTimeout(resolve, wait));
+  }
   const start = now();
   sink.emitLoadStart(resolvedConfig);
+
+  // Feeder-state guarantee THIS shard's exported frames report (§9): a sharded run must not
+  // claim the single-node guarantee. Derived from the shard's feeder strategy set — a
+  // segmented feeder (`uniquePerIteration` / `roundRobin`, the only strategies `shardPlan`
+  // assigns a row segment) is best-effort under sharding → "degraded"; slot-indexed /
+  // seeded-random strategies shard exactly → "distributed"; no feeders → "single-node"
+  // (vacuous — nothing to distribute). Multiple strategies take the WEAKEST, which is exactly
+  // `hasSegmentedFeeder ? degraded : distributed`. Stamped ONLY on exported frames (the
+  // distributed path); the single-machine artifact keeps finalize's "single-node".
+  const hasFeeders = workloads.some((w) => w.feeders.length > 0);
+  const hasSegmentedFeeder = Object.keys(shard.feederSegments).length > 0;
+  const shardFeederGuarantee: LoadArtifact["runtime"]["feederGuarantee"] = !hasFeeders
+    ? "single-node"
+    : hasSegmentedFeeder
+      ? "degraded"
+      : "distributed";
+
+  // Stamp shard-level facts onto an exported frame that `exportPartial` cannot know:
+  //  - `requestedConcurrency` ← this shard's slotCount (the ADDITIVE field the coordinator
+  //    merge SUMS: Σ slotCount === the run's global concurrency, so it must carry the
+  //    PER-SHARD value, never the global one the reducer folded from `load:start`);
+  //  - `feederGuarantee` ← the sharded value above (else a sharded artifact would report the
+  //    single-node guarantee `exportPartial` hard-codes);
+  //  - the sink/orchestrator-level unreleased-tail-poll advisory (not reducer-derivable).
+  const stampShardFrame = (frame: LoadReducerPartialV1): LoadReducerPartialV1 => {
+    frame.requestedConcurrency = shard.slotCount;
+    frame.feederGuarantee = shardFeederGuarantee;
+    if (sink.unreleasedTailPollRan) frame.advisories.push(UNRELEASED_TAIL_POLL_ADVISORY);
+    return frame;
+  };
+
+  // Periodic cumulative snapshots (proposal §7.1): a distributed worker exports its
+  // reducer state every `snapshotIntervalMs` (default 15s) so a coordinator can render
+  // live progress. Armed ONLY when a sink is provided — the single-machine `runLoad`
+  // omits `onSnapshot`, so no timer is created and there is zero added work there.
+  // `exportPartial` never mutates live state, so a mid-run snapshot is safe between the
+  // loop's await points; `unref` keeps the timer from holding a standalone process open.
+  let snapshotTimer: ReturnType<typeof setInterval> | undefined;
+  if (onSnapshot !== undefined) {
+    const intervalMs = opts.snapshotIntervalMs ?? DEFAULT_SNAPSHOT_INTERVAL_MS;
+    snapshotTimer = setInterval(() => {
+      onSnapshot(stampShardFrame(reducer.exportPartial(now())));
+    }, intervalMs);
+    snapshotTimer.unref?.();
+  }
 
   // Run-end coordination. Ramp-up / think-time waits are CANCELLABLE real timers:
   // while a slot legitimately waits, its timer is ref'd (so a standalone Node run
@@ -564,9 +747,15 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     if (wallClockUp) continuationPool.closeImmediate();
   };
   // A duration deadline timer wakes ramp/think waiters at the bound even if no slot
-  // happens to claim (and thus re-check) right then.
+  // happens to claim (and thus re-check) right then. A coordinator's absolute
+  // `dispatchDeadline` takes precedence; else the plan's relative `duration` window
+  // (byte-identical to the pre-D1 `setTimeout(…, durationMs)` when no deadline is given).
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-  if (durationMs !== undefined) deadlineTimer = setTimeout(() => markEnded(true), durationMs);
+  if (dispatchDeadline !== undefined) {
+    deadlineTimer = setTimeout(() => markEnded(true), Math.max(0, dispatchDeadline - now()));
+  } else if (durationMs !== undefined) {
+    deadlineTimer = setTimeout(() => markEnded(true), durationMs);
+  }
 
   /** Wait `ms`, returning early the instant the run ends (never overruns the bound). */
   const pausedSleep = (ms: number): Promise<void> => {
@@ -580,11 +769,24 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     });
   };
 
-  // The shared, monotonically-claimed global iteration counter. A slot claims the
-  // next index before running; -1 means the run is over. Single-threaded JS makes
-  // the claim atomic.
-  let claimed = 0;
-  const durationExpired = (): boolean => durationMs !== undefined && now() - start >= durationMs;
+  // Iteration claiming from THIS shard's slice of the GLOBAL index set. A slot claims the
+  // next LOCAL sequence number before running; the shard maps it to a GLOBAL iteration
+  // index — `start + k` for a contiguous range (iterations-bounded), `offset + k·step`
+  // for a stride (duration-only, unbounded, disjoint across workers, §6.3). -1 means this
+  // shard's dispatch is over. Single-threaded JS makes the claim atomic. For the single
+  // shard `runLoad` builds — range `{0, iterations}` or stride `{offset:0, step:1}` — this
+  // reduces to the pre-D1 global counter over `[0, iterations)` exactly.
+  const iterIdx = shard.iterationIndexes;
+  const rangeBounded = iterIdx.kind === "range";
+  const shardQuota = rangeBounded ? iterIdx.end - iterIdx.start : Infinity;
+  const toGlobalIndex = rangeBounded
+    ? (k: number): number => iterIdx.start + k
+    : (k: number): number => iterIdx.offset + k * iterIdx.step;
+  let claimed = 0; // LOCAL sequence within this shard's slice
+  const durationExpired = (): boolean =>
+    dispatchDeadline !== undefined
+      ? now() >= dispatchDeadline
+      : durationMs !== undefined && now() - start >= durationMs;
   const claimIteration = (): number => {
     // The deadline timer can flip `ended` independently of the (possibly frozen /
     // injected) clock, so honour it directly — not just `durationExpired()`.
@@ -593,13 +795,14 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       markEnded(true); // duration bound hit on a claim → wall-clock is up
       return -1;
     }
-    if (iterations !== undefined && claimed >= iterations) {
-      markEnded();
+    if (rangeBounded && claimed >= shardQuota) {
+      markEnded(); // this shard exhausted its iteration quota → "iterations"
       return -1;
     }
-    const index = claimed++;
-    // Claiming the last iteration ends the run — wake any ramp/think waiters now.
-    if (iterations !== undefined && claimed >= iterations) markEnded();
+    const index = toGlobalIndex(claimed);
+    claimed += 1;
+    // Claiming the shard's last quota iteration ends its dispatch — wake ramp/think waiters.
+    if (rangeBounded && claimed >= shardQuota) markEnded();
     return index;
   };
 
@@ -611,7 +814,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
    * the boundary so the slot can start the next primary while the continuation runs.
    */
   const startOneIteration = (
-    slotIndex: number,
+    globalSlotIndex: number,
     producerSlotId: string,
     globalIteration: number,
     slotIteration: number,
@@ -619,7 +822,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     feederSlotDraws: Map<object, number>,
   ): LoadIterationHandle | "skip" | "failed" => {
     const iterationId = `it-${globalIteration}`;
-    const producerSlot = { id: producerSlotId, index: slotIndex };
+    const producerSlot = { id: producerSlotId, index: globalSlotIndex };
     const iteration = { id: iterationId, index: globalIteration };
     const envelope: LoadIterationEnvelope = {
       scenarioId: workload.scenarioId,
@@ -643,13 +846,24 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       feederGlobalDraws.set(counterKey, g + 1);
       const s = feederSlotDraws.get(counterKey) ?? 0;
       feederSlotDraws.set(counterKey, s + 1);
+      // `drawIndex` is THIS shard's WINDOW-LOCAL per-feeder draw count. A segmented feeder
+      // (`uniquePerIteration` / `roundRobin`) carries its assigned row segment as `rowWindow`,
+      // so the feeder bounds the draw to `[offset, offset+length)` as a HARD boundary (§9): a
+      // shard can never index into another shard's rows (fixing the over-draw that let two
+      // shards return the same row), and `recycle` wraps WITHIN the segment. Non-segmented
+      // strategies carry no segment — `uniquePerVu` shards by the GLOBAL slot index,
+      // `partitionByVu` by (globalSlot, globalConcurrency), `random`/`weightedRandom` by the
+      // global seeded stream. For the single shard `runLoad` builds, `feederSegments` is empty
+      // → no window → `drawIndex === g` keeps its pre-D1 run-global meaning.
+      const segment = shard.feederSegments[slotKey];
       return {
-        producerSlot: slotIndex,
+        producerSlot: globalSlotIndex,
         producerCount: concurrency,
         slotIteration,
         globalIteration,
         drawIndex: g,
         slotDrawIndex: s,
+        ...(segment !== undefined ? { rowWindow: { offset: segment.offset, length: segment.length } } : {}),
         rng: (...keys: Array<string | number>) => prng(rngSeed, slotKey, globalIteration, ...keys),
       };
     };
@@ -727,12 +941,30 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // only on its entry's turns. Feeds `drawIndex` (built-in uniquePerIteration / roundRobin).
   const feederGlobalDraws = new Map<object, number>();
 
-  const runSlot = async (slotIndex: number): Promise<void> => {
+  // Largest overshoot of a slot's absolute ramp target (a worker that woke after
+  // `startAt + rampDelay`); 0 single-machine and whenever no slot ran late.
+  let maxStartLatenessMs = 0;
+
+  const runSlot = async (globalSlotIndex: number): Promise<void> => {
     if (rampUpMs !== undefined) {
-      await pausedSleep(rampDelayMs(slotIndex, concurrency, rampUpMs));
+      // Ramp timing is a GLOBAL-slot function (§6.1): a shard's slots ramp at their global
+      // positions, so the whole run's ramp curve is worker-count independent.
+      const rampDelay = rampDelayMs(globalSlotIndex, concurrency, rampUpMs);
+      if (startAt !== undefined) {
+        // Distributed: align each slot to the ABSOLUTE instant `startAt + rampDelay` (§5.1),
+        // so a worker that woke late does not shift its whole ramp curve forward (which would
+        // eat the dispatch window before the deadline). A slot already past its target opens
+        // at once; the overshoot is recorded as start lateness.
+        const wait = startAt + rampDelay - now();
+        if (wait > 0) await pausedSleep(wait);
+        else if (-wait > maxStartLatenessMs) maxStartLatenessMs = -wait;
+      } else {
+        // Single-machine: relative to the run start (unchanged — byte-identical).
+        await pausedSleep(rampDelay);
+      }
     }
-    sink.emitProducerSlotStart(slotIndex);
-    const producerSlotId = `p${slotIndex}`;
+    sink.emitProducerSlotStart(globalSlotIndex);
+    const producerSlotId = `p${globalSlotIndex}`;
     // Per-slot iteration index (the `slotIteration` public contract field), and per-slot
     // per-feeder draw counts (what partitionByVu actually indexes by, via `slotDrawIndex`).
     let slotIteration = 0;
@@ -745,7 +977,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
       // iteration index, the sole one for a single scenario); the feeders it draws
       // advance their own per-binding counters (see drawCtxFor).
       const workload = selectWorkload(globalIteration);
-      const started = startOneIteration(slotIndex, producerSlotId, globalIteration, slotIteration, workload, feederSlotDraws);
+      const started = startOneIteration(globalSlotIndex, producerSlotId, globalIteration, slotIteration, workload, feederSlotDraws);
       slotIteration += 1;
       if (started !== "skip") {
         // A real (or failed-setup) primary iteration.
@@ -773,15 +1005,21 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
         await pausedSleep(thinkDelay(thinkTimeMs, () => prng(rngSeed, "pacing", globalIteration)));
       }
     }
-    sink.emitProducerSlotEnd(slotIndex, primaryIterations);
+    sink.emitProducerSlotEnd(globalSlotIndex, primaryIterations);
   };
 
   let abortedByDrainTimeout = 0;
   try {
-    await Promise.all(Array.from({ length: concurrency }, (_, i) => runSlot(i)));
-    abortedByDrainTimeout = await drainContinuations(continuations, continuationCfg?.drainTimeoutMs);
+    // Launch THIS shard's producer slots at their GLOBAL indices
+    // [slotIndexBase, slotIndexBase + slotCount). For the single shard `runLoad` builds
+    // that is `[0, concurrency)` — exactly the pre-D1 launch.
+    await Promise.all(
+      Array.from({ length: shard.slotCount }, (_, j) => runSlot(shard.slotIndexBase + j)),
+    );
+    abortedByDrainTimeout = await drainContinuations(continuations, shardContinuationCfg?.drainTimeoutMs);
   } finally {
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    if (snapshotTimer !== undefined) clearInterval(snapshotTimer);
     // All primaries are done and the drain phase has run; abort whatever continuation
     // tail is still in flight so its in-flight HTTP / engine poll waits stop NOW rather
     // than running on in the background. A tail that already settled (drain awaited it,
@@ -796,54 +1034,129 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
   // dual-bound run whose duration deadline fired mid-drain (§7.4: duration wins then).
   // The fallback is defensive only: every path that ends the run goes through
   // markEnded, so a finished run always has a recorded reason.
-  const endReason: LoadEndReason = recordedEndReason ?? (durationMs !== undefined ? "duration" : "iterations");
+  // The reason recorded AT this shard's termination event (markEnded), not a post-hoc
+  // reconstruction. The fallback is defensive: every path that ends dispatch goes through
+  // markEnded. A duration/deadline-bounded shard defaults to "duration"; else "iterations".
+  const endReason: LoadEndReason =
+    recordedEndReason ?? (durationMs !== undefined || dispatchDeadline !== undefined ? "duration" : "iterations");
   sink.emitLoadEnd(endReason);
   // Seal the sink so a continuation the drain timeout abandoned can't emit into the
-  // reducer after the artifact is built. The `runAbort.abort()` above already cancelled
+  // reducer after the frame is exported. The `runAbort.abort()` above already cancelled
   // its in-flight HTTP / engine poll waits, so a tail settles promptly; seal is the
   // backstop for the late events that abort can't pre-empt (e.g. a bare `setTimeout` in
   // user code, which no signal can cancel) and for the settle that lands post-seal.
   sink.seal();
 
-  // Authoritative run-end boundary: this orchestrator's own finalization instant. The
-  // `load:end` just emitted was stamped `now()` too, so this differs from the reducer's
-  // `lastTs` fallback only by the sub-ms emit→finalize gap — same instant, but supplied
-  // EXPLICITLY so the production finalization path exercises the same channel a distributed
-  // worker uses (the D0-7 merge path passes the coordinator's `globalEndAt` here instead).
-  const artifact = reducer.finalize(now());
-  // The deprecated mix-selection override ACTUALLY drove at least one selection →
-  // this run is not replayable from the seed (a replay would take the PRNG branch
-  // and select differently), so drop the recorded seed rather than promise a false
-  // replay. A run where the override was never consulted (single workload, or zero
-  // iterations) stays fully seeded and keeps its seed.
-  if (mixOverrideUsed) delete artifact.config.rngSeed;
-  // Continuations the drain timeout abandoned are still in flight at finalize —
-  // surface them (the reducer can't know the orchestrator's drain decision).
+  // Finalization instant (this worker's own): the `load:end` just emitted was stamped
+  // `now()` too, so this differs from the reducer's `lastTs` fallback only by the sub-ms
+  // emit→finalize gap. Captured ONCE and used both as the terminal snapshot's `observedAt`
+  // AND (by the caller) as `reducer.finalize`'s run-end denominator, so the streamed frame
+  // and the finalized artifact describe the same instant. A coordinator supplies its own
+  // authoritative `globalEndAt` to `finalize`/`finalizeMerged` instead.
+  const finalizeNow = now();
+
+  // Terminal cumulative snapshot — the "final" frame a coordinator merges (proposal §7.5;
+  // the FINAL flag itself is a coordinator-side concept — the worker just exports its
+  // complete state at the run-end instant). Emitted only when a sink is wired: `runLoad`
+  // omits `onSnapshot` and finalizes from the returned reducer, paying no export cost. The
+  // sink/orchestrator-level unreleased-tail-poll advisory (not reducer-derivable) is
+  // stamped onto the frame's reserved `advisories` slot.
+  if (onSnapshot !== undefined) {
+    onSnapshot(stampShardFrame(reducer.exportPartial(finalizeNow)));
+  }
+
+  // A shard evaluates NO thresholds and finalizes NO artifact (coordinator work, §6.1); it
+  // hands back the live reducer plus the orchestrator-observed extras the cumulative state
+  // does not itself carry, so the caller can finalize.
+  return {
+    reducer,
+    endReason,
+    finalizeNow,
+    mixOverrideUsed,
+    peakContinuations,
+    abortedByDrainTimeout,
+    unreleasedTailPollRan: sink.unreleasedTailPollRan,
+    maxStartLatenessMs,
+  };
+}
+
+/**
+ * Run a load plan locally and return its finalized `LoadArtifact` — the single-machine
+ * SHELL around {@link runLoadShard}. It runs the whole plan as ONE shard (every producer
+ * slot, the full iteration index set, the un-segmented feeder space — exact single-node
+ * semantics), then finalizes the shard's reducer and evaluates thresholds (the
+ * coordinator-side work `runLoadShard` deliberately omits). Handles BOTH a single-scenario
+ * run and a traffic mix (`scenarios[]`); throws on a plan with neither `duration` nor
+ * `iterations`. Byte-identical to the pre-D1 monolithic `runLoad`: the kernel/shell split
+ * is a lossless refactor — the shell finalizes from the LIVE reducer the kernel returns,
+ * never through an export round-trip.
+ */
+export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promise<LoadArtifact> {
+  const config = plan.config;
+  const { concurrency, iterations } = plan.projection;
+  // The degenerate single shard: one worker owns every slot `[0, concurrency)`, the full
+  // iteration set (a `[0, iterations)` range, or an all-indexes `{offset:0, step:1}`
+  // stride for a duration-only run), the whole continuation config, and an EMPTY feeder-
+  // segment map (offset 0 → every draw indexes the full row space). Built inline (not via
+  // `shardPlan`) so `runLoadShard`'s own validation surfaces the `loadRunner`-prefixed
+  // error messages this function has always thrown, in the same order.
+  const shard: LoadShard = {
+    workerId: "w0",
+    slotIndexBase: 0,
+    slotCount: concurrency,
+    globalConcurrency: concurrency,
+    iterationIndexes:
+      iterations !== undefined
+        ? { kind: "range", start: 0, end: iterations }
+        : { kind: "stride", offset: 0, step: 1 },
+    feederSegments: {},
+    ...(config.continuation !== undefined ? { continuation: config.continuation } : {}),
+  };
+  const result = await runLoadShard(plan, {
+    shard,
+    // Default the run seed here (a distributed coordinator generates it once for all
+    // shards). No timelineOrigin / workerId / onSnapshot → the reducer anchors to firstTs
+    // and leaves samples workerId-free, and no partial frames are exported: the single-node
+    // artifact is produced from the live reducer below, exactly as before D1.
+    rngSeed: opts.rngSeed ?? randomUUID(),
+    ...(opts.vars !== undefined ? { vars: opts.vars } : {}),
+    ...(opts.secrets !== undefined ? { secrets: opts.secrets } : {}),
+    ...(opts.runId !== undefined ? { runId: opts.runId } : {}),
+    ...(opts.runnerId !== undefined ? { runnerId: opts.runnerId } : {}),
+    ...(opts.baseSession !== undefined ? { baseSession: opts.baseSession } : {}),
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
+    ...(opts.random !== undefined ? { random: opts.random } : {}),
+  });
+
+  const { reducer } = result;
+  // Authoritative run-end boundary: the kernel's finalization instant (see the kernel's
+  // `finalizeNow` — its `load:end` was stamped the same `now()`).
+  const artifact = reducer.finalize(result.finalizeNow);
+  // The deprecated mix-selection override ACTUALLY drove at least one selection → this run
+  // is not replayable from the seed, so drop the recorded seed rather than promise a false
+  // replay. A run that never consulted it stays fully seeded and keeps its seed.
+  if (result.mixOverrideUsed) delete artifact.config.rngSeed;
+  // Continuations the drain timeout abandoned are still in flight at finalize — surface
+  // them (the reducer can't know the orchestrator's drain decision), along with the true
+  // peak of concurrent tails (incl. deadline-released ones the pool never admitted, so the
+  // reducer's maxBacklog can't see them).
   if (artifact.summary.continuation) {
     const c = artifact.summary.continuation;
-    // The orchestrator saw the true peak of concurrent tails (incl. deadline-released
-    // ones the pool never admitted, so the reducer's maxBacklog can't see them).
-    c.maxBacklog = Math.max(c.maxBacklog, peakContinuations);
-    c.maxConcurrent = Math.max(c.maxConcurrent, peakContinuations);
-    if (abortedByDrainTimeout > 0) {
-      c.abortedByDrainTimeout = abortedByDrainTimeout;
-      c.backlog = abortedByDrainTimeout;
-      c.active = abortedByDrainTimeout;
-      artifact.runtime.continuationInFlight = abortedByDrainTimeout;
+    c.maxBacklog = Math.max(c.maxBacklog, result.peakContinuations);
+    c.maxConcurrent = Math.max(c.maxConcurrent, result.peakContinuations);
+    if (result.abortedByDrainTimeout > 0) {
+      c.abortedByDrainTimeout = result.abortedByDrainTimeout;
+      c.backlog = result.abortedByDrainTimeout;
+      c.active = result.abortedByDrainTimeout;
+      artifact.runtime.continuationInFlight = result.abortedByDrainTimeout;
     }
   }
-  // Advisory: some iteration ran a long TAIL poll but didn't request producer release,
-  // so its slot stayed tied up for the whole tail (closed end-to-end scheduling), under-
-  // pressuring the upstream. The sink decides this PER ITERATION (`unreleasedTailPollRan`):
-  //  - a TAIL poll (a step-scoped request before it, none after) — excludes a poll in an
-  //    untaken branch (never runs) and a readiness/token poll before the primary request;
-  //  - in an iteration that did NOT ask for release — a bare `primaryComplete()` still
-  //    gets advised, but a requested-but-rejected release does not (they already asked),
-  //    and a row that releases doesn't mute the advisory for a sibling row that doesn't.
-  if (sink.unreleasedTailPollRan) {
-    (artifact.summary.advisories ??= []).push(
-      "Most producer slot time is spent after the primary request; closed end-to-end scheduling may reduce upstream pressure. Call `await ctx.report.primaryComplete(..., { releaseProducerSlot: true })` after the primary load is issued if you want sustained ingress pressure.",
-    );
+  // Advisory: some iteration ran a long TAIL poll but didn't request producer release, so
+  // its slot stayed tied up for the whole tail (closed end-to-end scheduling), under-
+  // pressuring the upstream. (See the sink's `unreleasedTailPollRan` for the per-iteration
+  // decision rule.)
+  if (result.unreleasedTailPollRan) {
+    (artifact.summary.advisories ??= []).push(UNRELEASED_TAIL_POLL_ADVISORY);
   }
 
   // Evaluate configured thresholds against the finalized artifact and refine the pass

@@ -75,6 +75,18 @@ export interface FeederDrawContext {
    * to `Math.random()` when absent (standalone SDK use keeps working, unseeded).
    */
   rng?: (...keys: Array<string | number>) => number;
+  /**
+   * DISTRIBUTED shard row segment (proposal §9): the contiguous `[offset, offset + length)`
+   * slice of this feeder's rows this worker owns. When present, the DRAW-INDEXED strategies
+   * (`uniquePerIteration` / `roundRobin`) index ONLY within it — `drawIndex` is then
+   * WINDOW-LOCAL (0-based within the segment), a past-the-window draw is handled by the
+   * exhausted policy (`recycle` wraps WITHIN the window; `fail`/`skip`/`wait` miss), and an
+   * EMPTY window (`length === 0`, a worker owning no rows of this feeder) always misses. So
+   * two shards' segments tile the row space without overlap and a shard can never reach into
+   * another's rows. Absent (single-node / non-segmented strategies) → the full row set, and
+   * `drawIndex` keeps its run-global meaning — exactly the pre-distributed behavior.
+   */
+  rowWindow?: { offset: number; length: number };
 }
 
 /** Result of a feeder draw. */
@@ -154,6 +166,29 @@ function drawIndexed<T extends object>(
   return missDraw(policy);
 }
 
+/** Draw from a contiguous WINDOW `[offset, offset + length)` of `rows` by a window-LOCAL
+ *  index — a distributed shard's row segment (proposal §9). `localIndex` in `[0, length)`
+ *  → that row; past the window → policy (`recycle` wraps WITHIN the window, others miss);
+ *  an EMPTY window (`length <= 0`, a shard owning no rows of this feeder) always misses. The
+ *  window is a HARD boundary: a shard can never index another shard's rows, so segments tile
+ *  the row space without overlap and uniqueness is preserved across workers. */
+function drawWindowed<T extends object>(
+  rows: readonly T[],
+  window: { offset: number; length: number },
+  localIndex: number,
+  policy: ExhaustedPolicy,
+  key?: string,
+): FeederDraw<T> {
+  const { offset, length } = window;
+  if (length <= 0) return missDraw(policy);
+  if (localIndex >= 0 && localIndex < length) return toValueDraw(rows[offset + localIndex], key);
+  if (policy === "recycle") {
+    const wrapped = ((localIndex % length) + length) % length;
+    return toValueDraw(rows[offset + wrapped], key);
+  }
+  return missDraw(policy);
+}
+
 /** Weighted pick driven by a caller-supplied random value in [0,1) — the draw is a
  *  pure function of `rand`, so a keyed `ctx.rng` makes it reproducible. */
 function pickWeighted<T extends object>(
@@ -189,10 +224,16 @@ function makeBinding<T extends object>(
       case "uniquePerVu":
         return drawIndexed(rows, ctx.producerSlot, exhausted, key);
       case "uniquePerIteration":
-      case "roundRobin":
-        // Index by THIS feeder's run-global draw count so a mix entry / overridden shared
-        // feeder stays contiguous; `?? globalIteration` keeps single-scenario parity.
-        return drawIndexed(rows, ctx.drawIndex ?? ctx.globalIteration, exhausted, key);
+      case "roundRobin": {
+        // Index by THIS feeder's draw count so a mix entry / overridden shared feeder stays
+        // contiguous; `?? globalIteration` keeps single-scenario parity. Under a distributed
+        // shard's `rowWindow` (§9) the draw index is WINDOW-LOCAL and bounded to the segment
+        // (a hard boundary — see drawWindowed); absent, it indexes the full row set as before.
+        const idx = ctx.drawIndex ?? ctx.globalIteration;
+        return ctx.rowWindow !== undefined
+          ? drawWindowed(rows, ctx.rowWindow, idx, exhausted, key)
+          : drawIndexed(rows, idx, exhausted, key);
+      }
       // `random` / `weightedRandom` draw from the keyed `ctx.rng` stream when the
       // runtime provides one (reproducible, worker-count independent — §6.5) and
       // fall back to `Math.random()` for standalone SDK use.
