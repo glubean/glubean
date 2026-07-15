@@ -28,3 +28,4 @@ test-project/**/*.d.ts
 
 # Local run artifacts (screenshots, results, logs)
 .glubean/
+packages/runner/.tmp-workflow-test/
