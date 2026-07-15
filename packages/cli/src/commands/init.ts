@@ -1255,9 +1255,9 @@ async function initDemo(overwrite: boolean): Promise<void> {
       description: "In-process synthetic canary (full profile only)",
     },
     {
-      path: "tests/contracts/stable/users-contract.contract.ts",
+      path: "contracts/users.contract.ts",
       content: () =>
-        readCliTemplate("demo/tests/contracts/stable/users-contract.contract.ts"),
+        readCliTemplate("demo/contracts/users.contract.ts"),
       description: "Stable contract guarding the API shape",
     },
   ];

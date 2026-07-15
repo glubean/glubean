@@ -16,7 +16,7 @@ suites:
     kinds: [test]
   # Contract guarding the stable API shape. Always green.
   contracts-stable:
-    target: ./tests/contracts/stable
+    target: ./contracts/users.contract.ts
     kinds: [contract]
   # 100% in-process Math.random() canary — proves the run/reduce
   # pipeline itself is alive, independent of any backend.

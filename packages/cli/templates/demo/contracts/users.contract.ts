@@ -1,6 +1,6 @@
 import { contract } from "@glubean/sdk";
 import type { SchemaLike } from "@glubean/sdk";
-import { http } from "../../../config/api.ts";
+import { http } from "../config/api.ts";
 
 /**
  * Stable contract — guards the shape of the mock backend's
