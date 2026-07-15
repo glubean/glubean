@@ -42,20 +42,21 @@ import { LoadHistogram } from "./histogram.js";
 import type { ThresholdQuantileSource } from "./threshold.js";
 import { LoadTimeline } from "./timeline.js";
 import { LoadSampleCollector } from "./samples.js";
+import { SlotBusyWindows } from "./slot-busy.js";
+// Type-only (erased at runtime): the partial schema lives in partial.ts, which itself
+// value-imports this module for hydration — a runtime cycle would be a hazard, a type
+// cycle is not.
+import type {
+  LoadPartialCustomMetricV1,
+  LoadPartialCustomSeriesV1,
+  LoadReducerPartialV1,
+} from "./partial.js";
 
 const SEP = "\u0000";
 const ZERO_PCT: Percentiles = { p50: 0, p90: 0, p95: 0, p99: 0, max: 0 };
 // Fixed latency ladder (ms) for the distribution histograms. Fixed (not data-derived) so two
 // runs' distributions line up bucket-for-bucket; a final overflow bucket carries the tail.
 const LATENCY_LADDER = [10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 2000, 5000];
-
-// Mirror of `LoadTimeline`'s constructor defaults (base window width / coarsening cap), used
-// ONLY by the reducer-side synthetic zero timeline (`syntheticZeroTimeline`). TODO(integration:
-// revisit after D0-3 timeline merge lands): the synthesis — and these mirrored constants —
-// should fold into `LoadTimeline` itself; kept out of timeline.ts for now because the parallel
-// D0-3 line is reworking that file and an edit here would collide mid-flight.
-const TIMELINE_BASE_WINDOW_MS = 250;
-const TIMELINE_MAX_WINDOWS = 600;
 
 // Per-metric cap on distinct tag-series. Beyond it, new tag combinations are folded into
 // the untagged total only (the metric is flagged `seriesTruncated` + an advisory) — a guard
@@ -75,6 +76,13 @@ interface CustomSeriesAgg {
   sum: number;
   /** trend: distribution of folded samples. */
   hist?: LoadHistogram;
+  /** `false` when this series' fold is known INCOMPLETE — set only by hydration from a
+   *  merged partial where §7.3's conservative rule fired (a truncated worker folded this
+   *  key's observations into its total invisibly). Absent = complete (the live fold is
+   *  always exact for retained keys). Threshold evaluation reads it through
+   *  `latencyQuantiles().customSeriesComplete` — an incomplete series' retained values
+   *  undercount, so its gates must be unevaluable, never a false pass. */
+  complete?: boolean;
 }
 
 /** A declared custom metric, folded per tag-series plus the untagged total. */
@@ -92,8 +100,10 @@ interface CustomMetricAgg {
 
 /** Stable key for a tag combination: keys sorted so `{a,b}` and `{b,a}` collapse.
  *  JSON-encoded (not joined) so a tag key/value containing a separator or `=`
- *  can't collide two distinct combinations into one series. */
-function canonicalTagKey(tags: Record<string, string>): string {
+ *  can't collide two distinct combinations into one series. Exported so the
+ *  partial merge (`partial.ts`) unions series under the exact same canonical key
+ *  the fold and hydration use. */
+export function canonicalTagKey(tags: Record<string, string>): string {
   return JSON.stringify(Object.keys(tags).sort().map((k) => [k, tags[k]]));
 }
 
@@ -119,9 +129,17 @@ function recordCustomSample(s: CustomSeriesAgg, kind: LoadMetricKind, value: num
   }
 }
 
-/** Project a folded series into its artifact shape (only the kind's fields). */
+/** Project a folded series into its artifact shape (only the kind's fields). An
+ *  INCOMPLETE series (hydrated merged state, §7.3's conservative rule) carries
+ *  `complete: false` onto the v2 artifact row (codex R3) — threshold-less consumers
+ *  must be able to see WHICH row undercounts, not just the metric-level
+ *  `seriesTruncated`; a complete row omits the field (absent = complete). */
 function customSeriesSummary(s: CustomSeriesAgg, kind: LoadMetricKind): LoadCustomMetricSeries {
-  const out: LoadCustomMetricSeries = { tags: s.tags, count: s.count };
+  const out: LoadCustomMetricSeries = {
+    tags: s.tags,
+    count: s.count,
+    ...(s.complete === false ? { complete: false } : {}),
+  };
   if (kind === "rate") {
     out.trueCount = s.trueCount;
     out.rate = s.count > 0 ? s.trueCount / s.count : 0;
@@ -241,14 +259,35 @@ export class LoadReducerImpl implements LoadReducer {
   private readonly customMetrics = new Map<string, CustomMetricAgg>();
   private readonly recentFailures: LoadFailureSummary[] = [];
   // Over-time series (RPS / error-rate / latency / concurrency vs time), bucketed by the
-  // event ts offset from the run start.
-  private readonly timeline = new LoadTimeline();
+  // event ts offset from the run start. Reassignable (not readonly) ONLY for the
+  // hydration path (`fromPartial` revives a serialized timeline wholesale — merging into
+  // a fresh instance would miscount the fresh timeline as a contributor).
+  private timeline = new LoadTimeline();
   // Bounded failure-trace / slow-transaction samples (the "show me one" view).
   private readonly samples: LoadSampleCollector;
+
+  // Producer-slot occupancy integral per timeline-width window — the pressure-conformance
+  // NUMERATOR (proposal §6.2; see slot-busy.ts for the measurement contract). Fed by
+  // producerSlot:start/end spans; `openSlots` maps a live slot's index to its start
+  // offset (ms on the run axis) until its end event arrives. Reassignable ONLY for the
+  // hydration path (`fromPartial` revives the serialized accumulator wholesale).
+  private slotBusy = new SlotBusyWindows();
+  private readonly openSlots = new Map<number, number>();
 
   // Injected time origin for every time quantity this reducer emits (see `originMs`).
   // Absent → fall back to the first event's ts, the single-process run start.
   private readonly timelineOrigin?: number;
+  // Shard identity for a distributed run (stamped into sample identities via the
+  // collector AND exported on the partial envelope); unset on single-process runs.
+  private readonly workerId?: string;
+  // Snapshot instant claimed by the partial this reducer was HYDRATED from (codex R2
+  // P2-1). A re-export must never claim narrower observation coverage than its source
+  // frame: without this, export(T)→hydrate→no-arg re-export would fall back to the
+  // earlier lastTs while the slot-busy windows already integrate to T — an internally
+  // inconsistent frame whose downstream censoring drops known coverage. Serves as the
+  // no-arg default AND the floor of `exportPartial`'s observedAt. Unset on live
+  // (non-hydrated) reducers.
+  private hydratedObservedAt?: number;
 
   /** @param config `report` sample caps (0 disables a sample type entirely), plus two optional
    *  distributed-run knobs (single-process runs leave both unset):
@@ -272,6 +311,7 @@ export class LoadReducerImpl implements LoadReducer {
   ) {
     this.samples = new LoadSampleCollector(config);
     if (config.timelineOrigin !== undefined) this.timelineOrigin = config.timelineOrigin;
+    if (config.workerId !== undefined) this.workerId = config.workerId;
   }
 
   apply(event: LoadEvent): void {
@@ -514,6 +554,26 @@ export class LoadReducerImpl implements LoadReducer {
       case "metric:observed":
         this.foldCustomMetric(event);
         break;
+      case "producerSlot:start":
+        // Slot-occupancy integration starts here (§6.2 conformance numerator). The
+        // orchestrator emits this AFTER the slot's ramp delay, so pre-ramp time never
+        // counts. A duplicate start for a live index (never produced by the
+        // orchestrator) keeps the FIRST span open rather than resetting it.
+        if (!this.openSlots.has(event.producerSlotIndex)) {
+          this.openSlots.set(event.producerSlotIndex, this.offsetOf(event.ts));
+        }
+        break;
+      case "producerSlot:end": {
+        // Close the slot's occupancy span [start, end) into the per-window integral.
+        // Think time and backlog-parked waits sit INSIDE the span (design occupancy);
+        // under the closed producer-slot model the span is exact, not an approximation.
+        const startOffset = this.openSlots.get(event.producerSlotIndex);
+        if (startOffset !== undefined) {
+          this.openSlots.delete(event.producerSlotIndex);
+          this.slotBusy.addSpan(startOffset, this.offsetOf(event.ts));
+        }
+        break;
+      }
       // assertion:observed / log:sampled / checkpoints are handled by the sink
       // (failure traces) or don't affect these aggregates.
       default:
@@ -627,14 +687,19 @@ export class LoadReducerImpl implements LoadReducer {
         : [];
 
     // Timeline: `durationMs` (already the authoritative interval when `runEndMs` was
-    // supplied) drives the zero-fill extension — same boundary, same axis. One gap the
-    // timeline can't fill itself: it early-returns EMPTY when it never recorded a window,
-    // so an idle / lost shard (authoritative `runEndMs` supplied, zero events) would break
-    // the shared axis's dense-series promise over [0, durationMs] — synthesize it here.
+    // supplied) drives the zero-fill extension — same boundary, same axis. One gap
+    // `finalize` leaves: it early-returns EMPTY when it never recorded a window, so an
+    // idle / lost shard (authoritative `runEndMs` supplied, zero events) would break the
+    // shared axis's dense-series promise over [0, durationMs]. The reducer gates WHEN
+    // synthesis applies (only under an explicit authoritative boundary — the lastTs
+    // fallback keeps the empty-series status quo); the timeline owns HOW
+    // (`synthesizeZero`: its own width/coarsening AND its contributor census, so a
+    // censored merged-but-idle timeline still marks post-cutoff windows
+    // contributorsPartial — codex R3).
     const rawTimeline = this.timeline.finalize(durationMs);
     const timeline =
       runEndMs !== undefined && durationMs > 0 && rawTimeline.windows.length === 0
-        ? this.syntheticZeroTimeline(durationMs)
+        ? this.timeline.synthesizeZero(durationMs)
         : rawTimeline;
 
     return {
@@ -744,6 +809,9 @@ export class LoadReducerImpl implements LoadReducer {
    * `custom` returns a TREND series' own histogram — the untagged total for `tags: {}`,
    * else the series located by the same `canonicalTagKey` the fold uses — and
    * undefined for rate/counter series (no histogram; those gates are exact counts).
+   * `customSeriesComplete` exposes a series' fold completeness (hydrated merged state
+   * may carry `complete: false`, §7.3) so the evaluator can refuse to decide gates on
+   * undercounting values.
    */
   latencyQuantiles(): ThresholdQuantileSource {
     const mergedOver = (hists: LoadHistogram[]): LoadHistogram | undefined => {
@@ -766,7 +834,349 @@ export class LoadReducerImpl implements LoadReducer {
         const series = Object.keys(tags).length === 0 ? m.total : m.series.get(canonicalTagKey(tags));
         return series?.hist; // only trend series carry a histogram
       },
+      // Completeness of the target series' fold (codex R1): a hydrated merged state can
+      // carry `complete: false` (§7.3's conservative rule — a truncated worker folded
+      // this key invisibly into its total), and the retained values then UNDERCOUNT.
+      // The evaluator turns such targets unevaluable ("series-incomplete") instead of
+      // deciding gates on partial numbers. undefined = unknown metric/series; live
+      // (non-hydrated) folds are always complete for retained keys.
+      customSeriesComplete: (metricId, tags) => {
+        const m = this.customMetrics.get(metricId);
+        if (!m) return undefined;
+        const series = Object.keys(tags).length === 0 ? m.total : m.series.get(canonicalTagKey(tags));
+        return series === undefined ? undefined : series.complete !== false;
+      },
     };
+  }
+
+  // ── partial export / hydration (proposal §7.5) ─────────────────────────
+
+  /**
+   * Export this reducer's COMPLETE aggregate state as a versioned, JSON-serializable
+   * `LoadReducerPartialV1` (proposal §7.5): everything `finalize()` / `snapshot()` read
+   * is present, so `exportPartial → JSON round-trip → fromPartial → finalize` is
+   * IDENTICAL to a direct `finalize` (the D0 base invariant under D0-9's partition
+   * identity). Repeat-safe: nothing here mutates live state (deep copies / fresh wire
+   * objects throughout), so periodic snapshot exports (D1 §7.1) can call it freely.
+   *
+   * DELIBERATELY EXCLUDED transients (in-flight detail a cumulative snapshot does not
+   * carry — each with why the exclusion is sound):
+   *  - `iterHadPrimary` — per-in-flight boundary markers, only consulted at that
+   *    iteration's own future `iteration:end`; completed work is already in the counts.
+   *  - `iterStepPhase` — per-in-flight step start-phase attribution for FUTURE events.
+   *  - `openSlots` — open producer-slot spans are not exported as open state; their
+   *    occupancy up to `observedAt` is INTEGRATED into the exported slot-busy copy.
+   *  - the sample collector's per-iteration in-flight buffers — bounded live scratch; a
+   *    failure/slow sample only materializes at `iteration:end`.
+   *  - sink-side state (step-name maps, live phase flips, poll spans) — upstream of the
+   *    fact stream, not reducer state; its artifact effects (e.g. the long-poll
+   *    advisory) travel via the partial's `advisories` slot, stamped by the shard
+   *    runner (D1), not by the reducer.
+   * Consequently a HYDRATED reducer is a finalize/merge substrate (plus threshold
+   * quantile source), NOT an event consumer — applying further events to it is
+   * unsupported (the transients above are gone).
+   *
+   * Envelope: `observedAt` = the snapshot instant `observedAtMs` (epoch ms, same clock
+   * domain as `LoadEvent.ts` — the snapshot's observation cutoff for timeline
+   * censoring); `liveInFlight` = started − completed at that instant.
+   *
+   * `observedAtMs` — the WALL-CLOCK instant this snapshot is taken (a D1 periodic
+   * exporter passes its `now()`). It matters whenever the reducer sits in an
+   * event-free gap (think time, backlog waits): the snapshot really observed that
+   * idle span, so open producer-slot occupancy integrates up to it and the timeline
+   * censoring cutoff sits at it (codex R1 P2 — with the `lastTs` fallback an open
+   * slot's busy time silently truncated at the last event, and a merge treated the
+   * observed idle gap as unobserved). DEFAULT: a HYDRATED reducer defaults to the
+   * snapshot instant its source partial claimed (`hydratedObservedAt` — a re-export
+   * must not shrink the frame's coverage, codex R2 P2-1); a live reducer defaults to
+   * `lastTs` (the last applied event), which is only exact when the caller exports
+   * immediately after the last event with no gap — acceptable for terminal exports
+   * right after `load:end`, NOT for periodic mid-run snapshots. An instant EARLIER
+   * than the coverage floor — `lastTs`, and for a hydrated instance also its source
+   * frame's observedAt — is floored there (observation coverage cannot be narrower
+   * than what was already folded / already claimed).
+   */
+  exportPartial(observedAtMs?: number): LoadReducerPartialV1 {
+    // Coverage floor: events already folded (lastTs) and, for a hydrated instance,
+    // the snapshot instant its source frame already claimed.
+    const floor = Math.max(this.lastTs, this.hydratedObservedAt ?? 0);
+    const observedAt = Math.max(floor, observedAtMs ?? floor);
+    // Slot busy: closed spans + every OPEN slot's occupancy truncated at the snapshot
+    // instant, folded into a CLONE so the live accumulator is untouched.
+    const slotBusy = this.slotBusy.clone();
+    const observedAtOffset = this.offsetOf(observedAt);
+    for (const startOffset of this.openSlots.values()) {
+      slotBusy.addSpan(startOffset, observedAtOffset);
+    }
+    const anyHeuristicEndpoint = [...this.endpoints.values()].some((e) => e.routeKeyHeuristic);
+    const seriesJSON = (s: CustomSeriesAgg): LoadPartialCustomSeriesV1 => ({
+      tags: { ...s.tags },
+      count: s.count,
+      trueCount: s.trueCount,
+      sum: s.sum,
+      ...(s.hist !== undefined ? { hist: s.hist.toJSON() } : {}),
+      // A worker's own LIVE fold is always complete for retained keys: the series cap
+      // only blocks NEW keys (overflow folds into the total). `complete: false` is
+      // computed by `mergePartials` (§7.3's conservative rule) and survives a
+      // hydrate → re-export round trip via the agg's carried flag.
+      complete: s.complete !== false,
+    });
+    return {
+      v: 1,
+      observedAt,
+      liveInFlight: Math.max(0, this.iterStarted - this.iterCompleted),
+      ...(this.workerId !== undefined ? { workerId: this.workerId } : {}),
+      ...(this.timelineOrigin !== undefined ? { timelineOrigin: this.timelineOrigin } : {}),
+      // Feeder-state guarantee of THIS worker's segment — the single-machine reducer
+      // semantics finalize() also reports; the D1 shard runner stamps its real value
+      // post-export when it differs. `workerCount` is deliberately NOT stamped here:
+      // its presence marks a coordinator-merged aggregate (mergePartials stamps it),
+      // and coordinator-merge metadata does not survive a worker-side re-export.
+      feederGuarantee: "single-node",
+      runnerId: this.runnerId,
+      ...(this.config !== undefined ? { config: structuredClone(this.config) } : {}),
+      requestedConcurrency: this.requestedConcurrency,
+      ...(this.endReason !== undefined ? { endReason: this.endReason } : {}),
+      ...(this.crash !== undefined ? { crash: structuredClone(this.crash) } : {}),
+      ...(this.firstTs !== undefined ? { firstTs: this.firstTs } : {}),
+      lastTs: this.lastTs,
+      iterStarted: this.iterStarted,
+      iterCompleted: this.iterCompleted,
+      iterSucceeded: this.iterSucceeded,
+      iterFailed: this.iterFailed,
+      iterLatency: this.iterLatency.toJSON(),
+      primaryBoundaries: this.primaryBoundaries,
+      failedBeforePrimary: this.failedBeforePrimary,
+      endedWithoutBoundary: this.endedWithoutBoundary,
+      primaryLatency: this.primaryLatency.toJSON(),
+      releasedProducerSlots: this.releasedProducerSlots,
+      rejectedReleaseSignals: this.rejectedReleaseSignals,
+      duplicateReleaseSignals: this.duplicateReleaseSignals,
+      maxContinuationBacklog: this.maxContinuationBacklog,
+      continuationBackpressure: this.continuationBackpressure.toJSON(),
+      // Live in-flight COUNTS (not the id sets — ids are per-worker transients, but the
+      // counts drive finalize's interrupted-run reporting, so they must survive).
+      liveContinuations: this.liveContinuations.size,
+      pendingReleases: this.pendingRelease.size,
+      scenarios: [...this.scenarios.values()].map((s) => ({
+        scenarioId: s.scenarioId,
+        ...(s.scenarioRefId !== undefined ? { scenarioRefId: s.scenarioRefId } : {}),
+        iterations: s.iterations,
+        successful: s.successful,
+        failed: s.failed,
+        latency: s.latency.toJSON(),
+      })),
+      steps: [...this.steps.values()].map((s) => ({
+        scenarioId: s.scenarioId,
+        ...(s.scenarioRefId !== undefined ? { scenarioRefId: s.scenarioRefId } : {}),
+        stepId: s.stepId,
+        stepName: s.stepName,
+        ...(s.groupId !== undefined ? { groupId: s.groupId } : {}),
+        phase: s.phase,
+        invocationCount: s.invocationCount,
+        skippedCount: s.skippedCount,
+        assertionFailureCount: s.assertionFailureCount,
+        errorCount: s.errorCount,
+        requestCount: s.requestCount,
+        latency: s.latency.toJSON(),
+      })),
+      endpoints: [...this.endpoints.values()].map((e) => ({
+        routeKey: e.routeKey,
+        ...(e.phase !== undefined ? { phase: e.phase } : {}),
+        routeKeySource: e.routeKeySource,
+        routeKeyHeuristic: e.routeKeyHeuristic,
+        ...(e.method !== undefined ? { method: e.method } : {}),
+        requestCount: e.requestCount,
+        errorCount: e.errorCount,
+        statusCounts: { ...e.statusCounts },
+        latency: e.latency.toJSON(),
+      })),
+      matrix: [...this.matrix.values()].map((m) => ({
+        scenarioId: m.scenarioId,
+        ...(m.scenarioRefId !== undefined ? { scenarioRefId: m.scenarioRefId } : {}),
+        ...(m.stepId !== undefined ? { stepId: m.stepId } : {}),
+        ...(m.phase !== undefined ? { phase: m.phase } : {}),
+        routeKey: m.routeKey,
+        routeKeySource: m.routeKeySource,
+        routeKeyHeuristic: m.routeKeyHeuristic,
+        requestCount: m.requestCount,
+        errorCount: m.errorCount,
+        latency: m.latency.toJSON(),
+      })),
+      customMetrics: [...this.customMetrics.values()].map(
+        (m): LoadPartialCustomMetricV1 => ({
+          metricId: m.metricId,
+          kind: m.kind,
+          ...(m.unit !== undefined ? { unit: m.unit } : {}),
+          total: seriesJSON(m.total),
+          series: [...m.series.values()].map(seriesJSON),
+          seriesTruncated: m.truncated,
+        }),
+      ),
+      recentFailures: structuredClone(this.recentFailures),
+      timeline: this.timeline.toJSON(),
+      slotBusy: slotBusy.toJSON(),
+      samples: structuredClone(this.samples.finalize()),
+      // Reducer-derivable advisories (custom-metric truncation) are RE-DERIVED from the
+      // hydrated state at finalize, so they are deliberately not duplicated here; this
+      // slot carries EXTRA advisories from outside the reducer (the D1 shard runner
+      // stamps sink/orchestrator-level ones, e.g. the long-poll advisory).
+      advisories: [],
+      attribution: this.attribution(anyHeuristicEndpoint),
+    };
+  }
+
+  /**
+   * Hydrate a reducer from a VALIDATED `LoadReducerPartialV1` (see
+   * `parseLoadReducerPartial` in partial.ts — this method assumes the shape holds and
+   * delegates the deep sub-payload checks to each `fromJSON`). The result is a
+   * finalize/merge substrate: `finalize(runEndMs)` and `latencyQuantiles()` behave
+   * exactly as on the original reducer (the round-trip identity), and a no-arg
+   * `exportPartial()` re-export reproduces the source frame (its observedAt is
+   * preserved as the coverage floor, never regressing to the earlier lastTs), but
+   * applying further events is unsupported — the transients `exportPartial` excludes
+   * are gone.
+   *
+   * `opts.timelineOrigin` supplies the shared axis when the partial's envelope lacks it
+   * (its offsets then anchored to `firstTs`, which must agree — enforced by the caller,
+   * `finalizeMerged`); when the partial carries an origin it wins by default.
+   */
+  static fromPartial(
+    p: LoadReducerPartialV1,
+    opts: { timelineOrigin?: number } = {},
+  ): LoadReducerImpl {
+    const origin = p.timelineOrigin ?? opts.timelineOrigin;
+    const r = new LoadReducerImpl({
+      maxFailureTraces: p.samples.maxFailureTraces,
+      maxSlowTransactionSummaries: p.samples.maxSlowTransactionSummaries,
+      ...(p.workerId !== undefined ? { workerId: p.workerId } : {}),
+      ...(origin !== undefined ? { timelineOrigin: origin } : {}),
+    });
+    r.runnerId = p.runnerId;
+    if (p.config !== undefined) r.config = structuredClone(p.config);
+    r.requestedConcurrency = p.requestedConcurrency;
+    if (p.endReason !== undefined) r.endReason = p.endReason;
+    if (p.crash !== undefined) r.crash = structuredClone(p.crash);
+    if (p.firstTs !== undefined) r.firstTs = p.firstTs;
+    r.lastTs = p.lastTs;
+    // Preserve the source frame's snapshot instant (codex R2 P2-1): it is this
+    // instance's coverage floor and its no-arg re-export default, so hydrate →
+    // re-export keeps observedAt consistent with the already-integrated slot-busy
+    // windows / censoring anchors instead of regressing to the earlier lastTs.
+    r.hydratedObservedAt = p.observedAt;
+    r.iterStarted = p.iterStarted;
+    r.iterCompleted = p.iterCompleted;
+    r.iterSucceeded = p.iterSucceeded;
+    r.iterFailed = p.iterFailed;
+    // Histograms revive by merging into the fresh (empty) defaults — an exact copy, and
+    // safe because the partial validation pins every embedded histogram to the default
+    // relativeError (the same operational invariant the timeline enforces per window).
+    r.iterLatency.merge(LoadHistogram.fromJSON(p.iterLatency));
+    r.primaryBoundaries = p.primaryBoundaries;
+    r.failedBeforePrimary = p.failedBeforePrimary;
+    r.endedWithoutBoundary = p.endedWithoutBoundary;
+    r.primaryLatency.merge(LoadHistogram.fromJSON(p.primaryLatency));
+    r.releasedProducerSlots = p.releasedProducerSlots;
+    r.rejectedReleaseSignals = p.rejectedReleaseSignals;
+    r.duplicateReleaseSignals = p.duplicateReleaseSignals;
+    r.maxContinuationBacklog = p.maxContinuationBacklog;
+    r.continuationBackpressure.merge(LoadHistogram.fromJSON(p.continuationBackpressure));
+    // The id SETS are per-worker transients; only their SIZES affect finalize/snapshot.
+    // Synthetic members restore the sizes (the \u0000 prefix cannot collide with real
+    // iteration ids, which the orchestrator mints as `it-N`).
+    for (let i = 0; i < p.liveContinuations; i++) r.liveContinuations.add(`\u0000hydrated:continuation:${i}`);
+    for (let i = 0; i < p.pendingReleases; i++) r.pendingRelease.add(`\u0000hydrated:pending-release:${i}`);
+    for (const s of p.scenarios) {
+      r.scenarios.set(r.scenarioKey(s.scenarioId, s.scenarioRefId), {
+        scenarioId: s.scenarioId,
+        ...(s.scenarioRefId !== undefined ? { scenarioRefId: s.scenarioRefId } : {}),
+        iterations: s.iterations,
+        successful: s.successful,
+        failed: s.failed,
+        latency: LoadHistogram.fromJSON(s.latency),
+      });
+    }
+    for (const s of p.steps) {
+      r.steps.set(r.stepKey(s.scenarioId, s.scenarioRefId, s.stepId, s.phase), {
+        scenarioId: s.scenarioId,
+        ...(s.scenarioRefId !== undefined ? { scenarioRefId: s.scenarioRefId } : {}),
+        stepId: s.stepId,
+        stepName: s.stepName,
+        ...(s.groupId !== undefined ? { groupId: s.groupId } : {}),
+        phase: s.phase,
+        invocationCount: s.invocationCount,
+        skippedCount: s.skippedCount,
+        assertionFailureCount: s.assertionFailureCount,
+        errorCount: s.errorCount,
+        requestCount: s.requestCount,
+        latency: LoadHistogram.fromJSON(s.latency),
+      });
+    }
+    for (const e of p.endpoints) {
+      r.endpoints.set(`${e.routeKey}${SEP}${e.phase ?? ""}`, {
+        routeKey: e.routeKey,
+        ...(e.phase !== undefined ? { phase: e.phase } : {}),
+        routeKeySource: e.routeKeySource,
+        routeKeyHeuristic: e.routeKeyHeuristic,
+        ...(e.method !== undefined ? { method: e.method } : {}),
+        requestCount: e.requestCount,
+        errorCount: e.errorCount,
+        statusCounts: { ...e.statusCounts },
+        latency: LoadHistogram.fromJSON(e.latency),
+      });
+    }
+    for (const m of p.matrix) {
+      r.matrix.set(
+        `${m.scenarioId}${SEP}${m.scenarioRefId ?? ""}${SEP}${m.stepId ?? ""}${SEP}${m.routeKey}${SEP}${m.phase ?? ""}`,
+        {
+          scenarioId: m.scenarioId,
+          ...(m.scenarioRefId !== undefined ? { scenarioRefId: m.scenarioRefId } : {}),
+          ...(m.stepId !== undefined ? { stepId: m.stepId } : {}),
+          ...(m.phase !== undefined ? { phase: m.phase } : {}),
+          routeKey: m.routeKey,
+          routeKeySource: m.routeKeySource,
+          routeKeyHeuristic: m.routeKeyHeuristic,
+          requestCount: m.requestCount,
+          errorCount: m.errorCount,
+          latency: LoadHistogram.fromJSON(m.latency),
+        },
+      );
+    }
+    const reviveSeries = (s: LoadPartialCustomSeriesV1): CustomSeriesAgg => ({
+      tags: { ...s.tags },
+      count: s.count,
+      trueCount: s.trueCount,
+      sum: s.sum,
+      // hist presence follows the metric kind (validated: present iff trend).
+      ...(s.hist !== undefined ? { hist: LoadHistogram.fromJSON(s.hist) } : {}),
+      // Completeness survives hydration (codex R1 P1): a merged partial's
+      // `complete: false` must reach threshold evaluation (via
+      // `latencyQuantiles().customSeriesComplete`) — the retained values undercount,
+      // so deciding a gate on them would false-pass. Absent when complete (the
+      // live-fold default). It has no artifact-v1 row slot, but it is NOT display
+      // data — it gates evaluability.
+      ...(s.complete === false ? { complete: false } : {}),
+    });
+    for (const m of p.customMetrics) {
+      r.customMetrics.set(m.metricId, {
+        metricId: m.metricId,
+        kind: m.kind,
+        ...(m.unit !== undefined ? { unit: m.unit } : {}),
+        total: reviveSeries(m.total),
+        series: new Map(m.series.map((s) => [canonicalTagKey(s.tags), reviveSeries(s)])),
+        truncated: m.seriesTruncated,
+      });
+    }
+    r.recentFailures.push(...structuredClone(p.recentFailures));
+    r.samples.restoreRetained(
+      structuredClone({
+        failureTraces: p.samples.failureTraces,
+        slowTransactions: p.samples.slowTransactions,
+      }),
+    );
+    r.timeline = LoadTimeline.fromJSON(p.timeline);
+    r.slotBusy = SlotBusyWindows.fromJSON(p.slotBusy);
+    return r;
   }
 
   // ── aggregate accessors ────────────────────────────────────────────────
@@ -1058,35 +1468,6 @@ export class LoadReducerImpl implements LoadReducer {
       duplicateReleaseSignals: this.duplicateReleaseSignals,
       rejectedReleaseSignals: this.rejectedReleaseSignals,
       abortedByDrainTimeout: 0, // drain-timeout abort lands in M6-d
-    };
-  }
-
-  /** Reducer-side synthetic fallback: a DENSE all-zero timeline over the authoritative run
-   *  interval, for a reducer finalized with `runEndMs` that recorded no timeline events at
-   *  all (an idle worker / lost dispatch). `LoadTimeline.finalize` early-returns an EMPTY
-   *  series when it never saw a window, but the shared axis promises a dense series over
-   *  [0, durationMs] — a merge consumer should read "this worker sat idle the whole run",
-   *  not "this worker has no axis". Width mirrors the timeline's coarsening semantics
-   *  exactly (`runEndIndex`): the smallest baseWindowMs·2ⁿ whose last index fits the
-   *  maxWindows cap; indices 0..ceil(durationMs/width)−1; every field zero.
-   *  TODO(integration): revisit after D0-3 timeline merge lands — fold this into
-   *  `LoadTimeline` itself (see the mirrored-constants note at the top of this file). */
-  private syntheticZeroTimeline(durationMs: number): NonNullable<LoadArtifact["timeline"]> {
-    let windowMs = TIMELINE_BASE_WINDOW_MS;
-    while (Math.ceil(durationMs / windowMs) - 1 >= TIMELINE_MAX_WINDOWS) windowMs *= 2;
-    const count = Math.ceil(durationMs / windowMs);
-    return {
-      windowMs,
-      windows: Array.from({ length: count }, (_, i) => ({
-        offsetMs: i * windowMs,
-        requests: 0,
-        errors: 0,
-        errorRate: 0,
-        throughputPerSec: 0,
-        latency: ZERO_PCT,
-        iterations: 0,
-        peakInFlight: 0,
-      })),
     };
   }
 

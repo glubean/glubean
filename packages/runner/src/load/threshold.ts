@@ -405,6 +405,16 @@ export interface ThresholdQuantileSource {
    *  scopes do: the folded point value IS the interval upper, so a `>` gate compared
    *  at the point can false-pass while the true quantile sits anywhere in the interval. */
   custom?: (metricId: string, tags: Record<string, string>) => LoadHistogram | undefined;
+  /** Whether a custom-metric series' fold is COMPLETE. A reducer hydrated from a merged
+   *  partial can know a tagged series is incomplete (distributed proposal §7.3: a
+   *  series-cap-truncated worker folded that key's observations into its untagged total
+   *  invisibly, so the union series UNDERCOUNTS) — every gate on such a series is
+   *  `unevaluable` (`"series-incomplete"`, pass forced false), never decided on the
+   *  partial values (a `<` ceiling would false-pass). `false` → incomplete; `true` →
+   *  complete; `undefined` → unknown metric/series (treated as complete — the
+   *  absent-scope skip policy already covers truly missing targets). Live single-process
+   *  folds are always complete for retained keys. */
+  customSeriesComplete?: (metricId: string, tags: Record<string, string>) => boolean | undefined;
 }
 
 /** The quantile metrics decided on histogram intervals; narrows a metric/gate key to a
@@ -576,6 +586,14 @@ export function evaluateThresholds(
     for (const [targetKey, cfg] of Object.entries(thresholds.customMetric)) {
       const resolved = resolveCustomTarget(s.customMetrics, targetKey);
       const series = resolved ? findCustomSeries(resolved.metric, resolved.suffix) : undefined;
+      // Fold completeness of the target series (codex R1): a merged run's hydrated
+      // state can know this series undercounts (§7.3 — a truncated worker folded the
+      // key into its total invisibly). Checked once per target; every configured gate
+      // on an incomplete series is unevaluable below.
+      const seriesComplete =
+        resolved !== undefined && series !== undefined
+          ? (quantiles?.customSeriesComplete?.(resolved.metric.metricId, series.tags) ?? true)
+          : true;
       if (!series) {
         // Skip-on-absent is the module policy (a gate can't fail on missing data),
         // but a CONFIGURED gate that measured nothing must not stay silent: it
@@ -613,6 +631,26 @@ export function evaluateThresholds(
           continue;
         }
         const { op, value } = parseCustomExpression(expr, known, resolved?.metric.unit);
+        // An INCOMPLETE series (merged-run knowledge, see `seriesComplete` above): the
+        // retained count/sum/rate/quantiles all UNDERCOUNT the true fold, so no gate
+        // key can be decided on them — a `<` ceiling would false-pass on the missing
+        // observations. Unevaluable with pass forced false (the iron rule), reason
+        // `"series-incomplete"`. Dominates the zero-observation check: it is the more
+        // specific diagnosis (the series may well have retained samples).
+        if (!seriesComplete) {
+          out.push({
+            scope: "customMetric",
+            target: targetKey,
+            metric: known,
+            expression: expr,
+            actual,
+            pass: false,
+            status: "unevaluable",
+            reason: "series-incomplete",
+            source: "glubean",
+          });
+          continue;
+        }
         // A present-but-EMPTY series (count 0 — e.g. a D1 pinned-key placeholder, or
         // an adapter artifact) folds `rate` as 0/0→0 and trend quantiles as ZERO_PCT:
         // zero observations ≠ the value 0 (proposal §7.3) — evaluating them would

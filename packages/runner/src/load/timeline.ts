@@ -833,4 +833,44 @@ export class LoadTimeline {
     }
     return { windowMs: this.windowMs, windows };
   }
+
+  /** Dense all-zero series over [0, runEndMs) for a timeline that recorded NO windows —
+   *  the authoritative-boundary synthesis (`finalize` early-returns EMPTY with no
+   *  recorded window, but an idle / lost shard finalized against a coordinator run end
+   *  must present the shared axis as "observed idle", not "no axis"). The caller (the
+   *  reducer) gates WHEN synthesis applies — only under an explicit authoritative
+   *  boundary; this method owns HOW, with the timeline's own coarsening (`runEndIndex`)
+   *  and its contributor census. CONTRIBUTOR SEMANTICS ARE PRESERVED (codex R3): a
+   *  censored contributor covers only windows up to its cutoff window, so later
+   *  synthesized windows report `contributorsPartial` exactly as recorded windows would
+   *  — without this, an all-idle censored merge (e.g. every worker lost during ramp)
+   *  would synthesize windows that read "fully observed" past every cutoff. Peak
+   *  bounds are written as the observed contributors' exact zeros (lower === upper ===
+   *  0); under `contributorsPartial` they cover observed contributors only, like every
+   *  merged window (§7.3). Empty for a non-positive `runEndMs`. */
+  synthesizeZero(runEndMs: number): LoadTimelineArtifact {
+    const maxIdx = this.runEndIndex(runEndMs); // coarsens so the index fits the cap
+    if (maxIdx < 0) return { windowMs: this.windowMs, windows: [] };
+    const cutoffIdxs = this.contributorCutoffsMs.map((c) => Math.floor(c / this.windowMs));
+    const expectedContributors = this.fullContributors + cutoffIdxs.length;
+    const windows: LoadTimelineWindow[] = [];
+    for (let i = 0; i <= maxIdx; i++) {
+      const win: LoadTimelineWindow = {
+        offsetMs: i * this.windowMs,
+        requests: 0,
+        errors: 0,
+        errorRate: 0,
+        throughputPerSec: 0,
+        latency: ZERO_PCT,
+        iterations: 0,
+        peakInFlight: 0,
+        peakInFlightBounds: { lower: 0, upper: 0 },
+      };
+      const contributors =
+        this.fullContributors + cutoffIdxs.reduce((n, c) => (c >= i ? n + 1 : n), 0);
+      if (contributors < expectedContributors) win.contributorsPartial = true;
+      windows.push(win);
+    }
+    return { windowMs: this.windowMs, windows };
+  }
 }

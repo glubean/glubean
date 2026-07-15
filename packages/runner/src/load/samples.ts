@@ -330,6 +330,29 @@ export class LoadSampleCollector {
     };
   }
 
+  /** Hydration path (`LoadReducerPartialV1` → reducer): seed a fresh collector's RETAINED
+   *  sample sets from a validated partial. Replaces any previously retained samples,
+   *  re-sorts under the shared total orders and re-truncates to this collector's caps
+   *  (defensive — a canonical partial is already sorted and capped), so hydration can
+   *  never widen the bounded-retention guarantee. Per-iteration in-flight buffers are
+   *  deliberately NOT part of a partial (transient scratch that only matters while the
+   *  iteration is running), so a hydrated collector starts with none. */
+  restoreRetained(retained: {
+    failureTraces: LoadFailureTraceSample[];
+    slowTransactions: LoadSlowTransactionSummary[];
+  }): void {
+    this.failureTraces.length = 0;
+    this.slow.length = 0;
+    if (this.maxFailureTraces > 0) {
+      this.failureTraces.push(
+        ...[...retained.failureTraces].sort(compareFailure).slice(0, this.maxFailureTraces),
+      );
+    }
+    if (this.maxSlow > 0) {
+      this.slow.push(...[...retained.slowTransactions].sort(compareSlow).slice(0, this.maxSlow));
+    }
+  }
+
   private pushObservation(b: IterBuffer, obs: LoadFailureObservation): void {
     if (b.observations.length < MAX_OBS_PER_TRACE) {
       b.observations.push(obs);

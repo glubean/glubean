@@ -202,9 +202,12 @@ export interface ThresholdEvaluation {
   status?: "evaluated" | "unevaluable";
   /** Why the gate was unevaluable — REQUIRED when `status === "unevaluable"`. Current
    *  values: `"borderline-quantile"` (the quantile interval straddles the threshold at the
-   *  histogram's resolution) and `"no-observations"` (the target scope observed nothing —
-   *  its zero-filled fields are NOT measurements). Typed as an open string so D1 can add
-   *  `"feeder-gap"` / `"under-driven"` / `"partial-input"` without a breaking change. */
+   *  histogram's resolution), `"no-observations"` (the target scope observed nothing —
+   *  its zero-filled fields are NOT measurements), and `"series-incomplete"` (a merged
+   *  run knows the targeted custom-metric tag series undercounts — a series-cap-truncated
+   *  worker folded that key into its untagged total invisibly, distributed proposal §7.3).
+   *  Typed as an open string so D1 can add `"feeder-gap"` / `"under-driven"` /
+   *  `"partial-input"` without a breaking change. */
   reason?: string;
   /** The quantile interval a histogram-backed latency gate was decided on: the true
    *  (nearest-rank) quantile lies in `[lower, upper]` (ms). Present whenever the gate was
@@ -708,6 +711,15 @@ export interface LoadCustomMetricSeries {
   tags: Record<string, string>;
   /** Observations folded into this series. */
   count: number;
+  /** Whether this series' fold is EXACT (schema v2, distributed proposal §11/§7.3).
+   *  Absent = complete. `false` only on a MERGED (multi-worker) artifact where the
+   *  conservative completeness rule fired: a series-cap-truncated worker folded this
+   *  tag combination into its untagged total invisibly, so this row UNDERCOUNTS —
+   *  consumers must not read its values as exact (threshold gates targeting it are
+   *  already `unevaluable` with reason `"series-incomplete"`). The untagged total row
+   *  is always exact and never carries the field; the metric-level `seriesTruncated`
+   *  says truncation happened somewhere, this flag says WHICH row it hit. */
+  complete?: boolean;
   // rate:
   /** `rate` only: observations whose value was `true`. */
   trueCount?: number;
