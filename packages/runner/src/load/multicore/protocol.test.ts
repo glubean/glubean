@@ -102,7 +102,7 @@ describe("multicore protocol version incompatibility (rejected before assign, §
   });
 
   it("rejects a coordinator frame stamped with a different protocol version", () => {
-    const wire = { ...encodeCoordinatorMessage({ type: "abort", reason: "x" }), v: 2 };
+    const wire = { ...encodeCoordinatorMessage({ type: "abort", reason: "x" }), v: 999 };
     expect(() => decodeCoordinatorMessage(wire)).toThrow(MulticoreProtocolError);
   });
 

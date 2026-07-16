@@ -240,13 +240,24 @@ export async function runLoadMultiCore(
     const startAt = now() + (opts.startLeadMs ?? DEFAULT_START_LEAD_MS);
     const timelineOrigin = startAt;
     const dispatchDeadline = runLevel.durationMs !== undefined ? startAt + runLevel.durationMs : undefined;
+    // Release dispatch ONLY to workers still alive. A worker that exited during bind (SIGKILL /
+    // bootstrap crash) already opened its ready gate by settling; sending `start` to its CLOSED
+    // channel would reject and — unguarded — sink the WHOLE run instead of the partial the ready
+    // gate permits (its shard is simply missing). Skip terminated workers, and TOLERATE a send
+    // that races the close (frame handed off just as the channel drops) so one lost worker never
+    // fails the run — its shard counts as partial (§7.4), surviving workers still run.
     for (const c of collections) {
-      await c.channel.send({
-        type: "start",
-        startAt,
-        timelineOrigin,
-        ...(dispatchDeadline !== undefined ? { dispatchDeadline } : {}),
-      });
+      if (isTerminated(c)) continue;
+      try {
+        await c.channel.send({
+          type: "start",
+          startAt,
+          timelineOrigin,
+          ...(dispatchDeadline !== undefined ? { dispatchDeadline } : {}),
+        });
+      } catch {
+        // Raced the worker's close — it is lost; keep going (the other workers still dispatch).
+      }
     }
 
     // Wait for every worker to reach a terminal state (done or channel close).
@@ -321,6 +332,13 @@ function collectWorker(shard: LoadShard, channel: LoadWorkerChannel): WorkerColl
     });
   });
   return c;
+}
+
+/** A worker that has already reached a terminal state — its channel is closing/closed, so it
+ *  can neither receive `start` nor run. `done` covers a handled bind failure (it sent
+ *  `error`+`done`); `closeReason` covers a hard exit (SIGKILL / bootstrap crash) during bind. */
+function isTerminated(c: WorkerCollection): boolean {
+  return c.done || c.closeReason !== undefined;
 }
 
 /** Wait until every worker has bound (`ready`) or already terminated, bounded by

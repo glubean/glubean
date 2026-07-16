@@ -29,8 +29,14 @@ import type { LoadShard } from "../shard.js";
 import type { LoadEndReason } from "@glubean/sdk/load";
 
 /** The wire protocol version. Bumped on any INCOMPATIBLE message-shape change; a peer that
- *  announces (or stamps) a different version is rejected before `assign` (§4). */
-export const MULTICORE_PROTOCOL_VERSION = 1;
+ *  announces (or stamps) a different version is rejected at the `hello` handshake, before any
+ *  `assign` (§4) — a version-skewed worker never even reaches the coordinator's ready barrier.
+ *
+ *  v1 → v2 (D1-4): `ready` became a REQUIRED worker→coordinator frame (the two-phase
+ *  armed→commit barrier). A v1 worker never sends `ready`, so it is incompatible — bumping the
+ *  version makes that a fast `hello`-time rejection instead of the coordinator waiting out the
+ *  ready deadline for a frame that will never come. Same-build workers are all v2. */
+export const MULTICORE_PROTOCOL_VERSION = 2;
 
 // ── Payload sub-shapes ───────────────────────────────────────────────────────
 

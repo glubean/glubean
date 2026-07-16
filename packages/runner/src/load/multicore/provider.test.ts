@@ -13,7 +13,7 @@ import { runLoad } from "../orchestrator.js";
 import { shardPlan } from "../shard.js";
 import { mergePartials, finalizeMerged, type LoadReducerPartialV1 } from "../partial.js";
 import { Fd3WorkerChannel, MultiCoreProvider, type ChannelCloseReason, type LoadWorkerChannel } from "./provider.js";
-import { encodeWorkerMessage, type ShardResultObservablesV1, type WorkerMessage } from "./protocol.js";
+import { encodeWorkerMessage, MULTICORE_PROTOCOL_VERSION, type ShardResultObservablesV1, type WorkerMessage } from "./protocol.js";
 
 // The multi-core provider SPAWNS the BUILT dist/load/multicore/worker-harness.js, so the sdk +
 // runner must be built before this test (the CI build / pre-release `pnpm -r build` covers it).
@@ -222,7 +222,7 @@ describe("MultiCoreProvider end-to-end", () => {
     const provider = newProvider();
     const channels = await provider.acquire(2, { abort: new AbortController().signal });
     expect(channels).toHaveLength(2);
-    for (const ch of channels) expect(ch.hello.protocolVersion).toBe(1);
+    for (const ch of channels) expect(ch.hello.protocolVersion).toBe(MULTICORE_PROTOCOL_VERSION);
 
     const pids = channels.map((c) => c.pid);
     const collected = await driveRun(channels, {
@@ -325,7 +325,7 @@ export const plan = loadRunner("mc-flood", { scenario, concurrency: 1, iteration
       "PROBE send=undefined connected=false channel=undefined msgEvent=false guardedTried=false fd3Err=swallowed",
     );
     // The real hello was consumed at acquire — over the isolated fd 4, not stdout.
-    expect(channels[0].hello.protocolVersion).toBe(1);
+    expect(channels[0].hello.protocolVersion).toBe(MULTICORE_PROTOCOL_VERSION);
     // NO forged control frame (stdout-injected, process.send, or fd-3) ever reached the parent:
     // the only frames are legitimate worker→coordinator types with the coordinator-minted workerId.
     expect(c.messages.some((m) => (m.type as string) === "abort")).toBe(false);
@@ -647,7 +647,7 @@ describe("Fd3WorkerChannel supervision — error vs exit vs unreapable (P2)", ()
     live.control.write(JSON.stringify({ totally: "wrong" }) + "\n");
     live.control.write("\n");
     // A VALID frame after the garbage must still decode and be delivered (the de-framer recovered).
-    live.control.write(JSON.stringify(encodeWorkerMessage({ type: "hello", protocolVersion: 1, workerId: "w3", pid: 1 })) + "\n");
+    live.control.write(JSON.stringify(encodeWorkerMessage({ type: "hello", protocolVersion: MULTICORE_PROTOCOL_VERSION, workerId: "w3", pid: 1 })) + "\n");
     await new Promise((r) => setImmediate(r)); // let stream 'data' flush
 
     expect(errors).toEqual([]); // garbage was dropped, not escalated

@@ -143,7 +143,7 @@ describe("runLoadMultiCore — end-to-end coordinator", () => {
     expect(artifact.runtime.execution?.provider).toBe("multi-core");
     expect(artifact.runtime.execution?.workerCount).toBe(2);
     expect(artifact.summary.executionStatus).toBe("complete");
-    expect(artifact.runtime.execution?.protocolVersion).toBe("1");
+    expect(artifact.runtime.execution?.protocolVersion).toBe("2");
     // Coverage: both workers delivered a final snapshot; iterations fully covered.
     const cov = artifact.runtime.execution?.coverage;
     expect(cov?.workersFinal).toBe(2);
@@ -376,4 +376,70 @@ export const plan = loadRunner("mc-backpressure", { scenario, concurrency: 2, it
     expect(Math.max(...hits)).toBeGreaterThan(0); // real observed back-pressure, not hardcoded 0
     assertAllReaped(provider.workers.map((w) => w.pid));
   }, 30_000);
+
+  it("survives a worker that dies DURING bind → PARTIAL run with the survivor's data, no whole-run crash", async () => {
+    // w1 hard-exits during import (before it can `ready`), modelling a bootstrap crash / SIGKILL
+    // in the bind window. The coordinator must broadcast `start` only to survivors — sending to
+    // w1's already-closed channel would reject and sink the WHOLE run instead of the partial the
+    // ready gate permits. w0 keeps running its shard; the run is judged partial.
+    const KILL_ON_BIND = `
+import { loadScenario, loadRunner } from "@glubean/sdk/load";
+const wi = process.argv.indexOf("--worker-id");
+if (wi >= 0 && process.argv[wi + 1] === "w1") process.exit(137); // crash during bind — never readies
+const scenario = loadScenario("ping")
+  .step("ping", async (ctx) => { await ctx.http.get(ctx.vars.require("BASE_URL") + "/ping").json(); })
+  .build();
+export const plan = loadRunner("mc-kill-bind", { scenario, concurrency: 4, iterations: 12 });
+`;
+    const { file, plan } = await writeFixture("coord-kill-bind", KILL_ON_BIND);
+    const provider = newProvider();
+    const artifact = await runLoadMultiCore(plan, {
+      file,
+      workerCount: 2,
+      cwd: RUNNER_ROOT,
+      vars: { BASE_URL: base },
+      snapshotIntervalMs: 25,
+      provider,
+    });
+
+    // Did NOT crash — produced a partial artifact carrying the surviving worker's contribution.
+    expect(artifact.summary.executionStatus).toBe("partial");
+    expect(artifact.runtime.execution?.provider).toBe("multi-core");
+    // w0 owns iterations [0,6); w1 (dead) contributed nothing → 6 of the 12 ran.
+    expect(artifact.summary.totalIterations).toBe(6);
+    expect(artifact.summary.successfulIterations).toBe(6);
+    const cov = artifact.runtime.execution?.coverage;
+    expect(cov?.workersFinal).toBe(1);
+    expect(cov?.workersExpected).toBe(2);
+    assertAllReaped(provider.workers.map((w) => w.pid));
+  }, 30_000);
+
+  it("rejects a version-skewed (v1) worker at the hello handshake — fast, not after the ready deadline (protocol v2)", async () => {
+    // A stale v1 worker never sends the now-REQUIRED `ready` frame. Bumping the protocol to v2
+    // makes its v1 `hello` an immediate incompatibility rejection at acquire — BEFORE the
+    // coordinator ever sends `assign` or waits for `ready` — so a skewed worker can't strand the
+    // coordinator on the ready deadline. The test seam stamps the worker's envelope as v1.
+    process.env.GLUBEAN_MC_TEST_PROTOCOL_V = "1";
+    try {
+      const { file, plan } = await writeFixture("coord-v1skew", HTTP_FIXTURE("mc-v1skew", { concurrency: 2, iterations: 4 }));
+      const provider = newProvider();
+      const started = Date.now();
+      await expect(
+        runLoadMultiCore(plan, {
+          file,
+          workerCount: 2,
+          cwd: RUNNER_ROOT,
+          vars: { BASE_URL: base },
+          // Long deadlines: if the fix regressed, the run would wait these out instead of failing fast.
+          joinDeadlineMs: 20_000,
+          readyDeadlineMs: 20_000,
+          provider,
+        }),
+      ).rejects.toThrow(/protocol|incompatible/i);
+      expect(Date.now() - started).toBeLessThan(10_000); // rejected at hello, not a 20s deadline
+      assertAllReaped(provider.workers.map((w) => w.pid));
+    } finally {
+      delete process.env.GLUBEAN_MC_TEST_PROTOCOL_V;
+    }
+  }, 40_000);
 });
