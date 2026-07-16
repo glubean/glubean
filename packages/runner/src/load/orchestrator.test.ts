@@ -620,7 +620,13 @@ describe("runLoad — producer release scheduling (M6-b)", () => {
     });
     const startedAt = Date.now();
     const art = await runLoad(plan);
-    expect(Date.now() - startedAt).toBeLessThan(2000); // completes (no infinite hang)
+    // The invariant is "the parked admit gets cancelled so the run COMPLETES" (a broken deadline
+    // would hang to the vitest timeout). The bound only distinguishes "completed" from "hung", so
+    // it is deliberately generous (≪ the 30s testTimeout): a tight budget here was merely a proxy
+    // for CPU load and flaked when heavy spawn-based test files contended for cores (D1-4 report),
+    // never signalling a real defect. The self-bounded 80ms poll means a healthy run finishes in
+    // ~200ms; 15s is pure headroom.
+    expect(Date.now() - startedAt).toBeLessThan(15_000); // completes (no infinite hang)
     expect(art.summary.continuation?.rejectedReleaseSignals).toBeGreaterThanOrEqual(1);
   });
 

@@ -17,11 +17,14 @@
  * an orphan. An abort broadcasts an `abort` control frame first so each worker drains +
  * finalizes cleanly (endReason "abort") and still delivers its terminal frame.
  *
- * Scope (D1-4): the COMPLETE (all workers delivered a final snapshot) normal path plus the
- * BASIC `partial` / `failed` data-completeness judgment (§7.4). Full chaos handling —
- * per-state timeouts, clock-handshake segments, wedged-worker watchdog, invalid-snapshot
- * censoring nuance, the §6.2 conformance verdict — is D1-5. Windows is unsupported (the
- * provider fails loudly; callers pre-check and steer users to in-process).
+ * Scope (D1-4/D1-5): the COMPLETE (all workers delivered a final snapshot) normal path, the
+ * `partial` / `failed` data-completeness judgment (§7.4), AND a minimal no-progress watchdog
+ * (§10.5 running-state liveness, coarse form — see {@link DEFAULT_NO_PROGRESS_MS}) so a wedged
+ * worker that blocks its event loop can never hang the whole run. Still deferred: per-state
+ * timeouts, clock-handshake segments, the fine-grained phase-deadline liveness (harness
+ * `currentPhase`/`currentDeadline` reporting), invalid-snapshot censoring nuance, and the §6.2
+ * conformance verdict. Windows is unsupported (the provider fails loudly; callers pre-check and
+ * steer users to in-process).
  */
 import { randomUUID } from "node:crypto";
 import type {
@@ -57,6 +60,21 @@ const DEFAULT_START_LEAD_MS = 150;
  *  `startAt` is committed. Covers a slow user-file import; a worker that hangs past it fails
  *  the run. Defaults to the join deadline (§5, 60s) when neither is given. */
 const DEFAULT_READY_DEADLINE_MS = 60_000;
+
+/** Default no-progress watchdog window (§10.5 running-state liveness — the COARSE D1 form). A
+ *  dispatched worker streams cumulative `snapshot` frames on a wall-clock cadence
+ *  (`snapshotIntervalMs`, default 15s) INDEPENDENT of iteration progress, so any worker whose
+ *  event loop is still turning keeps `lastFrameAt` fresh even while a single user iteration runs
+ *  long. A worker that delivers NO frame of any kind for this window is therefore genuinely
+ *  wedged — its event loop is blocked (a synchronous infinite loop / CPU-bound hang) — so the
+ *  coordinator kills it (SIGTERM→SIGKILL via the channel) and finalizes `partial` rather than
+ *  hanging the whole run on `Promise.all(settled)`. This is deliberately NOT the fine-grained
+ *  phase-deadline liveness of §10.5 (which needs the harness to report `currentPhase` /
+ *  `currentDeadline` and must not false-kill legitimately-slow user code with no bounded
+ *  deadline — that stays D2): a bare-promise / alive-but-slow worker still ticks the snapshot
+ *  timer, so it never trips this watchdog. 60s is a generous default (4× the 15s snapshot
+ *  cadence) chosen so only a real wedge fires it; override with `noProgressMs`. */
+const DEFAULT_NO_PROGRESS_MS = 60_000;
 
 /** Options for {@link runLoadMultiCore}. The `plan` argument carries the shape (projection /
  *  config / thresholds); these are the runtime knobs a coordinator supplies at dispatch. */
@@ -94,6 +112,12 @@ export interface RunLoadMultiCoreOptions {
   /** Deadline for every worker to `ready` (bind) after `assign`. Default: `joinDeadlineMs`
    *  else {@link DEFAULT_READY_DEADLINE_MS}. */
   readyDeadlineMs?: number;
+  /** No-progress watchdog window (ms): a DISPATCHED worker that delivers no frame of any kind
+   *  for this long is judged wedged (event loop blocked) → killed → its shard counts as lost
+   *  (§7.4 partial). Default {@link DEFAULT_NO_PROGRESS_MS} (60s). Must comfortably exceed
+   *  `snapshotIntervalMs`, or a healthy worker between snapshot ticks could be false-killed.
+   *  Injectable so a chaos test need not wait 60s for a wedge. */
+  noProgressMs?: number;
   /** Grace after SIGTERM before SIGKILL per worker (provider default 3s). */
   sigtermGraceMs?: number;
   /** Echo each worker's stdout/stderr to the coordinator's stdout/stderr. Default true
@@ -128,6 +152,13 @@ interface WorkerCollection {
   /** A per-worker `error` frame message, if any (a handled shard failure). */
   errorMessage?: string;
   closeReason?: ChannelCloseReason;
+  /** Coordinator-clock instant of the LAST frame of any kind received from this worker (the
+   *  no-progress watchdog's liveness signal). Seeded at collect time; advanced on every inbound
+   *  frame (`ready`/`snapshot`/`result`/`error`/`done`). */
+  lastFrameAt: number;
+  /** The no-progress watchdog judged this worker wedged and killed it (§10.5) — reported as the
+   *  `no-progress` termination cause and noted in the partial diagnostics. */
+  wedged: boolean;
   /** Resolves once the worker is BOUND (`ready`) OR has already terminated — the gate the
    *  coordinator waits on before committing a shared `startAt` (§10.5 armed→commit barrier).
    *  A worker that crashed during bind resolves this via its own settle (it contributes
@@ -192,7 +223,7 @@ export async function runLoadMultiCore(
       if (channel === undefined) {
         throw new Error(`runLoadMultiCore: no channel for shard ${shard.workerId} (provider/shard id mismatch)`);
       }
-      return collectWorker(shard, channel);
+      return collectWorker(shard, channel, now);
     });
 
     // Broadcast an abort frame on SIGINT so workers drain + finalize cleanly (they still
@@ -260,8 +291,16 @@ export async function runLoadMultiCore(
       }
     }
 
-    // Wait for every worker to reach a terminal state (done or channel close).
-    await Promise.all(collections.map((c) => c.settled));
+    // Wait for every worker to reach a terminal state (done or channel close), guarded by the
+    // no-progress watchdog: a dispatched worker that goes silent past `noProgressMs` (its event
+    // loop wedged) is killed so it can never hang this `Promise.all` forever — its shard just
+    // counts as lost → partial (§7.4/§10.5). Cleared on every exit so no timer leaks.
+    const stopWatchdog = armNoProgressWatchdog(collections, opts.noProgressMs ?? DEFAULT_NO_PROGRESS_MS, now);
+    try {
+      await Promise.all(collections.map((c) => c.settled));
+    } finally {
+      stopWatchdog();
+    }
 
     return assembleArtifact(plan, {
       collections,
@@ -282,12 +321,14 @@ export async function runLoadMultiCore(
 /** Wire a fan-in collector onto one worker's channel: capture its latest + final snapshot,
  *  its result observables, an error, and settle on `done` OR channel close (a crash can
  *  never hang the coordinator). */
-function collectWorker(shard: LoadShard, channel: LoadWorkerChannel): WorkerCollection {
+function collectWorker(shard: LoadShard, channel: LoadWorkerChannel, now: () => number): WorkerCollection {
   const c: WorkerCollection = {
     shard,
     channel,
     ready: false,
     done: false,
+    lastFrameAt: now(),
+    wedged: false,
     readyGate: undefined as unknown as Promise<void>,
     settled: undefined as unknown as Promise<void>,
   };
@@ -303,6 +344,8 @@ function collectWorker(shard: LoadShard, channel: LoadWorkerChannel): WorkerColl
       resolveSettle();
     };
     channel.onMessage((msg) => {
+      // Any frame is a liveness signal — refresh the no-progress watchdog's clock (§10.5).
+      c.lastFrameAt = now();
       switch (msg.type) {
         case "ready":
           c.ready = true;
@@ -368,6 +411,33 @@ function awaitAllReady(collections: WorkerCollection[], deadlineMs: number): Pro
       },
     );
   });
+}
+
+/**
+ * Arm the no-progress watchdog (§10.5 running-state liveness, coarse D1 form). Polls each
+ * still-live worker and kills any that has delivered NO frame for `noProgressMs` — a wedge (its
+ * event loop is blocked, so it can neither stream a periodic snapshot nor ever `done`). Killing
+ * it (via `channel.close()` — SIGTERM→SIGKILL) lets it settle as lost so the run finalizes
+ * `partial` instead of hanging forever on the settle wait. Returns a stop fn the caller MUST
+ * call on every exit (the interval is `unref`'d, but it is still cleared to avoid a stray tick).
+ * A worker that already terminated (settled) or was already killed by a prior tick is skipped.
+ */
+function armNoProgressWatchdog(collections: WorkerCollection[], noProgressMs: number, now: () => number): () => void {
+  // Poll a few times per window (bounded to a sane 25–250ms) so detection is prompt without busy-spinning.
+  const period = Math.min(250, Math.max(25, Math.floor(noProgressMs / 4)));
+  const timer = setInterval(() => {
+    const at = now();
+    for (const c of collections) {
+      if (c.wedged || isTerminated(c)) continue;
+      if (at - c.lastFrameAt > noProgressMs) {
+        c.wedged = true;
+        // Wedged: no frame for the whole window. Kill it — its shard is lost, survivors run on.
+        c.channel.close();
+      }
+    }
+  }, period);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /** Everything `assembleArtifact` needs beyond the plan + collections. */
@@ -496,9 +566,12 @@ const UNRELEASED_TAIL_POLL_ADVISORY =
   "An iteration ran a long tail poll without requesting producer release — its slot stayed occupied for the whole tail (closed end-to-end scheduling), under-pressuring the upstream.";
 
 /** Map a worker's `endReason` (and whether it finished) to the finer per-worker
- *  `terminationCause` (§7.4/§11). A basic mapping — the full watchdog-driven causes
- *  (no-progress / lease-expired / coordinator-lost) are D1-5. */
+ *  `terminationCause` (§7.4/§11). Covers `no-progress` (the coarse D1 watchdog above),
+ *  `abort`, `channel-lost`, `crash`, and `normal`; the lease-driven causes
+ *  (`lease-expired` / `coordinator-lost`) and `invalid-snapshot` remain D2. */
 function terminationCauseOf(worker: WorkerCollection): LoadWorkerTerminationCause {
+  // The no-progress watchdog killed it — report that explicitly (it also has no final frame).
+  if (worker.wedged) return "no-progress";
   if (worker.finalSnapshot === undefined) {
     // Lost before a terminal frame — distinguish a channel drop from a handled error/crash.
     if (worker.closeReason !== undefined && !worker.done) return "channel-lost";
@@ -603,6 +676,10 @@ function fillExecutionBlock(
   if (artifact.summary.executionStatus === "partial") {
     const lost = ctx.collections.filter((c) => c.finalSnapshot === undefined).map((c) => c.shard.workerId);
     notes.push(`partial: ${lost.length} worker(s) lost before a final snapshot (${lost.join(", ")}); their contribution is censored`);
+    const wedged = ctx.collections.filter((c) => c.wedged).map((c) => c.shard.workerId);
+    if (wedged.length > 0) {
+      notes.push(`no-progress: ${wedged.length} worker(s) killed after delivering no frame within the watchdog window (${wedged.join(", ")})`);
+    }
   }
   // slotSecondsExpected + the §6.2 conformance verdict are deferred to D1-5 (the ideal
   // schedule integral must subtract the ramp curve; noted so it is not silently missing).

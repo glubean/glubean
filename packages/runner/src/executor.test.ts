@@ -1,4 +1,5 @@
 import { test, expect, afterAll, beforeAll } from "vitest";
+import { createServer, type Server } from "node:http";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,12 +14,32 @@ const RUNNER_ROOT = resolve(__dirname, "..");
 const TMP_DIR = join(RUNNER_ROOT, ".tmp-test");
 let tmpSeq = 0;
 
+// A LOCAL httpbin-shaped server backs the HTTP-schema fixtures (below). These tests once hit the
+// public `httpbin.org`, whose slowness/rate-limiting/outages flaked the response-header schema
+// cases intermittently (they need a real RESPONSE to validate its headers) — a genuinely external
+// root cause, not CPU contention. A deterministic loopback server that answers `/get` and `/post`
+// with a JSON body and a `content-type` header removes the network entirely.
+let schemaServer: Server;
+let schemaBase: string;
+
 beforeAll(async () => {
   await rm(TMP_DIR, { recursive: true, force: true }).catch(() => {});
   await mkdir(TMP_DIR, { recursive: true });
+
+  schemaServer = createServer((req, res) => {
+    // httpbin-shaped: 200 + JSON body + a `content-type` header (the response-header schema gates
+    // on `content-type` being present; the FAIL fixture asserts a header that is deliberately never
+    // sent). Query/request-body/request-header validation is request-side (pre-send), unaffected.
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, url: req.url, method: req.method }));
+  });
+  await new Promise<void>((r) => schemaServer.listen(0, "127.0.0.1", r));
+  const addr = schemaServer.address();
+  schemaBase = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : addr}`;
 });
 
 afterAll(async () => {
+  await new Promise<void>((r) => schemaServer.close(() => r()));
   await rm(TMP_DIR, { recursive: true, force: true }).catch(() => {});
 });
 
@@ -1778,7 +1799,7 @@ test("ctx.validate - generateSummary includes schema validation counters", async
 // HTTP Schema Integration (Phase 4)
 // =============================================================================
 
-const HTTP_SCHEMA_TEST_CONTENT = `
+const httpSchemaContent = (base: string) => `
 import { test } from "@glubean/sdk";
 import { z } from "zod";
 
@@ -1796,7 +1817,7 @@ export const httpQuerySchemaPassTest = test(
   { id: "httpQuerySchemaPassTest", name: "HTTP Query Schema Pass" },
   async (ctx) => {
     try {
-      await ctx.http.get("https://httpbin.org/get", {
+      await ctx.http.get("${base}/get", {
         searchParams: { page: 1, limit: 10 },
         schema: {
           query: QuerySchema,
@@ -1813,7 +1834,7 @@ export const httpQuerySchemaFailTest = test(
   { id: "httpQuerySchemaFailTest", name: "HTTP Query Schema Fail" },
   async (ctx) => {
     try {
-      await ctx.http.get("https://httpbin.org/get", {
+      await ctx.http.get("${base}/get", {
         searchParams: { page: "not-a-number", limit: "bad" },
         schema: {
           query: QuerySchema,
@@ -1835,7 +1856,7 @@ export const httpRequestSchemaTest = test(
     });
 
     try {
-      await ctx.http.post("https://httpbin.org/post", {
+      await ctx.http.post("${base}/post", {
         json: { name: "Alice", email: "alice@example.com" },
         schema: {
           request: BodySchema,
@@ -1857,7 +1878,7 @@ export const httpRequestSchemaFailTest = test(
     });
 
     try {
-      await ctx.http.post("https://httpbin.org/post", {
+      await ctx.http.post("${base}/post", {
         json: { name: 42, email: "not-email" },
         schema: {
           request: BodySchema,
@@ -1874,7 +1895,7 @@ export const httpSchemaWithSeverityTest = test(
   { id: "httpSchemaWithSeverityTest", name: "HTTP Schema With Severity" },
   async (ctx) => {
     try {
-      await ctx.http.get("https://httpbin.org/get", {
+      await ctx.http.get("${base}/get", {
         searchParams: { page: "bad" },
         schema: {
           query: { schema: QuerySchema, severity: "warn" },
@@ -1891,7 +1912,7 @@ export const httpRequestHeadersSchemaPassTest = test(
   { id: "httpRequestHeadersSchemaPassTest", name: "HTTP Request Headers Pass" },
   async (ctx) => {
     try {
-      await ctx.http.get("https://httpbin.org/get", {
+      await ctx.http.get("${base}/get", {
         headers: { "X-Tenant-Id": "t1" },
         schema: {
           requestHeaders: z.object({ "X-Tenant-Id": z.string() }),
@@ -1908,7 +1929,7 @@ export const httpRequestHeadersSchemaFailTest = test(
   { id: "httpRequestHeadersSchemaFailTest", name: "HTTP Request Headers Fail" },
   async (ctx) => {
     try {
-      await ctx.http.get("https://httpbin.org/get", {
+      await ctx.http.get("${base}/get", {
         headers: { "X-Tenant-Id": "t1" },
         schema: {
           requestHeaders: z.object({ "X-Required": z.string() }),
@@ -1925,7 +1946,7 @@ export const httpResponseHeadersSchemaPassTest = test(
   { id: "httpResponseHeadersSchemaPassTest", name: "HTTP Response Headers Pass" },
   async (ctx) => {
     try {
-      await ctx.http.get("https://httpbin.org/get", {
+      await ctx.http.get("${base}/get", {
         schema: {
           responseHeaders: z.object({ "content-type": z.string() }),
         },
@@ -1941,7 +1962,7 @@ export const httpResponseHeadersSchemaFailTest = test(
   { id: "httpResponseHeadersSchemaFailTest", name: "HTTP Response Headers Fail" },
   async (ctx) => {
     try {
-      await ctx.http.get("https://httpbin.org/get", {
+      await ctx.http.get("${base}/get", {
         schema: {
           responseHeaders: z.object({ "x-never-sent": z.string() }),
         },
@@ -1955,7 +1976,7 @@ export const httpResponseHeadersSchemaFailTest = test(
 `;
 
 test("HTTP schema - query validation passes with valid params", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -1972,7 +1993,7 @@ test("HTTP schema - query validation passes with valid params", { retry: 3 }, as
 });
 
 test("HTTP schema - query validation fails with invalid params", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -1991,7 +2012,7 @@ test("HTTP schema - query validation fails with invalid params", { retry: 3 }, a
 });
 
 test("HTTP schema - request body validation passes", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -2007,7 +2028,7 @@ test("HTTP schema - request body validation passes", { retry: 3 }, async () => {
 });
 
 test("HTTP schema - request body validation fails", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -2026,7 +2047,7 @@ test("HTTP schema - request body validation fails", { retry: 3 }, async () => {
 });
 
 test("HTTP schema - severity: warn does not fail test", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -2045,7 +2066,7 @@ test("HTTP schema - severity: warn does not fail test", { retry: 3 }, async () =
 });
 
 test("HTTP schema - request headers validation passes", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -2061,7 +2082,7 @@ test("HTTP schema - request headers validation passes", { retry: 3 }, async () =
 });
 
 test("HTTP schema - request headers validation fails", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -2080,7 +2101,7 @@ test("HTTP schema - request headers validation fails", { retry: 3 }, async () =>
 });
 
 test("HTTP schema - response headers validation passes", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
@@ -2096,7 +2117,7 @@ test("HTTP schema - response headers validation passes", { retry: 3 }, async () 
 });
 
 test("HTTP schema - response headers validation fails", { retry: 3 }, async () => {
-  const testFile = await makeTempFile(HTTP_SCHEMA_TEST_CONTENT);
+  const testFile = await makeTempFile(httpSchemaContent(schemaBase));
   const executor = new TestExecutor();
 
   const result = await executor.execute(
