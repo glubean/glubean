@@ -22,6 +22,7 @@ import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
 import { loadProjectEnv, runLoadFileInSubprocess, type LoadProviderChoice } from "@glubean/runner";
 import type { LoadArtifact } from "@glubean/sdk/load";
+import type { LoadExecutionConfig } from "../lib/config.js";
 import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 import { findProjectConfig } from "./run.js";
 import type { UploadReceipt, UploadRunInput } from "../lib/upload.js";
@@ -88,30 +89,50 @@ export interface ResolvedLoadProvider {
 }
 
 /**
- * Resolve the execution provider from the CLI flags (proposal §5.2 configuration surface):
- *  - default / `--provider in-process` → the unchanged single-process path;
- *  - `--provider multi-core` / `--provider multi-core:N` → the coordinator with N workers.
+ * Resolve the execution provider from the CLI flags AND the glubean.yaml
+ * provider layer (proposal §5.2 + D1 config surface).
  *
- * Worker count precedence: an explicit `--workers N` wins over the inline `:N`, which wins
- * over the default `max(1, cores-1)`. `shardPlan` clamps the result again per plan (§5.2),
- * so this is only the REQUESTED count. Windows is unsupported (the multi-core provider needs
- * POSIX extra-fd inheritance) → flagged so the caller can steer the user to in-process.
+ * Precedence (owner decision, D1): `provider` and `workers` are two INDEPENDENT
+ * keys, each resolved **CLI flag > yaml > built-in**, where `config` is the
+ * yaml layer already merged upstream (`profiles.<name>.load` over
+ * `defaults.load`). CLI presence is detected with `!== undefined`, NOT
+ * truthiness — an explicit `--provider in-process` is a real value that must
+ * override a yaml `multi-core` (distinct from "flag absent → use yaml"); this
+ * is the same undefined-vs-explicit distinction the `??` precedence relies on.
+ *
+ * Worker-count precedence (highest first): CLI `--workers N` > CLI inline `:N`
+ * (on `--provider multi-core:N`) > yaml `config.workers` > built-in
+ * `max(1, cores-1)`. `shardPlan` clamps the result again per plan (§5.2), so
+ * this is only the REQUESTED count. Windows is unsupported (the multi-core
+ * provider needs POSIX extra-fd inheritance) → flagged so the caller can steer
+ * the user to in-process. `remote` is reserved (see `LoadExecutionConfig`).
  */
 export function resolveLoadProviderChoice(
   providerFlag: string | undefined,
   workersFlag: number | undefined,
   env: { platform: NodeJS.Platform; cpuCount: number } = { platform: process.platform, cpuCount: cpus().length },
+  config: LoadExecutionConfig = {},
 ): ResolvedLoadProvider {
-  const raw = (providerFlag ?? "in-process").trim();
+  // CLI `--provider` wins wholesale (it may carry an inline `:N`); else the yaml
+  // provider kind; else undefined → the in-process default below. `config` is
+  // the loader-validated yaml layer, so `config.provider` is a valid enum value.
+  const effectiveProviderFlag = providerFlag ?? config.provider;
+  const raw = (effectiveProviderFlag ?? "in-process").trim();
   const [kind, inlineN] = raw.split(":");
 
   if (kind === "in-process" || kind === "") {
+    // The "--workers has no effect" hint is a CLI-usage warning: fire it only
+    // for a CLI `--workers`, NEVER for a yaml `config.workers`. A stored worker
+    // count that doesn't apply under in-process is an inactive default (like any
+    // other), not a misuse — it's silently ignored, not warned about.
     if (workersFlag !== undefined) {
       return { provider: { kind: "in-process" }, warnings: ["--workers has no effect without --provider multi-core."] };
     }
     return { provider: { kind: "in-process" }, warnings: [] };
   }
   if (kind !== "multi-core") {
+    // A yaml `provider` is enum-validated at load time, so an unknown value here
+    // can only have come from the CLI `--provider` flag — the message stays accurate.
     return {
       provider: { kind: "in-process" },
       warnings: [],
@@ -138,7 +159,12 @@ export function resolveLoadProviderChoice(
       error: `Invalid worker count — --workers / --provider multi-core:N must be a positive integer.`,
     };
   }
-  const workerCount = explicit ?? inline ?? defaultN;
+  // yaml `config.workers` is a loader-validated positive int; guard NaN →
+  // undefined defensively so a hand-constructed bad value falls through to the
+  // default instead of poisoning `workerCount` (NaN survives `??`).
+  const configured = parseCount(config.workers);
+  const configuredWorkers = Number.isNaN(configured) ? undefined : configured;
+  const workerCount = explicit ?? inline ?? configuredWorkers ?? defaultN;
   const warnings: string[] = [];
   if (env.cpuCount < 2) {
     warnings.push(
@@ -146,6 +172,41 @@ export function resolveLoadProviderChoice(
     );
   }
   return { provider: { kind: "multi-core", workerCount }, warnings };
+}
+
+/**
+ * Read the project-level `defaults.load` execution provider (D1) for a BARE
+ * `glubean load` (no `--profile` — profile mode resolves + passes the merged
+ * layer in via `LoadCommandOptions.resolvedLoad` instead).
+ *
+ * PURELY ADDITIVE / best-effort: it augments behavior ONLY when glubean.yaml
+ * loads cleanly. On ANY config problem — an absent file (config-less project),
+ * a missing explicit `--config`, or an invalid/parse-failing config — it
+ * returns `{}` so the command behaves exactly as it did before D1 (a bare
+ * `glubean load` never read glubean.yaml at all): the built-in in-process
+ * default applies and the config is ignored here. It deliberately does NOT
+ * fail-close on a broken config — provider selection is a perf convenience, not
+ * a correctness/security gate, and a real config error still surfaces via
+ * `glubean run` / `glubean load --profile` / the `--upload` redaction preflight
+ * (`resolveLoadUploadContext`), which keeps its OWN fail-closed check. Erroring
+ * here would only pre-empt (and mask) that security-relevant redaction error on
+ * the `--upload` path. Only a non-config (e.g. unexpected IO) error propagates.
+ */
+export async function readDefaultsLoadConfig(
+  rootDir: string,
+  explicitConfigPath: string | undefined,
+): Promise<LoadExecutionConfig> {
+  const { loadProjectConfigV1, GlubeanConfigError } = await import("../lib/config.js");
+  try {
+    const { config } = await loadProjectConfigV1(
+      rootDir,
+      explicitConfigPath ? { configPath: explicitConfigPath } : {},
+    );
+    return config.defaults?.load ?? {};
+  } catch (err) {
+    if (err instanceof GlubeanConfigError) return {};
+    throw err;
+  }
 }
 
 /**
@@ -517,6 +578,15 @@ export interface LoadCommandOptions {
   /** Worker count for `--provider multi-core` (overrides the inline `:N`; default
    *  `max(1, cores-1)`). */
   workers?: number;
+  /**
+   * yaml-resolved execution-provider layer (D1) — `profiles.<name>.load` merged
+   * over `defaults.load`, supplied by PROFILE mode (`glubean load --profile`).
+   * When present (even as `{}`) it's the below-CLI precedence layer and
+   * loadCommand does NOT re-read `defaults.load`. When ABSENT (bare `glubean
+   * load`), loadCommand reads `defaults.load` from the project root itself so
+   * the flagless path still honours the project default.
+   */
+  resolvedLoad?: LoadExecutionConfig;
 }
 
 /**
@@ -866,8 +936,19 @@ export async function loadCommand(
   }
 
   // Resolve the execution provider (default in-process; multi-core spawns worker
-  // processes, proposal §5.2). Fail fast on a bad flag / Windows before any load traffic.
-  const resolvedProvider = resolveLoadProviderChoice(options.provider, options.workers);
+  // processes, proposal §5.2). The yaml provider layer sits below CLI flags: in
+  // PROFILE mode the caller passes the already-merged `resolvedLoad`
+  // (profile.load over defaults.load); in BARE mode we read `defaults.load` from
+  // the project root here (absent glubean.yaml → `{}` → in-process, zero change).
+  // Fail fast on a bad flag / Windows before any load traffic.
+  const yamlLoad =
+    options.resolvedLoad ?? (await readDefaultsLoadConfig(rootDir, options.configPath));
+  const resolvedProvider = resolveLoadProviderChoice(
+    options.provider,
+    options.workers,
+    { platform: process.platform, cpuCount: cpus().length },
+    yamlLoad,
+  );
   if (resolvedProvider.error) {
     console.log(`${colors.red}Error: ${resolvedProvider.error}${colors.reset}`);
     process.exit(1);

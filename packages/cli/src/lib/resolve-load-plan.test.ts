@@ -201,4 +201,52 @@ describe("resolveLoadPlan", () => {
       expect(plan.upload).toBeUndefined();
     });
   });
+
+  describe("provider/workers merge: defaults.load → profile.load (D1)", () => {
+    it("omits both when neither defaults.load nor profile.load sets them", () => {
+      const plan = resolveLoadPlan(makeConfig(), "/p", "perf");
+      expect(plan.provider).toBeUndefined();
+      expect(plan.workers).toBeUndefined();
+    });
+
+    it("reads defaults.load.{provider,workers} when the profile sets neither", () => {
+      const config = makeConfig({ defaults: { load: { provider: "multi-core", workers: 2 } } });
+      const plan = resolveLoadPlan(config, "/p", "perf");
+      expect(plan.provider).toBe("multi-core");
+      expect(plan.workers).toBe(2);
+    });
+
+    it("profile.load overrides defaults.load per key", () => {
+      const config = makeConfig({
+        defaults: { load: { provider: "in-process", workers: 2 } },
+        profiles: {
+          local: { suites: ["local-suite"] },
+          perf: {
+            suites: [],
+            load: { plans: ["runtime-comparison"], provider: "multi-core", workers: 8 },
+          },
+        },
+      });
+      const plan = resolveLoadPlan(config, "/p", "perf");
+      expect(plan.provider).toBe("multi-core");
+      expect(plan.workers).toBe(8);
+    });
+
+    it("merges per key — profile provider over defaults, defaults workers kept", () => {
+      const config = makeConfig({
+        defaults: { load: { provider: "in-process", workers: 4 } },
+        profiles: {
+          local: { suites: ["local-suite"] },
+          perf: {
+            suites: [],
+            // profile sets ONLY provider; workers falls through to defaults.load.
+            load: { plans: ["runtime-comparison"], provider: "multi-core" },
+          },
+        },
+      });
+      const plan = resolveLoadPlan(config, "/p", "perf");
+      expect(plan.provider).toBe("multi-core");
+      expect(plan.workers).toBe(4);
+    });
+  });
 });

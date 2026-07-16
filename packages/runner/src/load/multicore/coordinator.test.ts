@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -276,12 +277,22 @@ export const plan = loadRunner("mc-crash", { scenario, concurrency: 2, iteration
     // A duration-bounded run kept dispatching; the coordinator broadcasts `abort` on the
     // signal, so every worker winds down cleanly (endReason "abort") and still delivers its
     // terminal frame — the run finalizes as a complete abort, and the provider is reaped.
+    // DETERMINISTIC abort timing: a worker writes a sentinel the instant it reaches its FIRST
+    // iteration — only possible AFTER the shared start barrier (every worker acked ready → the
+    // pre-run acquire/hello phase is over). The test polls for it and fires the abort, so it's
+    // guaranteed to land DURING the run. A fixed `setTimeout(…, 800)` is fragile: under a loaded
+    // machine the spawn/import/ready barrier can exceed it, landing the abort in acquire — which
+    // correctly reports "acquire aborted" and fails this mid-run-abort assertion.
     const DURATION = `
 import { loadScenario, loadRunner } from "@glubean/sdk/load";
+import { writeFileSync } from "node:fs";
+let n = 0;
 const scenario = loadScenario("ping")
   .step("ping", async (ctx) => {
     const b = ctx.vars.require("BASE_URL");
     await ctx.http.get(b + "/ping").json();
+    n++;
+    if (n === 1) { try { writeFileSync(ctx.vars.require("RUN_SENTINEL"), "go"); } catch {} }
   })
   .build();
 export const plan = loadRunner("mc-abort", { scenario, concurrency: 2, duration: "10s" });
@@ -289,20 +300,26 @@ export const plan = loadRunner("mc-abort", { scenario, concurrency: 2, duration:
     const { file, plan } = await writeFixture("coord-abort", DURATION);
     const provider = newProvider();
     const ac = new AbortController();
-    // Fire the abort comfortably after the shared start (startLead 300ms) so the run is
-    // genuinely dispatching when it arrives.
-    const timer = setTimeout(() => ac.abort(), 800);
+    const sentinel = join(TMP_DIR, `abort-sentinel-${Date.now()}`);
+    let aborted = false;
+    const abortWatch = setInterval(() => {
+      if (aborted || !existsSync(sentinel)) return;
+      aborted = true;
+      ac.abort();
+    }, 10);
+    abortWatch.unref?.();
     const artifact = await runLoadMultiCore(plan, {
       file,
       workerCount: 2,
       cwd: RUNNER_ROOT,
-      vars: { BASE_URL: base },
+      vars: { BASE_URL: base, RUN_SENTINEL: sentinel },
       snapshotIntervalMs: 25,
       abort: ac.signal,
       provider,
     });
-    clearTimeout(timer);
+    clearInterval(abortWatch);
 
+    expect(aborted).toBe(true); // the abort genuinely fired mid-run (sentinel observed)
     expect(artifact.summary.endReason).toBe("abort");
     expect(artifact.runtime.execution?.provider).toBe("multi-core");
     // The workers still delivered terminal frames (a clean abort drain), so data is complete.

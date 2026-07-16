@@ -9,6 +9,7 @@ import {
   writeLoadResults,
   resolveManyLoadTargets,
   resolveLoadProviderChoice,
+  readDefaultsLoadConfig,
   LoadTargetResolutionError,
   type LoadRunOutcome,
 } from "./load.js";
@@ -612,5 +613,163 @@ describe("resolveLoadProviderChoice (proposal §5.2 — --provider / --workers)"
     const r = resolveLoadProviderChoice("in-process", 4, posix4);
     expect(r.provider).toEqual({ kind: "in-process" });
     expect(r.warnings.join(" ")).toMatch(/--workers has no effect/);
+  });
+});
+
+describe("resolveLoadProviderChoice — yaml config layer (D1: CLI > yaml > built-in)", () => {
+  const posix4 = { platform: "linux" as NodeJS.Platform, cpuCount: 4 };
+
+  // ── provider: yaml fills in when the CLI flag is absent ──────────────────
+  it("uses the yaml provider (multi-core) when no --provider flag is given", () => {
+    const r = resolveLoadProviderChoice(undefined, undefined, posix4, { provider: "multi-core" });
+    // default worker count (cores - 1) since neither CLI nor yaml set workers.
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 3 });
+  });
+
+  it("uses the yaml provider + yaml workers together (走多核, flagless)", () => {
+    const r = resolveLoadProviderChoice(undefined, undefined, posix4, { provider: "multi-core", workers: 2 });
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 2 });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("defaults to in-process when neither CLI nor yaml sets a provider", () => {
+    expect(resolveLoadProviderChoice(undefined, undefined, posix4, {}).provider).toEqual({ kind: "in-process" });
+  });
+
+  // ── the critical override: explicit CLI in-process beats yaml multi-core ──
+  it("CLI --provider in-process OVERRIDES yaml multi-core (走单机) — undefined vs explicit", () => {
+    const r = resolveLoadProviderChoice("in-process", undefined, posix4, { provider: "multi-core", workers: 8 });
+    expect(r.provider).toEqual({ kind: "in-process" });
+    // yaml workers under a resolved in-process must NOT trip the CLI-usage warning.
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("CLI --provider multi-core beats yaml in-process", () => {
+    const r = resolveLoadProviderChoice("multi-core", undefined, posix4, { provider: "in-process" });
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 3 });
+  });
+
+  // ── workers: independent precedence CLI > inline :N > yaml > built-in ─────
+  it("CLI --workers overrides yaml workers", () => {
+    const r = resolveLoadProviderChoice("multi-core", 5, posix4, { provider: "multi-core", workers: 8 });
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 5 });
+  });
+
+  it("CLI inline :N overrides yaml workers", () => {
+    const r = resolveLoadProviderChoice("multi-core:4", undefined, posix4, { provider: "multi-core", workers: 8 });
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 4 });
+  });
+
+  it("yaml workers apply when the CLI re-affirms multi-core with no worker count", () => {
+    // `--provider multi-core` (no --workers, no inline) + yaml workers:6 → 6.
+    const r = resolveLoadProviderChoice("multi-core", undefined, posix4, { provider: "multi-core", workers: 6 });
+    expect(r.provider).toEqual({ kind: "multi-core", workerCount: 6 });
+  });
+
+  it("four-layer worker precedence — CLI > inline > yaml > built-in default", () => {
+    // built-in (cores-1 = 3): nothing set anywhere.
+    expect(resolveLoadProviderChoice("multi-core", undefined, posix4, {}).provider).toEqual({ kind: "multi-core", workerCount: 3 });
+    // yaml workers beat the built-in default.
+    expect(resolveLoadProviderChoice("multi-core", undefined, posix4, { workers: 2 }).provider).toEqual({ kind: "multi-core", workerCount: 2 });
+    // inline :N beats yaml workers.
+    expect(resolveLoadProviderChoice("multi-core:5", undefined, posix4, { workers: 2 }).provider).toEqual({ kind: "multi-core", workerCount: 5 });
+    // CLI --workers beats everything.
+    expect(resolveLoadProviderChoice("multi-core:5", 7, posix4, { workers: 2 }).provider).toEqual({ kind: "multi-core", workerCount: 7 });
+  });
+
+  // ── the "no effect" warning is CLI-scoped, not yaml-scoped ───────────────
+  it("does NOT warn about yaml workers under a yaml/default in-process (inactive default, silently ignored)", () => {
+    // provider resolves in-process (nothing sets multi-core); yaml workers set.
+    const r = resolveLoadProviderChoice(undefined, undefined, posix4, { workers: 8 });
+    expect(r.provider).toEqual({ kind: "in-process" });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("still warns for a CLI --workers under in-process even when yaml has no provider", () => {
+    const r = resolveLoadProviderChoice("in-process", 4, posix4, { workers: 8 });
+    expect(r.provider).toEqual({ kind: "in-process" });
+    expect(r.warnings.join(" ")).toMatch(/--workers has no effect/);
+  });
+});
+
+describe("readDefaultsLoadConfig (D1 — bare `glubean load` reads defaults.load)", () => {
+  it("returns defaults.load.{provider,workers} from a valid glubean.yaml", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-defaults-load-"));
+    try {
+      await writeFile(
+        join(dir, "glubean.yaml"),
+        `version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  local: { suites: [tests] }
+defaults:
+  load:
+    provider: multi-core
+    workers: 3
+`,
+        "utf-8",
+      );
+      const load = await readDefaultsLoadConfig(dir, undefined);
+      expect(load).toEqual({ provider: "multi-core", workers: 3 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns {} for a config-less project (no glubean.yaml) — zero-change default", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-defaults-load-none-"));
+    try {
+      const load = await readDefaultsLoadConfig(dir, undefined);
+      expect(load).toEqual({});
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns {} when glubean.yaml has no defaults.load block", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-defaults-load-empty-"));
+    try {
+      await writeFile(
+        join(dir, "glubean.yaml"),
+        `version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+profiles:
+  local: { suites: [tests] }
+`,
+        "utf-8",
+      );
+      const load = await readDefaultsLoadConfig(dir, undefined);
+      expect(load).toEqual({});
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns {} (best-effort) on an INVALID glubean.yaml — never fails the bare load path, so it can't pre-empt the --upload redaction preflight", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-defaults-load-invalid-"));
+    try {
+      await writeFile(
+        join(dir, "glubean.yaml"),
+        `version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+defaults:
+  load:
+    provider: bogus-not-an-enum
+profiles:
+  local: { suites: [tests] }
+`,
+        "utf-8",
+      );
+      // Provider selection is a perf convenience, not a fail-closed gate: an
+      // invalid config falls back to the built-in default here (in-process); the
+      // real error still surfaces via run / --profile / --upload redaction.
+      const load = await readDefaultsLoadConfig(dir, undefined);
+      expect(load).toEqual({});
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

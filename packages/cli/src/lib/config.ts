@@ -122,9 +122,41 @@ export interface UploadConfig {
   tokenEnv?: string;
 }
 
+/** Provider kinds accepted in glubean.yaml `load.provider` / CLI `--provider`
+ *  today. `remote` (a future distributed cluster) is intentionally ABSENT —
+ *  reserved shape only (see `LoadExecutionConfig.provider`). */
+export type LoadProviderKind = "in-process" | "multi-core";
+
+/**
+ * Load execution provider selection (D1 multi-core config surface). Two
+ * INDEPENDENT keys by owner decision — `provider` picks the execution model,
+ * `workers` the worker count for `multi-core` — deliberately NOT a combined
+ * `multi-core:N` string, so a future `remote` (distributed cluster) provider
+ * can add its OWN keys without changing `workers` semantics or having to split
+ * a fused string. Shared by `defaults.load` (project default) and
+ * `profiles.<name>.load` (per-profile override); the CLI `--provider` /
+ * `--workers` flags override both. Precedence (per key, later wins):
+ * built-in (`in-process`) → `defaults.load` → `profiles.<name>.load` → CLI flag.
+ */
+export interface LoadExecutionConfig {
+  /**
+   * Execution provider — `in-process` (default) or `multi-core`. `remote` is
+   * RESERVED for a future distributed-cluster provider: the enum is closed to
+   * those two today (a `remote` value is rejected at load time); the shape is
+   * fixed now only so adding `remote` later is purely additive.
+   */
+  provider?: LoadProviderKind;
+  /**
+   * Worker count for `multi-core` (positive integer). Ignored under
+   * `in-process`. Omit to default to `max(1, cpuCount - 1)` at run time.
+   */
+  workers?: number;
+}
+
 /** Profile-scoped reference into the top-level `load.plans` block — which
- *  named load plans `glubean load --profile <name>` runs (GLU-244). */
-export interface ProfileLoadConfig {
+ *  named load plans `glubean load --profile <name>` runs (GLU-244) — plus an
+ *  optional per-profile execution-provider override (`provider`/`workers`, D1). */
+export interface ProfileLoadConfig extends LoadExecutionConfig {
   /** Names of top-level `load.plans` entries this profile runs. */
   plans: string[];
 }
@@ -165,6 +197,9 @@ export interface DefaultsConfig {
   redaction?: GlubeanRedactionConfigInput;
   /** Baseline metric thresholds; per-profile `thresholds` overrides per metric. */
   thresholds?: ThresholdConfig;
+  /** Project-level default load execution provider (D1). Overridable per
+   *  profile (`profiles.<name>.load`) and by CLI `--provider` / `--workers`. */
+  load?: LoadExecutionConfig;
 }
 
 /** MCP trace header allow-lists — which headers the MCP server surfaces to agents. */
@@ -352,6 +387,7 @@ const V1_DEFAULTS_KEYS = new Set([
   "reporters",
   "redaction",
   "thresholds",
+  "load",
 ]);
 const V1_PROFILE_KEYS = new Set([
   "suites",
@@ -364,7 +400,13 @@ const V1_PROFILE_KEYS = new Set([
   "envFile",
   "load",
 ]);
-const V1_PROFILE_LOAD_KEYS = new Set(["plans"]);
+const V1_PROFILE_LOAD_KEYS = new Set(["plans", "provider", "workers"]);
+const V1_DEFAULTS_LOAD_KEYS = new Set(["provider", "workers"]);
+// Provider kinds accepted today. `remote` (distributed cluster) is deliberately
+// NOT here yet — reserved shape only (owner decision, D1); adding it later
+// brings its own config keys and does not change `workers` semantics.
+// TODO(D-remote): add "remote" here (plus its keys) when the cluster provider lands.
+const V1_LOAD_PROVIDERS = new Set<string>(["in-process", "multi-core"]);
 const V1_LOAD_KEYS = new Set(["plans"]);
 const V1_LOAD_PLAN_KEYS = new Set(["target"]);
 const V1_THRESHOLD_AGGREGATIONS = new Set([
@@ -618,6 +660,42 @@ function assertPositiveInt(
       configPath,
     );
   }
+}
+
+/**
+ * Validate a `LoadExecutionConfig` (D1) — the `provider`/`workers` pair shared
+ * by `defaults.load` (project default) and the provider half of
+ * `profiles.<name>.load`. The CALLER asserts the allowed key set (they differ:
+ * `profiles.<name>.load` also permits `plans`), so this only type/enum/range-
+ * checks the two provider fields. Illegal values hard-error (never silently
+ * truncate) — same discipline as the CLI `--workers` guard.
+ */
+function validateLoadExecution(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): LoadExecutionConfig {
+  if (raw === undefined) return {};
+  assertType(raw, "object", context, configPath);
+  const s = raw as Record<string, unknown>;
+  const out: LoadExecutionConfig = {};
+  if (s.provider !== undefined) {
+    if (typeof s.provider !== "string" || !V1_LOAD_PROVIDERS.has(s.provider)) {
+      throw new GlubeanConfigError(
+        `\`${context}.provider\` must be one of: ${[...V1_LOAD_PROVIDERS].join(", ")} ` +
+          `(got ${JSON.stringify(s.provider)}). ` +
+          `\`remote\` is reserved for a future distributed provider — not accepted yet.`,
+        configPath,
+      );
+    }
+    out.provider = s.provider as LoadProviderKind;
+  }
+  if (s.workers !== undefined) {
+    assertType(s.workers, "number", `${context}.workers`, configPath);
+    assertPositiveInt(s.workers as number, `${context}.workers`, configPath);
+    out.workers = s.workers as number;
+  }
+  return out;
 }
 
 function validateExecution(
@@ -954,7 +1032,11 @@ function validateProfileLoad(
     }
     return p;
   });
-  return { plans };
+  // Per-profile execution-provider override (D1). `l` already passed the
+  // V1_PROFILE_LOAD_KEYS key check above, so `validateLoadExecution` need only
+  // type/enum/range-check `provider`/`workers` off the same object.
+  const exec = validateLoadExecution(l, context, configPath);
+  return { plans, ...exec };
 }
 
 function validateProfile(
@@ -1047,6 +1129,13 @@ function validateDefaults(
   out.redaction = validateRedaction(d.redaction, "defaults.redaction", configPath);
   if (d.thresholds !== undefined) {
     out.thresholds = validateThresholds(d.thresholds, "defaults.thresholds", configPath);
+  }
+  if (d.load !== undefined) {
+    // Project-level default load provider (D1). `defaults.load` allows ONLY
+    // `provider`/`workers` (no `plans` — plan references are per-profile).
+    assertType(d.load, "object", "defaults.load", configPath);
+    assertOnlyKnownKeys(d.load, V1_DEFAULTS_LOAD_KEYS, "defaults.load", configPath);
+    out.load = validateLoadExecution(d.load, "defaults.load", configPath);
   }
   return out;
 }
@@ -1632,6 +1721,19 @@ export interface ResolvedLoadPlan {
    *  --profile <name> --upload` reuses this rather than a separate
    *  load-specific upload config surface. */
   upload?: UploadConfig;
+  /**
+   * Resolved execution provider (`profiles.<name>.load.provider` ??
+   * `defaults.load.provider`, D1). `undefined` = no yaml provider configured —
+   * the CLI `--provider` flag or the built-in `in-process` default decides
+   * downstream (`resolveLoadProviderChoice`). Never forces a provider.
+   */
+  provider?: LoadProviderKind;
+  /**
+   * Resolved worker count (`profiles.<name>.load.workers` ??
+   * `defaults.load.workers`, D1). `undefined` = not configured — the CLI
+   * `--workers` / inline `:N` / built-in `max(1, cpuCount-1)` decides downstream.
+   */
+  workers?: number;
 }
 
 /**
@@ -1712,6 +1814,14 @@ export function resolveLoadPlan(
     profile.envFile !== undefined ||
     defaults.envFile !== undefined;
 
+  // Provider/workers (D1): two INDEPENDENT keys, `profile.load` overriding
+  // `defaults.load` per key. The CLI `--provider`/`--workers` flags override
+  // this resolved yaml layer DOWNSTREAM (in `resolveLoadProviderChoice`), so we
+  // don't fold them here. `undefined` at every yaml layer stays `undefined` —
+  // never force a provider; the built-in `in-process` default applies then.
+  const provider = profile.load.provider ?? defaults.load?.provider;
+  const workers = profile.load.workers ?? defaults.load?.workers;
+
   return {
     profile: profileName,
     configPath,
@@ -1719,6 +1829,8 @@ export function resolveLoadPlan(
     envFile,
     envFileExplicit,
     ...(profile.upload !== undefined && { upload: profile.upload }),
+    ...(provider !== undefined && { provider }),
+    ...(workers !== undefined && { workers }),
   };
 }
 

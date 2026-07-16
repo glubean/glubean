@@ -436,6 +436,127 @@ profiles:
     });
   });
 
+  describe("load execution provider (D1 — defaults.load / profiles.<name>.load)", () => {
+    const BASE = `
+version: 1
+suites:
+  tests: { target: ./tests, kinds: [test] }
+`;
+
+    it("parses defaults.load.{provider,workers} (project-level default)", async () => {
+      const yaml = `${BASE}
+defaults:
+  load:
+    provider: multi-core
+    workers: 4
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.defaults?.load).toEqual({ provider: "multi-core", workers: 4 });
+      });
+    });
+
+    it("parses provider/workers alongside plans on profiles.<name>.load", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    ok: { target: ./x.load.ts }
+profiles:
+  perf:
+    load:
+      plans: [ok]
+      provider: multi-core
+      workers: 6
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.profiles.perf.load).toEqual({
+          plans: ["ok"],
+          provider: "multi-core",
+          workers: 6,
+        });
+      });
+    });
+
+    it("absent load config leaves defaults.load undefined (single-machine in-process default)", async () => {
+      const yaml = `${BASE}
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.defaults?.load).toBeUndefined();
+      });
+    });
+
+    it("rejects an unknown provider enum value (remote is reserved, not yet accepted)", async () => {
+      const yaml = `${BASE}
+defaults:
+  load:
+    provider: remote
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`defaults\.load\.provider` must be one of: in-process, multi-core/,
+        );
+      });
+    });
+
+    it("rejects a non-positive-integer workers count (no silent truncation)", async () => {
+      const yaml = `${BASE}
+defaults:
+  load:
+    provider: multi-core
+    workers: 0
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`defaults\.load\.workers` must be a positive integer/,
+        );
+      });
+    });
+
+    it("rejects a fractional workers count on profiles.<name>.load", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    ok: { target: ./x.load.ts }
+profiles:
+  perf:
+    load:
+      plans: [ok]
+      workers: 2.5
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`profiles\.perf\.load\.workers` must be a positive integer/,
+        );
+      });
+    });
+
+    it("rejects an unknown key under defaults.load", async () => {
+      const yaml = `${BASE}
+defaults:
+  load:
+    provider: multi-core
+    bogus: 1
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Unknown key\(s\) at `defaults\.load`.*bogus/s,
+        );
+      });
+    });
+  });
+
   describe("mcp config (plan 06 P3 — MCP trace settings)", () => {
     it("accepts a top-level mcp.trace block", async () => {
       const yaml = `

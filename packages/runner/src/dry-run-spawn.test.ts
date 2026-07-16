@@ -98,14 +98,17 @@ vtest(
   "aliased test.extend tests still get bareBranchCount (alias-aware extraction)",
   async () => {
     const aliased = resolve(testProject, "_dryrun_aliased.fixture.ts");
-    const res = await dryRunFiles([aliased], { cwd: testProject, timeoutMs: 8000 });
+    // Watchdog budget is a "finite vs hung" safety ceiling, not a perf gate — give it ample margin
+    // so a slow-but-working spawn (tsx import + projection) on a saturated machine isn't killed
+    // before it produces its shape (was 8s; a loaded `pnpm -r test` pushed the spawn past it).
+    const res = await dryRunFiles([aliased], { cwd: testProject, timeoutMs: 20000 });
     const shape = res.shapes.find((s) => s.testId === "aliased-bare");
     expect(shape).toBeDefined();
     // bare `if` → partial; only true if the worker forwarded extend aliases.
     expect(shape!.projectionComplete).toBe(false);
     expect(shape!.incompleteReason).toMatch(/bare branch\/loop/);
   },
-  20_000,
+  40_000,
 );
 
 vtest(
@@ -113,14 +116,15 @@ vtest(
   async () => {
     const usesAlias = resolve(testProject, "_dryrun_uses_alias.fixture.ts");
     // Only this file is passed — the helper defining `helperApi` is NOT. The
-    // project-wide alias scan must still pick it up.
-    const res = await dryRunFiles([usesAlias], { cwd: testProject, timeoutMs: 8000 });
+    // project-wide alias scan must still pick it up. Watchdog budget widened (see note above) so a
+    // loaded machine's slow spawn isn't killed before the shape is produced.
+    const res = await dryRunFiles([usesAlias], { cwd: testProject, timeoutMs: 20000 });
     const shape = res.shapes.find((s) => s.testId === "uses-alias");
     expect(shape).toBeDefined();
     expect(shape!.projectionComplete).toBe(false);
     expect(shape!.incompleteReason).toMatch(/bare branch\/loop/);
   },
-  20_000,
+  40_000,
 );
 
 vtest(
@@ -128,13 +132,16 @@ vtest(
   async () => {
     const held = resolve(testProject, "_dryrun_openhandle.fixture.ts");
     const start = Date.now();
-    const res = await dryRunFiles([held], { cwd: testProject, timeoutMs: 8000 });
+    const res = await dryRunFiles([held], { cwd: testProject, timeoutMs: 20000 });
     const elapsed = Date.now() - start;
     expect(res.shapes.find((s) => s.testId === "open-handle")).toBeDefined();
-    // exited via process.exit(0) after projection, not killed at the 8s watchdog
-    expect(elapsed).toBeLessThan(6000);
+    // Intent: the projection exits via process.exit(0) PROMPTLY, not held to the watchdog ceiling.
+    // The assertion just has to sit clearly BELOW the watchdog (20s) with load headroom ABOVE the
+    // real prompt-return time (~1s, up to a few seconds saturated) — precise timing isn't the point
+    // (was <6s against an 8s watchdog, which a loaded run breached at ~6.5s while still prompt).
+    expect(elapsed).toBeLessThan(15000);
   },
-  20_000,
+  40_000,
 );
 
 vtest(

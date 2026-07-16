@@ -339,28 +339,49 @@ export const plan = loadRunner("mc-feeder-degraded", {
     // finalizes cleanly (endReason "abort"), still delivering its terminal frame, so the run is a
     // COMPLETE abort (data intact) — not a partial. Every worker's per-record cause is "abort", and
     // the whole process group is reaped.
+    // DETERMINISTIC abort timing (no wall-clock gamble): the scenario writes a sentinel the instant
+    // a worker reaches its FIRST iteration — which can only happen AFTER the shared start barrier
+    // (every worker said hello → the pre-run acquire/awaitAllHellos phase is over). The test polls
+    // for it and fires the abort, so the abort is guaranteed to land DURING the run. A fixed
+    // `setTimeout(…, 700)` is fragile here: on a loaded machine a 3-worker spawn/import/ready barrier
+    // can exceed 700ms, so the abort would land in acquire — which correctly reports "acquire
+    // aborted" and fails this mid-run-abort assertion (fixed delay can't chase a slow start).
     const DURATION = `
 import { loadScenario, loadRunner } from "@glubean/sdk/load";
+import { writeFileSync } from "node:fs";
+let n = 0;
 const scenario = loadScenario("ping")
-  .step("ping", async (ctx) => { await ctx.http.get(ctx.vars.require("BASE_URL") + "/ping").json(); })
+  .step("ping", async (ctx) => {
+    await ctx.http.get(ctx.vars.require("BASE_URL") + "/ping").json();
+    n++;
+    if (n === 1) { try { writeFileSync(ctx.vars.require("RUN_SENTINEL"), "go"); } catch {} }
+  })
   .build();
 export const plan = loadRunner("mc-chaos-abort", { scenario, concurrency: 3, duration: "10s" });
 `;
     const { file, plan } = await writeFixture("chaos-abort", DURATION);
     const provider = newProvider();
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 700); // fire comfortably after the shared start
+    const sentinel = join(TMP_DIR, `abort-sentinel-${Date.now()}`);
+    let aborted = false;
+    const abortWatch = setInterval(() => {
+      if (aborted || !existsSync(sentinel)) return;
+      aborted = true;
+      ac.abort();
+    }, 10);
+    abortWatch.unref?.();
     const artifact = await runLoadMultiCore(plan, {
       file,
       workerCount: 3,
       cwd: RUNNER_ROOT,
-      vars: { BASE_URL: base },
+      vars: { BASE_URL: base, RUN_SENTINEL: sentinel },
       snapshotIntervalMs: 25,
       abort: ac.signal,
       provider,
     });
-    clearTimeout(timer);
+    clearInterval(abortWatch);
 
+    expect(aborted).toBe(true); // the abort genuinely fired mid-run (sentinel observed)
     expect(artifact.summary.endReason).toBe("abort");
     expect(artifact.summary.executionStatus).toBe("complete"); // clean drain → data complete
     const workers = artifact.runtime.execution?.workers ?? [];
