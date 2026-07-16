@@ -152,9 +152,10 @@ interface WorkerCollection {
   /** A per-worker `error` frame message, if any (a handled shard failure). */
   errorMessage?: string;
   closeReason?: ChannelCloseReason;
-  /** Coordinator-clock instant of the LAST frame of any kind received from this worker (the
-   *  no-progress watchdog's liveness signal). Seeded at collect time; advanced on every inbound
-   *  frame (`ready`/`snapshot`/`result`/`error`/`done`). */
+  /** The no-progress watchdog's liveness baseline for this worker: the later of the last frame
+   *  received (`ready`/`snapshot`/`result`/`error`/`done`) and the COMMITTED dispatch instant.
+   *  Seeded at collect time, REBASED to `startAt` when dispatch is released (the bind→startAt
+   *  wait is legitimate silence, not stalled progress), then advanced on every inbound frame. */
   lastFrameAt: number;
   /** The no-progress watchdog judged this worker wedged and killed it (§10.5) — reported as the
    *  `no-progress` termination cause and noted in the partial diagnostics. */
@@ -279,6 +280,15 @@ export async function runLoadMultiCore(
     // fails the run — its shard counts as partial (§7.4), surviving workers still run.
     for (const c of collections) {
       if (isTerminated(c)) continue;
+      // Rebase the no-progress liveness clock to the COMMITTED dispatch instant (`startAt`), not
+      // the bind (`ready`) instant. Between binding and `startAt` a worker legitimately WAITS —
+      // it holds at the time-based start barrier and its periodic snapshot timer has not started
+      // (both begin at `startAt`, §5.1/§10.5) — so counting that quiet window as "no progress"
+      // would false-kill a healthy early binder when `ready→startAt` approaches `noProgressMs`
+      // (e.g. a large `startLeadMs`, or a slow last binder stretching the barrier wait). Seeding
+      // the baseline at `startAt` (a coordinator-clock instant in the near future) means the
+      // silence window is measured from when the worker actually starts running.
+      c.lastFrameAt = startAt;
       try {
         await c.channel.send({
           type: "start",

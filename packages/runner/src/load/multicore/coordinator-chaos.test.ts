@@ -233,6 +233,48 @@ export const plan = loadRunner("mc-wedge", { scenario, concurrency: 4, iteration
     assertAllReaped(provider.workers.map((w) => w.pid));
   }, 30_000);
 
+  it("does NOT false-kill a healthy worker whose bind→startAt wait exceeds the no-progress window (baseline is dispatch, not bind)", async () => {
+    // A large start lead makes every worker WAIT ~600ms after binding before the committed startAt
+    // — legitimate silence (it holds at the start barrier; its periodic snapshot timer only begins
+    // at startAt). With the watchdog baseline seeded at `startAt` (dispatch), that quiet window is
+    // NOT counted as no-progress; a healthy worker runs to completion. Regression guard: if the
+    // baseline were the bind (`ready`) instant, the watchdog's first tick (~50ms cadence) would fire
+    // at ~250ms with `now - readyAt > 200ms` while the worker is still waiting for startAt=600ms —
+    // false-killing it and turning a clean run into a partial.
+    const PING = `
+import { loadScenario, loadRunner } from "@glubean/sdk/load";
+const scenario = loadScenario("ping")
+  .step("ping", async (ctx) => { await ctx.http.get(ctx.vars.require("BASE_URL") + "/ping").json(); })
+  .build();
+export const plan = loadRunner("mc-startlead-liveness", { scenario, concurrency: 2, duration: "1s" });
+`;
+    const { file, plan } = await writeFixture("chaos-startlead-liveness", PING);
+    const provider = newProvider();
+    const artifact = await runLoadMultiCore(plan, {
+      file,
+      workerCount: 2,
+      cwd: RUNNER_ROOT,
+      vars: { BASE_URL: base },
+      snapshotIntervalMs: 25,
+      noProgressMs: 200, // watchdog window …
+      startLeadMs: 600, // … deliberately SHORTER than the bind→startAt wait
+      provider,
+    });
+
+    // No worker was wedged: the legitimate pre-dispatch wait did not trip the watchdog, so the run
+    // is a clean, complete duration run (pre-fix this was a false-killed partial).
+    expect(artifact.summary.executionStatus).toBe("complete");
+    const workers = artifact.runtime.execution?.workers ?? [];
+    expect(workers).toHaveLength(2);
+    expect(workers.every((w) => w.endReason === "duration")).toBe(true);
+    expect(workers.every((w) => w.terminationCause === "normal")).toBe(true);
+    expect(artifact.runtime.execution?.coverage?.workersFinal).toBe(2);
+    const notes = artifact.runtime.execution?.notes ?? [];
+    expect(notes.some((s) => /no-progress/.test(s))).toBe(false);
+
+    assertAllReaped(provider.workers.map((w) => w.pid));
+  }, 30_000);
+
   it("stamps feederGuarantee=degraded end-to-end for a segmented feeder whose shard segments exhaust (§9)", async () => {
     // A `uniquePerIteration` feeder with FEWER rows than iterations. `shardPlan` splits the rows
     // into per-worker segments (best-effort under sharding → the run's feeder guarantee DROPS to
