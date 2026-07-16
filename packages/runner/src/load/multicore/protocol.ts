@@ -85,7 +85,12 @@ export interface ShardAssignmentV1 {
   /** Base session each iteration copies. JSON-safe by construction (it crossed the wire). */
   baseSession?: Record<string, unknown>;
   /** Shared run-axis origin (epoch ms) every emitted offset is computed against — the
-   *  coordinator's authoritative `t0`, identical on every shard so their frames merge. */
+   *  coordinator's authoritative `t0`, identical on every shard so their frames merge. A
+   *  coordinator that gates dispatch on the two-phase `ready` barrier (§10.5) sends a
+   *  PROVISIONAL value here and COMMITS the real axis in the later `start` frame's
+   *  `timelineOrigin` (which the worker prefers) — so the axis equals `startAt` even though
+   *  `assign` is sent before every worker has bound. A driver that does not use the barrier
+   *  (e.g. a manual test) may set the committed value here and omit it from `start`. */
   timelineOrigin: number;
   /** Periodic snapshot cadence (ms); omitted → the kernel default (15s). Injectable so a
    *  test need not wait 15s for a frame. */
@@ -97,14 +102,16 @@ export interface ShardAssignmentV1 {
 /**
  * A frame the coordinator (parent) sends the worker. `assign` binds the shard; `start`
  * releases dispatch at an absolute `startAt` instant (the time-based start barrier, §5.1 —
- * every worker holds until this shared instant, so a late `start` does not desync the run);
- * `abort` requests a clean early wind-down; `heartbeat` is the coordinator-liveness
- * keep-alive (§10.5 lease) that also doubles as a channel probe. (The full
- * `armed`/`commit` two-phase barrier of §10.5 is coordinator orchestration — D1-4.)
+ * every worker holds until this shared instant, so a late `start` does not desync the run)
+ * and may COMMIT the shared `timelineOrigin` (overriding the provisional one in `assign`, so
+ * the run axis equals `startAt` even when `assign` preceded every worker's bind); `abort`
+ * requests a clean early wind-down; `heartbeat` is the coordinator-liveness keep-alive
+ * (§10.5 lease) that also doubles as a channel probe. (The `assign` → `ready` → `start`
+ * sequence is the multi-core minimal form of §10.5's armed→commit barrier — D1-4.)
  */
 export type CoordinatorMessage =
   | { type: "assign"; assignment: ShardAssignmentV1 }
-  | { type: "start"; startAt: number; dispatchDeadline?: number }
+  | { type: "start"; startAt: number; dispatchDeadline?: number; timelineOrigin?: number }
   | { type: "abort"; reason: string }
   | { type: "heartbeat"; ts?: number };
 
@@ -112,16 +119,20 @@ export type CoordinatorMessage =
 
 /**
  * A frame the worker (child) sends the coordinator. `hello` announces readiness + the
- * protocol version the coordinator checks BEFORE assigning (§4); `snapshot` streams the
- * cumulative reducer state (periodic `final:false`, then one authoritative `final:true` at
- * run end — the frame a coordinator merges); `result` carries the scalar orchestration
- * observables; `error` reports a per-assignment failure; `done` is the terminal sentinel
- * (its absence at channel close means the worker died mid-run). `progress` is a reserved,
- * lightweight cumulative-counter frame (§4 "progress 可选") — defined for wire completeness;
- * the D1-3 worker relies on `snapshot` for live progress and does not emit it.
+ * protocol version the coordinator checks BEFORE assigning (§4); `ready` acknowledges that
+ * `assign` was BOUND (the user file imported + the plan selected) so the coordinator can pick
+ * a shared `startAt` in every worker's future (the multi-core armed→commit barrier, §10.5);
+ * `snapshot` streams the cumulative reducer state (periodic `final:false`, then one
+ * authoritative `final:true` at run end — the frame a coordinator merges); `result` carries
+ * the scalar orchestration observables; `error` reports a per-assignment failure; `done` is
+ * the terminal sentinel (its absence at channel close means the worker died mid-run).
+ * `progress` is a reserved, lightweight cumulative-counter frame (§4 "progress 可选") —
+ * defined for wire completeness; the D1-3 worker relies on `snapshot` for live progress and
+ * does not emit it.
  */
 export type WorkerMessage =
   | { type: "hello"; protocolVersion: number; workerId: string; pid: number }
+  | { type: "ready"; workerId: string }
   | {
       type: "progress";
       workerId: string;
@@ -222,6 +233,8 @@ export function decodeWorkerMessage(raw: unknown): WorkerMessage {
         workerId: reqString(o, "workerId", side),
         pid: reqNumber(o, "pid", side),
       };
+    case "ready":
+      return { type: "ready", workerId: reqString(o, "workerId", side) };
     case "progress":
       return {
         type: "progress",
@@ -307,6 +320,7 @@ export function decodeCoordinatorMessage(raw: unknown): CoordinatorMessage {
         type: "start",
         startAt: reqNumber(o, "startAt", side),
         ...(o.dispatchDeadline !== undefined ? { dispatchDeadline: reqNumber(o, "dispatchDeadline", side) } : {}),
+        ...(o.timelineOrigin !== undefined ? { timelineOrigin: reqNumber(o, "timelineOrigin", side) } : {}),
       };
     case "abort":
       return { type: "abort", reason: reqString(o, "reason", side) };

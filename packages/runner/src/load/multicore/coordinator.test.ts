@@ -309,4 +309,71 @@ export const plan = loadRunner("mc-abort", { scenario, concurrency: 2, duration:
     expect(artifact.runtime.execution?.workers?.every((w) => w.endReason === "abort")).toBe(true);
     assertAllReaped(provider.workers.map((w) => w.pid));
   }, 30_000);
+
+  it("aligns dispatch across workers even when the user file imports SLOWLY (two-phase ready barrier)", async () => {
+    // A slow user-file import (top-level await) must NOT eat the dispatch window: the coordinator
+    // waits for every worker's `ready` ack and only THEN commits a shared startAt in their
+    // future, so no worker starts late. With the old fixed-lead approach startAt would already be
+    // ~700ms in the past when a worker finally bound → large startLateness.
+    const SLOW_IMPORT = `
+import { loadScenario, loadRunner } from "@glubean/sdk/load";
+await new Promise((r) => setTimeout(r, 800)); // simulate a slow user-file import / bootstrap
+const scenario = loadScenario("ping")
+  .step("ping", async (ctx) => { await ctx.http.get(ctx.vars.require("BASE_URL") + "/ping").json(); })
+  .build();
+export const plan = loadRunner("mc-slow-import", { scenario, concurrency: 4, iterations: 12 });
+`;
+    const { file, plan } = await writeFixture("coord-slow-import", SLOW_IMPORT);
+    const provider = newProvider();
+    const artifact = await runLoadMultiCore(plan, {
+      file,
+      workerCount: 2,
+      cwd: RUNNER_ROOT,
+      vars: { BASE_URL: base },
+      snapshotIntervalMs: 25,
+      provider,
+    });
+
+    expect(artifact.summary.totalIterations).toBe(12);
+    expect(artifact.summary.executionStatus).toBe("complete");
+    // Every worker started close to the committed startAt — the ~800ms import did NOT become
+    // start lateness (it would have, ~650ms+, under a fixed pre-ready lead).
+    const maxLateness = Math.max(...(artifact.runtime.execution?.workers ?? []).map((w) => w.startLatenessMs ?? 0));
+    expect(maxLateness).toBeLessThan(500);
+    assertAllReaped(provider.workers.map((w) => w.pid));
+  }, 30_000);
+
+  it("reports each worker's REAL continuation backpressureHits (from its partial, not hardcoded 0)", async () => {
+    // A tight backlog (maxOutstanding 1) forces producers to park on release → back-pressure.
+    // The per-worker record must carry that observed count, read from the worker's partial.
+    const BACKPRESSURE = `
+import { loadScenario, loadRunner } from "@glubean/sdk/load";
+const scenario = loadScenario("async-job")
+  .step("submit", async (ctx) => {
+    await ctx.http.post(ctx.vars.require("BASE_URL") + "/orders", { json: {} }).json();
+    await ctx.report.primaryComplete("submitted", { releaseProducerSlot: true });
+  })
+  .step("poll", async (ctx) => { await ctx.http.get(ctx.vars.require("BASE_URL") + "/items/1").json(); })
+  .build();
+export const plan = loadRunner("mc-backpressure", { scenario, concurrency: 2, iterations: 6,
+  continuation: { maxOutstanding: 1 } });
+`;
+    const { file, plan } = await writeFixture("coord-backpressure", BACKPRESSURE);
+    const provider = newProvider();
+    const artifact = await runLoadMultiCore(plan, {
+      file,
+      workerCount: 2, // clamps to 1 (maxOutstanding=1) — the sole worker forces backpressure
+      cwd: RUNNER_ROOT,
+      vars: { BASE_URL: base },
+      snapshotIntervalMs: 25,
+      provider,
+    });
+
+    expect(artifact.summary.totalIterations).toBe(6);
+    const workers = artifact.runtime.execution?.workers ?? [];
+    const hits = workers.map((w) => w.continuation?.backpressureHits ?? 0);
+    expect(workers.every((w) => w.continuation !== undefined)).toBe(true);
+    expect(Math.max(...hits)).toBeGreaterThan(0); // real observed back-pressure, not hardcoded 0
+    assertAllReaped(provider.workers.map((w) => w.pid));
+  }, 30_000);
 });

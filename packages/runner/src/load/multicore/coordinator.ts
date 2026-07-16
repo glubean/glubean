@@ -51,7 +51,12 @@ export interface CoordinatorProvider extends LoadWorkerProvider {
  *  every `assign` + every `start` time to land on all workers before it (§5.1 barrier). A
  *  late `start` does not desync the run — a worker holds until this instant regardless —
  *  but a comfortable lead avoids workers recording `startLatenessMs` on a loaded machine. */
-const DEFAULT_START_LEAD_MS = 300;
+const DEFAULT_START_LEAD_MS = 150;
+
+/** Deadline for every worker to `ready` (bind its shard) after `assign`, before the shared
+ *  `startAt` is committed. Covers a slow user-file import; a worker that hangs past it fails
+ *  the run. Defaults to the join deadline (§5, 60s) when neither is given. */
+const DEFAULT_READY_DEADLINE_MS = 60_000;
 
 /** Options for {@link runLoadMultiCore}. The `plan` argument carries the shape (projection /
  *  config / thresholds); these are the runtime knobs a coordinator supplies at dispatch. */
@@ -80,10 +85,15 @@ export interface RunLoadMultiCoreOptions {
   /** Periodic snapshot cadence (ms) each worker uses; omitted → the kernel default (15s).
    *  Injectable so a test need not wait 15s for a frame. */
   snapshotIntervalMs?: number;
-  /** Lead (ms) before the shared `startAt` instant. Default {@link DEFAULT_START_LEAD_MS}. */
+  /** Lead (ms) before the shared `startAt` instant, measured AFTER every worker has bound
+   *  (readied), so it only needs to cover the `start` frame's delivery. Default
+   *  {@link DEFAULT_START_LEAD_MS}. */
   startLeadMs?: number;
   /** Deadline for every worker to `hello` after spawn (§5, multi-core default 60s). */
   joinDeadlineMs?: number;
+  /** Deadline for every worker to `ready` (bind) after `assign`. Default: `joinDeadlineMs`
+   *  else {@link DEFAULT_READY_DEADLINE_MS}. */
+  readyDeadlineMs?: number;
   /** Grace after SIGTERM before SIGKILL per worker (provider default 3s). */
   sigtermGraceMs?: number;
   /** Echo each worker's stdout/stderr to the coordinator's stdout/stderr. Default true
@@ -106,6 +116,8 @@ export interface RunLoadMultiCoreOptions {
 interface WorkerCollection {
   shard: LoadShard;
   channel: LoadWorkerChannel;
+  /** The worker acknowledged its `assign` was BOUND (user file imported + plan selected). */
+  ready: boolean;
   /** The most recent snapshot of ANY kind (a lost worker's last valid frame, §7.4). */
   latestSnapshot?: LoadReducerPartialV1;
   /** The authoritative terminal frame (`final: true`) — present iff the worker finished. */
@@ -116,6 +128,11 @@ interface WorkerCollection {
   /** A per-worker `error` frame message, if any (a handled shard failure). */
   errorMessage?: string;
   closeReason?: ChannelCloseReason;
+  /** Resolves once the worker is BOUND (`ready`) OR has already terminated — the gate the
+   *  coordinator waits on before committing a shared `startAt` (§10.5 armed→commit barrier).
+   *  A worker that crashed during bind resolves this via its own settle (it contributes
+   *  nothing); one that hangs in import is caught by the ready deadline. */
+  readyGate: Promise<void>;
   /** Resolves when the worker reaches a terminal state (`done` OR channel close). */
   settled: Promise<void>;
 }
@@ -178,19 +195,10 @@ export async function runLoadMultiCore(
       return collectWorker(shard, channel);
     });
 
-    // A single authoritative run axis: `timelineOrigin` is the coordinator's t0 (every
-    // worker offset is computed against it, so their frames merge); `startAt` is a shared
-    // FUTURE instant every worker holds until before dispatching (§5.1 barrier). Using
-    // `timelineOrigin === startAt` puts offset 0 at the synchronized start.
-    const startAt = now() + (opts.startLeadMs ?? DEFAULT_START_LEAD_MS);
-    const timelineOrigin = startAt;
-    // A duration bound becomes an ABSOLUTE dispatch deadline (§6/§8.2); an iterations-only
-    // run has none (workers stop when their quota is exhausted).
-    const dispatchDeadline = runLevel.durationMs !== undefined ? startAt + runLevel.durationMs : undefined;
-
     // Broadcast an abort frame on SIGINT so workers drain + finalize cleanly (they still
-    // deliver a terminal frame, so the merge below still runs). Best-effort — a dead channel
-    // just rejects the send.
+    // deliver a terminal frame, so the merge below still runs). Wired BEFORE assign so an
+    // abort during the bind/ready wait still reaches every worker. Best-effort — a dead
+    // channel just rejects the send.
     if (abort !== undefined) {
       onAbort = () => {
         for (const c of collections) void c.channel.send({ type: "abort", reason: "coordinator abort (SIGINT)" }).catch(() => {});
@@ -199,7 +207,10 @@ export async function runLoadMultiCore(
       else abort.addEventListener("abort", onAbort, { once: true });
     }
 
-    // Assign every worker its shard (bind, no dispatch) …
+    // Assign every worker its shard (bind, no dispatch). The `timelineOrigin` here is
+    // PROVISIONAL — the real shared axis is committed in `start` below, AFTER every worker
+    // has bound, so it can equal `startAt` even though `assign` is sent first (§10.5).
+    const provisionalOrigin = now();
     for (const c of collections) {
       await c.channel.send({
         type: "assign",
@@ -210,17 +221,30 @@ export async function runLoadMultiCore(
           rngSeed,
           vars: opts.vars ?? {},
           secrets: opts.secrets ?? {},
-          timelineOrigin,
+          timelineOrigin: provisionalOrigin,
           ...(opts.baseSession !== undefined ? { baseSession: opts.baseSession } : {}),
           ...(opts.snapshotIntervalMs !== undefined ? { snapshotIntervalMs: opts.snapshotIntervalMs } : {}),
         },
       });
     }
-    // … then release dispatch at the shared instant (§5.1 time-based start barrier).
+
+    // Two-phase barrier (§10.5 armed→commit, multi-core minimal form): wait until EVERY
+    // worker has bound (`ready`) or already terminated, so the `startAt` we pick next is in
+    // every worker's future — a slow user-file import no longer eats the dispatch window.
+    await awaitAllReady(collections, opts.readyDeadlineMs ?? opts.joinDeadlineMs ?? DEFAULT_READY_DEADLINE_MS);
+
+    // Now COMMIT the shared run axis: `startAt` is a small lead past the moment every worker
+    // is ready, and `timelineOrigin === startAt` (offset 0 at the synchronized start). A
+    // duration bound becomes an ABSOLUTE dispatch deadline (§6/§8.2); an iterations-only run
+    // has none. Broadcast `start` with the committed axis (workers prefer it over `assign`'s).
+    const startAt = now() + (opts.startLeadMs ?? DEFAULT_START_LEAD_MS);
+    const timelineOrigin = startAt;
+    const dispatchDeadline = runLevel.durationMs !== undefined ? startAt + runLevel.durationMs : undefined;
     for (const c of collections) {
       await c.channel.send({
         type: "start",
         startAt,
+        timelineOrigin,
         ...(dispatchDeadline !== undefined ? { dispatchDeadline } : {}),
       });
     }
@@ -251,12 +275,28 @@ function collectWorker(shard: LoadShard, channel: LoadWorkerChannel): WorkerColl
   const c: WorkerCollection = {
     shard,
     channel,
+    ready: false,
     done: false,
+    readyGate: undefined as unknown as Promise<void>,
     settled: undefined as unknown as Promise<void>,
   };
+  // `readyGate` opens on the FIRST of: the `ready` ack, or the worker settling (a crash
+  // during bind). Both resolvers are captured so either path opens the gate exactly once.
+  let openReadyGate!: () => void;
+  c.readyGate = new Promise<void>((r) => {
+    openReadyGate = r;
+  });
   c.settled = new Promise<void>((resolveSettle) => {
+    const settle = (): void => {
+      openReadyGate(); // a terminal worker also opens the ready gate (idempotent)
+      resolveSettle();
+    };
     channel.onMessage((msg) => {
       switch (msg.type) {
+        case "ready":
+          c.ready = true;
+          openReadyGate();
+          break;
         case "snapshot":
           // Atomic replace with the newest cumulative frame; the `final:true` frame is the
           // authoritative terminal one a coordinator merges (§7.1).
@@ -271,16 +311,45 @@ function collectWorker(shard: LoadShard, channel: LoadWorkerChannel): WorkerColl
           break;
         case "done":
           c.done = true;
-          resolveSettle();
+          settle();
           break;
       }
     });
     channel.onClose((reason) => {
       c.closeReason = reason;
-      resolveSettle();
+      settle();
     });
   });
   return c;
+}
+
+/** Wait until every worker has bound (`ready`) or already terminated, bounded by
+ *  `deadlineMs` — a worker that hangs in import (never readies, never settles) fails the run
+ *  rather than stalling forever. The `readyGate`s resolve on EITHER outcome, so a worker that
+ *  crashed during bind does not block the barrier (it simply contributes nothing). */
+function awaitAllReady(collections: WorkerCollection[], deadlineMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const stuck = collections.filter((c) => !c.ready && c.closeReason === undefined && !c.done);
+      reject(
+        new Error(
+          `runLoadMultiCore: ${stuck.length}/${collections.length} worker(s) did not bind (ready) within ${deadlineMs}ms` +
+            (stuck.length > 0 ? ` — ${stuck.map((c) => c.shard.workerId).join(", ")}` : ""),
+        ),
+      );
+    }, deadlineMs);
+    timer.unref?.();
+    Promise.all(collections.map((c) => c.readyGate)).then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e as Error);
+      },
+    );
+  });
 }
 
 /** Everything `assembleArtifact` needs beyond the plan + collections. */
@@ -327,11 +396,18 @@ function assembleArtifact(plan: LoadPlan, ctx: AssembleContext): LoadArtifact {
     throw new Error(`runLoadMultiCore: no usable worker result (execution failed) — ${detail}`);
   }
 
-  // Coordinator-authoritative run-end (§7.2 throughput denominator): the last worker's
-  // finalize instant (covers every event, on the shared axis). No result frame anywhere
-  // (all lost mid-run) → the coordinator's own clock closes the interval.
-  const finalizeNows = contributors.map((x) => x.c.observables?.finalizeNow).filter((n): n is number => typeof n === "number");
-  const runEndMs = finalizeNows.length > 0 ? Math.max(...finalizeNows) : now();
+  // Coordinator-authoritative run-end (§7.2 throughput denominator): the latest of every
+  // clean finisher's finalize instant AND every contributor's snapshot coverage. Including
+  // the snapshot `observedAt`s matters when a fast worker finished while a SLOWER worker only
+  // sent a periodic frame before crashing — the run-end must not fall before that lost
+  // worker's last observed data (else the merged interval would exclude its events yet the
+  // denominator would end early, inflating throughput). No data at all (all lost pre-frame) →
+  // the coordinator's own clock (unreachable here — the failed path threw above).
+  const ends = [
+    ...contributors.map((x) => x.c.observables?.finalizeNow).filter((n): n is number => typeof n === "number"),
+    ...contributors.map((x) => x.part.observedAt),
+  ];
+  const runEndMs = ends.length > 0 ? Math.max(...ends) : now();
 
   // Censor each contributor's observation window: a clean finisher is extended to the
   // authoritative globalEndAt (so its trailing event-free tail is not marked
@@ -462,6 +538,9 @@ function fillExecutionBlock(
   execution.coverage = coverage;
 
   // ── per-worker records ──
+  // The partial each worker contributed (its final frame, else its last valid snapshot) —
+  // the source of that worker's real continuation-backpressure count.
+  const partById = new Map(data.contributors.map((x) => [x.c.shard.workerId, x.part]));
   execution.workers = ctx.collections.map((c) => {
     const shard = c.shard;
     const iterationIndexes = shard.iterationIndexes as LoadShardIterationIndexes;
@@ -482,7 +561,11 @@ function fillExecutionBlock(
     if (c.observables !== undefined) rec.startLatenessMs = c.observables.maxStartLatenessMs;
     if (shard.continuation !== undefined) {
       const quota = shard.continuation.maxConcurrent ?? shard.continuation.maxOutstanding ?? 0;
-      rec.continuation = { quota, backpressureHits: 0 };
+      // Real per-worker back-pressure: the count of the worker's continuation-backpressure
+      // histogram (one observation per producer that parked on a full backlog). 0 when the
+      // worker never contributed a frame (fully lost).
+      const backpressureHits = partById.get(shard.workerId)?.continuationBackpressure.count ?? 0;
+      rec.continuation = { quota, backpressureHits };
     }
     // A lost worker (no terminal frame): record where its observation was censored + its
     // handled crash message, if any.

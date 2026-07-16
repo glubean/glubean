@@ -54,6 +54,8 @@ describe("multicore protocol round-trip", () => {
     { type: "assign", assignment: { ...ASSIGNMENT, baseSession: undefined, snapshotIntervalMs: undefined } },
     { type: "start", startAt: 1_700_000_000_500 },
     { type: "start", startAt: 1_700_000_000_500, dispatchDeadline: 1_700_000_030_500 },
+    { type: "start", startAt: 1_700_000_000_500, timelineOrigin: 1_700_000_000_500 },
+    { type: "start", startAt: 1_700_000_000_500, dispatchDeadline: 1_700_000_030_500, timelineOrigin: 1_700_000_000_500 },
     { type: "abort", reason: "coordinator requested" },
     { type: "heartbeat" },
     { type: "heartbeat", ts: 1_700_000_000_600 },
@@ -69,6 +71,7 @@ describe("multicore protocol round-trip", () => {
 
   const workerCases: WorkerMessage[] = [
     { type: "hello", protocolVersion: MULTICORE_PROTOCOL_VERSION, workerId: "w1", pid: 4242 },
+    { type: "ready", workerId: "w1" },
     { type: "progress", workerId: "w1", observedAt: 123, iterationsStarted: 10, iterationsCompleted: 8 },
     { type: "snapshot", workerId: "w1", final: false, partial: PARTIAL_STUB },
     { type: "snapshot", workerId: "w1", final: true, partial: PARTIAL_STUB },

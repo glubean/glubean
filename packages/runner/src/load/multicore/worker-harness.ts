@@ -201,23 +201,35 @@ async function handleAssign(assignment: ShardAssignmentV1): Promise<void> {
   }
 
   bound = { plan, assignment };
+  // Acknowledge the bind so the coordinator's two-phase barrier can pick a shared `startAt`
+  // in every worker's future (§10.5 armed→commit). Sent AFTER the (possibly slow) user-file
+  // import completes — the whole point of the barrier is that the coordinator waits for this.
+  await send({ type: "ready", workerId });
   // A `start` (or `abort`) that raced ahead of assign now applies.
   if (pendingStart !== undefined) {
     const s = pendingStart;
     pendingStart = undefined;
-    void beginRun(s.startAt, s.dispatchDeadline);
+    void beginRun(s.startAt, s.dispatchDeadline, s.timelineOrigin);
   }
 }
 
 /** Run the shard: `runLoadShard`, streaming snapshots over fd 3, then final snapshot + result +
  *  done. The completion path is shared by a natural end AND an abort (the abort just makes
  *  `runLoadShard` wind down early with endReason "abort"). */
-async function beginRun(startAt: number, dispatchDeadline: number | undefined): Promise<void> {
+async function beginRun(
+  startAt: number,
+  dispatchDeadline: number | undefined,
+  timelineOriginOverride: number | undefined,
+): Promise<void> {
   if (bound === undefined || running || finished) return;
   running = true;
   const { plan, assignment } = bound;
   const envVars = withProcessEnvFallback(assignment.vars);
   const envSecrets = withProcessEnvFallback(assignment.secrets);
+  // The `start` frame COMMITS the shared run axis (it is picked after every worker readied,
+  // so it equals `startAt`); fall back to the provisional origin from `assign` for a driver
+  // that set the committed value there and omitted it from `start`.
+  const timelineOrigin = timelineOriginOverride ?? assignment.timelineOrigin;
 
   // The LAST frame `runLoadShard` hands to `onSnapshot` is its terminal (final) export —
   // already `stampShardFrame`-stamped with this shard's `requestedConcurrency` /
@@ -236,7 +248,7 @@ async function beginRun(startAt: number, dispatchDeadline: number | undefined): 
     const result = await runLoadShard(plan, {
       shard: assignment.shard,
       rngSeed: assignment.rngSeed,
-      timelineOrigin: assignment.timelineOrigin,
+      timelineOrigin,
       vars: envVars,
       secrets: envSecrets,
       startAt,
@@ -316,7 +328,7 @@ function handleControlLine(line: string): void {
       if (bound === undefined) void handleAssign(msg.assignment);
       break;
     case "start":
-      if (bound !== undefined) void beginRun(msg.startAt, msg.dispatchDeadline);
+      if (bound !== undefined) void beginRun(msg.startAt, msg.dispatchDeadline, msg.timelineOrigin);
       else pendingStart = msg; // arrived before import finished — replayed on bind
       break;
     case "abort":

@@ -586,6 +586,16 @@ describe("resolveLoadProviderChoice (proposal §5.2 — --provider / --workers)"
     expect(resolveLoadProviderChoice("multi-core", -1, posix4).error).toMatch(/positive integer/);
   });
 
+  it("rejects a FRACTIONAL / garbage worker count instead of silently truncating it (P2-3)", () => {
+    // main.ts parses --workers with Number() (not parseInt), so "2.5" arrives as 2.5 and "2foo"
+    // as NaN — both must ERROR here, never silently run 2.
+    expect(resolveLoadProviderChoice("multi-core", 2.5, posix4).error).toMatch(/positive integer/);
+    expect(resolveLoadProviderChoice("multi-core", Number("2foo"), posix4).error).toMatch(/positive integer/);
+    // The inline :N form is validated the same way.
+    expect(resolveLoadProviderChoice("multi-core:2.5", undefined, posix4).error).toMatch(/positive integer/);
+    expect(resolveLoadProviderChoice("multi-core:2foo", undefined, posix4).error).toMatch(/positive integer/);
+  });
+
   it("flags multi-core on Windows as unsupported (falls back to in-process for the caller to steer)", () => {
     const r = resolveLoadProviderChoice("multi-core:2", undefined, { platform: "win32", cpuCount: 8 });
     expect(r.windowsUnsupported).toBe(true);

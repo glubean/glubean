@@ -331,7 +331,7 @@ export const plan = loadRunner("mc-flood", { scenario, concurrency: 1, iteration
     expect(c.messages.some((m) => (m.type as string) === "abort")).toBe(false);
     expect(c.messages.some((m) => String((m as { workerId?: string }).workerId ?? "").startsWith("w-FORGED"))).toBe(false);
     for (const m of c.messages) {
-      expect(["hello", "progress", "snapshot", "result", "done", "error"]).toContain(m.type);
+      expect(["hello", "ready", "progress", "snapshot", "result", "done", "error"]).toContain(m.type);
     }
 
     await provider.close();

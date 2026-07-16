@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ import {
   runLoadFileInSubprocess,
   withProcessEnvFallback,
 } from "./subprocess.js";
+import { resolveRunnerRoot, resolveTsxPath, prepareZeroProject } from "../runner-resolve.js";
 
 // NOTE: runLoadFileInSubprocess spawns the BUILT dist/load-harness.js, so sdk +
 // runner must be built before this test runs (pretest / CI build covers it).
@@ -239,6 +241,53 @@ export const zBoomPlan = loadRunner("boom-plan", { scenario: boom, concurrency: 
     expect(errors).toHaveLength(1);
     expect(errors[0].message).toMatch(/did not complete/);
   });
+
+  it("in-process harness terminates PROMPTLY on SIGTERM (no signal listener suppresses default termination)", async () => {
+    // Regression (D1-4): the multi-core SIGINT/SIGTERM → abort bridge must NOT be installed on
+    // the in-process path — the single-machine harness has nothing else wired to react, so a
+    // listener would swallow Node's default termination and let a long run continue to plan end
+    // on a CI timeout / SIGTERM. A 30s in-process run signalled at ~600ms must die in seconds.
+    const fixture = join(TMP_DIR, "long-inprocess.load.ts");
+    await writeFile(
+      fixture,
+      `
+import { loadScenario, loadRunner } from "@glubean/sdk/load";
+const scenario = loadScenario("ping")
+  .step("ping", async (ctx) => { await ctx.http.get(ctx.vars.require("BASE_URL") + "/ping").json(); })
+  .build();
+export const plan = loadRunner("long-inprocess", { scenario, concurrency: 1, duration: "30s" });
+`,
+      "utf-8",
+    );
+
+    // Spawn the built load-harness the same way runLoadFileInSubprocess does (tsx + zero-project
+    // resolver), but keep the child handle so the test can signal it.
+    const resolved = resolveRunnerRoot(TMP_DIR, resolve(RUNNER_ROOT, "dist"), RUNNER_ROOT);
+    const harnessPath = resolve(resolved.distDir, "load-harness.js");
+    const zp = prepareZeroProject(TMP_DIR, resolved.distDir, resolved.pkgRoot);
+    const child = spawn("node", [resolveTsxPath(), ...zp.tsxArgs, harnessPath, `--file=${fixture}`], {
+      cwd: TMP_DIR,
+      env: { ...process.env, ...zp.env } as NodeJS.ProcessEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      child.stdin!.write(JSON.stringify({ vars: { BASE_URL: base }, secrets: {} }));
+      child.stdin!.end();
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null; ms: number }>((res) => {
+        const t0 = Date.now();
+        child.on("exit", (code, signal) => res({ code, signal, ms: Date.now() - t0 }));
+      });
+      // Let it get well into dispatching, then SIGTERM. With the fix it dies in ms; with the
+      // D1-4 regression it would run the full 30s (and blow the 15s test timeout).
+      await new Promise((r) => setTimeout(r, 700));
+      child.kill("SIGTERM");
+      const result = await exited;
+      expect(result.ms).toBeLessThan(8_000); // NOT the ~30s plan duration
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      zp.cleanup();
+    }
+  }, 15_000);
 
   it("still parses protocol messages after user stdout with no trailing newline", async () => {
     // A load file that writes to stdout WITHOUT a trailing newline must not eat the

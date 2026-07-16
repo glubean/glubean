@@ -114,11 +114,19 @@ try {
 const envVars = withProcessEnvFallback(vars);
 const envSecrets = withProcessEnvFallback(secrets);
 
-// A SIGINT reaching the coordinator winds workers down cleanly (abort → drain → finalize).
-// Bridged to an AbortSignal `runLoadMultiCore` broadcasts on; harmless on the in-process path.
-const runAbort = new AbortController();
-process.on("SIGINT", () => runAbort.abort());
-process.on("SIGTERM", () => runAbort.abort());
+// Multi-core ONLY: bridge SIGINT/SIGTERM to a cooperative abort the coordinator broadcasts so
+// workers drain + finalize cleanly (abort → drain → finalize), then reap them. The in-process
+// path installs NO signal listeners — a listener would suppress Node's DEFAULT termination
+// (the harness has no other place wired to react), so a CI timeout / SIGTERM would leave the
+// single-machine harness running to plan end instead of dying promptly. Keeping listeners out
+// of the in-process branch preserves the exact pre-D1-4 single-machine signal behavior.
+let runAbort: AbortController | undefined;
+if (providerKind === "multi-core") {
+  runAbort = new AbortController();
+  const onSignal = (): void => runAbort!.abort();
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+}
 
 for (const plan of collectLoadPlans(ns)) {
   try {
@@ -133,7 +141,7 @@ for (const plan of collectLoadPlans(ns)) {
             cwd: process.cwd(),
             vars: envVars,
             secrets: envSecrets,
-            abort: runAbort.signal,
+            ...(runAbort !== undefined ? { abort: runAbort.signal } : {}),
           })
         : await runLoad(plan, { vars: envVars, secrets: envSecrets });
     emit({ type: "artifact", runnerId: plan.id, artifact });

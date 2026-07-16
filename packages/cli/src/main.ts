@@ -810,7 +810,10 @@ program
   .option("--config <paths>", "Config file(s), comma-separated or repeatable", collect, [])
   .option("--env-file <name>", "Env file basename (default: active env, else .env; prod-like active envs are refused implicitly)")
   .option("--provider <mode>", "Execution provider: in-process (default) or multi-core[:N] (N worker processes)")
-  .option("--workers <n>", "Worker count for --provider multi-core (default: CPU cores - 1)", (v) => parseInt(v, 10))
+  // Number() over the WHOLE string (not parseInt, which silently truncates "2.5"/"2foo" → 2);
+  // a non-positive-integer becomes NaN/non-integer here and is rejected by
+  // resolveLoadProviderChoice with a clear error instead of running a wrong worker count.
+  .option("--workers <n>", "Worker count for --provider multi-core (default: CPU cores - 1)", (v) => Number(v))
   .option("--upload", "Upload each plan's LoadArtifact to Glubean Cloud")
   .option("--upload-receipt-json <path>", "Write Cloud upload receipt(s) JSON after --upload")
   .option("--project <id>", "Glubean Cloud project ID (or GLUBEAN_PROJECT_ID env)")
