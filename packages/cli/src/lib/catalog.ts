@@ -29,6 +29,7 @@ import { CLI_VERSION } from "../version.js";
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage"]);
 const TEMPLATE_ENV_PARTS = new Set(["example", "sample", "template"]);
+const CLOUD_READINESS_ATTEMPT_TIMEOUTS_MS = [5_000, 10_000] as const;
 
 export type CatalogAssetKind = "test" | "contract" | "workflow" | "openapi" | "load";
 export type CatalogFileKind = CatalogAssetKind | "bootstrap" | "setup" | "session" | "config";
@@ -277,26 +278,65 @@ function parseErrorCode(body: unknown): string | undefined {
   return undefined;
 }
 
-async function fetchCloudReadiness(
+interface CloudReadinessFetchOptions {
+  attemptTimeoutsMs?: readonly number[];
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+export async function fetchCloudReadiness(
   apiUrl: string,
   projectId: string,
   token: string,
   targetId?: string,
+  options: CloudReadinessFetchOptions = {},
 ): Promise<{
   check: CatalogEnvironment["cloudCheck"];
   url?: string;
   sync: { status: ReadinessStatus; reasons?: string[] };
   upload: { status: ReadinessStatus; reasons?: string[]; targetId?: string };
 }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5_000);
+  const attemptTimeoutsMs = options.attemptTimeoutsMs?.length
+    ? options.attemptTimeoutsMs
+    : CLOUD_READINESS_ATTEMPT_TIMEOUTS_MS;
+  const base = apiUrl.replace(/\/+$/, "");
+  const query = targetId ? `?targetId=${encodeURIComponent(targetId)}` : "";
+  const url = `${base}/v1/projects/${encodeURIComponent(projectId)}/readiness${query}`;
+  let response: Response | undefined;
+  let lastFetchError: unknown;
+
+  for (const timeoutMs of attemptTimeoutsMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      break;
+    } catch (error) {
+      lastFetchError = error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  if (!response) {
+    const attempts = attemptTimeoutsMs.length;
+    const totalSeconds = Math.ceil(attemptTimeoutsMs.reduce((total, timeoutMs) => total + timeoutMs, 0) / 1_000);
+    const reason = isAbortError(lastFetchError)
+      ? `Platform API readiness check timed out after ${attempts} attempts (${totalSeconds}s total).`
+      : `Platform API readiness check failed after ${attempts} attempts.`;
+    return {
+      check: "unreachable",
+      sync: { status: "unverified", reasons: [reason] },
+      upload: { status: "unverified", reasons: [reason] },
+    };
+  }
+
   try {
-    const base = apiUrl.replace(/\/+$/, "");
-    const query = targetId ? `?targetId=${encodeURIComponent(targetId)}` : "";
-    const response = await fetch(`${base}/v1/projects/${encodeURIComponent(projectId)}/readiness${query}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
-    });
     const body = await response.json().catch(() => null) as CloudReadinessResponse | null;
     if (response.ok && body?.sync?.ready === true) {
       const uploadReady = body.upload?.ready === true;
@@ -362,11 +402,9 @@ async function fetchCloudReadiness(
   } catch {
     return {
       check: "unreachable",
-      sync: { status: "unverified", reasons: ["Platform API is unreachable."] },
-      upload: { status: "unverified", reasons: ["Platform API is unreachable."] },
+      sync: { status: "unverified", reasons: ["Platform API readiness response could not be processed."] },
+      upload: { status: "unverified", reasons: ["Platform API readiness response could not be processed."] },
     };
-  } finally {
-    clearTimeout(timer);
   }
 }
 

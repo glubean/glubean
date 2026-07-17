@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   catalogHasBlockingIssues,
+  fetchCloudReadiness,
   filterProjectCatalog,
   serializeCatalog,
   type ProjectCatalog,
 } from "./catalog.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function fixture(): ProjectCatalog {
   return {
@@ -79,6 +84,55 @@ function fixture(): ProjectCatalog {
 }
 
 describe("project catalog", () => {
+  it("retries a timed-out readiness request so a Cloud Run cold start does not become unverified", async () => {
+    const fetchMock = vi.fn()
+      .mockImplementationOnce((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        url: "https://app.staging.glubean.com/p/proj_staging/contracts",
+        sync: { ready: true },
+        upload: { ready: true, targetId: "tgt_staging" },
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchCloudReadiness(
+      "https://platform.staging.glubean.com",
+      "proj_staging",
+      "gb_test",
+      "tgt_staging",
+      { attemptTimeoutsMs: [1, 50] },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      check: "verified",
+      url: "https://app.staging.glubean.com/p/proj_staging/contracts",
+      sync: { status: "ready" },
+      upload: { status: "ready", targetId: "tgt_staging" },
+    });
+  });
+
+  it("reports a readiness timeout precisely after the retry budget is exhausted", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    })));
+
+    const result = await fetchCloudReadiness(
+      "https://platform.staging.glubean.com",
+      "proj_staging",
+      "gb_test",
+      undefined,
+      { attemptTimeoutsMs: [1, 1] },
+    );
+
+    expect(result).toMatchObject({
+      check: "unreachable",
+      sync: { status: "unverified", reasons: ["Platform API readiness check timed out after 2 attempts (1s total)."] },
+      upload: { status: "unverified", reasons: ["Platform API readiness check timed out after 2 attempts (1s total)."] },
+    });
+  });
+
   it("filters assets and environments while recomputing summary counts", () => {
     const filtered = filterProjectCatalog(fixture(), ["type:test", "tag:smoke", "env:prod*"]);
     expect(filtered.assets.map((asset) => asset.id)).toEqual(["list-users"]);
