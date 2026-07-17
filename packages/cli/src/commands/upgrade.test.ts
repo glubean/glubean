@@ -1,6 +1,15 @@
-import { describe, expect, test } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
 
 import { detectGlobalPackageManager, globalInstallCommand } from "./upgrade.js";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 describe("upgrade installation ownership", () => {
   test.each([
@@ -16,6 +25,19 @@ describe("upgrade installation ownership", () => {
 
   test("does not mistake a project-local CLI for a global install", () => {
     expect(detectGlobalPackageManager("/work/api/node_modules/@glubean/cli/bin/gb.js")).toBeNull();
+  });
+
+  test("follows an npm global bin symlink before detecting its owner", () => {
+    const prefix = mkdtempSync(join(tmpdir(), "glubean-upgrade-"));
+    tempDirs.push(prefix);
+    const packageBin = join(prefix, "lib/node_modules/glubean/bin/glubean.js");
+    const launcher = join(prefix, "bin/glubean");
+    mkdirSync(join(prefix, "lib/node_modules/glubean/bin"), { recursive: true });
+    mkdirSync(join(prefix, "bin"), { recursive: true });
+    writeFileSync(packageBin, "#!/usr/bin/env node\n");
+    symlinkSync("../lib/node_modules/glubean/bin/glubean.js", launcher);
+
+    expect(detectGlobalPackageManager(launcher)).toBe("npm");
   });
 
   test.each([

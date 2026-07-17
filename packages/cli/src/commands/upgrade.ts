@@ -3,6 +3,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { isNewer, parseSemver } from "../update_check.js";
 
 const REGISTRY_URL = "https://registry.npmjs.org/glubean/latest";
@@ -21,7 +22,13 @@ export type GlobalPackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
 /** Identify the manager that owns the CLI process selected by the shell. */
 export function detectGlobalPackageManager(executablePath: string): GlobalPackageManager | null {
-  const path = executablePath.replaceAll("\\", "/").toLowerCase();
+  let resolvedPath = executablePath;
+  try {
+    resolvedPath = realpathSync(executablePath);
+  } catch {
+    // Keep the supplied path for synthetic paths and actionable diagnostics.
+  }
+  const path = resolvedPath.replaceAll("\\", "/").toLowerCase();
   const cliPackage = String.raw`(?:glubean|@glubean/cli)`;
   if (path.includes("/.pnpm/") || path.includes("/pnpm/global/") || path.includes("/library/pnpm/")) {
     return "pnpm";
