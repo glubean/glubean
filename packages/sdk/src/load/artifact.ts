@@ -471,6 +471,19 @@ export interface LoadArtifactConfig {
     drainTimeoutMs?: number;
     onBacklogFull?: "block-producer" | "fail-iteration";
   };
+  /** Egress HTTP transport model the run used, recorded so artifacts under different
+   *  connection models are distinguishable / comparable / reproducible (like `rngSeed`).
+   *  `connections` is the h2 connection count for the run's concurrency under the reuse
+   *  ratio — `ceil(concurrency / streamsPerConnection)` when `preferH2` (https targets
+   *  multiplex ~`streamsPerConnection` streams per connection), else `concurrency` (h1 /
+   *  plain-http is one connection per concurrent request; `streamsPerConnection` doesn't
+   *  apply). Recorded at the GLOBAL concurrency, so a multi-core run's value is
+   *  worker-count-independent (each worker runs `ceil(slotCount / spc)` of it). */
+  http?: {
+    preferH2: boolean;
+    streamsPerConnection: number;
+    connections: number;
+  };
 }
 
 /** Why a load run (or one worker of it) ended. Global full-order priority when

@@ -26,6 +26,11 @@
  * The Agent is a resource (open sockets): the orchestrator creates ONE per run and
  * `close()`s it at run end so connections never leak / hold the process open.
  */
+// npm `undici` (NOT Node's built-in undici — see the double-undici note in createLoadTransport).
+// We pin undici 8 for `connect.preferH2` (h2-first ALPN), which reliably negotiates HTTP/2 over
+// TLS; undici 7.x has NO `preferH2` option (only `allowH2`, h1-first ALPN — server-preference
+// decides) — it was added in undici 8. undici 8 requires Node >=22.19.0, which every publishable
+// package's `engines.node` now reflects (bumped from >=22).
 import { Agent, fetch as undiciFetch } from "undici";
 import type { FetchImpl } from "@glubean/engine";
 import type { LoadHttpConfig } from "@glubean/sdk/load";
@@ -134,28 +139,25 @@ export function loadHttpPlainHttpIgnoreWarning(
 }
 
 /**
- * Connection-pool size for a given concurrency (slot count) and reuse ratio:
- * `ceil(slotCount / streamsPerConnection)`, floored at 1. In multi-core each worker
- * passes its OWN `shard.slotCount` (each worker process owns an independent pool), so
- * the workers' connection counts sum to ≈ the global concurrency's pool.
- *
- * undici's `connections` is the pool CAP and, with concurrent in-flight requests, undici
- * opens up to that many connections and spreads streams across them — so this IS the
- * multiplexing lever: a low cap makes h2 multiplex ~`streamsPerConnection` concurrent
- * streams per connection. It applies PER ORIGIN but uniformly (one cap for every origin
- * under an Agent), so a plain-http origin under an h2-sized cap would be throttled — which
- * is exactly why {@link createLoadTransport} routes http origins to a SEPARATE `slotCount`
- * pool rather than reusing the h2 cap.
+ * The number of h2 connections that carry `slotCount` concurrent requests at the reuse
+ * ratio: `ceil(slotCount / streamsPerConnection)`, floored at 1. This is the COUNT of
+ * single-connection Agents the transport round-robins over (see {@link createLoadTransport}),
+ * so each connection multiplexes ~`streamsPerConnection` concurrent streams. In multi-core
+ * each worker passes its OWN `shard.slotCount`, so the workers' connection counts sum to ≈
+ * the global concurrency's.
  */
 export function computeLoadConnections(slotCount: number, streamsPerConnection: number): number {
   return Math.max(1, Math.ceil(slotCount / streamsPerConnection));
 }
 
-/** A live transport: the fetch to inject, plus the pool `close()` the run must call. */
+/** A live transport: the fetch to inject, plus bounded/graceful teardown. */
 export interface LoadTransport {
   fetch: FetchImpl;
-  /** Close every Agent this transport opened (drain + close their connections). */
+  /** GRACEFUL close — waits for every open Agent's in-flight requests to finish. */
   close(): Promise<void>;
+  /** DESTRUCTIVE close — aborts in-flight requests at once (bounded). Used when a coarse
+   *  abort / drain-timeout left a request in flight that `close()` would wait on forever. */
+  destroy(): Promise<void>;
 }
 
 /** True for an `https://` URL (case-insensitive scheme). `Request.url` / `URL.href` have
@@ -166,59 +168,77 @@ function isHttpsUrl(url: string | URL): boolean {
 }
 
 /**
- * Build the load transport: up to TWO undici {@link Agent}s (connection pools) routed by
- * the per-request target SCHEME, plus a `fetch` that dispatches through the right one.
- * TLS options keep undici's secure defaults (`rejectUnauthorized` stays on) — only the
- * ALPN preference is added to `connect`.
+ * Build the load transport: a `fetch` that routes each request to a pooled undici Agent by
+ * the request's target SCHEME, plus graceful `close()` / destructive `destroy()` teardown.
+ * TLS options keep undici's secure defaults (`rejectUnauthorized` stays on) — only the ALPN
+ * preference is added to `connect`.
  *
- * WHY TWO POOLS (owner decision 2026-07-17): undici's `connections` is one cap applied
- * uniformly to every origin under an Agent (verified: a plain-http origin under a
- * `ceil(slotCount/spc)` cap is throttled to that few h1 connections). So the pool is sized
- * by the target's ACTUAL protocol, not by `preferH2` alone:
- *  - `https://` under `preferH2:true` → the h2 pool: `ceil(slotCount / streamsPerConnection)`
- *    connections, `allowH2:true, preferH2:true` — the reuse ratio multiplexes ~spc streams
- *    per connection where h2 can actually be negotiated (TLS ALPN).
- *  - everything else — every `http://` target (cleartext → always h1, no multiplexing) AND
- *    every target when `preferH2:false` — → the h1 pool: `slotCount` connections (one per
- *    concurrent request), `allowH2:false`. `streamsPerConnection` is ignored here (nothing
- *    to multiplex), so a plain-http load is NEVER silently throttled.
- * A run mixing http + https origins gets each request routed to the correct pool.
+ * ENFORCING THE REUSE RATIO — h1/h2 ASYMMETRY (owner decision 2026-07-17): undici's
+ * `connections` is only an UPPER BOUND, and under h2 undici multiplexes as few connections
+ * as possible (verified: under a real staggered ramp a `connections:20` Agent collapses to
+ * ONE h2 connection carrying every stream — the server's SETTINGS `maxConcurrentStreams`
+ * overrides any client-side cap, so `connections` never forces spreading). The ONLY reliable
+ * way to force exactly K h2 connections is K SEPARATE `connections:1` Agents round-robined
+ * per request — each is exactly one h2 connection multiplexing ~`streamsPerConnection`
+ * streams. So the two schemes are sized DIFFERENTLY:
+ *  - **h2 pool** (`https://` under `preferH2:true`): K = `ceil(slotCount / streamsPerConnection)`
+ *    single-connection Agents, round-robined → exactly K connections, ratio enforced.
+ *  - **h1 pool** (`http://` cleartext — always h1 — OR any target under `preferH2:false`): ONE
+ *    Agent with `connections: slotCount`, `allowH2:false`. h1 has no multiplexing, so the
+ *    `connections` cap IS the real connection count (undici must open one per concurrent
+ *    request) — no round-robin needed, and `streamsPerConnection` is ignored (nothing to
+ *    multiplex), so a plain-http load is never throttled.
+ * A run mixing http + https origins routes each request to the right pool by its own scheme
+ * — including a request that a redirect moved to a different scheme (routing is per call).
  *
  * ALPN nuance: undici's `allowH2` defaults true and `preferH2` only REORDERS the ALPN list —
- * the SERVER picks — so `preferH2:false` alone would still let an h2-preferring server
- * choose h2. The h1 pool sets `allowH2:false` (h2 not offered) for a firm HTTP/1.1 contract.
+ * the SERVER picks — so `preferH2:false` alone would still let an h2-preferring server choose
+ * h2. The h1 pool sets `allowH2:false` (h2 not offered) for a firm HTTP/1.1 contract.
  *
- * Both pools are created LAZILY on first use of their scheme, so a run that only hits one
- * scheme opens one pool; `close()` closes whichever were opened. The optional
- * `connectOverrides` merges EXTRA connect options (production never sets it — secure
- * defaults preserved); it exists only so a self-signed-cert h2 test can pass
+ * All Agents are created LAZILY on first use of their scheme; `close()`/`destroy()` tear down
+ * whichever were opened. `connectOverrides` merges EXTRA connect options (production never
+ * sets it — secure defaults preserved); it exists only so a self-signed-cert h2 test can pass
  * `{ rejectUnauthorized: false }`. `httpIgnoreWarning`, when set, is printed ONCE the first
- * time an `http://` request is routed to the h1 pool (the runtime plain-http-ignore notice —
- * see {@link loadHttpPlainHttpIgnoreWarning}).
+ * time an `http://` request is routed to the h1 pool under `preferH2:true` (the runtime
+ * plain-http-ignore notice — see {@link loadHttpPlainHttpIgnoreWarning}).
  */
 export function createLoadTransport(opts: {
   preferH2: boolean;
-  /** This shard's concurrency — the h1 pool size (one connection per concurrent request). */
+  /** This shard's concurrency — sizes both pools (h1 `connections`, and the h2 Agent count). */
   slotCount: number;
-  /** h2 reuse ratio — the https pool is `ceil(slotCount / streamsPerConnection)`. */
+  /** h2 reuse ratio — the https pool uses `ceil(slotCount / streamsPerConnection)` connections. */
   streamsPerConnection: number;
   connectOverrides?: Record<string, unknown>;
-  /** Printed once (console.warn) the first time a plain-`http://` request is routed to the
-   *  h1 pool under `preferH2:true` with an explicit `streamsPerConnection > 1`. */
+  /** Printed once the first time a plain-`http://` request is routed to the h1 pool under
+   *  `preferH2:true` with an explicit `streamsPerConnection > 1`. */
   httpIgnoreWarning?: string;
 }): LoadTransport {
   const overrides = opts.connectOverrides ?? {};
   const h1Connections = Math.max(1, opts.slotCount);
-  const h2Connections = computeLoadConnections(opts.slotCount, opts.streamsPerConnection);
+  const h2Count = computeLoadConnections(opts.slotCount, opts.streamsPerConnection);
 
-  // Lazily-built pools: h1 (one-per-request, no h2 offered) and h2 (multiplexing). Only the
-  // scheme(s) a run actually hits get a pool.
+  // h1: ONE Agent, connections = slotCount (the cap IS the real count for h1 — no multiplexing).
   let h1Agent: Agent | undefined;
-  let h2Agent: Agent | undefined;
   const getH1 = (): Agent =>
     (h1Agent ??= new Agent({ connections: h1Connections, connect: { ...overrides, allowH2: false } }));
-  const getH2 = (): Agent =>
-    (h2Agent ??= new Agent({ connections: h2Connections, connect: { ...overrides, allowH2: true, preferH2: true } }));
+
+  // h2: K single-connection Agents, round-robined per request → exactly K h2 connections, each
+  // multiplexing ~streamsPerConnection streams (a single Agent's `connections` cap can't force
+  // this — see the header). Built as one batch on first https use.
+  let h2Agents: Agent[] | undefined;
+  let h2Cursor = 0;
+  const getH2 = (): Agent => {
+    if (h2Agents === undefined) {
+      h2Agents = Array.from(
+        { length: h2Count },
+        () => new Agent({ connections: 1, connect: { ...overrides, allowH2: true, preferH2: true } }),
+      );
+    }
+    // Single-process async — a plain increment-and-mod is atomic enough (no preemption mid-op).
+    const agent = h2Agents[h2Cursor % h2Agents.length];
+    h2Cursor += 1;
+    return agent;
+  };
 
   let httpWarned = false;
   const pickAgent = (https: boolean): Agent => {
@@ -232,24 +252,38 @@ export function createLoadTransport(opts: {
     return getH1();
   };
 
-  // ky calls services.fetch(request, options); route it through the pooled Agent via
-  // undici's per-request `dispatcher` option (NOT setGlobalDispatcher — no global state).
+  // ky calls services.fetch(request, options); route it through the pooled Agent via undici's
+  // per-request `dispatcher` option (NOT setGlobalDispatcher — no global state).
   //
-  // Double-undici hazard: npm `undici` and Node's built-in undici are DIFFERENT instances,
-  // so (a) built-in `globalThis.fetch` rejects an npm-undici Agent dispatcher (handler-
-  // interface skew), and (b) npm-undici `fetch` does NOT brand-recognize the GLOBAL
-  // `Request` object ky constructs (it stringifies it → "Failed to parse URL"). We avoid
-  // both by calling npm-undici `fetch` and NORMALIZING the incoming (global) Request into
-  // `(url, init)` that undici builds its OWN Request from — carrying method / headers /
-  // signal / body (a global `ReadableStream` body needs `duplex: 'half'`). A string/URL
-  // input passes straight through.
+  // Double-undici hazard: npm `undici` and Node's built-in undici are DIFFERENT instances, so
+  // (a) built-in `globalThis.fetch` rejects an npm-undici Agent dispatcher (handler-interface
+  // skew), and (b) npm-undici `fetch` does NOT brand-recognize the GLOBAL `Request` object ky
+  // constructs (it stringifies it → "Failed to parse URL"). We avoid both by calling npm-undici
+  // `fetch` and NORMALIZING the incoming (global) Request into `(url, init)` that undici builds
+  // its OWN Request from — carrying the request's semantics: method / headers / signal / body
+  // (a global `ReadableStream` body needs `duplex:'half'`), AND redirect / credentials / mode /
+  // integrity (else a scenario's `redirect:'manual'`/`'error'` would silently become the default
+  // `'follow'`, generating extra traffic + returning the final response instead of the 3xx).
+  // The dispatcher is chosen per call by the CURRENT target scheme, so a request a redirect moved
+  // to another scheme (http→https) still lands on the right pool. A string/URL input passes through.
   const fetchImpl: FetchImpl = (input, init) => {
     let url: string | URL;
     let requestInit: Record<string, unknown>;
     if (typeof Request !== "undefined" && input instanceof Request) {
       const r = input;
       url = r.url;
-      requestInit = { method: r.method, headers: r.headers, signal: r.signal, ...(init as Record<string, unknown>) };
+      requestInit = {
+        method: r.method,
+        headers: r.headers,
+        signal: r.signal,
+        redirect: r.redirect,
+        credentials: r.credentials,
+        mode: r.mode,
+        referrer: r.referrer,
+        referrerPolicy: r.referrerPolicy,
+        integrity: r.integrity,
+        ...(init as Record<string, unknown>),
+      };
       if (r.method !== "GET" && r.method !== "HEAD" && r.body !== null) {
         requestInit.body = r.body;
         requestInit.duplex = "half";
@@ -264,11 +298,14 @@ export function createLoadTransport(opts: {
       requestInit as Parameters<typeof undiciFetch>[1],
     ) as unknown as Promise<Response>;
   };
+
+  const allAgents = (): Agent[] => [...(h1Agent !== undefined ? [h1Agent] : []), ...(h2Agents ?? [])];
   const close = async (): Promise<void> => {
-    await Promise.all([
-      ...(h1Agent !== undefined ? [h1Agent.close()] : []),
-      ...(h2Agent !== undefined ? [h2Agent.close()] : []),
-    ]);
+    await Promise.all(allAgents().map((a) => a.close()));
   };
-  return { fetch: fetchImpl, close };
+  const destroy = async (): Promise<void> => {
+    // `destroy()` aborts in-flight requests immediately (bounded); tolerate any per-Agent throw.
+    await Promise.all(allAgents().map((a) => a.destroy().catch(() => {})));
+  };
+  return { fetch: fetchImpl, close, destroy };
 }

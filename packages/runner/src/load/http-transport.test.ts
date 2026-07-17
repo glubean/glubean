@@ -185,21 +185,44 @@ async function concurrentProbe(fetchImpl: F, base: string, n: number): Promise<{
   return Promise.all(reqs);
 }
 
-describe("createLoadTransport — HTTP/2 multiplexing over TLS (e2e)", () => {
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A STAGGERED RAMP (not a synchronized barrier): `slots` slots start `gapMs` apart, each
+ * doing `perSlot` sequential request→await→next cycles. This is the load pattern that
+ * exposed the illusion — under it a single `connections`-capped Agent collapses to ONE h2
+ * connection; the K-single-connection-Agent round-robin must still open exactly K. Returns
+ * the negotiated httpVersions seen.
+ */
+async function rampProbe(
+  fetchImpl: F,
+  base: string,
+  { slots, perSlot = 3, gapMs = 15 }: { slots: number; perSlot?: number; gapMs?: number },
+): Promise<Set<string>> {
+  const versions = new Set<string>();
+  const slot = async (i: number): Promise<void> => {
+    await sleep(i * gapMs);
+    for (let k = 0; k < perSlot; k++) {
+      const r = (await fetchImpl(new Request(`${base}/${i}-${k}`)).then((x) => x.json())) as { ver: string };
+      versions.add(r.ver);
+    }
+  };
+  await Promise.all(Array.from({ length: slots }, (_, i) => slot(i)));
+  return versions;
+}
+
+describe("createLoadTransport — HTTP/2 connection-reuse ratio under a RAMP (e2e)", () => {
   let server: Http2SecureServer | undefined;
   let base = "";
   let sessionCount = 0;
-  const gate = makeGate();
 
   beforeAll(async () => {
     if (!TLS) return; // openssl unavailable → the it.skipIf blocks below skip
     server = createSecureServer({ key: TLS.key, cert: TLS.cert, allowHTTP1: true });
     server.on("session", () => { sessionCount += 1; });
     server.on("request", (req, res) => {
-      void gate.onRequest().then(() => {
-        res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ ver: req.httpVersion }));
-      });
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ver: req.httpVersion }));
     });
     await new Promise<void>((r) => server!.listen(0, "127.0.0.1", () => r()));
     const addr = server.address();
@@ -211,41 +234,64 @@ describe("createLoadTransport — HTTP/2 multiplexing over TLS (e2e)", () => {
     if (TLS) rmSync(TLS.dir, { recursive: true, force: true });
   });
 
-  it.skipIf(!TLS)("https + slotCount:6, spc:6 → ONE h2 session carries all 6 concurrent streams", async () => {
-    sessionCount = 0; gate.arm(6);
-    const t = createLoadTransport({ preferH2: true, slotCount: 6, streamsPerConnection: 6, connectOverrides: { rejectUnauthorized: false } });
-    const results = await concurrentProbe(t.fetch as F, base, 6);
+  it.skipIf(!TLS)("staggered ramp, slotCount:10 spc:5 → exactly 2 h2 connections (ceil(10/5))", async () => {
+    sessionCount = 0;
+    const t = createLoadTransport({ preferH2: true, slotCount: 10, streamsPerConnection: 5, connectOverrides: { rejectUnauthorized: false } });
+    const vers = await rampProbe(t.fetch as F, base, { slots: 10 });
     await t.close();
-    expect(sessionCount).toBe(1); // ceil(6/6) = 1 connection
-    expect(results.every((r) => r.ver === "2.0")).toBe(true);
+    expect(sessionCount).toBe(2); // K = ceil(10/5) — enforced by the round-robin, NOT a barrier artifact
+    expect([...vers]).toEqual(["2.0"]);
   });
 
-  it.skipIf(!TLS)("https + slotCount:8, spc:2 → FOUR h2 sessions (the reuse ratio spreads streams)", async () => {
-    sessionCount = 0; gate.arm(8);
+  it.skipIf(!TLS)("staggered ramp, slotCount:8 spc:2 → exactly 4 h2 connections (ceil(8/2))", async () => {
+    sessionCount = 0;
     const t = createLoadTransport({ preferH2: true, slotCount: 8, streamsPerConnection: 2, connectOverrides: { rejectUnauthorized: false } });
-    const results = await concurrentProbe(t.fetch as F, base, 8);
+    const vers = await rampProbe(t.fetch as F, base, { slots: 8 });
     await t.close();
-    expect(sessionCount).toBe(4); // ceil(8/2) = 4 connections
-    expect(results.every((r) => r.ver === "2.0")).toBe(true);
+    expect(sessionCount).toBe(4); // K = ceil(8/2)
+    expect([...vers]).toEqual(["2.0"]);
+  });
+
+  it.skipIf(!TLS)("staggered ramp, slotCount:6 spc:6 → ONE h2 connection (full multiplex)", async () => {
+    sessionCount = 0;
+    const t = createLoadTransport({ preferH2: true, slotCount: 6, streamsPerConnection: 6, connectOverrides: { rejectUnauthorized: false } });
+    const vers = await rampProbe(t.fetch as F, base, { slots: 6 });
+    await t.close();
+    expect(sessionCount).toBe(1); // K = ceil(6/6)
+    expect([...vers]).toEqual(["2.0"]);
   });
 
   it.skipIf(!TLS)("preferH2:false → HTTP/1.1 even against an h2-capable server (allowH2 off)", async () => {
-    sessionCount = 0; gate.arm(3);
+    sessionCount = 0;
     const t = createLoadTransport({ preferH2: false, slotCount: 3, streamsPerConnection: 5, connectOverrides: { rejectUnauthorized: false } });
-    const results = await concurrentProbe(t.fetch as F, base, 3);
+    const vers = await rampProbe(t.fetch as F, base, { slots: 3 });
     await t.close();
-    expect(results.every((r) => r.ver === "1.1")).toBe(true);
+    expect([...vers]).toEqual(["1.1"]);
   });
 });
 
-describe("createLoadTransport — plain http (no TLS): auto-h1 + scheme-aware pool sizing", () => {
+describe("createLoadTransport — plain http (no TLS): auto-h1, pool sizing, redirect, teardown", () => {
   let server: Server | undefined;
   let base = "";
   let connections = 0;
+  let finalHits = 0;
   const gate = makeGate();
 
   beforeAll(async () => {
     server = createServer((req, res) => {
+      const url = req.url ?? "/";
+      if (url.startsWith("/hang")) return; // never respond → an in-flight request for the destroy test
+      if (url.startsWith("/redirect")) {
+        res.statusCode = 302;
+        res.setHeader("location", `${base}/final`);
+        res.end();
+        return;
+      }
+      if (url.startsWith("/final")) {
+        finalHits += 1;
+        res.end("final");
+        return;
+      }
       void gate.onRequest().then(() => {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ ver: req.httpVersion }));
@@ -284,16 +330,47 @@ describe("createLoadTransport — plain http (no TLS): auto-h1 + scheme-aware po
   });
 
   it("sizes the http pool to slotCount (NOT ceil(slotCount/spc)) — cleartext is never throttled", async () => {
-    // preferH2:true + spc:5 would (wrongly) cap a single Agent at ceil(6/5)=2 connections; the
-    // scheme-routed h1 pool must instead give 6 concurrent connections for a 6-slot http load.
-    // The gate holds all 6 concurrently, so a throttled pool would DEADLOCK (only 2 arrive) —
-    // this test both proves the count AND that http is not capped below slotCount.
+    // preferH2:true + spc:5 must NOT cap the h1 pool at ceil(6/5)=2; the h1 Agent's connections
+    // = slotCount = 6. The gate holds all 6 concurrently, so a throttled pool would DEADLOCK
+    // (only 2 arrive) — this proves both the count AND that http is not capped below slotCount.
     connections = 0; gate.arm(6);
     const t = createLoadTransport({ preferH2: true, slotCount: 6, streamsPerConnection: 5 });
     const results = await concurrentProbe(t.fetch as F, base, 6);
     await t.close();
     expect(connections).toBe(6); // one connection per concurrent request — not 2
     expect(results.every((r) => r.ver === "1.1")).toBe(true);
+  });
+
+  it("preserves redirect:'manual' (does NOT follow the 3xx) through Request normalization", async () => {
+    finalHits = 0;
+    const t = createLoadTransport({ preferH2: true, slotCount: 1, streamsPerConnection: 5 });
+    const res = (await (t.fetch as F)(new Request(`${base}/redirect`, { redirect: "manual" }))) as Response;
+    await t.close();
+    // manual → the transport returns the redirect itself and does NOT fetch /final.
+    expect(finalHits).toBe(0);
+    expect(res.status === 302 || res.type === "opaqueredirect").toBe(true);
+  });
+
+  it("default redirect DOES follow (control for the manual case)", async () => {
+    finalHits = 0;
+    const t = createLoadTransport({ preferH2: true, slotCount: 1, streamsPerConnection: 5 });
+    const res = (await (t.fetch as F)(new Request(`${base}/redirect`))) as Response;
+    const body = await res.text();
+    await t.close();
+    expect(finalHits).toBe(1); // followed to /final
+    expect(body).toBe("final");
+  });
+
+  it("destroy() aborts an in-flight request within a bounded time (close() would hang)", async () => {
+    const t = createLoadTransport({ preferH2: true, slotCount: 1, streamsPerConnection: 5 });
+    // Fire a request to the never-responding /hang endpoint; keep it in flight.
+    const inflight = (t.fetch as F)(new Request(`${base}/hang`));
+    const outcome = inflight.then(() => "resolved", () => "rejected");
+    await sleep(50); // let it reach the server (now hung)
+    const start = Date.now();
+    await t.destroy(); // destructive → aborts the in-flight request at once
+    expect(Date.now() - start).toBeLessThan(2000); // bounded, does not wait on the hung request
+    expect(await outcome).toBe("rejected"); // the in-flight request was aborted
   });
 
   it("emits the plain-http ignore warning ONCE when routing http under an explicit spc>1", async () => {

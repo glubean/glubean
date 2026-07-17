@@ -2,7 +2,7 @@
   "name": "@glubean/cli",
   "version": "0.10.3",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "type": "module",
   "bin": {

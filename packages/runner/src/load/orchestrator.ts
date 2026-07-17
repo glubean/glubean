@@ -37,6 +37,7 @@ import { randomUUID } from "node:crypto";
 
 import { createEngineCore } from "../engine-bridge.js";
 import {
+  computeLoadConnections,
   createLoadTransport,
   loadHttpH1IgnoreWarning,
   loadHttpPlainHttpIgnoreWarning,
@@ -699,6 +700,19 @@ export async function runLoadShard(
     ...(thinkTimeMs !== undefined ? { pacing: { thinkTimeMs } } : {}),
     ...(continuationCfg !== undefined ? { continuation: continuationCfg } : {}),
     ...(mixScenarios !== undefined ? { scenarios: mixScenarios } : {}),
+    // Egress transport model (P2 artifact-config): preferH2 + the reuse ratio + the derived
+    // h2 connection count for the GLOBAL concurrency — `ceil(concurrency/spc)` for h2 (https),
+    // else `concurrency` (h1/plain-http is one-per-request). Recorded at GLOBAL concurrency so
+    // a multi-core run's value is worker-count-independent (every worker's frame carries the
+    // same numbers; the coordinator's replace-with-first merge stays consistent). Makes runs
+    // under different connection models distinguishable/comparable/reproducible, like rngSeed.
+    http: {
+      preferH2: httpConfig.preferH2,
+      streamsPerConnection: httpConfig.streamsPerConnection,
+      connections: httpConfig.preferH2
+        ? computeLoadConnections(concurrency, httpConfig.streamsPerConnection)
+        : concurrency,
+    },
   };
 
   // startAt gate (a coordinator's synchronized dispatch instant): hold until the shared
@@ -1140,10 +1154,19 @@ export async function runLoadShard(
     // microtasks — after the synchronous `seal()` below — so their late events are still
     // dropped, leaving the artifact unchanged; only the wasted in-flight work is cut.
     runAbort.abort();
-    // Close the egress HTTP transport's Agent (its pooled connections) so a run leaves no
-    // open sockets behind — a leaked pool would hold a standalone process open past run end.
-    // `runAbort.abort()` above already cancelled in-flight requests, so this drains cleanly.
-    await transport.close();
+    // Tear down the egress transport (its pooled connections) so a run leaves no open sockets.
+    // When the drain timeout ABANDONED a continuation, its HTTP request may still be in flight —
+    // and under a `"coarse"` abort `runAbort` DELIBERATELY did not cancel it — so a graceful
+    // `close()` (which waits for in-flight requests) would block `runLoad` past any bound. Use
+    // the DESTRUCTIVE `destroy()` (aborts in-flight at once → bounded) in that case; a normal
+    // run — every continuation drained/awaited and cancelled — uses graceful `close()`.
+    // (`abortedByDrainTimeout > 0` is the precise signal: without an abandonment, `drainContinuations`
+    // already awaited every continuation's request, so nothing is left in flight at close.)
+    if (abortedByDrainTimeout > 0) {
+      await transport.destroy();
+    } else {
+      await transport.close();
+    }
   }
 
   // The reason recorded AT the actual termination event (markEnded), not a post-hoc
