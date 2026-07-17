@@ -24,6 +24,7 @@ import type {
   LoadArtifactConfig,
   LoadEndReason,
   LoadErrorKind,
+  LoadHttpConfig,
   LoadMixConfig,
   LoadPlan,
   LoadResolvedConfig,
@@ -35,6 +36,12 @@ import { parseDurationMs } from "@glubean/sdk/load";
 import { randomUUID } from "node:crypto";
 
 import { createEngineCore } from "../engine-bridge.js";
+import {
+  createLoadTransport,
+  loadHttpH1IgnoreWarning,
+  loadHttpPlainHttpIgnoreWarning,
+  resolveLoadHttpConfig,
+} from "./http-transport.js";
 import {
   compileLoadScenario,
   startLoadIteration,
@@ -91,6 +98,10 @@ export interface RunLoadOptions {
    *  consulted it (single scenario / single-entry mix) stays fully seeded and
    *  keeps its recorded seed. */
   random?: () => number;
+  /** glubean.yaml `load.http` default transport config (preferH2 / streamsPerConnection),
+   *  layered UNDER the plan's own `http` (plan wins per field). Absent → built-in defaults
+   *  (preferH2 true, streamsPerConnection 5) apply. */
+  httpDefault?: LoadHttpConfig;
 }
 
 /**
@@ -318,6 +329,10 @@ export interface RunLoadShardOptions {
   baseSession?: Record<string, unknown>;
   /** Clock for wall-clock timing + event ts (default `Date.now`). */
   now?: () => number;
+  /** glubean.yaml `load.http` default transport config, layered UNDER the plan's own
+   *  `http` (plan wins per field). In multi-core it rides the shard assignment so every
+   *  worker resolves the same effective transport; absent → built-in defaults. */
+  httpDefault?: LoadHttpConfig;
   /** @deprecated mix-selection override — see {@link RunLoadOptions.random}. Carried so
    *  `runLoad` can pass it through; a distributed run never sets it. */
   random?: () => number;
@@ -596,10 +611,30 @@ export async function runLoadShard(
     ...(onSnapshot !== undefined ? { workerId: shard.workerId } : {}),
   });
   const sink = new LoadSink(reducer, runId, runnerId, now);
+
+  // Egress HTTP transport (HTTP/2 + connection-reuse ratio). Resolve the effective config
+  // (plan `http` over the glubean.yaml `load.http` default over built-ins;
+  // `streamsPerConnection` validated as a positive integer, throws `loadRunner`-prefixed),
+  // then hand it THIS worker's `shard.slotCount` — each worker process owns independent pools,
+  // so N workers' pools sum to ≈ the global concurrency's. For the single shard `runLoad`
+  // builds, `slotCount === concurrency` (global). The transport sizes its pool by the target's
+  // ACTUAL scheme (owner 2026-07-17): https under preferH2 multiplexes at `ceil(slotCount/spc)`;
+  // a plain http:// target can't multiplex and gets `slotCount` (one-per-request), so it is
+  // NEVER silently throttled. The pooled Agent(s) are a resource (open sockets): they are
+  // `close()`d in the `finally` below so they never leak.
+  const httpConfig = resolveLoadHttpConfig(plan.id, config.http, opts.httpDefault);
+  const plainHttpWarning = loadHttpPlainHttpIgnoreWarning(config.http, opts.httpDefault);
+  const transport = createLoadTransport({
+    preferH2: httpConfig.preferH2,
+    slotCount: shard.slotCount,
+    streamsPerConnection: httpConfig.streamsPerConnection,
+    ...(plainHttpWarning !== undefined ? { httpIgnoreWarning: `loadRunner "${plan.id}": ${plainHttpWarning}` } : {}),
+  });
   const core = createEngineCore(sink.handleWire, {
     vars: opts.vars ?? {},
     secrets: opts.secrets ?? {},
     abortMode: config.abort ?? "precise",
+    fetch: transport.fetch,
   });
 
   // Run-level abort, handed to every iteration's engine run. Fired once at finalization
@@ -1105,6 +1140,10 @@ export async function runLoadShard(
     // microtasks — after the synchronous `seal()` below — so their late events are still
     // dropped, leaving the artifact unchanged; only the wasted in-flight work is cut.
     runAbort.abort();
+    // Close the egress HTTP transport's Agent (its pooled connections) so a run leaves no
+    // open sockets behind — a leaked pool would hold a standalone process open past run end.
+    // `runAbort.abort()` above already cancelled in-flight requests, so this drains cleanly.
+    await transport.close();
   }
 
   // The reason recorded AT the actual termination event (markEnded), not a post-hoc
@@ -1178,6 +1217,10 @@ export async function runLoadShard(
 export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promise<LoadArtifact> {
   const config = plan.config;
   const { concurrency, iterations } = plan.projection;
+  // Warn ONCE (here, not per-shard) if `streamsPerConnection` was set > 1 under
+  // `preferH2:false` — it is HTTP/2-only and ignored under h1 (must not fail silently).
+  const httpWarning = loadHttpH1IgnoreWarning(config.http, opts.httpDefault);
+  if (httpWarning !== undefined) console.warn(`loadRunner "${plan.id}": ${httpWarning}`);
   // The degenerate single shard: one worker owns every slot `[0, concurrency)`, the full
   // iteration set (a `[0, iterations)` range, or an all-indexes `{offset:0, step:1}`
   // stride for a duration-only run), the whole continuation config, and an EMPTY feeder-
@@ -1209,6 +1252,7 @@ export async function runLoad(plan: LoadPlan, opts: RunLoadOptions = {}): Promis
     ...(opts.runnerId !== undefined ? { runnerId: opts.runnerId } : {}),
     ...(opts.baseSession !== undefined ? { baseSession: opts.baseSession } : {}),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
+    ...(opts.httpDefault !== undefined ? { httpDefault: opts.httpDefault } : {}),
     ...(opts.random !== undefined ? { random: opts.random } : {}),
   });
 

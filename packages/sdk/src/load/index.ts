@@ -60,6 +60,7 @@ export type {
   LoadDuration,
   LoadContinuationConfig,
   LoadPacingConfig,
+  LoadHttpConfig,
   LoadThresholds,
   LoadThresholdScope,
   LoadCustomMetricThresholdScope,

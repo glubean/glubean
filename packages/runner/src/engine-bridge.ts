@@ -17,6 +17,7 @@ import {
   RunnerCore,
   toTestDef,
   type ExecutionEvent,
+  type FetchImpl,
   type RunnerServices,
   type TestResult,
   type ScopeInput,
@@ -221,6 +222,11 @@ export interface EngineCoreOptions {
    *  cancels in-flight requests at once via a leak-free per-iteration bridge; "coarse"
    *  skips per-request signal wiring for max throughput (abort between steps only). */
   abortMode?: "precise" | "coarse";
+  /** Egress fetch override (the injectable host port). Defaults to `globalThis.fetch`
+   *  (Node's built-in undici, HTTP/1.1). The load path injects an undici-Agent-backed
+   *  fetch here to enable HTTP/2 + a tuned connection-reuse ratio (see
+   *  `load/http-transport.ts`); the test/contract path leaves it unset. */
+  fetch?: FetchImpl;
 }
 
 /**
@@ -233,7 +239,7 @@ export function createEngineCore(
   opts: EngineCoreOptions,
 ): RunnerCore {
   const services: RunnerServices = {
-    fetch: (input, init) => globalThis.fetch(input as RequestInfo, init),
+    fetch: opts.fetch ?? ((input, init) => globalThis.fetch(input as RequestInfo, init)),
     env: {
       vars: () => opts.vars,
       secrets: () => opts.secrets,

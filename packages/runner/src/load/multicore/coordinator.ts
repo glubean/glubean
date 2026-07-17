@@ -34,11 +34,13 @@ import type {
   LoadExecutionCoverage,
   LoadExecutionStatus,
   LoadExecutionWorker,
+  LoadHttpConfig,
   LoadPlan,
   LoadShardIterationIndexes,
   LoadWorkerTerminationCause,
 } from "@glubean/sdk/load";
 import { shardPlan, type LoadShard } from "../shard.js";
+import { loadHttpH1IgnoreWarning } from "../http-transport.js";
 import { finalizeMerged, mergePartials, type LoadReducerPartialV1 } from "../partial.js";
 import { MultiCoreProvider, type LoadWorkerChannel, type LoadWorkerProvider, type ChannelCloseReason } from "./provider.js";
 import { MULTICORE_PROTOCOL_VERSION, type ShardResultObservablesV1 } from "./protocol.js";
@@ -100,6 +102,10 @@ export interface RunLoadMultiCoreOptions {
   /** Root seed for the run's counter-keyed RNG streams (§6.5) — generated ONCE and handed
    *  identically to every shard. Default: a fresh UUID. */
   rngSeed?: string;
+  /** glubean.yaml `load.http` default transport config (preferH2 / streamsPerConnection),
+   *  layered UNDER the plan's own `http`. Rides each worker's assignment so every shard
+   *  resolves the same effective transport; absent → built-in defaults apply. */
+  httpDefault?: LoadHttpConfig;
   /** Periodic snapshot cadence (ms) each worker uses; omitted → the kernel default (15s).
    *  Injectable so a test need not wait 15s for a frame. */
   snapshotIntervalMs?: number;
@@ -196,6 +202,12 @@ export async function runLoadMultiCore(
   // termination bound / bad bounds) BEFORE any worker is spawned.
   const { shards, workerCount, runLevel, clampedFrom, clampReason } = shardPlan(plan, opts.workerCount);
 
+  // Warn ONCE (coordinator-side, not per worker) if `streamsPerConnection` was set > 1 under
+  // `preferH2:false` — HTTP/2-only, ignored under h1 (must not fail silently). Each worker's
+  // `runLoadShard` still applies the same resolution; only the warning is centralized here.
+  const httpWarning = loadHttpH1IgnoreWarning(plan.config.http, opts.httpDefault);
+  if (httpWarning !== undefined) console.warn(`loadRunner "${plan.id}": ${httpWarning}`);
+
   const rngSeed = opts.rngSeed ?? randomUUID();
   const provider =
     opts.provider ??
@@ -256,6 +268,7 @@ export async function runLoadMultiCore(
           timelineOrigin: provisionalOrigin,
           ...(opts.baseSession !== undefined ? { baseSession: opts.baseSession } : {}),
           ...(opts.snapshotIntervalMs !== undefined ? { snapshotIntervalMs: opts.snapshotIntervalMs } : {}),
+          ...(opts.httpDefault !== undefined ? { http: opts.httpDefault } : {}),
         },
       });
     }

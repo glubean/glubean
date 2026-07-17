@@ -555,6 +555,72 @@ profiles:
         );
       });
     });
+
+    it("parses defaults.load.http (preferH2 / streamsPerConnection)", async () => {
+      const yaml = `${BASE}
+defaults:
+  load:
+    http:
+      preferH2: false
+      streamsPerConnection: 8
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.defaults?.load?.http).toEqual({ preferH2: false, streamsPerConnection: 8 });
+      });
+    });
+
+    it("parses http alongside plans/provider on profiles.<name>.load", async () => {
+      const yaml = `${BASE}
+load:
+  plans:
+    ok: { target: ./x.load.ts }
+profiles:
+  perf:
+    load:
+      plans: [ok]
+      http: { preferH2: true, streamsPerConnection: 3 }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        const { config } = await loadProjectConfigV1(dir);
+        expect(config.profiles.perf.load?.http).toEqual({ preferH2: true, streamsPerConnection: 3 });
+      });
+    });
+
+    it("rejects a non-positive-integer load.http.streamsPerConnection", async () => {
+      const yaml = `${BASE}
+defaults:
+  load:
+    http:
+      streamsPerConnection: 0
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /`defaults\.load\.http\.streamsPerConnection` must be a positive integer/,
+        );
+      });
+    });
+
+    it("rejects an unknown key under load.http", async () => {
+      const yaml = `${BASE}
+defaults:
+  load:
+    http:
+      preferH2: true
+      bogus: 1
+profiles:
+  local: { suites: [tests] }
+`;
+      await withTempDir({ "glubean.yaml": yaml }, async (dir) => {
+        await expect(loadProjectConfigV1(dir)).rejects.toThrow(
+          /Unknown key\(s\) at `defaults\.load\.http`.*bogus/s,
+        );
+      });
+    });
   });
 
   describe("mcp config (plan 06 P3 — MCP trace settings)", () => {

@@ -31,7 +31,8 @@
     "dotenv": "^16.4.0",
     "ky": "^2.0.2",
     "p-queue": "^9.1.0",
-    "tsx": "^4.22.4"
+    "tsx": "^4.22.4",
+    "undici": "^8.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

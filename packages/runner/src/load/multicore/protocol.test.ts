@@ -32,6 +32,7 @@ const ASSIGNMENT: ShardAssignmentV1 = {
   baseSession: { user: { id: 7 } },
   timelineOrigin: 1_700_000_000_000,
   snapshotIntervalMs: 25,
+  http: { preferH2: true, streamsPerConnection: 4 },
 };
 
 const OBSERVABLES: ShardResultObservablesV1 = {
@@ -51,7 +52,7 @@ const PARTIAL_STUB = { v: 1, observedAt: 100 } as never;
 describe("multicore protocol round-trip", () => {
   const coordinatorCases: CoordinatorMessage[] = [
     { type: "assign", assignment: ASSIGNMENT },
-    { type: "assign", assignment: { ...ASSIGNMENT, baseSession: undefined, snapshotIntervalMs: undefined } },
+    { type: "assign", assignment: { ...ASSIGNMENT, baseSession: undefined, snapshotIntervalMs: undefined, http: undefined } },
     { type: "start", startAt: 1_700_000_000_500 },
     { type: "start", startAt: 1_700_000_000_500, dispatchDeadline: 1_700_000_030_500 },
     { type: "start", startAt: 1_700_000_000_500, timelineOrigin: 1_700_000_000_500 },

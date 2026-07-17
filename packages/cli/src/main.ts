@@ -943,7 +943,7 @@ async function executeLoad(
     // resolveLoadPlan (D1). Passing it (even when both are undefined) marks this
     // as profile mode so loadCommand doesn't ALSO re-read defaults.load. CLI
     // --provider/--workers still override this layer in resolveLoadProviderChoice.
-    resolvedLoad: { provider: resolvedLoadPlan.provider, workers: resolvedLoadPlan.workers },
+    resolvedLoad: { provider: resolvedLoadPlan.provider, workers: resolvedLoadPlan.workers, http: resolvedLoadPlan.http },
     tokenEnv: resolvedLoadPlan.upload?.tokenEnv,
     // GLU-244 codex R1 P1: without this, --upload's redaction-config reload
     // (resolveLoadUploadContext) would re-read the DEFAULT glubean.yaml path

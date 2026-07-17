@@ -20,6 +20,7 @@
 import { parseArgs } from "node:util";
 import { writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import type { LoadHttpConfig } from "@glubean/sdk/load";
 import { bootstrap } from "./bootstrap.js";
 import { runLoad } from "./load/orchestrator.js";
 import { runLoadMultiCore } from "./load/multicore/coordinator.js";
@@ -66,12 +67,27 @@ const { values: args } = parseArgs({
     // the coordinator, which spawns `--workers` worker processes.
     provider: { type: "string" },
     workers: { type: "string" },
+    // glubean.yaml `load.http` default transport config (JSON), layered UNDER each plan's
+    // own `http`. Absent → the runner's built-in defaults (preferH2 true, spc 5).
+    http: { type: "string" },
   },
   strict: false,
 });
 
 const file = args.file as string | undefined;
 if (!file) crash("load harness: missing required --file argument");
+
+// Parse the glubean.yaml `load.http` default from argv (JSON). A malformed value is a
+// coordinator bug, not user input — fail loudly rather than silently dropping the default.
+const httpDefault: LoadHttpConfig | undefined = (() => {
+  const raw = args.http as string | undefined;
+  if (raw === undefined) return undefined;
+  try {
+    return JSON.parse(raw) as LoadHttpConfig;
+  } catch (e) {
+    crash(`load harness: invalid --http JSON: ${e instanceof Error ? e.message : String(e)}`);
+  }
+})();
 
 const providerKind = (args.provider as string | undefined) ?? "in-process";
 // Worker count arrives already clamped by the CLI (cores-1); `shardPlan` clamps it again per
@@ -141,9 +157,14 @@ for (const plan of collectLoadPlans(ns)) {
             cwd: process.cwd(),
             vars: envVars,
             secrets: envSecrets,
+            ...(httpDefault !== undefined ? { httpDefault } : {}),
             ...(runAbort !== undefined ? { abort: runAbort.signal } : {}),
           })
-        : await runLoad(plan, { vars: envVars, secrets: envSecrets });
+        : await runLoad(plan, {
+            vars: envVars,
+            secrets: envSecrets,
+            ...(httpDefault !== undefined ? { httpDefault } : {}),
+          });
     emit({ type: "artifact", runnerId: plan.id, artifact });
   } catch (e) {
     emit({

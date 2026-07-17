@@ -21,7 +21,7 @@ import { stat, readdir, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
 import { loadProjectEnv, runLoadFileInSubprocess, type LoadProviderChoice } from "@glubean/runner";
-import type { LoadArtifact } from "@glubean/sdk/load";
+import type { LoadArtifact, LoadHttpConfig } from "@glubean/sdk/load";
 import type { LoadExecutionConfig } from "../lib/config.js";
 import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 import { findProjectConfig } from "./run.js";
@@ -227,6 +227,9 @@ export async function runLoadFiles(
     /** Execution provider (default in-process). `multi-core` runs the coordinator in the
      *  child, which spawns worker processes; the parent side is unchanged. */
     provider?: LoadProviderChoice;
+    /** glubean.yaml `load.http` default transport config (preferH2 / streamsPerConnection),
+     *  layered UNDER each plan's own `http` by the runner. Absent → built-in defaults. */
+    http?: LoadHttpConfig;
   },
 ): Promise<RunLoadFilesResult> {
   const outcomes: LoadRunOutcome[] = [];
@@ -237,6 +240,7 @@ export async function runLoadFiles(
       secrets: opts.secrets,
       cwd: opts.cwd,
       ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+      ...(opts.http !== undefined ? { http: opts.http } : {}),
     });
     for (const o of res.outcomes) outcomes.push({ file, runnerId: o.runnerId, artifact: o.artifact });
     for (const e of res.errors) errors.push({ file, message: e.message });
@@ -991,6 +995,9 @@ export async function loadCommand(
     secrets,
     cwd: rootDir,
     provider: resolvedProvider.provider,
+    // glubean.yaml `load.http` default (profile.load.http over defaults.load.http, or
+    // bare defaults.load.http) — the runner layers each plan's own `http` over it.
+    ...(yamlLoad.http !== undefined ? { http: yamlLoad.http } : {}),
   });
 
   // Persist every completed artifact FIRST — a later broken file must not discard

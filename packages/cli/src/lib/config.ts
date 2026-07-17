@@ -21,6 +21,7 @@ import type { RedactionConfig } from "@glubean/redaction";
 import { LOCAL_RUN_DEFAULTS } from "@glubean/runner";
 import type { SharedRunConfig } from "@glubean/runner";
 import type { ThresholdConfig } from "@glubean/sdk";
+import type { LoadHttpConfig } from "@glubean/sdk/load";
 import { SUITE_KINDS } from "@glubean/scanner";
 import type { GlubeanSuiteKind } from "@glubean/scanner";
 
@@ -151,6 +152,14 @@ export interface LoadExecutionConfig {
    * `in-process`. Omit to default to `max(1, cpuCount - 1)` at run time.
    */
   workers?: number;
+  /**
+   * Egress HTTP transport defaults for load runs — HTTP/2 preference +
+   * connection-reuse ratio. Layered UNDER a plan's own `loadRunner(..., { http })`
+   * (the plan wins per field), over the built-in defaults (`preferH2: true`,
+   * `streamsPerConnection: 5`). `streamsPerConnection` is HTTP/2-only and
+   * `preferH2` only affects `https` (TLS ALPN) targets — see `LoadHttpConfig`.
+   */
+  http?: LoadHttpConfig;
 }
 
 /** Profile-scoped reference into the top-level `load.plans` block — which
@@ -400,8 +409,9 @@ const V1_PROFILE_KEYS = new Set([
   "envFile",
   "load",
 ]);
-const V1_PROFILE_LOAD_KEYS = new Set(["plans", "provider", "workers"]);
-const V1_DEFAULTS_LOAD_KEYS = new Set(["provider", "workers"]);
+const V1_PROFILE_LOAD_KEYS = new Set(["plans", "provider", "workers", "http"]);
+const V1_DEFAULTS_LOAD_KEYS = new Set(["provider", "workers", "http"]);
+const V1_LOAD_HTTP_KEYS = new Set(["preferH2", "streamsPerConnection"]);
 // Provider kinds accepted today. `remote` (distributed cluster) is deliberately
 // NOT here yet — reserved shape only (owner decision, D1); adding it later
 // brings its own config keys and does not change `workers` semantics.
@@ -694,6 +704,37 @@ function validateLoadExecution(
     assertType(s.workers, "number", `${context}.workers`, configPath);
     assertPositiveInt(s.workers as number, `${context}.workers`, configPath);
     out.workers = s.workers as number;
+  }
+  if (s.http !== undefined) {
+    out.http = validateLoadHttp(s.http, `${context}.http`, configPath);
+  }
+  return out;
+}
+
+/**
+ * Validate a `load.http` block (D1 HTTP transport surface) — the `preferH2` /
+ * `streamsPerConnection` pair shared by `defaults.load.http` and
+ * `profiles.<name>.load.http`. Illegal values hard-error (never silently truncate),
+ * same discipline as the provider/workers guard. `streamsPerConnection` must be a
+ * positive integer (matching the SDK/runner validation); `preferH2` a boolean.
+ */
+function validateLoadHttp(
+  raw: unknown,
+  context: string,
+  configPath: string,
+): LoadHttpConfig {
+  assertType(raw, "object", context, configPath);
+  assertOnlyKnownKeys(raw, V1_LOAD_HTTP_KEYS, context, configPath);
+  const s = raw as Record<string, unknown>;
+  const out: LoadHttpConfig = {};
+  if (s.preferH2 !== undefined) {
+    assertType(s.preferH2, "boolean", `${context}.preferH2`, configPath);
+    out.preferH2 = s.preferH2 as boolean;
+  }
+  if (s.streamsPerConnection !== undefined) {
+    assertType(s.streamsPerConnection, "number", `${context}.streamsPerConnection`, configPath);
+    assertPositiveInt(s.streamsPerConnection as number, `${context}.streamsPerConnection`, configPath);
+    out.streamsPerConnection = s.streamsPerConnection as number;
   }
   return out;
 }
@@ -1734,6 +1775,13 @@ export interface ResolvedLoadPlan {
    * `--workers` / inline `:N` / built-in `max(1, cpuCount-1)` decides downstream.
    */
   workers?: number;
+  /**
+   * Resolved egress HTTP transport default (`profiles.<name>.load.http` ??
+   * `defaults.load.http`, D1). `undefined` = not configured — the built-in
+   * defaults (`preferH2: true`, `streamsPerConnection: 5`) apply, still overridable
+   * per plan by `loadRunner(..., { http })`.
+   */
+  http?: LoadHttpConfig;
 }
 
 /**
@@ -1821,6 +1869,11 @@ export function resolveLoadPlan(
   // never force a provider; the built-in `in-process` default applies then.
   const provider = profile.load.provider ?? defaults.load?.provider;
   const workers = profile.load.workers ?? defaults.load?.workers;
+  // HTTP transport default: `profile.load.http` overrides `defaults.load.http`
+  // WHOLESALE (same per-key `??` precedence as provider/workers — an http block
+  // is resolved as one unit; the per-FIELD merge with a plan's own `http` happens
+  // downstream in the runner). Absent at every yaml layer → built-in defaults.
+  const http = profile.load.http ?? defaults.load?.http;
 
   return {
     profile: profileName,
@@ -1831,6 +1884,7 @@ export function resolveLoadPlan(
     ...(profile.upload !== undefined && { upload: profile.upload }),
     ...(provider !== undefined && { provider }),
     ...(workers !== undefined && { workers }),
+    ...(http !== undefined && { http }),
   };
 }
 

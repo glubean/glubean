@@ -21,7 +21,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import type { LoadArtifact, LoadPlan } from "@glubean/sdk/load";
+import type { LoadArtifact, LoadHttpConfig, LoadPlan } from "@glubean/sdk/load";
 import { resolveRunnerRoot, resolveTsxPath, prepareZeroProject } from "../runner-resolve.js";
 
 // ── Shared wire contract (child stdout → parent) ─────────────────────────────
@@ -143,6 +143,10 @@ export interface RunLoadFileOptions {
   /** Execution provider (default: in-process). For `multi-core`, the child harness runs the
    *  coordinator + spawns workers; the parent side (WIRE / artifact collection) is unchanged. */
   provider?: LoadProviderChoice;
+  /** glubean.yaml `load.http` default transport config (preferH2 / streamsPerConnection),
+   *  passed to the child on argv as JSON. The child's harness layers each plan's own `http`
+   *  over it (plan wins per field). Absent → the runner's built-in defaults apply. */
+  http?: LoadHttpConfig;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -217,7 +221,10 @@ export async function runLoadFileInSubprocess(
       opts.provider?.kind === "multi-core"
         ? [`--provider=multi-core`, `--workers=${opts.provider.workerCount}`]
         : [];
-    const child = spawn("node", [resolveTsxPath(), ...zp.tsxArgs, harnessPath, `--file=${file}`, ...providerArgs], {
+    // glubean.yaml `load.http` default rides argv as JSON (the child layers each plan's own
+    // `http` over it). Omitted when unset → the child applies the runner's built-in defaults.
+    const httpArgs = opts.http !== undefined ? [`--http=${JSON.stringify(opts.http)}`] : [];
+    const child = spawn("node", [resolveTsxPath(), ...zp.tsxArgs, harnessPath, `--file=${file}`, ...providerArgs, ...httpArgs], {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

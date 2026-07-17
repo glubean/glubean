@@ -65,6 +65,41 @@ export interface LoadPacingConfig {
   thinkTime?: LoadDuration | { min: LoadDuration; max: LoadDuration };
 }
 
+/**
+ * Egress HTTP transport tuning for a load run. Load is a pressure tool, so it can
+ * opt the out-of-process HTTP client into HTTP/2 with a controlled connection-reuse
+ * ratio — matching how real clients multiplex many concurrent requests over a few
+ * long-lived h2 connections instead of one connection per in-flight request.
+ *
+ * **HTTP/2 only.** `streamsPerConnection` describes h2 stream multiplexing; it has
+ * NO meaning under HTTP/1.1, where one connection carries at most one in-flight
+ * request (no multiplexing). Under `preferH2: false` the runner therefore IGNORES
+ * `streamsPerConnection` and is "one concurrent request → one connection" (bounded
+ * by the client's connection pool); if you explicitly set `streamsPerConnection > 1`
+ * together with `preferH2: false`, the runner prints a one-time warning rather than
+ * silently ignoring it.
+ *
+ * **`preferH2` only takes effect over TLS (https).** HTTP/2 is negotiated via the
+ * TLS ALPN handshake, so `preferH2: true` only upgrades `https://` targets. A plain
+ * `http://` target has no ALPN and stays HTTP/1.1 (the runner does not do h2c
+ * cleartext) — so `preferH2: true` is a no-op there.
+ */
+export interface LoadHttpConfig {
+  /**
+   * Prefer HTTP/2 via TLS ALPN for `https://` targets. Default `true` (load should
+   * exercise realistic h2 traffic). No effect on `http://` (cleartext) targets.
+   */
+  preferH2?: boolean;
+  /**
+   * Target number of concurrent h2 streams multiplexed onto ONE connection — the
+   * connection-reuse ratio. The client opens `ceil(concurrency / streamsPerConnection)`
+   * connections (per worker in multi-core: `ceil(slotCount / streamsPerConnection)`).
+   * Must be a positive integer. Default `5`. **HTTP/2 only** — ignored under
+   * `preferH2: false` (see the interface note).
+   */
+  streamsPerConnection?: number;
+}
+
 /** Threshold expressions for one scope (e.g. `errorRate: "<1%"`, `p95: "<800ms"`). */
 export interface LoadThresholdScope {
   errorRate?: string;
@@ -128,6 +163,11 @@ interface LoadRunnerCommon {
    *  `counter()`. Surfaced to steps as `ctx.metrics.<id>.add(...)` and folded
    *  into `summary.customMetrics`. */
   metrics?: LoadMetricDeclarations;
+  /** Egress HTTP transport tuning — HTTP/2 preference + connection-reuse ratio.
+   *  Defaults: `preferH2: true`, `streamsPerConnection: 5`. `streamsPerConnection`
+   *  is HTTP/2-only and `preferH2` only affects `https` (TLS ALPN) targets — see
+   *  {@link LoadHttpConfig}. Overridable per-project via glubean.yaml `load.http`. */
+  http?: LoadHttpConfig;
   /** How a run-level abort (stop / duration deadline / SIGINT) reaches in-flight
    *  requests.
    *  - `"precise"` (default): cancel in-flight HTTP at once. Uses a leak-free

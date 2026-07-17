@@ -26,7 +26,7 @@
  */
 import type { LoadReducerPartialV1 } from "../partial.js";
 import type { LoadShard } from "../shard.js";
-import type { LoadEndReason } from "@glubean/sdk/load";
+import type { LoadEndReason, LoadHttpConfig } from "@glubean/sdk/load";
 
 /** The wire protocol version. Bumped on any INCOMPATIBLE message-shape change; a peer that
  *  announces (or stamps) a different version is rejected at the `hello` handshake, before any
@@ -101,6 +101,11 @@ export interface ShardAssignmentV1 {
   /** Periodic snapshot cadence (ms); omitted → the kernel default (15s). Injectable so a
    *  test need not wait 15s for a frame. */
   snapshotIntervalMs?: number;
+  /** glubean.yaml `load.http` default transport config (preferH2 / streamsPerConnection),
+   *  layered UNDER the plan's own `http`. Rides the assignment so every worker resolves the
+   *  same effective transport; omitted → the worker applies plan `http` over built-in
+   *  defaults. Structurally passed through here; `runLoadShard` validates the values. */
+  http?: LoadHttpConfig;
 }
 
 // ── Coordinator → worker ─────────────────────────────────────────────────────
@@ -318,6 +323,10 @@ export function decodeCoordinatorMessage(raw: unknown): CoordinatorMessage {
           ? { baseSession: reqObject(a, "baseSession", side) as Record<string, unknown> }
           : {}),
         ...(a.snapshotIntervalMs !== undefined ? { snapshotIntervalMs: reqNumber(a, "snapshotIntervalMs", side) } : {}),
+        // Structural passthrough (an object if present) — the numeric bounds are validated by
+        // `runLoadShard`'s `resolveLoadHttpConfig`, which throws a `loadRunner`-prefixed error
+        // the worker relays as an `error` frame (cooperative trust; see file header).
+        ...(a.http !== undefined ? { http: reqObject(a, "http", side) as LoadHttpConfig } : {}),
       };
       return { type: "assign", assignment };
     }

@@ -257,6 +257,9 @@ async function beginRun(
       ...(assignment.baseSession !== undefined ? { baseSession: assignment.baseSession } : {}),
       ...(dispatchDeadline !== undefined ? { dispatchDeadline } : {}),
       ...(assignment.snapshotIntervalMs !== undefined ? { snapshotIntervalMs: assignment.snapshotIntervalMs } : {}),
+      // glubean.yaml `load.http` default (rides the assignment) → the shard's transport
+      // resolution layers the plan's own `http` over it. Absent → built-in defaults.
+      ...(assignment.http !== undefined ? { httpDefault: assignment.http } : {}),
     });
 
     // Authoritative terminal frame (the stamped state the shard exported at finalize) — the
