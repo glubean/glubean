@@ -228,6 +228,10 @@ function makePackageJson(_baseUrl: string): string {
         scripts: {
           test: "glubean run --profile local",
           "test:ci": "glubean ci run",
+          discover: "glubean discover",
+          doctor: "glubean doctor",
+          sync: "glubean sync --env-file .env",
+          upload: "glubean run --profile local --upload",
         },
         dependencies: {
           "@glubean/sdk": SDK_VERSION,
@@ -469,10 +473,19 @@ export const placeholder = test(
 function makeEnvFile(baseUrl: string): string {
   return `# Environment variables for tests
 BASE_URL=${baseUrl}
+
+# Glubean Cloud destination (IDs are not secrets)
+GLUBEAN_PROJECT_ID=
+GLUBEAN_TARGET_ID=
+GLUBEAN_API_URL=https://api.glubean.com
 `;
 }
 
 const ENV_SECRETS = `# Credentials and other secrets for tests (this file is gitignored)
+# Create a scoped runs:write token in Glubean Cloud Settings -> Tokens.
+GLUBEAN_TOKEN=
+
+# Target API credentials belong below this line.
 # Example: API_KEY=your-secret-here
 `;
 
@@ -1130,6 +1143,10 @@ const CONTRACT_FIRST_PACKAGE_JSON = (sdkVersion: string) =>
         test: "glubean run --profile local",
         "test:ci": "glubean ci run",
         scan: "glubean scan",
+        discover: "glubean discover",
+        doctor: "glubean doctor",
+        sync: "glubean sync --env-file .env",
+        upload: "glubean run --profile local --upload",
       },
       dependencies: {
         "@glubean/sdk": sdkVersion,
@@ -1158,6 +1175,10 @@ const DEMO_PACKAGE_JSON = (sdkVersion: string) =>
         // upload). Exit code is intermittently non-zero BY DESIGN.
         "test:full": "glubean run --profile full",
         scan: "glubean scan",
+        discover: "glubean discover",
+        doctor: "glubean doctor",
+        sync: "glubean sync --env-file .env",
+        upload: "glubean run --profile local --upload",
       },
       dependencies: {
         "@glubean/sdk": sdkVersion,
@@ -1318,12 +1339,12 @@ async function initContractFirst(overwrite: boolean): Promise<void> {
     },
     {
       path: ".env",
-      content: `# Environment variables\n# Set BASE_URL to your API server once it's running\nBASE_URL=http://localhost:3000\n`,
+      content: makeEnvFile("http://localhost:3000"),
       description: "Environment variables",
     },
     {
       path: ".env.secrets",
-      content: "# Secrets (add to .gitignore)\n",
+      content: ENV_SECRETS,
       description: "Secret variables",
     },
     {

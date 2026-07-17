@@ -24,6 +24,7 @@ glubean run --filter checkout --tag smoke
 glubean run --profile ci --upload   # CI profile + push results to Cloud
 glubean load                    # discover and run *.load.ts plans
 glubean login                   # authenticate with Glubean Cloud
+glubean discover                # inventory assets + environment readiness
 ```
 
 See the full project README at the [repo root](../../README.md) for the broader Glubean story (SDK, MCP, agent workflow).
@@ -84,7 +85,42 @@ Statically analyze a directory and emit `metadata.json` describing the test suit
 
 ```bash
 glubean scan tests/
-glubean scan --upload --project <id>      # push contract metadata without running
+```
+
+### `discover` and `doctor`
+
+`discover` builds a deterministic project asset catalog. It lists source files,
+tests, contracts and cases, workflows, load plans, OpenAPI paths, available env
+files, and whether each environment is ready to sync definitions or upload runs.
+When credentials are present it performs a read-only Cloud capability check and
+includes the canonical project URL; it never syncs or uploads data.
+
+```bash
+glubean discover                         # write <project>/catalog.yml
+glubean discover --out catalog.json      # JSON inferred from the extension
+glubean discover --out - --format yaml   # catalog on stdout
+glubean discover --filter type:contract  # type:, file:, tag:, id:, or env:
+glubean discover --offline               # local inventory only
+```
+
+`doctor` uses the same discovery engine but prints a diagnostic report instead
+of writing a file by default. Blocking asset or environment readiness issues
+produce exit code 1, making it suitable for CI.
+
+```bash
+glubean doctor
+glubean doctor --filter env:production
+glubean doctor --out doctor.json
+```
+
+### `sync`
+
+Project tests, contracts, workflows, and OpenAPI projections to Glubean Cloud
+without running them. `discover` or `doctor` can verify the environment first.
+
+```bash
+glubean doctor --filter env:production
+glubean sync --env-file .env.production
 ```
 
 ### `migrate`

@@ -37,13 +37,14 @@ npm test                 # local profile — green
 npm run test:full        # full narrative — flaky + canary intermittently fail
 ```
 
-`MOCK_BACKEND_URL` lives in `.env` (loaded into `ctx.vars` + `{{VAR}}`
+`MOCK_BACKEND_URL`, `GLUBEAN_PROJECT_ID`, `GLUBEAN_TARGET_ID`, and
+`GLUBEAN_API_URL` live in `.env` (loaded into `ctx.vars` + `{{VAR}}`
 templates). The HTTP client is configured once in
 [`config/api.ts`](config/api.ts) and imported by every test + contract —
 it auto-traces and auto-redacts requests, so the dashboard shows the
 actual calls with zero hand-written client code.
 
-`.env.secrets` (gitignored) is only needed for the opt-in `--upload`
+`.env.secrets` (gitignored) is only needed for the opt-in `sync`/`--upload`
 flow — put `GLUBEAN_TOKEN` there.
 
 ## Notes

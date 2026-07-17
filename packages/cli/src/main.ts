@@ -36,6 +36,7 @@ import { redactCommand } from "./commands/redact.js";
 import { configMcpCommand } from "./commands/config_mcp.js";
 import { upgradeCommand } from "./commands/upgrade.js";
 import { migrateCommand } from "./commands/migrate.js";
+import { discoverCommand, doctorCommand } from "./commands/discover.js";
 
 import { envShowCommand, envUseCommand, envResetCommand, envListCommand } from "./commands/env.js";
 import { qaOpenCommand, qaAttachCommand, qaStopCommand } from "./commands/qa.js";
@@ -748,6 +749,47 @@ program
     await scanCommand({
       dir: options.dir,
       output: options.out,
+    });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// discover / doctor — shared asset inventory and readiness diagnostics
+// ─────────────────────────────────────────────────────────────────────────────
+program
+  .command("discover")
+  .description("Catalog project assets, environments, and Cloud sync/upload readiness")
+  .option("-d, --dir <path>", "Locate the Glubean project from this directory", ".")
+  .option("-f, --filter <selector>", "Filter assets (type:, file:, tag:, id:) or environments (env:); repeatable", collect, [])
+  .option("-o, --out <path>", "Write catalog to this path; default: <project>/catalog.yml; use - for stdout")
+  .option("--format <format>", "Catalog format: yaml or json (inferred from --out when omitted)")
+  .option("--offline", "Skip the read-only Cloud token/project/scope readiness check")
+  .option("--strict", "Exit non-zero when sync or upload has a blocking issue")
+  .action(async (options) => {
+    process.exitCode = await discoverCommand({
+      dir: options.dir,
+      out: options.out,
+      format: options.format,
+      filters: options.filter,
+      offline: options.offline,
+      strict: options.strict,
+    });
+  });
+
+program
+  .command("doctor")
+  .description("Diagnose project assets and Cloud sync/upload readiness")
+  .option("-d, --dir <path>", "Locate the Glubean project from this directory", ".")
+  .option("-f, --filter <selector>", "Filter assets or environments; repeatable", collect, [])
+  .option("-o, --out <path>", "Also write the full diagnostic catalog")
+  .option("--format <format>", "Catalog format: yaml or json (inferred from --out when omitted)")
+  .option("--offline", "Skip the read-only Cloud token/project/scope readiness check")
+  .action(async (options) => {
+    process.exitCode = await doctorCommand({
+      dir: options.dir,
+      out: options.out,
+      format: options.format,
+      filters: options.filter,
+      offline: options.offline,
     });
   });
 

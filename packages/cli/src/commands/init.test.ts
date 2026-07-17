@@ -64,6 +64,10 @@ test("init --no-interactive creates basic project files", async () => {
     expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeUndefined();
     expect(typeof pkgJson.scripts?.test).toBe("string");
     expect(typeof pkgJson.scripts?.["test:ci"]).toBe("string");
+    expect(pkgJson.scripts?.discover).toBe("glubean discover");
+    expect(pkgJson.scripts?.doctor).toBe("glubean doctor");
+    expect(pkgJson.scripts?.sync).toBe("glubean sync --env-file .env");
+    expect(pkgJson.scripts?.upload).toBe("glubean run --profile local --upload");
 
     // GLU-110 / GitHub #9 regression: `npm test` must resolve the local
     // `glubean` binary, not fall back to whatever stale `glubean` happens
@@ -79,6 +83,11 @@ test("init --no-interactive creates basic project files", async () => {
     // Verify .env contains default base URL
     const envContent = await readFile(join(dir, ".env"), "utf-8");
     expect(envContent).toContain("https://dummyjson.com");
+    expect(envContent).toContain("GLUBEAN_PROJECT_ID=");
+    expect(envContent).toContain("GLUBEAN_TARGET_ID=");
+    expect(envContent).toContain("GLUBEAN_API_URL=https://api.glubean.com");
+    const secretsContent = await readFile(join(dir, ".env.secrets"), "utf-8");
+    expect(secretsContent).toContain("GLUBEAN_TOKEN=");
 
     // Verify example test uses configure() + {{BASE_URL}} pattern
     const testContent = await readFile(join(dir, "tests/api.test.ts"), "utf-8");
@@ -341,6 +350,16 @@ test("init --contract-first creates contract-first project", async () => {
     expect(pkgJson.scripts?.["contract:run"]).toBe("glubean run contracts/");
     expect(pkgJson.scripts?.test).toBe("glubean run --profile local");
     expect(pkgJson.scripts?.["test:ci"]).toBe("glubean ci run");
+    expect(pkgJson.scripts?.discover).toBe("glubean discover");
+    expect(pkgJson.scripts?.doctor).toBe("glubean doctor");
+    expect(pkgJson.scripts?.sync).toBe("glubean sync --env-file .env");
+    expect(pkgJson.scripts?.upload).toBe("glubean run --profile local --upload");
+    const envContent = await readFile(join(dir, ".env"), "utf-8");
+    expect(envContent).toContain("GLUBEAN_PROJECT_ID=");
+    expect(envContent).toContain("GLUBEAN_TARGET_ID=");
+    expect(envContent).toContain("GLUBEAN_API_URL=https://api.glubean.com");
+    const secretsContent = await readFile(join(dir, ".env.secrets"), "utf-8");
+    expect(secretsContent).toContain("GLUBEAN_TOKEN=");
     expect(pkgJson.dependencies?.zod).toBeDefined();
     expect(pkgJson.dependencies?.["@glubean/runner"]).toBeDefined();
     expect(pkgJson.devDependencies?.["@glubean/runner"]).toBeUndefined();
@@ -375,6 +394,16 @@ test("init --template demo scaffolds package.json with CLI as a direct dep (GLU-
     expect(pkgJson.dependencies?.["@glubean/cli"]).toBeDefined();
     expect(pkgJson.devDependencies?.["@glubean/cli"]).toBeUndefined();
     expect(pkgJson.scripts?.test).toBe("glubean run --profile local");
+    expect(pkgJson.scripts?.discover).toBe("glubean discover");
+    expect(pkgJson.scripts?.doctor).toBe("glubean doctor");
+    expect(pkgJson.scripts?.sync).toBe("glubean sync --env-file .env");
+    expect(pkgJson.scripts?.upload).toBe("glubean run --profile local --upload");
+    const envExample = await readFile(join(dir, ".env.example"), "utf-8");
+    expect(envExample).toContain("GLUBEAN_PROJECT_ID=");
+    expect(envExample).toContain("GLUBEAN_TARGET_ID=");
+    expect(envExample).toContain("GLUBEAN_API_URL=https://api.glubean.com");
+    const secretsExample = await readFile(join(dir, ".env.secrets.example"), "utf-8");
+    expect(secretsExample).toContain("GLUBEAN_TOKEN=");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

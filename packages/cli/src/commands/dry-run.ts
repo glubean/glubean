@@ -52,6 +52,8 @@ export interface ProjectedTest {
  *  derived head fields, for upload to /projections/contract. */
 export interface ProjectedContract {
   contractId: string;
+  /** JavaScript export that produced this contract (catalog/source navigation). */
+  exportName: string;
   protocol: string;
   target?: string;
   description?: string;
@@ -76,6 +78,8 @@ export interface ProjectedContract {
 /** One projected workflow (C1) — the scanner's static normalized workflow. */
 export interface ProjectedWorkflow {
   workflowId: string;
+  /** JavaScript export that produced this workflow (catalog/source navigation). */
+  exportName: string;
   name?: string;
   description?: string;
   tags?: string[];
@@ -213,6 +217,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
     const { sourceText, ...projectionBody } = c;
     return {
       contractId: c.id,
+      exportName: c.exportName,
       protocol: c.protocol,
       target: c.target,
       description: c.description,
@@ -237,6 +242,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
     const nodeCount = (g.full ?? 0) + (g.partial ?? 0) + (g.opaque ?? 0);
     return {
       workflowId: w.id,
+      exportName: w.exportName,
       name: w.name,
       description: w.description,
       tags: w.tags,
