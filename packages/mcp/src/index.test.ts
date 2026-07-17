@@ -1695,15 +1695,24 @@ export const cases = test.each([
 });
 
 test("runLocalTestsFromFile filters deferred/browser/out-of-band/opt-in contract cases", async () => {
-  const dir = await makeSessionTempDir();
-  await mkdir(join(dir, "tests"), { recursive: true });
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const addr = server.address();
+  const baseUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
 
-  // Contract with 5 cases: 1 runnable + 4 that must be filtered
-  await writeFile(
-    join(dir, "tests", "filter.contract.ts"),
-    `import { contract, configure } from "@glubean/sdk";
+  try {
+    const dir = await makeSessionTempDir();
+    await mkdir(join(dir, "tests"), { recursive: true });
 
-const { http: api } = configure({ http: { prefixUrl: "https://example.com" } });
+    // Contract with 5 cases: 1 runnable + 4 that must be filtered
+    await writeFile(
+      join(dir, "tests", "filter.contract.ts"),
+      `import { contract, configure } from "@glubean/sdk";
+
+const { http: api } = configure({ http: { prefixUrl: "${baseUrl}" } });
 
 const filterInstance = contract.http.with("filter", { client: api });
 
@@ -1737,27 +1746,28 @@ export const filterCheck = filterInstance("filter-check", {
     },
   },
 });`,
-  );
+    );
 
-  const result = await runLocalTestsFromFile({
-    filePath: join(dir, "tests", "filter.contract.ts"),
-    includeLogs: false,
-  });
+    const result = await runLocalTestsFromFile({
+      filePath: join(dir, "tests", "filter.contract.ts"),
+      includeLogs: false,
+    });
 
-  // Only the single runnable case should be executed.
-  // We do NOT care whether the one case passes or fails — what matters
-  // is that the filter dropped deferred/browser/oob/opt-in before execution.
-  expect(result.error).toBeUndefined();
-  expect(result.summary.total).toBe(1);
-  expect(result.results).toHaveLength(1);
-  expect(result.results[0].id).toBe("filter-check.runMe");
+    // Only the single runnable case should be executed.
+    expect(result.error).toBeUndefined();
+    expect(result.summary.total).toBe(1);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].id).toBe("filter-check.runMe");
 
-  // None of the filtered case IDs should appear in results
-  const ids = result.results.map((r) => r.id);
-  expect(ids).not.toContain("filter-check.deferredCase");
-  expect(ids).not.toContain("filter-check.browserCase");
-  expect(ids).not.toContain("filter-check.oobCase");
-  expect(ids).not.toContain("filter-check.optInCase");
+    // None of the filtered case IDs should appear in results
+    const ids = result.results.map((r) => r.id);
+    expect(ids).not.toContain("filter-check.deferredCase");
+    expect(ids).not.toContain("filter-check.browserCase");
+    expect(ids).not.toContain("filter-check.oobCase");
+    expect(ids).not.toContain("filter-check.optInCase");
+  } finally {
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  }
 }, 30_000);
 
 // ==================== Static Fallback Protocol Gate Tests ====================
