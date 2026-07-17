@@ -1,6 +1,6 @@
 {
   "name": "@glubean/engine",
-  "version": "0.10.7",
+  "version": "0.10.8",
   "engines": { "node": ">=22.19.0" },
   "type": "module",
   "description": "Environment-agnostic run-loop core shared by the Node runner and the browser host.",
