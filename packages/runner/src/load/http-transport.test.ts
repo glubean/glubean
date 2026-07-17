@@ -450,3 +450,51 @@ describe("createLoadTransport — plain http (no TLS): auto-h1, pool sizing, red
     expect(hits.length).toBe(1); // once, not per request
   });
 });
+
+describe("createLoadTransport — cross-origin redirect (accepted boundary: followed via source Agent)", () => {
+  // Locks the DOCUMENTED behavior (D1-7 review): undici follows redirects internally on the ONE
+  // dispatcher chosen for the initial URL, so a followed CROSS-ORIGIN redirect (A→B) rides A's
+  // Agent for the B hop. We don't (and can't cheaply) re-route per hop, so the per-origin density
+  // guarantee is direct-request-only; but the redirect MUST still be followed correctly (B reached,
+  // final body returned) — that functional contract is what this test pins.
+  let serverA: Server | undefined;
+  let serverB: Server | undefined;
+  let baseA = "";
+  let baseB = "";
+  let bHits = 0;
+
+  beforeAll(async () => {
+    serverB = createServer((_req, res) => { bHits += 1; res.end("arrived-at-B"); });
+    await new Promise<void>((r) => serverB!.listen(0, "127.0.0.1", () => r()));
+    const bAddr = serverB.address();
+    baseB = `http://127.0.0.1:${typeof bAddr === "object" && bAddr ? bAddr.port : bAddr}`;
+
+    serverA = createServer((req, res) => {
+      if ((req.url ?? "").startsWith("/go")) {
+        res.statusCode = 302;
+        res.setHeader("location", `${baseB}/dest`); // cross-ORIGIN redirect
+        res.end();
+        return;
+      }
+      res.end("A");
+    });
+    await new Promise<void>((r) => serverA!.listen(0, "127.0.0.1", () => r()));
+    const aAddr = serverA.address();
+    baseA = `http://127.0.0.1:${typeof aAddr === "object" && aAddr ? aAddr.port : aAddr}`;
+  });
+
+  afterAll(async () => {
+    if (serverA) await new Promise<void>((r) => serverA!.close(() => r()));
+    if (serverB) await new Promise<void>((r) => serverB!.close(() => r()));
+  });
+
+  it("a followed cross-origin redirect still reaches the target (routing per fetch call, undici follows internally)", async () => {
+    bHits = 0;
+    const t = createLoadTransport({ preferH2: true, slotCount: 4, streamsPerConnection: 2 });
+    const res = (await (t.fetch as F)(new Request(`${baseA}/go`))) as Response;
+    const body = await res.text();
+    await t.close();
+    expect(body).toBe("arrived-at-B"); // undici followed A→B internally
+    expect(bHits).toBe(1); // B was reached exactly once
+  });
+});

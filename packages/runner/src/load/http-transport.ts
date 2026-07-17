@@ -200,8 +200,17 @@ function originOf(url: string | URL): string {
  *    `connections` cap IS the real connection count (undici must open one per concurrent
  *    request) — no round-robin needed, and `streamsPerConnection` is ignored (nothing to
  *    multiplex), so a plain-http load is never throttled.
- * A run mixing http + https origins routes each request to the right pool by its own scheme
- * — including a request that a redirect moved to a different scheme (routing is per call).
+ * A run mixing http + https origins routes each DIRECT request (each `fetch` call ky makes)
+ * to the right pool by its own scheme + origin. NOTE (accepted boundary, D1-7 review): undici
+ * follows redirects INTERNALLY within the ONE dispatcher chosen for the initial URL — there is
+ * no per-hop dispatcher hook in undici's fetch — so a FOLLOWED redirect that crosses origin
+ * (A→C) reuses A's Agent for the C hop. The request still succeeds (C is reached), but C's
+ * traffic does NOT enter C's own per-origin round-robin, so the exact per-origin connection
+ * density (K) is only GUARANTEED for direct requests; a followed cross-origin redirect's target
+ * gets between 1 and K connections. This is a bounded, edge-case deviation (a load run that both
+ * follows redirects AND crosses origins mid-chain) — not worth the large, redirect-semantics-
+ * altering change of manual redirect following (which would also fight `redirect:'manual'`
+ * preservation below). Direct-request density — the common case — is exact.
  *
  * ALPN nuance: undici's `allowH2` defaults true and `preferH2` only REORDERS the ALPN list —
  * the SERVER picks — so `preferH2:false` alone would still let an h2-preferring server choose
@@ -284,8 +293,10 @@ export function createLoadTransport(opts: {
   // (a global `ReadableStream` body needs `duplex:'half'`), AND redirect / credentials / mode /
   // integrity (else a scenario's `redirect:'manual'`/`'error'` would silently become the default
   // `'follow'`, generating extra traffic + returning the final response instead of the 3xx).
-  // The dispatcher is chosen per call by the CURRENT target scheme, so a request a redirect moved
-  // to another scheme (http→https) still lands on the right pool. A string/URL input passes through.
+  // The dispatcher is chosen per fetch CALL by that call's target scheme+origin; undici follows
+  // any redirects INTERNALLY on that one dispatcher (see the createLoadTransport header — a
+  // followed cross-origin redirect stays on the initial origin's Agent; direct-request density
+  // is exact). A string/URL input passes through.
   const fetchImpl: FetchImpl = (input, init) => {
     let url: string | URL;
     let requestInit: Record<string, unknown>;
