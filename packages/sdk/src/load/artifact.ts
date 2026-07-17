@@ -471,18 +471,17 @@ export interface LoadArtifactConfig {
     drainTimeoutMs?: number;
     onBacklogFull?: "block-producer" | "fail-iteration";
   };
-  /** Egress HTTP transport model the run used, recorded so artifacts under different
+  /** Egress HTTP transport CONFIG the run used, recorded so artifacts under different
    *  connection models are distinguishable / comparable / reproducible (like `rngSeed`).
-   *  `connections` is the h2 connection count for the run's concurrency under the reuse
-   *  ratio — `ceil(concurrency / streamsPerConnection)` when `preferH2` (https targets
-   *  multiplex ~`streamsPerConnection` streams per connection), else `concurrency` (h1 /
-   *  plain-http is one connection per concurrent request; `streamsPerConnection` doesn't
-   *  apply). Recorded at the GLOBAL concurrency, so a multi-core run's value is
-   *  worker-count-independent (each worker runs `ceil(slotCount / spc)` of it). */
+   *  Records the INTENT — `preferH2` + `streamsPerConnection` — NOT a derived connection
+   *  count: the actual connection count is scheme- and shard-dependent (an `https` target
+   *  multiplexes `ceil(concurrency/spc)` connections, a plain-`http` target is one per
+   *  concurrent request, and a multi-core run sums `ceil(shard.slotCount/spc)` per worker),
+   *  so a single recorded number would misreport most runs. These two fields plus the
+   *  recorded `concurrency` fully reproduce the model. */
   http?: {
     preferH2: boolean;
     streamsPerConnection: number;
-    connections: number;
   };
 }
 

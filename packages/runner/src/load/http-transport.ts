@@ -167,6 +167,18 @@ function isHttpsUrl(url: string | URL): boolean {
   return typeof url === "string" ? /^https:/i.test(url) : url.protocol === "https:";
 }
 
+/** The `scheme://host:port` origin of a URL — the h2 round-robin cursor's key (a per-origin
+ *  cursor keeps each origin's connection count = K regardless of cross-origin arrival order).
+ *  Parsed only on the h2 path (https + preferH2), never for h1. A malformed URL groups under
+ *  its raw string (undici rejects it downstream anyway). */
+function originOf(url: string | URL): string {
+  try {
+    return typeof url === "string" ? new URL(url).origin : url.origin;
+  } catch {
+    return String(url);
+  }
+}
+
 /**
  * Build the load transport: a `fetch` that routes each request to a pooled undici Agent by
  * the request's target SCHEME, plus graceful `close()` / destructive `destroy()` teardown.
@@ -222,27 +234,35 @@ export function createLoadTransport(opts: {
   const getH1 = (): Agent =>
     (h1Agent ??= new Agent({ connections: h1Connections, connect: { ...overrides, allowH2: false } }));
 
-  // h2: K single-connection Agents, round-robined per request → exactly K h2 connections, each
-  // multiplexing ~streamsPerConnection streams (a single Agent's `connections` cap can't force
-  // this — see the header). Built as one batch on first https use.
+  // h2: K single-connection Agents, round-robined per request → exactly K h2 connections per
+  // origin, each multiplexing ~streamsPerConnection streams (a single Agent's `connections` cap
+  // can't force this — see the header). Built as one batch on first https use. The K Agents are
+  // SHARED across origins (each is `connections:1` PER ORIGIN, so K Agents already give every
+  // origin its own K connections — replicating Agents per origin would be a connection explosion).
+  // The CURSOR, however, is PER ORIGIN: a single shared cursor would let cross-origin arrival
+  // order decide which subset of the K Agents an origin lands on (fewer than K connections, or an
+  // uneven split), making the per-origin connection count traffic-order-dependent. A per-origin
+  // cursor pins each origin to its own K-way round-robin → exactly K connections/origin, stable
+  // regardless of how requests to different origins interleave.
   let h2Agents: Agent[] | undefined;
-  let h2Cursor = 0;
-  const getH2 = (): Agent => {
+  const h2CursorByOrigin = new Map<string, number>();
+  const getH2 = (origin: string): Agent => {
     if (h2Agents === undefined) {
       h2Agents = Array.from(
         { length: h2Count },
         () => new Agent({ connections: 1, connect: { ...overrides, allowH2: true, preferH2: true } }),
       );
     }
-    // Single-process async — a plain increment-and-mod is atomic enough (no preemption mid-op).
-    const agent = h2Agents[h2Cursor % h2Agents.length];
-    h2Cursor += 1;
-    return agent;
+    // Single-process async — a plain get/increment/set is atomic enough (no preemption mid-op).
+    const cursor = h2CursorByOrigin.get(origin) ?? 0;
+    h2CursorByOrigin.set(origin, cursor + 1);
+    return h2Agents[cursor % h2Agents.length];
   };
 
   let httpWarned = false;
-  const pickAgent = (https: boolean): Agent => {
-    if (opts.preferH2 && https) return getH2();
+  const pickAgent = (url: string | URL): Agent => {
+    const https = isHttpsUrl(url);
+    if (opts.preferH2 && https) return getH2(originOf(url));
     // Plain http under preferH2:true with an explicit ratio → the ratio is ignored for this
     // (unmultiplexable) target; surface it once, then fall through to the h1 pool.
     if (opts.preferH2 && !https && opts.httpIgnoreWarning !== undefined && !httpWarned) {
@@ -292,7 +312,7 @@ export function createLoadTransport(opts: {
       url = input as string | URL;
       requestInit = { ...(init as Record<string, unknown>) };
     }
-    requestInit.dispatcher = pickAgent(isHttpsUrl(url));
+    requestInit.dispatcher = pickAgent(url);
     return undiciFetch(
       url as Parameters<typeof undiciFetch>[0],
       requestInit as Parameters<typeof undiciFetch>[1],

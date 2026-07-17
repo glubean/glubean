@@ -37,7 +37,6 @@ import { randomUUID } from "node:crypto";
 
 import { createEngineCore } from "../engine-bridge.js";
 import {
-  computeLoadConnections,
   createLoadTransport,
   loadHttpH1IgnoreWarning,
   loadHttpPlainHttpIgnoreWarning,
@@ -700,18 +699,15 @@ export async function runLoadShard(
     ...(thinkTimeMs !== undefined ? { pacing: { thinkTimeMs } } : {}),
     ...(continuationCfg !== undefined ? { continuation: continuationCfg } : {}),
     ...(mixScenarios !== undefined ? { scenarios: mixScenarios } : {}),
-    // Egress transport model (P2 artifact-config): preferH2 + the reuse ratio + the derived
-    // h2 connection count for the GLOBAL concurrency — `ceil(concurrency/spc)` for h2 (https),
-    // else `concurrency` (h1/plain-http is one-per-request). Recorded at GLOBAL concurrency so
-    // a multi-core run's value is worker-count-independent (every worker's frame carries the
-    // same numbers; the coordinator's replace-with-first merge stays consistent). Makes runs
-    // under different connection models distinguishable/comparable/reproducible, like rngSeed.
+    // Egress transport CONFIG (P2 artifact-config): the INTENT — preferH2 + the reuse ratio —
+    // NOT a derived connection count. The real connection count is scheme/shard-dependent
+    // (https → ceil(slotCount/spc) per worker, http → one-per-request, multi-core sums per
+    // worker), so a single recorded number would misreport most runs; these two fields plus
+    // the recorded `concurrency` reproduce the model. Same everywhere, so multi-core's
+    // replace-with-first merge stays consistent. Distinguishes connection models like rngSeed.
     http: {
       preferH2: httpConfig.preferH2,
       streamsPerConnection: httpConfig.streamsPerConnection,
-      connections: httpConfig.preferH2
-        ? computeLoadConnections(concurrency, httpConfig.streamsPerConnection)
-        : concurrency,
     },
   };
 

@@ -270,6 +270,64 @@ describe("createLoadTransport — HTTP/2 connection-reuse ratio under a RAMP (e2
   });
 });
 
+describe("createLoadTransport — TWO https origins: per-origin K, stable across interleave (e2e)", () => {
+  let serverA: Http2SecureServer | undefined;
+  let serverB: Http2SecureServer | undefined;
+  let baseA = "";
+  let baseB = "";
+  let sessA = 0;
+  let sessB = 0;
+
+  const mk = async (onSession: () => void): Promise<{ server: Http2SecureServer; base: string }> => {
+    const server = createSecureServer({ key: TLS!.key, cert: TLS!.cert, allowHTTP1: true });
+    server.on("session", onSession);
+    server.on("request", (_req, res) => res.end("ok"));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    return { server, base: `https://127.0.0.1:${typeof addr === "object" && addr ? addr.port : addr}` };
+  };
+
+  beforeAll(async () => {
+    if (!TLS) return;
+    ({ server: serverA, base: baseA } = await mk(() => { sessA += 1; }));
+    ({ server: serverB, base: baseB } = await mk(() => { sessB += 1; }));
+  });
+
+  afterAll(async () => {
+    if (serverA) await new Promise<void>((r) => serverA!.close(() => r()));
+    if (serverB) await new Promise<void>((r) => serverB!.close(() => r()));
+  });
+
+  /** Fire the interleave sequence sequentially (per-origin cursor advances per request, so
+   *  the round-robin is independent of concurrency). */
+  const fire = async (fetchImpl: F, seq: ("A" | "B")[]): Promise<void> => {
+    for (const o of seq) {
+      await fetchImpl(new Request(`${(o === "A" ? baseA : baseB)}/x`)).then((r) => r.text());
+    }
+  };
+
+  // slotCount:10 spc:5 → K = 2 per origin. A GLOBAL cursor would make the ALTERNATING order
+  // pin origin A to agent 0 and origin B to agent 1 → 1 connection each (wrong); the per-origin
+  // cursor gives each origin its own 0,1,0,1 round-robin → exactly 2 each, for EVERY interleave.
+  const interleaves: Array<[string, ("A" | "B")[]]> = [
+    ["alternating", ["A", "B", "A", "B", "A", "B", "A", "B"]],
+    ["grouped", ["A", "A", "A", "A", "B", "B", "B", "B"]],
+    ["irregular", ["A", "B", "B", "A", "B", "A", "A", "B"]],
+  ];
+
+  it.skipIf(!TLS).each(interleaves)(
+    "%s interleave → each origin gets exactly K=2 h2 connections",
+    async (_label, seq) => {
+      sessA = 0; sessB = 0;
+      const t = createLoadTransport({ preferH2: true, slotCount: 10, streamsPerConnection: 5, connectOverrides: { rejectUnauthorized: false } });
+      await fire(t.fetch as F, seq);
+      await t.close();
+      expect(sessA).toBe(2);
+      expect(sessB).toBe(2);
+    },
+  );
+});
+
 describe("createLoadTransport — plain http (no TLS): auto-h1, pool sizing, redirect, teardown", () => {
   let server: Server | undefined;
   let base = "";
