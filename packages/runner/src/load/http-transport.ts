@@ -31,7 +31,7 @@
 // TLS; undici 7.x has NO `preferH2` option (only `allowH2`, h1-first ALPN — server-preference
 // decides) — it was added in undici 8. undici 8 requires Node >=22.19.0, which every publishable
 // package's `engines.node` now reflects (bumped from >=22).
-import { Agent, fetch as undiciFetch } from "undici";
+import { Agent, Dispatcher, fetch as undiciFetch } from "undici";
 import type { FetchImpl } from "@glubean/engine";
 import type { LoadHttpConfig } from "@glubean/sdk/load";
 
@@ -160,68 +160,156 @@ export interface LoadTransport {
   destroy(): Promise<void>;
 }
 
-/** True for an `https://` URL (case-insensitive scheme). `Request.url` / `URL.href` have
- *  a lowercase scheme; a raw string may not, so match case-insensitively and cheaply
- *  (no `new URL()` per request on the hot path). */
-function isHttpsUrl(url: string | URL): boolean {
-  return typeof url === "string" ? /^https:/i.test(url) : url.protocol === "https:";
+/** True for an `https://` origin string (case-insensitive; undici passes `opts.origin` as a
+ *  normalized `scheme://host:port`, so a cheap prefix test suffices — no URL parse on the hot path). */
+function isHttpsOrigin(origin: string): boolean {
+  return /^https:/i.test(origin);
 }
 
-/** The `scheme://host:port` origin of a URL — the h2 round-robin cursor's key (a per-origin
- *  cursor keeps each origin's connection count = K regardless of cross-origin arrival order).
- *  Parsed only on the h2 path (https + preferH2), never for h1. A malformed URL groups under
- *  its raw string (undici rejects it downstream anyway). */
-function originOf(url: string | URL): string {
-  try {
-    return typeof url === "string" ? new URL(url).origin : url.origin;
-  } catch {
-    return String(url);
+/** Config the {@link LoadRouterDispatcher} needs to pick a pool. */
+interface RouterConfig {
+  preferH2: boolean;
+  /** h1 pool size (one connection per concurrent request — h1 has no multiplexing). */
+  h1Connections: number;
+  /** h2 round-robin width = `ceil(slotCount / streamsPerConnection)` single-connection Agents. */
+  h2Count: number;
+  connectOverrides: Record<string, unknown>;
+  httpIgnoreWarning?: string;
+}
+
+/**
+ * A router {@link Dispatcher}: undici's fetch calls `dispatch(opts, handler)` for EVERY hop —
+ * including each redirect hop — with `opts.origin` = that hop's ACTUAL origin (verified on undici
+ * 8.7). Passing THIS router as the fetch `dispatcher` (instead of one concrete Agent picked up
+ * front) makes pool selection happen per hop, so the per-origin connection-density + protocol
+ * guarantees hold for direct requests AND followed redirects — even a cross-origin / cross-scheme
+ * redirect (http→https, https→http) lands each hop on the right pool. undici still follows
+ * redirects internally; the router only chooses the dispatcher per hop, never touching redirect
+ * semantics (so a scenario's `redirect:'manual'`/`'error'` is preserved by the Request
+ * normalization in {@link createLoadTransport}).
+ *
+ * ENFORCING THE REUSE RATIO — h1/h2 ASYMMETRY (owner decision 2026-07-17): undici's `connections`
+ * is only an UPPER BOUND, and under h2 undici multiplexes as few connections as possible (verified:
+ * under a staggered ramp a `connections:20` Agent collapses to ONE h2 connection carrying every
+ * stream — the server's SETTINGS `maxConcurrentStreams` overrides any client-side cap, so
+ * `connections` never forces spreading). The ONLY reliable way to force exactly K h2 connections
+ * is K SEPARATE `connections:1` Agents round-robined per request — each is exactly one h2
+ * connection multiplexing ~`streamsPerConnection` streams. So the two schemes are sized DIFFERENTLY:
+ *  - **h2 pool** (`https://` under `preferH2:true`): K = `ceil(slotCount / streamsPerConnection)`
+ *    single-connection Agents. They are SHARED across origins (each is `connections:1` PER ORIGIN,
+ *    so K Agents already give every origin its own K connections — replicating Agents per origin
+ *    would be a connection explosion). The round-robin CURSOR is PER ORIGIN: a shared cursor would
+ *    let cross-origin arrival order pin an origin to a subset of the K Agents (uneven density); a
+ *    per-origin cursor gives each origin its own 0..K-1 rotation → exactly K connections/origin,
+ *    stable regardless of interleave.
+ *  - **h1 pool** (`http://` cleartext — always h1 — OR any target under `preferH2:false`): ONE
+ *    Agent with `connections: slotCount`, `allowH2:false`. h1 has no multiplexing, so the
+ *    `connections` cap IS the real connection count (undici must open one per concurrent request)
+ *    — no round-robin needed, and `streamsPerConnection` is ignored (nothing to multiplex), so a
+ *    plain-http load is never throttled.
+ *
+ * ALPN nuance: undici's `allowH2` defaults true and `preferH2` only REORDERS the ALPN list — the
+ * SERVER picks — so `preferH2:false` alone would still let an h2-preferring server choose h2. The
+ * h1 pool sets `allowH2:false` (h2 not offered) for a firm HTTP/1.1 contract.
+ *
+ * All Agents are created LAZILY on first use of their scheme; `close()`/`destroy()` tear down
+ * whichever were opened (overload-compatible with undici's `Dispatcher` so an internal
+ * callback-form call is safe too). `connectOverrides` merges EXTRA connect options (production
+ * never sets it — secure defaults preserved); it exists only so a self-signed-cert h2 test can
+ * pass `{ rejectUnauthorized: false }`.
+ */
+class LoadRouterDispatcher extends Dispatcher {
+  private readonly cfg: RouterConfig;
+  private h1Agent?: Agent;
+  private h2Agents?: Agent[];
+  private readonly h2CursorByOrigin = new Map<string, number>();
+  private httpWarned = false;
+
+  constructor(cfg: RouterConfig) {
+    super();
+    this.cfg = cfg;
+  }
+
+  private getH1(): Agent {
+    return (this.h1Agent ??= new Agent({
+      connections: this.cfg.h1Connections,
+      connect: { ...this.cfg.connectOverrides, allowH2: false },
+    }));
+  }
+
+  private getH2(origin: string): Agent {
+    if (this.h2Agents === undefined) {
+      this.h2Agents = Array.from(
+        { length: this.cfg.h2Count },
+        () => new Agent({ connections: 1, connect: { ...this.cfg.connectOverrides, allowH2: true, preferH2: true } }),
+      );
+    }
+    // Single-process async — a plain get/increment/set is atomic enough (no preemption mid-op).
+    const cursor = this.h2CursorByOrigin.get(origin) ?? 0;
+    this.h2CursorByOrigin.set(origin, cursor + 1);
+    return this.h2Agents[cursor % this.h2Agents.length];
+  }
+
+  private pick(origin: string): Agent {
+    if (this.cfg.preferH2 && isHttpsOrigin(origin)) return this.getH2(origin);
+    // Plain http under preferH2:true with an explicit ratio → the ratio is ignored for this
+    // (unmultiplexable) target; surface it once, then fall through to the h1 pool.
+    if (this.cfg.preferH2 && !isHttpsOrigin(origin) && this.cfg.httpIgnoreWarning !== undefined && !this.httpWarned) {
+      this.httpWarned = true;
+      console.warn(this.cfg.httpIgnoreWarning);
+    }
+    return this.getH1();
+  }
+
+  private openAgents(): Agent[] {
+    return [...(this.h1Agent !== undefined ? [this.h1Agent] : []), ...(this.h2Agents ?? [])];
+  }
+
+  override dispatch(opts: Dispatcher.DispatchOptions, handler: Dispatcher.DispatchHandler): boolean {
+    // `opts.origin` is this hop's real origin (per-hop routing: redirects re-enter here).
+    const origin = typeof opts.origin === "string" ? opts.origin : opts.origin?.origin ?? "";
+    return this.pick(origin).dispatch(opts, handler);
+  }
+
+  // close/destroy delegate to the open child Agents. Overload-compatible with undici's Dispatcher
+  // (promise form AND callback form) so an internal callback-style call can't break — though only
+  // the transport's own `close()`/`destroy()` (promise form) invoke these.
+  override close(): Promise<void>;
+  override close(callback: () => void): void;
+  override close(callback?: () => void): Promise<void> | void {
+    const p = Promise.all(this.openAgents().map((a) => a.close())).then(() => undefined);
+    if (callback) {
+      void p.then(() => callback(), () => callback());
+      return;
+    }
+    return p;
+  }
+
+  override destroy(): Promise<void>;
+  override destroy(err: Error | null): Promise<void>;
+  override destroy(callback: () => void): void;
+  override destroy(err: Error | null, callback: () => void): void;
+  override destroy(errOrCb?: Error | null | (() => void), callback?: () => void): Promise<void> | void {
+    const cb = typeof errOrCb === "function" ? errOrCb : callback;
+    // `destroy()` aborts in-flight requests immediately (bounded); tolerate any per-Agent throw.
+    const p = Promise.all(this.openAgents().map((a) => a.destroy().catch(() => {}))).then(() => undefined);
+    if (cb) {
+      void p.then(() => cb(), () => cb());
+      return;
+    }
+    return p;
   }
 }
 
 /**
- * Build the load transport: a `fetch` that routes each request to a pooled undici Agent by
- * the request's target SCHEME, plus graceful `close()` / destructive `destroy()` teardown.
- * TLS options keep undici's secure defaults (`rejectUnauthorized` stays on) — only the ALPN
- * preference is added to `connect`.
+ * Build the load transport: a `fetch` that dispatches through a {@link LoadRouterDispatcher}
+ * (per-hop, per-origin pool routing — see that class), plus graceful `close()` / destructive
+ * `destroy()` teardown. TLS options keep undici's secure defaults (`rejectUnauthorized` stays on)
+ * — only the ALPN preference is added to `connect`.
  *
- * ENFORCING THE REUSE RATIO — h1/h2 ASYMMETRY (owner decision 2026-07-17): undici's
- * `connections` is only an UPPER BOUND, and under h2 undici multiplexes as few connections
- * as possible (verified: under a real staggered ramp a `connections:20` Agent collapses to
- * ONE h2 connection carrying every stream — the server's SETTINGS `maxConcurrentStreams`
- * overrides any client-side cap, so `connections` never forces spreading). The ONLY reliable
- * way to force exactly K h2 connections is K SEPARATE `connections:1` Agents round-robined
- * per request — each is exactly one h2 connection multiplexing ~`streamsPerConnection`
- * streams. So the two schemes are sized DIFFERENTLY:
- *  - **h2 pool** (`https://` under `preferH2:true`): K = `ceil(slotCount / streamsPerConnection)`
- *    single-connection Agents, round-robined → exactly K connections, ratio enforced.
- *  - **h1 pool** (`http://` cleartext — always h1 — OR any target under `preferH2:false`): ONE
- *    Agent with `connections: slotCount`, `allowH2:false`. h1 has no multiplexing, so the
- *    `connections` cap IS the real connection count (undici must open one per concurrent
- *    request) — no round-robin needed, and `streamsPerConnection` is ignored (nothing to
- *    multiplex), so a plain-http load is never throttled.
- * A run mixing http + https origins routes each DIRECT request (each `fetch` call ky makes)
- * to the right pool by its own scheme + origin. NOTE (accepted boundary, D1-7 review): undici
- * follows redirects INTERNALLY within the ONE dispatcher chosen for the initial URL — there is
- * no per-hop dispatcher hook in undici's fetch — so a FOLLOWED redirect that crosses origin
- * (A→C) reuses A's Agent for the C hop. The request still succeeds (C is reached), but C's
- * traffic does NOT enter C's own per-origin round-robin, so the exact per-origin connection
- * density (K) is only GUARANTEED for direct requests; a followed cross-origin redirect's target
- * gets between 1 and K connections. This is a bounded, edge-case deviation (a load run that both
- * follows redirects AND crosses origins mid-chain) — not worth the large, redirect-semantics-
- * altering change of manual redirect following (which would also fight `redirect:'manual'`
- * preservation below). Direct-request density — the common case — is exact.
- *
- * ALPN nuance: undici's `allowH2` defaults true and `preferH2` only REORDERS the ALPN list —
- * the SERVER picks — so `preferH2:false` alone would still let an h2-preferring server choose
- * h2. The h1 pool sets `allowH2:false` (h2 not offered) for a firm HTTP/1.1 contract.
- *
- * All Agents are created LAZILY on first use of their scheme; `close()`/`destroy()` tear down
- * whichever were opened. `connectOverrides` merges EXTRA connect options (production never
- * sets it — secure defaults preserved); it exists only so a self-signed-cert h2 test can pass
- * `{ rejectUnauthorized: false }`. `httpIgnoreWarning`, when set, is printed ONCE the first
- * time an `http://` request is routed to the h1 pool under `preferH2:true` (the runtime
- * plain-http-ignore notice — see {@link loadHttpPlainHttpIgnoreWarning}).
+ * `httpIgnoreWarning`, when set, is printed ONCE the first time an `http://` request is routed to
+ * the h1 pool under `preferH2:true` (the runtime plain-http-ignore notice — see
+ * {@link loadHttpPlainHttpIgnoreWarning}).
  */
 export function createLoadTransport(opts: {
   preferH2: boolean;
@@ -234,69 +322,27 @@ export function createLoadTransport(opts: {
    *  `preferH2:true` with an explicit `streamsPerConnection > 1`. */
   httpIgnoreWarning?: string;
 }): LoadTransport {
-  const overrides = opts.connectOverrides ?? {};
-  const h1Connections = Math.max(1, opts.slotCount);
-  const h2Count = computeLoadConnections(opts.slotCount, opts.streamsPerConnection);
+  const router = new LoadRouterDispatcher({
+    preferH2: opts.preferH2,
+    h1Connections: Math.max(1, opts.slotCount),
+    h2Count: computeLoadConnections(opts.slotCount, opts.streamsPerConnection),
+    connectOverrides: opts.connectOverrides ?? {},
+    ...(opts.httpIgnoreWarning !== undefined ? { httpIgnoreWarning: opts.httpIgnoreWarning } : {}),
+  });
 
-  // h1: ONE Agent, connections = slotCount (the cap IS the real count for h1 — no multiplexing).
-  let h1Agent: Agent | undefined;
-  const getH1 = (): Agent =>
-    (h1Agent ??= new Agent({ connections: h1Connections, connect: { ...overrides, allowH2: false } }));
-
-  // h2: K single-connection Agents, round-robined per request → exactly K h2 connections per
-  // origin, each multiplexing ~streamsPerConnection streams (a single Agent's `connections` cap
-  // can't force this — see the header). Built as one batch on first https use. The K Agents are
-  // SHARED across origins (each is `connections:1` PER ORIGIN, so K Agents already give every
-  // origin its own K connections — replicating Agents per origin would be a connection explosion).
-  // The CURSOR, however, is PER ORIGIN: a single shared cursor would let cross-origin arrival
-  // order decide which subset of the K Agents an origin lands on (fewer than K connections, or an
-  // uneven split), making the per-origin connection count traffic-order-dependent. A per-origin
-  // cursor pins each origin to its own K-way round-robin → exactly K connections/origin, stable
-  // regardless of how requests to different origins interleave.
-  let h2Agents: Agent[] | undefined;
-  const h2CursorByOrigin = new Map<string, number>();
-  const getH2 = (origin: string): Agent => {
-    if (h2Agents === undefined) {
-      h2Agents = Array.from(
-        { length: h2Count },
-        () => new Agent({ connections: 1, connect: { ...overrides, allowH2: true, preferH2: true } }),
-      );
-    }
-    // Single-process async — a plain get/increment/set is atomic enough (no preemption mid-op).
-    const cursor = h2CursorByOrigin.get(origin) ?? 0;
-    h2CursorByOrigin.set(origin, cursor + 1);
-    return h2Agents[cursor % h2Agents.length];
-  };
-
-  let httpWarned = false;
-  const pickAgent = (url: string | URL): Agent => {
-    const https = isHttpsUrl(url);
-    if (opts.preferH2 && https) return getH2(originOf(url));
-    // Plain http under preferH2:true with an explicit ratio → the ratio is ignored for this
-    // (unmultiplexable) target; surface it once, then fall through to the h1 pool.
-    if (opts.preferH2 && !https && opts.httpIgnoreWarning !== undefined && !httpWarned) {
-      httpWarned = true;
-      console.warn(opts.httpIgnoreWarning);
-    }
-    return getH1();
-  };
-
-  // ky calls services.fetch(request, options); route it through the pooled Agent via undici's
-  // per-request `dispatcher` option (NOT setGlobalDispatcher — no global state).
+  // ky calls services.fetch(request, options); dispatch through the router (NOT setGlobalDispatcher
+  // — no global state). The router selects the pool per hop by `opts.origin`.
   //
   // Double-undici hazard: npm `undici` and Node's built-in undici are DIFFERENT instances, so
-  // (a) built-in `globalThis.fetch` rejects an npm-undici Agent dispatcher (handler-interface
-  // skew), and (b) npm-undici `fetch` does NOT brand-recognize the GLOBAL `Request` object ky
-  // constructs (it stringifies it → "Failed to parse URL"). We avoid both by calling npm-undici
-  // `fetch` and NORMALIZING the incoming (global) Request into `(url, init)` that undici builds
-  // its OWN Request from — carrying the request's semantics: method / headers / signal / body
-  // (a global `ReadableStream` body needs `duplex:'half'`), AND redirect / credentials / mode /
-  // integrity (else a scenario's `redirect:'manual'`/`'error'` would silently become the default
-  // `'follow'`, generating extra traffic + returning the final response instead of the 3xx).
-  // The dispatcher is chosen per fetch CALL by that call's target scheme+origin; undici follows
-  // any redirects INTERNALLY on that one dispatcher (see the createLoadTransport header — a
-  // followed cross-origin redirect stays on the initial origin's Agent; direct-request density
-  // is exact). A string/URL input passes through.
+  // (a) built-in `globalThis.fetch` rejects an npm-undici dispatcher (handler-interface skew), and
+  // (b) npm-undici `fetch` does NOT brand-recognize the GLOBAL `Request` object ky constructs (it
+  // stringifies it → "Failed to parse URL"). We avoid both by calling npm-undici `fetch` and
+  // NORMALIZING the incoming (global) Request into `(url, init)` that undici builds its OWN Request
+  // from — carrying the request's semantics: method / headers / signal / body (a global
+  // `ReadableStream` body needs `duplex:'half'`), AND redirect / credentials / mode / integrity
+  // (else a scenario's `redirect:'manual'`/`'error'` would silently become the default `'follow'`,
+  // generating extra traffic + returning the final response instead of the 3xx). A string/URL
+  // input passes straight through.
   const fetchImpl: FetchImpl = (input, init) => {
     let url: string | URL;
     let requestInit: Record<string, unknown>;
@@ -323,20 +369,16 @@ export function createLoadTransport(opts: {
       url = input as string | URL;
       requestInit = { ...(init as Record<string, unknown>) };
     }
-    requestInit.dispatcher = pickAgent(url);
+    requestInit.dispatcher = router;
     return undiciFetch(
       url as Parameters<typeof undiciFetch>[0],
       requestInit as Parameters<typeof undiciFetch>[1],
     ) as unknown as Promise<Response>;
   };
 
-  const allAgents = (): Agent[] => [...(h1Agent !== undefined ? [h1Agent] : []), ...(h2Agents ?? [])];
-  const close = async (): Promise<void> => {
-    await Promise.all(allAgents().map((a) => a.close()));
+  return {
+    fetch: fetchImpl,
+    close: () => router.close(),
+    destroy: () => router.destroy(),
   };
-  const destroy = async (): Promise<void> => {
-    // `destroy()` aborts in-flight requests immediately (bounded); tolerate any per-Agent throw.
-    await Promise.all(allAgents().map((a) => a.destroy().catch(() => {})));
-  };
-  return { fetch: fetchImpl, close, destroy };
 }

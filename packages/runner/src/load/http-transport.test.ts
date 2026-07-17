@@ -451,31 +451,40 @@ describe("createLoadTransport — plain http (no TLS): auto-h1, pool sizing, red
   });
 });
 
-describe("createLoadTransport — cross-origin redirect (accepted boundary: followed via source Agent)", () => {
-  // Locks the DOCUMENTED behavior (D1-7 review): undici follows redirects internally on the ONE
-  // dispatcher chosen for the initial URL, so a followed CROSS-ORIGIN redirect (A→B) rides A's
-  // Agent for the B hop. We don't (and can't cheaply) re-route per hop, so the per-origin density
-  // guarantee is direct-request-only; but the redirect MUST still be followed correctly (B reached,
-  // final body returned) — that functional contract is what this test pins.
+describe("createLoadTransport — followed redirects route PER HOP by origin+scheme (router dispatcher)", () => {
+  // The router Dispatcher is invoked for EVERY hop (undici follows redirects internally, calling
+  // dispatch per hop with that hop's real origin), so a followed redirect — even cross-origin or
+  // cross-SCHEME — lands each hop on the right pool. Two proofs: (1) a cross-origin http→http
+  // redirect reaches the target; (2) a cross-SCHEME http→https(h2) redirect's target hop is served
+  // over HTTP/2 — which can ONLY happen if that hop was routed to the h2 pool, not left on the
+  // source's h1 (allowH2:false) Agent. The latter is the regression this router fixes.
   let serverA: Server | undefined;
-  let serverB: Server | undefined;
+  let serverBHttp: Server | undefined;
+  let serverBHttps: Http2SecureServer | undefined;
   let baseA = "";
-  let baseB = "";
-  let bHits = 0;
+  let baseBHttp = "";
+  let baseBHttps = "";
+  let httpHits = 0;
+  let httpsVer = "";
 
   beforeAll(async () => {
-    serverB = createServer((_req, res) => { bHits += 1; res.end("arrived-at-B"); });
-    await new Promise<void>((r) => serverB!.listen(0, "127.0.0.1", () => r()));
-    const bAddr = serverB.address();
-    baseB = `http://127.0.0.1:${typeof bAddr === "object" && bAddr ? bAddr.port : bAddr}`;
+    serverBHttp = createServer((_req, res) => { httpHits += 1; res.end("arrived-at-B"); });
+    await new Promise<void>((r) => serverBHttp!.listen(0, "127.0.0.1", () => r()));
+    const bAddr = serverBHttp.address();
+    baseBHttp = `http://127.0.0.1:${typeof bAddr === "object" && bAddr ? bAddr.port : bAddr}`;
+
+    if (TLS) {
+      serverBHttps = createSecureServer({ key: TLS.key, cert: TLS.cert, allowHTTP1: true });
+      serverBHttps.on("request", (req, res) => { httpsVer = req.httpVersion; res.end("arrived-at-B-https"); });
+      await new Promise<void>((r) => serverBHttps!.listen(0, "127.0.0.1", () => r()));
+      const bhAddr = serverBHttps.address();
+      baseBHttps = `https://127.0.0.1:${typeof bhAddr === "object" && bhAddr ? bhAddr.port : bhAddr}`;
+    }
 
     serverA = createServer((req, res) => {
-      if ((req.url ?? "").startsWith("/go")) {
-        res.statusCode = 302;
-        res.setHeader("location", `${baseB}/dest`); // cross-ORIGIN redirect
-        res.end();
-        return;
-      }
+      const u = req.url ?? "";
+      if (u.startsWith("/go-https")) { res.statusCode = 302; res.setHeader("location", `${baseBHttps}/dest`); res.end(); return; }
+      if (u.startsWith("/go")) { res.statusCode = 302; res.setHeader("location", `${baseBHttp}/dest`); res.end(); return; }
       res.end("A");
     });
     await new Promise<void>((r) => serverA!.listen(0, "127.0.0.1", () => r()));
@@ -485,16 +494,27 @@ describe("createLoadTransport — cross-origin redirect (accepted boundary: foll
 
   afterAll(async () => {
     if (serverA) await new Promise<void>((r) => serverA!.close(() => r()));
-    if (serverB) await new Promise<void>((r) => serverB!.close(() => r()));
+    if (serverBHttp) await new Promise<void>((r) => serverBHttp!.close(() => r()));
+    if (serverBHttps) await new Promise<void>((r) => serverBHttps!.close(() => r()));
   });
 
-  it("a followed cross-origin redirect still reaches the target (routing per fetch call, undici follows internally)", async () => {
-    bHits = 0;
+  it("a followed cross-origin redirect reaches the target", async () => {
+    httpHits = 0;
     const t = createLoadTransport({ preferH2: true, slotCount: 4, streamsPerConnection: 2 });
     const res = (await (t.fetch as F)(new Request(`${baseA}/go`))) as Response;
     const body = await res.text();
     await t.close();
-    expect(body).toBe("arrived-at-B"); // undici followed A→B internally
-    expect(bHits).toBe(1); // B was reached exactly once
+    expect(body).toBe("arrived-at-B");
+    expect(httpHits).toBe(1);
+  });
+
+  it.skipIf(!TLS)("a followed CROSS-SCHEME redirect (http→https) serves the https hop over HTTP/2 (per-hop routing)", async () => {
+    httpsVer = "";
+    const t = createLoadTransport({ preferH2: true, slotCount: 4, streamsPerConnection: 2, connectOverrides: { rejectUnauthorized: false } });
+    const res = (await (t.fetch as F)(new Request(`${baseA}/go-https`))) as Response;
+    const body = await res.text();
+    await t.close();
+    expect(body).toBe("arrived-at-B-https"); // followed http→https
+    expect(httpsVer).toBe("2.0"); // the https hop went to the h2 pool — NOT stuck on the h1 Agent
   });
 });
