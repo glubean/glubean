@@ -12,6 +12,7 @@ import {
 } from "../lib/auth.js";
 import { resolveEnvFileName, SensitiveActiveEnvError } from "../lib/active_env.js";
 import { detectGitProvenance, gitRoot } from "../lib/git.js";
+import { formatProjectionInventory } from "../lib/feedback.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -158,7 +159,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
   // ALWAYS project the WHOLE project (rootDir), never just --dir: the upload is a
   // complete snapshot the server replaces, so scanning a subdirectory would make
   // the server delete every test outside it. --dir only locates the project root.
-  const { projected, errors, warnings, emptyTestFiles, contracts, workflows, openapi, openapiFailed } =
+  const { projected, files, errors, warnings, emptyTestFiles, contracts, workflows, openapi, openapiFailed } =
     await buildProjections(rootDir);
 
   // A file that failed to import / timed out has NO projection. Since sync is a
@@ -200,6 +201,15 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     );
     process.exit(1);
   }
+
+  console.log(formatProjectionInventory("Discovered locally", {
+    files: files.length,
+    tests: projected.length,
+    contracts: contracts.length,
+    workflows: workflows.length,
+    warnings: warnings.length,
+  }, { hintWhenNoWorkflows: true }));
+  console.log();
 
   // Empty snapshot would CLEAR the project's projections — guard against an
   // accidental run in the wrong/empty dir; require --allow-empty to actually wipe.
@@ -469,7 +479,7 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     kind: string,
     body: unknown,
     opts?: { tolerateMissingRoute?: boolean },
-  ): Promise<{ upserted?: number; deleted?: number; skipped?: boolean }> => {
+  ): Promise<{ upserted?: number; deleted?: number; skipped?: boolean; url?: string }> => {
     let res: Response;
     try {
       res = await fetch(`${base}/${kind}`, {
@@ -506,7 +516,12 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
       }
       process.exit(1);
     }
-    return (await res.json().catch(() => ({}))) as { upserted?: number; deleted?: number; skipped?: boolean };
+    return (await res.json().catch(() => ({}))) as {
+      upserted?: number;
+      deleted?: number;
+      skipped?: boolean;
+      url?: string;
+    };
   };
 
   const testRes = await post("test", { tests: safeTests });
@@ -525,9 +540,15 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     ? { skipped: true as const }
     : await post("openapi", { openapi: safeOpenapi }, { tolerateMissingRoute: true });
 
-  const line = (label: string, r: { upserted?: number; deleted?: number }, n: number) => {
-    const removed = r.deleted ? `${colors.dim} (${r.deleted} removed)${colors.reset}` : "";
-    return `${colors.green}✓ ${r.upserted ?? n} ${label}${colors.reset}${removed}`;
+  const line = (label: string, r: { upserted?: number; deleted?: number }, expected: number) => {
+    const confirmed = r.upserted ?? expected;
+    const mismatch = r.upserted !== undefined && r.upserted !== expected;
+    const mark = mismatch ? `${colors.yellow}!${colors.reset}` : `${colors.green}✓${colors.reset}`;
+    const removed = r.deleted ? `${colors.dim}; ${r.deleted} removed${colors.reset}` : "";
+    const detail = mismatch
+      ? `${colors.yellow}; expected ${expected} from local discovery${colors.reset}`
+      : "";
+    return `  ${mark} ${label.padEnd(10)} ${String(confirmed).padStart(5)}${removed}${detail}`;
   };
   const pathCount = safeOpenapi ? Object.keys((safeOpenapi.paths as Record<string, unknown>) ?? {}).length : 0;
   const openapiLine = openapiFailed
@@ -535,9 +556,28 @@ export async function syncCommand(options: SyncCommandOptions = {}): Promise<voi
     : openapiRes?.skipped
       ? `${colors.dim}· openapi not supported by this server (skipped)${colors.reset}`
       : `${colors.green}✓ openapi${colors.reset}${colors.dim} (${pathCount} path${pathCount === 1 ? "" : "s"})${colors.reset}`;
-  console.log(
-    `${line("test", testRes, safeTests.length)}  ${line("contract", contractRes, safeContracts.length)}  ${line("workflow", workflowRes, safeWorkflows.length)}  ${openapiLine} ${colors.dim}→ project ${projectId}${colors.reset}`,
-  );
+  console.log(`${colors.bold}Cloud confirmed${colors.reset}`);
+  console.log(line("Tests", testRes, safeTests.length));
+  console.log(line("Contracts", contractRes, safeContracts.length));
+  console.log(line("Workflows", workflowRes, safeWorkflows.length));
+  console.log(`  ${openapiLine}`);
+
+  const openapiUrl = "url" in openapiRes ? openapiRes.url : undefined;
+  const urls = [testRes.url, contractRes.url, workflowRes.url, openapiUrl]
+    .filter((url): url is string => typeof url === "string" && url.length > 0);
+  const uniqueUrls = [...new Set(urls)];
+  if (uniqueUrls.length === 1) {
+    console.log(`\n${colors.bold}View project${colors.reset}`);
+    console.log(`  ${uniqueUrls[0]}`);
+  } else if (uniqueUrls.length === 0) {
+    console.log(
+      `\n${colors.yellow}Cloud did not return an app URL.${colors.reset} ${colors.dim}Update the Platform API; the CLI will not guess app routes.${colors.reset}`,
+    );
+  } else {
+    console.log(
+      `\n${colors.yellow}Cloud returned inconsistent app URLs.${colors.reset} ${colors.dim}${uniqueUrls.join(", ")}${colors.reset}`,
+    );
+  }
   const partial =
     projected.filter((p) => !p.projectionComplete).length +
     contracts.filter((c) => !c.projectionComplete).length +

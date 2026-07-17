@@ -4,8 +4,8 @@
  * Upload flow:
  * 1. POST a `RunIngest` envelope to
  *    `{apiUrl}/v1/projects/{projectId}/targets/{targetId}/runs` → the created
- *    run row (`{ id, ... }`). The run id + a deep link are recorded on the
- *    receipt.
+ *    run row (`{ id, url, ... }`). The server owns the canonical app deep link;
+ *    the CLI records and displays it without knowing app routes or domains.
  * 2. If artifact files exist, POST them as inline multipart parts to
  *    `…/runs/{id}/artifacts` (one part = one artifact, ≤512KB each). Files over
  *    the inline cap are skipped (presigned R2 upload is an M6 follow-up).
@@ -245,25 +245,6 @@ function createUploadReceipt(options: UploadOptions): UploadReceipt {
  */
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
-}
-
-/**
- * Canonical location of an uploaded run — its platform API resource URL
- * (`…/v1/projects/{projectId}/targets/{targetId}/runs/{runId}`). The dashboard
- * run-detail page doesn't exist yet (M2), and app-next has no URL-addressable
- * project context (TargetPage resolves the target under the SESSION's active
- * project, not the URL), so a guessed `app.<host>` link can't reliably resolve
- * cross-project. The API resource URL is real, addressable (with the token),
- * and carries full project+target+run context — the honest "where is my run".
- */
-function buildRunUrl(
-  apiUrl: string,
-  projectId: string,
-  targetId: string,
-  runId: string,
-): string {
-  const base = normalizeApiUrl(apiUrl);
-  return `${base}/v1/projects/${projectId}/targets/${targetId}/runs/${runId}`;
 }
 
 function toErrorMessage(err: unknown): string {
@@ -558,9 +539,11 @@ export async function uploadToCloud(
       return receipt;
     }
 
-    // The ingest endpoint returns the created run row (`{ id, ... }`); it does
-    // not return a URL, so build the dashboard deep link from the API host.
-    const result = await resp.json() as { id?: unknown };
+    // The server owns the app route/domain and returns the canonical URL. Never
+    // synthesize one in the CLI: app routing can evolve independently of npm
+    // client releases. A pre-link server still uploads successfully, but the
+    // missing URL is visible instead of being replaced with a guessed link.
+    const result = await resp.json() as { id?: unknown; url?: unknown };
     runId = typeof result.id === "string" ? result.id : "";
     if (!runId) {
       const error = "Cloud upload response was missing the run id.";
@@ -572,18 +555,23 @@ export async function uploadToCloud(
       };
       return receipt;
     }
-    runUrl = buildRunUrl(apiUrl, projectId, targetId, runId);
+    runUrl = typeof result.url === "string" ? result.url : "";
     receipt.runId = runId;
-    receipt.url = runUrl;
+    if (runUrl) receipt.url = runUrl;
     receipt.resultUpload = {
       status: "uploaded",
       runId,
-      url: runUrl,
+      ...(runUrl ? { url: runUrl } : {}),
       statusCode: resp.status,
     };
-    console.log(
-      `${colors.green}Run uploaded${colors.reset} ${colors.dim}(${runId}) → ${runUrl}${colors.reset}`,
-    );
+    console.log(`${colors.green}Run uploaded${colors.reset} ${colors.dim}(${runId})${colors.reset}`);
+    if (runUrl) {
+      console.log(`${colors.dim}View run: ${colors.reset}${runUrl}`);
+    } else {
+      console.log(
+        `${colors.yellow}Cloud did not return an app URL.${colors.reset} ${colors.dim}Update the Platform API; the CLI will not guess app routes.${colors.reset}`,
+      );
+    }
   } catch (err) {
     let error: string;
     if (err instanceof DOMException && err.name === "AbortError") {

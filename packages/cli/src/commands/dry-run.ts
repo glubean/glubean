@@ -8,6 +8,7 @@ import {
   type ExtractedContractProjection,
   type EachRowMeta,
 } from "@glubean/sdk";
+import { formatProjectionInventory } from "../lib/feedback.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -309,7 +310,7 @@ export async function buildProjections(dir: string): Promise<ProjectionResult> {
  */
 export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise<void> {
   const dir = options.dir ? resolve(options.dir) : process.cwd();
-  const { projected, files, errors, warnings, emptyTestFiles, openapi } = await buildProjections(dir);
+  const { projected, files, errors, warnings, emptyTestFiles, contracts, workflows, openapi } = await buildProjections(dir);
   // Files that contribute NO projection though they look like tests — a sync
   // would silently drop them (see syncCommand).
   const dropped = [
@@ -320,18 +321,25 @@ export async function dryRunCommand(options: DryRunCommandOptions = {}): Promise
   ];
 
   if (options.out) {
-    await writeFile(resolve(options.out), JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles, openapi }, null, 2));
+    await writeFile(resolve(options.out), JSON.stringify({ tests: projected, contracts, workflows, errors, warnings, emptyTestFiles, openapi }, null, 2));
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ tests: projected, errors, warnings, emptyTestFiles, openapi }, null, 2));
+    console.log(JSON.stringify({ tests: projected, contracts, workflows, errors, warnings, emptyTestFiles, openapi }, null, 2));
     return;
   }
 
   // ── Human-readable ──
   console.log(`\n${colors.bold}${colors.blue}🔬 Glubean Dry-Run (shape projection)${colors.reset}\n`);
   console.log(`${colors.dim}Directory: ${dir}${colors.reset}`);
-  console.log(`${colors.dim}Projected: ${projected.length} test(s) from ${files.length} file(s)${colors.reset}\n`);
+  console.log(formatProjectionInventory("Discovered locally", {
+    files: files.length,
+    tests: projected.length,
+    contracts: contracts.length,
+    workflows: workflows.length,
+    warnings: warnings.length,
+  }, { hintWhenNoWorkflows: true }));
+  console.log();
 
   for (const t of projected) {
     const flag = t.skipped

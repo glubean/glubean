@@ -38,7 +38,13 @@ const baseOptions = {
 
 function runResponse(id = "run_123") {
   return new Response(
-    JSON.stringify({ id, projectId: "proj_123", targetId: "tgt_123", kind: "test" }),
+    JSON.stringify({
+      id,
+      projectId: "proj_123",
+      targetId: "tgt_123",
+      kind: "test",
+      url: `https://app.glubean.test/p/proj_123/targets/tgt_123/runs/${id}`,
+    }),
     { status: 201, headers: { "Content-Type": "application/json" } },
   );
 }
@@ -70,7 +76,7 @@ afterEach(async () => {
   await rm(rootDir, { recursive: true, force: true }).catch(() => {});
 });
 
-test("uploadToCloud posts a RunIngest to the target-scoped endpoint with a constructed deep link", async () => {
+test("uploadToCloud uses the server-returned canonical app deep link", async () => {
   const fetchMock = vi.fn().mockResolvedValueOnce(runResponse());
   vi.stubGlobal("fetch", fetchMock);
 
@@ -105,13 +111,11 @@ test("uploadToCloud posts a RunIngest to the target-scoped endpoint with a const
     projectId: "proj_123",
     targetId: "tgt_123",
     runId: "run_123",
-    // Canonical API resource URL (real + addressable + full project/target/run
-    // context). A dashboard deep link lands with M2.
-    url: "https://api.glubean.test/v1/projects/proj_123/targets/tgt_123/runs/run_123",
+    url: "https://app.glubean.test/p/proj_123/targets/tgt_123/runs/run_123",
     resultUpload: {
       status: "uploaded",
       runId: "run_123",
-      url: "https://api.glubean.test/v1/projects/proj_123/targets/tgt_123/runs/run_123",
+      url: "https://app.glubean.test/p/proj_123/targets/tgt_123/runs/run_123",
       statusCode: 201,
     },
     artifactUpload: { status: "skipped", attempted: false, count: 0 },
@@ -137,7 +141,24 @@ test("uploadToCloud normalizes a trailing-slash apiUrl (no double slash in the r
   expect(url).toBe("https://api.glubean.test/v1/projects/proj_123/targets/tgt_123/runs");
   expect(url).not.toMatch(/\/\/v1\//);
   expect(receipt.resultUpload.status).toBe("uploaded");
-  expect(receipt.url).toBe("https://api.glubean.test/v1/projects/proj_123/targets/tgt_123/runs/run_123");
+  expect(receipt.url).toBe("https://app.glubean.test/p/proj_123/targets/tgt_123/runs/run_123");
+});
+
+test("uploadToCloud never guesses an app URL when an older server omits it", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(
+    new Response(JSON.stringify({ id: "run_legacy", projectId: "proj_123", targetId: "tgt_123" }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const receipt = await uploadToCloud(input, { ...baseOptions, rootDir });
+
+  expect(receipt.resultUpload.status).toBe("uploaded");
+  expect(receipt.url).toBeUndefined();
+  expect(receipt.resultUpload.url).toBeUndefined();
+  expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Cloud did not return an app URL"));
 });
 
 test("uploadToCloud normalizes a multi-trailing-slash apiUrl for the artifact endpoint too", async () => {

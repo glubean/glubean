@@ -148,7 +148,15 @@ beforeEach(async () => {
   await writeFile(join(fixtureDir, "contracts", "secrets.contract.ts"), contractFixtureSource());
   await writeFile(join(fixtureDir, "auth.flow.ts"), workflowFixtureSource());
 
-  fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ upserted: 1 })));
+  fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+    const body = JSON.parse(init.body as string) as Record<string, unknown[]>;
+    const upserted = body.tests?.length ?? body.contracts?.length ?? body.workflows?.length ?? (body.openapi ? 1 : 0);
+    return Promise.resolve(jsonResponse({
+      upserted,
+      deleted: 0,
+      url: "https://app.glubean.test/p/proj_test/contracts",
+    }));
+  });
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -180,6 +188,13 @@ describe("GLU-123 — glubean sync redacts contract projection extensions before
       apiUrl: "https://api.glubean.test",
       allowEmpty: true,
     });
+
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(output).toContain("Discovered locally");
+    expect(output).toContain("Contracts");
+    expect(output).toContain("Workflows");
+    expect(output).toContain("Cloud confirmed");
+    expect(output).toContain("https://app.glubean.test/p/proj_test/contracts");
 
     const contractBody = bodyForKind("contract") as { contracts: Array<{ projection: any }> };
     expect(contractBody.contracts).toHaveLength(1);

@@ -5,6 +5,7 @@ import { bootstrap } from "@glubean/runner";
 import { buildMetadata } from "../metadata.js";
 import { CLI_VERSION } from "../version.js";
 import { lintDescription } from "./contracts.js";
+import { formatProjectionInventory } from "../lib/feedback.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -42,9 +43,9 @@ export async function scanCommand(
   const hasContracts = (scanResult.contracts ?? []).length > 0;
   const hasWorkflows = (scanResult.workflows ?? []).length > 0;
   if (scanResult.fileCount === 0 && !hasContracts && !hasWorkflows) {
-    console.log(`${colors.yellow}⚠️  No test or contract files found.${colors.reset}`);
+    console.log(`${colors.yellow}⚠️  No test, contract, or workflow files found.${colors.reset}`);
     console.log(
-      `${colors.dim}   Ensure files import @glubean/sdk and export test() or contract.http.with().${colors.reset}\n`,
+      `${colors.dim}   Expected exported test()/contract declarations, or workflow() in *.workflow.ts (legacy: *.flow.ts).${colors.reset}\n`,
     );
     process.exit(1);
   }
@@ -103,9 +104,18 @@ export async function scanCommand(
 
   await writeFile(outputPath, JSON.stringify(metadata, null, 2), "utf-8");
   console.log(`${colors.green}✓ metadata.json updated${colors.reset}`);
-  console.log(
-    `${colors.dim}  Files: ${metadata.fileCount}, Tests: ${metadata.testCount}${colors.reset}\n`,
+  const testCount = Object.values(scanResult.files).reduce(
+    (count, file) => count + file.exports.filter((entry) => !entry.workflow).length,
+    0,
   );
+  console.log(formatProjectionInventory("Discovered locally", {
+    files: metadata.fileCount,
+    tests: testCount,
+    contracts: scanResult.contracts?.length ?? 0,
+    workflows: scanResult.workflows?.length ?? 0,
+    warnings: scanResult.warnings.length,
+  }, { hintWhenNoWorkflows: true }));
+  console.log();
 
   // Description lint for contract cases
   const contracts = scanResult.contracts ?? [];

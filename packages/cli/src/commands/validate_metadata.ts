@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { BundleMetadata, FileMeta } from "@glubean/scanner";
 import { computeRootHash, deriveMetadataStats, normalizeFileMap, normalizeFilePath } from "../metadata.js";
+import { formatProjectionInventory } from "../lib/feedback.js";
 
 const colors = {
   reset: "\x1b[0m",
@@ -154,7 +155,16 @@ export async function validateMetadataCommand(
   }
 
   console.log(`${colors.green}✓ metadata.json is valid${colors.reset}`);
-  console.log(
-    `${colors.dim}  Files: ${derived.fileCount}, Tests: ${derived.testCount}${colors.reset}\n`,
+  const testCount = Object.values(normalizedFiles!).reduce(
+    (count, file) => count + file.exports.filter((entry) => !entry.workflow).length,
+    0,
   );
+  console.log(formatProjectionInventory("Metadata inventory", {
+    files: derived.fileCount,
+    tests: testCount,
+    contracts: metadata.contracts?.length ?? 0,
+    workflows: metadata.workflows?.length ?? 0,
+    warnings: metadata.warnings?.length ?? 0,
+  }, { hintWhenNoWorkflows: true }));
+  console.log();
 }
