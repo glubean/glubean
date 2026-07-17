@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -747,7 +747,7 @@ profiles:
     }
   });
 
-  it("returns {} (best-effort) on an INVALID glubean.yaml — never fails the bare load path, so it can't pre-empt the --upload redaction preflight", async () => {
+  it("returns {} on a READABLE but content-invalid glubean.yaml — a CONTENT error is best-effort here (surfaces via run / --profile / --upload preflight), so it can't pre-empt the --upload redaction preflight", async () => {
     const dir = await mkdtemp(join(tmpdir(), "glubean-defaults-load-invalid-"));
     try {
       await writeFile(
@@ -763,13 +763,41 @@ profiles:
 `,
         "utf-8",
       );
-      // Provider selection is a perf convenience, not a fail-closed gate: an
-      // invalid config falls back to the built-in default here (in-process); the
-      // real error still surfaces via run / --profile / --upload redaction.
+      // The file is READABLE — the invalid content is a validation failure, which is the
+      // best-effort case (only an UNREADABLE file, below, propagates). Provider selection is
+      // a perf convenience; the content error surfaces with fuller context elsewhere.
       const load = await readDefaultsLoadConfig(dir, undefined);
       expect(load).toEqual({});
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("PROPAGATES when `--config` points at a DIRECTORY (present-but-unreadable → EISDIR, not silent {})", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "glubean-defaults-load-isdir-"));
+    try {
+      await mkdir(join(dir, "as-a-dir"));
+      // `--config as-a-dir` → the path EXISTS but is a directory → readFile EISDIR → propagate.
+      await expect(readDefaultsLoadConfig(dir, "as-a-dir")).rejects.toThrow();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+    "PROPAGATES when glubean.yaml exists but is unreadable (chmod 000 → EACCES)",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "glubean-defaults-load-eacces-"));
+      const file = join(dir, "glubean.yaml");
+      try {
+        await writeFile(file, "version: 1\nsuites: {}\nprofiles: {}\n", "utf-8");
+        await chmod(file, 0o000); // owner can still stat (existsSync true) but not read → EACCES
+        // Present-but-unreadable → the read failure propagates (not swallowed to {}).
+        await expect(readDefaultsLoadConfig(dir, undefined)).rejects.toThrow();
+      } finally {
+        await chmod(file, 0o600).catch(() => {}); // restore so rm can clean up
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

@@ -17,7 +17,7 @@
 import { resolve, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { cpus } from "node:os";
-import { stat, readdir, writeFile, mkdir } from "node:fs/promises";
+import { stat, readdir, writeFile, mkdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { glob } from "node:fs/promises";
 import { loadProjectEnv, runLoadFileInSubprocess, type LoadProviderChoice } from "@glubean/runner";
@@ -179,23 +179,50 @@ export function resolveLoadProviderChoice(
  * `glubean load` (no `--profile` — profile mode resolves + passes the merged
  * layer in via `LoadCommandOptions.resolvedLoad` instead).
  *
- * PURELY ADDITIVE / best-effort: it augments behavior ONLY when glubean.yaml
- * loads cleanly. On ANY config problem — an absent file (config-less project),
- * a missing explicit `--config`, or an invalid/parse-failing config — it
- * returns `{}` so the command behaves exactly as it did before D1 (a bare
- * `glubean load` never read glubean.yaml at all): the built-in in-process
- * default applies and the config is ignored here. It deliberately does NOT
- * fail-close on a broken config — provider selection is a perf convenience, not
- * a correctness/security gate, and a real config error still surfaces via
- * `glubean run` / `glubean load --profile` / the `--upload` redaction preflight
- * (`resolveLoadUploadContext`), which keeps its OWN fail-closed check. Erroring
- * here would only pre-empt (and mask) that security-relevant redaction error on
- * the `--upload` path. Only a non-config (e.g. unexpected IO) error propagates.
+ * Best-effort, but keyed on whether the file can be READ AS BYTES vs whether its
+ * CONTENT is valid (D1-7 review — this fixes a D1-6 gap where a present-but-UNREADABLE
+ * config was silently swallowed like a missing one). Three outcomes:
+ *  - **MISSING** (ENOENT — no `glubean.yaml`, or `--config` → a nonexistent path) →
+ *    `{}`. A config-less bare `glubean load` must behave exactly as before D1 (built-in
+ *    `in-process` default), and ABSENCE must not pre-empt the `--upload` redaction
+ *    preflight's own fail-closed check.
+ *  - **PRESENT but UNREADABLE** (EACCES permission denied, `--config` → a directory
+ *    EISDIR, or any other read I/O error — the file's BYTES can't be obtained) →
+ *    **PROPAGATE**. A config that IS there but can't be read must be reported (command
+ *    errors + exits), not silently downgraded to the in-process default — that could
+ *    produce artifacts under the WRONG provider. This is the D1-6 gap being closed.
+ *  - **READABLE but CONTENT-INVALID** (bad YAML / schema-invalid) → `{}` (best-effort).
+ *    Provider selection is a perf convenience, not a fail-closed gate; the real content
+ *    error still surfaces — with FULLER context — via `glubean run`, `glubean load
+ *    --profile`, or the `--upload` redaction preflight (`resolveLoadUploadContext`),
+ *    which keeps its OWN fail-closed check. Erroring here would pre-empt (and mask) that
+ *    security-relevant redaction error on the `--upload` path — the exact D1-6 intent to
+ *    preserve. (This is why we distinguish "can't read the file" from "file content is
+ *    invalid": only the former is the swallowed-I/O-error bug.)
+ *
+ * A dedicated byte-read probe classifies the I/O outcome (ENOENT vs EACCES/EISDIR/…);
+ * once the bytes are readable, a parse/validation failure is the best-effort case.
  */
 export async function readDefaultsLoadConfig(
   rootDir: string,
   explicitConfigPath: string | undefined,
 ): Promise<LoadExecutionConfig> {
+  // Resolve the effective config path the SAME way loadProjectConfigV1 does.
+  const configPath = explicitConfigPath
+    ? resolve(rootDir, explicitConfigPath)
+    : resolve(rootDir, "glubean.yaml");
+  // I/O-level probe: distinguish "the file's bytes can't be obtained" from "its content
+  // is invalid". MISSING (ENOENT) → best-effort {}; PRESENT-but-unreadable (EACCES /
+  // EISDIR / other read error) → propagate (the D1-6 gap).
+  try {
+    await readFile(configPath, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw e;
+  }
+  // Bytes readable → parse + validate. A CONTENT error stays best-effort {} so the
+  // specialized paths (run / --profile / --upload redaction preflight) surface it with
+  // their own fail-closed handling; only a non-config error propagates.
   const { loadProjectConfigV1, GlubeanConfigError } = await import("../lib/config.js");
   try {
     const { config } = await loadProjectConfigV1(
