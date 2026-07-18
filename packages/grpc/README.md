@@ -405,4 +405,4 @@ If you currently use `@glubean/grpc` only as a transport plugin and do not impor
 
 ## License
 
-MIT
+[Apache-2.0](./LICENSE)

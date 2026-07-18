@@ -439,4 +439,4 @@ A few edges are deliberately simple in Phase 1. Reviewed in
 
 ## License
 
-MIT
+[Apache-2.0](./LICENSE)

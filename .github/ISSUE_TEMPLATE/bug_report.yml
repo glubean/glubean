@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in the SDK, CLI, or a plugin doesn't work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        1. Ran `npx glubean run tests/…`
+        2. Expected …
+        3. Got …
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest test file / command that shows the problem. Paste code or link a repo.
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Glubean version
+      description: Output of `npx glubean --version` (all @glubean/* packages share one version)
+      placeholder: 0.10.8
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "Node 22.19 / macOS 15 / pnpm 10"
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        > If this is about the hosted **Glubean Cloud dashboard** (app.glubean.com), you can still file it — it will be labeled `cloud` and forwarded to the internal tracker.
+        > **Security vulnerabilities**: please use [private reporting](https://github.com/glubean/glubean/security/advisories/new) instead of a public issue.
