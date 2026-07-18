@@ -149,4 +149,4 @@ This is a v1 focused on the authorization code flow for explore mode. Not includ
 
 ## License
 
-MIT
+[Apache-2.0](./LICENSE)

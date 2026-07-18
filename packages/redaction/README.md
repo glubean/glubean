@@ -156,4 +156,4 @@ Users override scopes by stable `id` in `.glubean/redact.json`:
 
 ## License
 
-MIT
+[Apache-2.0](./LICENSE)
