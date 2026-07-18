@@ -1,6 +1,7 @@
 {
   "name": "glubean",
   "version": "0.10.8",
+  "license": "Apache-2.0",
   "engines": { "node": ">=22.19.0" },
   "description": "Glubean CLI — test automation for APIs, browsers, and more",
   "type": "module",

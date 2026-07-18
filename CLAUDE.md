@@ -62,9 +62,23 @@ engine depends on sdk; runner on engine/sdk/scanner; cli on sdk/runner/scanner/r
 (meta) on cli; mcp on cloud-client/runner/scanner/sdk; the other plugins on sdk. The CI workflow
 encodes this order — keep `publish.yml` and this list in sync when packages are added/removed.
 
-## Branch Policy
-- Solo development: direct commits to main are OK.
-- With collaborators: require branch + PR + squash merge. Add branch protection when the team grows.
+## Branch Policy — issues-driven OSS workflow (owner 2026-07-18)
+
+This repo has real external users; development follows the public open-source
+workflow. Full runbook: `~/glubean/automation/development/core-oss-workflow.md`.
+
+- **Issue-first**: features / fixes / refactors start as an English GitHub
+  issue (labeled), then `<type>/<slug>` branch → PR with `Fixes #N` → CI green
+  + codex converge gate → **squash merge**.
+- **Direct commits to main** are allowed only for: typos, docs-only changes,
+  lint/format, and release version-bump commits.
+- **Agent autonomy (this repo only)**: agents may create issues, push
+  branches, open PRs, and squash-merge once the converge gate is clean.
+  npm releases (tags) stay owner-gated.
+- **Public surface language: English.** Issues, PRs, commit messages, release
+  notes, and all in-repo docs are English-only.
+- Issue hygiene: first response to external issues ≤48h; close fixed issues at
+  release time with the version number; no zombie issues.
 
 ## Commit gate
 
