@@ -9,6 +9,7 @@
     "glubean": "./bin/glubean.js"
   },
   "files": [
+    "NOTICE",
     "bin"
   ],
   "scripts": {

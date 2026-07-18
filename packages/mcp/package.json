@@ -15,6 +15,7 @@
     }
   },
   "files": [
+    "NOTICE",
     "bin",
     "dist"
   ],

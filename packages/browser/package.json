@@ -12,6 +12,7 @@
     }
   },
   "files": [
+    "NOTICE",
     "dist"
   ],
   "scripts": {
