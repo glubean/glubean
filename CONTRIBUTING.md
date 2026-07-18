@@ -27,7 +27,8 @@ maintainer via `v*` tags; contributors never need to touch versions.
 
 ## Development setup
 
-Requirements: Node.js ≥ 22 and [pnpm](https://pnpm.io) 10.
+Requirements: Node.js ≥ 22.19 (all packages declare `engines.node: >=22.19.0`)
+and [pnpm](https://pnpm.io) 10.
 
 ```bash
 pnpm install

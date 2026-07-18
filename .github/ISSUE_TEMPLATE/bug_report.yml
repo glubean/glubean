@@ -33,7 +33,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      placeholder: "Node 22.5 / macOS 15 / pnpm 10"
+      placeholder: "Node 22.19 / macOS 15 / pnpm 10"
     validations:
       required: false
   - type: markdown

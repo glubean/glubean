@@ -3,7 +3,7 @@
 API quality layer: functional correctness tests and load performance tests in the same TypeScript project, with AI agents that write, run, and repair them.
 
 [![npm version](https://img.shields.io/npm/v/@glubean/sdk)](https://www.npmjs.com/package/@glubean/sdk)
-[![CI](https://github.com/glubean/glubean/actions/workflows/publish.yml/badge.svg)](https://github.com/glubean/glubean/actions/workflows/publish.yml)
+[![CI](https://github.com/glubean/glubean/actions/workflows/ci.yml/badge.svg)](https://github.com/glubean/glubean/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 ```bash
