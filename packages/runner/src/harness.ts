@@ -18,6 +18,8 @@ import {
   setExplicitInput,
   setBootstrapInput,
   setForceStandalone,
+  getRequestSensitiveValues,
+  maskRequestSensitiveValues,
   type InternalRuntime,
 } from "@glubean/sdk/internal";
 // Workflow executor — now node-only and owned by this package (plan 0007). The host
@@ -1044,6 +1046,7 @@ const kyInstance = ky.create({
         // for the trace target; the trace state is keyed by the stable context.
         const trace = requestTraceMap.get(options.context);
         const duration = Math.round(performance.now() - (trace?.startTime ?? performance.now()));
+        const sensitiveValues = getRequestSensitiveValues(options.context);
 
         // Increment HTTP counters for summary
         { const t = currentTestCtx(); if (t) { t.httpRequestTotal++; if (response.status >= 400) t.httpErrorTotal++; } }
@@ -1122,11 +1125,18 @@ const kyInstance = ky.create({
                 traceData.responseSchema = inferJsonSchema(parsedBody);
               }
 
+              // Mask before truncation: truncateDeep may cut a long secret so
+              // the final whole-trace masking pass can no longer match it.
+              const safeParsedBody = maskRequestSensitiveValues(
+                parsedBody,
+                sensitiveValues,
+              );
+
               // Truncate body: aggressive (truncateArrays) or default (>1MB only)
               if (truncateArrays) {
-                traceData.responseBody = truncateDeep(parsedBody);
+                traceData.responseBody = truncateDeep(safeParsedBody);
               } else {
-                traceData.responseBody = truncateBody(parsedBody);
+                traceData.responseBody = truncateBody(safeParsedBody);
               }
             }
             // Binary content types are intentionally skipped
@@ -1141,14 +1151,22 @@ const kyInstance = ky.create({
         // workflow node promotes its grade and obeys the late-evidence
         // quarantine. Outside a workflow node this is the closure ctx as ever.
         const sink = __activeWorkflowNodeCtx() ?? ctx;
-        sink.trace(traceData as unknown as Trace);
+        const safeTraceData = maskRequestSensitiveValues(
+          traceData,
+          sensitiveValues,
+        ) as Record<string, unknown>;
+        sink.trace(safeTraceData as unknown as Trace);
 
         // Auto-metric for response time
         try {
           const pathname = new URL(request.url).pathname;
+          const safePathname = maskRequestSensitiveValues(
+            pathname,
+            sensitiveValues,
+          ) as string;
           sink.metric("http_duration_ms", duration, {
             unit: "ms",
-            tags: { method: request.method, path: pathname },
+            tags: { method: request.method, path: safePathname },
           });
         } catch {
           sink.metric("http_duration_ms", duration, {

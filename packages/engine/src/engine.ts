@@ -19,7 +19,12 @@ import ky, { type KyInstance } from "ky";
 import { captureRequestBody, inferJsonSchema, truncateBody, truncateDeep } from "./http-trace.js";
 import { Expectation } from "@glubean/sdk";
 import type { EachRowMeta, GlubeanAction, GlubeanEvent, HttpSchemaOptions, MetricOptions, PollUntilOptions, SchemaEntry, SchemaIssue, SchemaLike, SwitchCase, Trace, ValidateOptions } from "@glubean/sdk";
-import { installCarrier, runWithRuntime } from "@glubean/sdk/internal";
+import {
+  getRequestSensitiveValues,
+  installCarrier,
+  maskRequestSensitiveValues,
+  runWithRuntime,
+} from "@glubean/sdk/internal";
 import type { InternalRuntime } from "@glubean/sdk/internal";
 import type {
   EngineContext,
@@ -426,6 +431,7 @@ export class RunnerCore {
             if (!ctx) return response;
             const state = reqState.get(options.context);
             const durationMs = Math.round(scheduler.now() - (state?.startTime ?? scheduler.now()));
+            const sensitiveValues = getRequestSensitiveValues(options.context);
             // `request` is the final (possibly hook-replaced) request — correct target.
             const pathname = pathnameOf(request.url);
             const trace: Trace = {
@@ -472,7 +478,15 @@ export class RunnerCore {
                   if (inferSchema && typeof parsedBody === "object" && parsedBody !== null) {
                     trace.responseSchema = inferJsonSchema(parsedBody);
                   }
-                  trace.responseBody = truncateArrays ? truncateDeep(parsedBody) : truncateBody(parsedBody);
+                  // Mask before truncateDeep can cut a long sensitive value
+                  // into a prefix that no longer matches the final mask pass.
+                  const safeParsedBody = maskRequestSensitiveValues(
+                    parsedBody,
+                    sensitiveValues,
+                  );
+                  trace.responseBody = truncateArrays
+                    ? truncateDeep(safeParsedBody)
+                    : truncateBody(safeParsedBody);
                 }
                 // Binary content types are intentionally skipped.
               } catch {
@@ -481,12 +495,18 @@ export class RunnerCore {
             }
 
             // ctx.trace emits the trace event + the derived `http:request` action.
-            ctx.trace(trace);
+            ctx.trace(maskRequestSensitiveValues(trace, sensitiveValues) as Trace);
             // Auto-metric for response time (node parity: harness.ts:1116).
             const urlPath = tryPathname(request.url);
+            const safeUrlPath = maskRequestSensitiveValues(
+              urlPath,
+              sensitiveValues,
+            ) as string | undefined;
             ctx.metric("http_duration_ms", durationMs, {
               unit: "ms",
-              tags: urlPath !== undefined ? { method: request.method, path: urlPath } : { method: request.method },
+              tags: safeUrlPath !== undefined
+                ? { method: request.method, path: safeUrlPath }
+                : { method: request.method },
             });
             return response;
           },

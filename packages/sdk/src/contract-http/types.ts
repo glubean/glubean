@@ -107,10 +107,16 @@ export interface ContractExpect<T = unknown> {
 // =============================================================================
 
 /**
- * Static-body shape for HTTP case `body` field. Excludes `unknown` (which
- * would swallow the function branch in a union and lose `Needs` typing for
- * function-valued bodies). Function-form `body: (input: Needs) => ...` only
- * matches when the static-form types reject the value.
+ * Static-body shape for HTTP case `body`. A top-level string and string leaves
+ * in plain objects/arrays resolve `{{KEY}}` templates at execution time.
+ * Non-string BodyInit values (FormData, URLSearchParams, Blob, BufferSource,
+ * and ReadableStream) are opaque to template traversal, then follow the normal
+ * content-type dispatch; set the matching non-JSON content type to send one as
+ * a raw body. Excludes `unknown`, which would swallow the function branch and
+ * lose `Needs` typing. A function-form body follows the same runtime rules for
+ * its return value. Enumerable accessor properties are rejected; use data
+ * properties, including from the function form. In a JavaScript/TypeScript
+ * string, write `\\{{KEY}}` to send the literal text `{{KEY}}`.
  */
 export type HttpStaticBody =
   | Record<string, unknown>
@@ -119,9 +125,7 @@ export type HttpStaticBody =
   | number
   | boolean
   | null
-  | FormData
-  | URLSearchParams
-  | Blob;
+  | BodyInit;
 
 /**
  * v0 HTTP case factory — closes the v3 P2 known-open ("HTTP body Needs
@@ -232,7 +236,12 @@ export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
   /** Query parameters. */
   query?: Record<string, ParamValue> | ((input: Needs) => Record<string, string>);
 
-  /** Request headers merged with client headers. */
+  /**
+   * Request headers merged with client headers. String data-property values
+   * resolve `{{KEY}}` templates at execution time. Enumerable accessors are
+   * rejected; a function form must return a data-property record. Write
+   * `\\{{KEY}}` in source to send the literal text `{{KEY}}`.
+   */
   headers?: Record<string, string> | ((input: Needs) => Record<string, string>);
 
   /** Business-logic verify — runs after status and schema validation. */
