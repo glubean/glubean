@@ -25,7 +25,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
-    "test": "vitest run",
+    "pretest": "test -n \"$CI\" || pnpm --filter \"@glubean/browser...\" build",
+    "pretest:chrome-extension:smoke": "test -n \"$CI\" || pnpm --filter \"@glubean/browser...\" build",
+    "pretest:types": "test -n \"$CI\" || pnpm --filter \"@glubean/browser...\" build",
+    "test": "vitest run && tsc --noEmit -p tsconfig.test.json",
+    "test:types": "tsc --noEmit -p tsconfig.test.json",
     "test:chrome-extension:smoke": "vitest run src/chrome-extension/smoke.test.ts"
   },
   "publishConfig": {

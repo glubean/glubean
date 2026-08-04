@@ -1,5 +1,8 @@
 import type { LaunchOptions } from "puppeteer-core";
-import { resolveUnpackedExtensions } from "./manifest.js";
+import {
+  resolveUnpackedExtensions,
+  type UnpackedExtension,
+} from "./manifest.js";
 
 /** Launch options accepted by Puppeteer, excluding its extension switch. */
 export type ExtensionLaunchOverrides = Omit<LaunchOptions, "enableExtensions">;
@@ -15,6 +18,17 @@ export function extensionLaunchOptions(
   extensionPaths: string | readonly string[],
   overrides: ExtensionLaunchOverrides = {},
 ): LaunchOptions {
+  return extensionLaunchOptionsFromResolved(
+    resolveUnpackedExtensions(extensionPaths),
+    overrides,
+  );
+}
+
+/** @internal Compose launch options from already-validated extension metadata. */
+export function extensionLaunchOptionsFromResolved(
+  extensions: readonly UnpackedExtension[],
+  overrides: ExtensionLaunchOverrides = {},
+): LaunchOptions {
   if (overrides.pipe === false) {
     throw new Error(
       "Puppeteer requires pipe: true when loading unpacked Chrome extensions with enableExtensions.",
@@ -25,7 +39,6 @@ export function extensionLaunchOptions(
       "Do not set --remote-debugging-port or --remote-debugging-pipe in extension launch args; Puppeteer owns the required pipe transport.",
     );
   }
-  const extensions = resolveUnpackedExtensions(extensionPaths);
   return {
     ...overrides,
     headless: overrides.headless ?? false,

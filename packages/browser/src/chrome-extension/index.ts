@@ -15,6 +15,17 @@ export type { ExtensionLaunchOverrides } from "./launch.js";
 export { createExtensionTest } from "./test.js";
 export type { ChromeExtensionTestOptions } from "./test.js";
 
+export { ExtensionBrowser } from "./page.js";
+export type {
+  CloseExtensionSidePanelOptions,
+  ExtensionController,
+  ExtensionPage,
+  ExtensionSidePanelController,
+  ExtensionSidePanelHandle,
+  ExtensionSidePanelTargetOptions,
+  OpenExtensionSidePanelOptions,
+} from "./page.js";
+
 export {
   extensionPageUrl,
   findExtensionTarget,

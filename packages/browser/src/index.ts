@@ -43,7 +43,18 @@ import { browserAdapter, createBrowserRoot } from "./contract/index.js";
 import type { BrowserContractRoot } from "./contract/index.js";
 
 export { browser } from "./plugin.js";
+export type { ExtensionBrowserOptions } from "./plugin.js";
 export { GlubeanBrowser, GlubeanPage } from "./page.js";
+export { ExtensionBrowser } from "./chrome-extension/page.js";
+export type {
+  CloseExtensionSidePanelOptions,
+  ExtensionController,
+  ExtensionPage,
+  ExtensionSidePanelController,
+  ExtensionSidePanelHandle,
+  ExtensionSidePanelTargetOptions,
+  OpenExtensionSidePanelOptions,
+} from "./chrome-extension/page.js";
 export { connectChrome, resolveEndpoint, launchChrome } from "./chrome.js";
 
 /**
@@ -76,12 +87,13 @@ export type {
   BrowserAction,
   BrowserEvent,
   BrowserOptions,
+  BrowserPageClient,
   BrowserTestContext,
   DialogHandler,
   DialogMode,
   InstrumentedPage,
-  PuppeteerLike,
   NetworkTraceOptions,
+  PuppeteerLike,
   ResponseChecks,
 } from "./page.js";
 export type {

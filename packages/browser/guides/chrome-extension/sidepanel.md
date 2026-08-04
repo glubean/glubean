@@ -13,17 +13,7 @@ the call follows a user action.
 See Chrome's [Side Panel API reference](https://developer.chrome.com/docs/extensions/reference/api/sidePanel).
 
 ```ts
-import {
-  closeExtensionSidePanel,
-  resolveExtensionPagePath,
-  triggerExtensionAction,
-  waitForExtensionOwnedPage,
-  waitForExtensionPageClosed,
-  waitForExtensionWorker,
-} from "@glubean/browser/chrome-extension";
 import { extension, test } from "./setup.js";
-
-const sidePanelPath = resolveExtensionPagePath(extension, "sidepanel");
 
 export const nativeSidePanel = test(
   {
@@ -34,37 +24,101 @@ export const nativeSidePanel = test(
   async (ctx) => {
     await ctx.page.goto("/sidepanel-fixture");
 
-    const loaded = await triggerExtensionAction(ctx.page.raw, {
-      path: extension.path,
+    const panel = await ctx.page.extension.sidePanel.open({
+      extension: { path: extension.path },
     });
-    const panel = await waitForExtensionOwnedPage(loaded, sidePanelPath);
-    await panel.waitForSelector("[data-testid=sidepanel-root]");
+    await panel.page.waitForSelector("[data-testid=sidepanel-root]");
 
-    ctx.expect(await panel.title()).toBe(
+    ctx.expect(await panel.page.title()).toBe(
       "Extension Side Panel",
       "the toolbar action opens the declared side-panel document",
     );
 
-    const worker = await waitForExtensionWorker(
-      ctx.page.raw.browser(),
-      loaded.id,
-    );
-    await closeExtensionSidePanel(worker.worker);
-    await waitForExtensionPageClosed(loaded, panel);
+    await panel.close();
   },
 );
+```
+
+`open()` defaults to the selected extension's manifest-declared
+`side_panel.default_path`. Use `pagePath` to override it. When one extension is
+loaded, omit `extension`; when several are loaded, select one by id, name, or
+unpacked-directory path. Calling `open()` while the matching panel is already
+active throws a targeted error; use `current()` to recover that handle instead.
+The optional `timeout` is one total budget for extension discovery and panel
+opening, rather than a separate budget for each stage.
+
+The returned `panel.page` is the raw Puppeteer page for the extension-owned
+document. It is intentionally outside the host page's single-page evidence
+window; use imperative assertions inside the step action. Declarative
+multi-page `contract.browser expect[]` support is a separate concern.
+
+The same capability is inferred for extension-backed browser contracts:
+
+```ts
+import { contract } from "@glubean/sdk";
+import { defineBrowserCase } from "@glubean/browser";
+import { chrome } from "./setup.js";
+
+const extensionUI = contract.browser.with("extensionUI", { client: chrome });
+
+export const nativeSidePanelLifecycle = extensionUI("native-side-panel-lifecycle", {
+  cases: {
+    openCloseReopen: defineBrowserCase({
+      description: "The toolbar action opens, closes, and reopens the native side panel.",
+      steps: [{
+        id: "open-close-reopen",
+        intent: "open the side panel, close it, and open it again",
+        action: async (page) => {
+          const first = await page.extension.sidePanel.open();
+          await first.close();
+          const second = await page.extension.sidePanel.open();
+          await second.close();
+        },
+      }],
+      expect: [],
+    }),
+  },
+});
 ```
 
 The extension must declare the `sidePanel` permission and configure its action
 to open the panel, for example with
 `chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })`.
 
-`triggerExtensionAction()` requires `puppeteer-core >= 24.41.0`.
-`closeExtensionSidePanel()` evaluates `chrome.sidePanel.close({ windowId })` in
-the extension worker and therefore requires Chrome 141 or newer. Pass an
-explicit `{ windowId }` when the test owns multiple Chrome windows.
+`sidePanel.open()` relies on Puppeteer's `Extension.triggerAction()` and
+therefore requires `puppeteer-core >= 24.41.0`. The handle's `close()` method
+evaluates `chrome.sidePanel.close({ windowId })` in the extension worker and
+therefore requires Chrome 141 or newer. Pass an explicit `{ windowId }` when
+the test owns multiple Chrome windows.
 
 To isolate panel rendering from browser action behavior, navigate directly to
-`extensionPageUrl(loaded.id, sidePanelPath)` in a separate test. That is useful
-component-level proof, but it does not prove the toolbar action or native panel
-container.
+the declared document in a separate test:
+
+```ts
+import {
+  extensionPageUrl,
+  getInstalledExtension,
+  resolveExtensionPagePath,
+} from "@glubean/browser/chrome-extension";
+import { extension, test } from "./setup.js";
+
+export const sidePanelDocument = test(
+  {
+    id: "side-panel-document",
+    name: "The declared Side Panel document renders in isolation",
+    tags: ["browser", "extension", "sidepanel"],
+  },
+  async (ctx) => {
+    const loaded = await getInstalledExtension(ctx.page.raw.browser());
+    const sidePanelPath = resolveExtensionPagePath(extension, "sidepanel");
+    await ctx.page.goto(extensionPageUrl(loaded.id, sidePanelPath));
+    ctx.expect(await ctx.page.title()).toBe(
+      "Extension Side Panel",
+      "the declared Side Panel document renders",
+    );
+  },
+);
+```
+
+That is useful component-level proof, but it does not prove the toolbar action
+or native panel container.

@@ -22,7 +22,7 @@ export const extension = resolveUnpackedExtension(
   path.resolve(process.env.CHROME_EXTENSION_PATH ?? "apps/extension/dist"),
 );
 
-export const { test } = createExtensionTest({
+export const { test, chrome } = createExtensionTest({
   extensions: extension.path,
   baseUrl: "APP_URL",
   launchOptions: {
@@ -47,6 +47,11 @@ cannot be reused by `glubean qa attach`. Use a separate launch without
 `chrome-extension://` URLs even when `baseUrl` is configured.
 The `extensions` option also accepts literal paths, `"{{EXTENSION_PATH}}"`
 templates, or a bare runtime variable key such as `"EXTENSION_PATH"`.
+
+Pages created by `createExtensionTest()` expose extension-only operations under
+`ctx.page.extension`. The same typed capability is inferred in
+`contract.browser` step actions when the scoped client comes from
+`browser({ launch: true, extensions })`.
 
 Run a guide as a normal Glubean test:
 

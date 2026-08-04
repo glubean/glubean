@@ -130,7 +130,10 @@ describe("installed extension actions", () => {
   });
 
   it("closes the native side panel through the extension worker", async () => {
-    const evaluate = vi.fn(async () => {});
+    const evaluate = vi.fn(async (
+      _fn: (...args: never[]) => unknown,
+      _windowId?: number,
+    ) => {});
     const worker = { evaluate } as unknown as WebWorker;
 
     await closeExtensionSidePanel(worker, { windowId: 7 });

@@ -11,7 +11,7 @@
  * judges ALL expects and we can inspect every verdict.
  */
 
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, expectTypeOf, test } from "vitest";
 import { contract, installPlugin } from "@glubean/sdk";
 import type { ContractCaseRef, TestContext } from "@glubean/sdk";
 import browserPlugin, { browserAdapter, defineBrowserCase } from "../index.js";
@@ -23,6 +23,7 @@ import type {
   BrowserTraceRecord,
 } from "./types.js";
 import type { BrowserTestContext, GlubeanBrowser, InstrumentedPage } from "../page.js";
+import type { ExtensionPage } from "../chrome-extension/page.js";
 
 beforeAll(async () => {
   await installPlugin(browserPlugin);
@@ -975,5 +976,38 @@ describe("contract.browser factory", () => {
       resolvedInput: { email: "dogfood@example.com" },
     });
     expect(seenEmail).toBe("dogfood@example.com");
+  });
+
+  test("scoped clients propagate extension page capabilities into step actions", () => {
+    // This assertion is compile-time evidence enforced by the package's
+    // `test:types` gate; Vitest alone erases `expectTypeOf` at runtime.
+    const extensionBrowser = {
+      newPage: async (_ctx: BrowserTestContext) => ({} as ExtensionPage),
+    };
+    const extensionUI = (
+      contract as unknown as { browser: BrowserContractRoot }
+    ).browser.with("extensionUI", {
+      client: extensionBrowser,
+    });
+
+    extensionUI("native-side-panel", {
+      cases: {
+        openCloseReopen: defineBrowserCase({
+          description: "The native side panel opens, closes, and reopens from the toolbar action.",
+          steps: [
+            {
+              id: "open-close-reopen",
+              intent: "open the side panel, close it, and open it again",
+              action: async (page) => {
+                expectTypeOf(page).toEqualTypeOf<ExtensionPage>();
+                const panel = await page.extension.sidePanel.open();
+                await panel.close();
+              },
+            },
+          ],
+          expect: [],
+        }),
+      },
+    });
   });
 });
