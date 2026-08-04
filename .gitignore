@@ -8,6 +8,7 @@ dist/
 
 # tsc inline output (build outputs go to dist/)
 packages/*/src/**/*.js
+!packages/browser/src/chrome-extension/fixtures/**/*.js
 packages/*/src/**/*.d.ts
 packages/*/src/**/*.js.map
 packages/*/src/**/*.d.ts.map

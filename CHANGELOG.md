@@ -9,6 +9,13 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ## [Unreleased]
 
+### Added
+- **Unpacked Chrome extension testing in `@glubean/browser`** (#19) — launch one or more extension directories with `browser({ launch: true, extensions })`; discover loaded extensions, workers, pages, and targets through `@glubean/browser/chrome-extension`; trigger real toolbar actions; verify native Side Panel open/close behavior; and test options pages and content scripts with dedicated guides and a real-Chrome smoke test. Extension-origin absolute URLs now remain intact when an application `baseUrl` is configured. Native Side Panel closing requires Chrome 141+.
+- **Pipe-transport attach failures are explicit in `@glubean/browser`** — `GlubeanBrowser.wsEndpoint()` now throws a descriptive error when Chrome has no CDP WebSocket endpoint, including extension-enabled sessions, instead of returning an unusable empty string.
+
+### Changed
+- **BREAKING: `@glubean/browser` now requires `puppeteer-core >=24.41.0 <26`** — Chrome extension discovery and toolbar actions use Puppeteer's high-level `Extension` API introduced in 24.41. Existing browser-plugin users on Puppeteer 22 or 23 must upgrade before installing this release.
+
 ## [0.10.3] — 2026-07-11
 
 ### Changed

@@ -74,8 +74,25 @@ export interface PuppeteerLike {
 export type BrowserOptions =
   & BrowserOptionsBase
   & (
-    | { launch: true; executablePath?: string; endpoint?: never }
-    | { endpoint: string; launch?: never; executablePath?: never }
+    | {
+        launch: true;
+        executablePath?: string;
+        endpoint?: never;
+        /**
+         * One or more unpacked Chrome extension directories to load.
+         * Each directory must contain a valid manifest.json.
+         *
+         * Extension launch mode uses Puppeteer's pipe transport and defaults
+         * to visible Chrome unless `launchOptions.headless` is set explicitly.
+         */
+        extensions?: string | readonly string[];
+      }
+    | {
+        endpoint: string;
+        launch?: never;
+        executablePath?: never;
+        extensions?: never;
+      }
   );
 
 /** Network trace filter configuration. */
@@ -462,7 +479,14 @@ export class GlubeanBrowser {
    */
   async wsEndpoint(): Promise<string> {
     const browser = await this._getBrowser();
-    return browser.wsEndpoint();
+    const endpoint = browser.wsEndpoint();
+    if (!endpoint) {
+      throw new Error(
+        "This Chrome session uses pipe transport and has no CDP WebSocket endpoint. " +
+          "glubean qa attach is unavailable; launch without extensions when an attachable session is required.",
+      );
+    }
+    return endpoint;
   }
 
   /** Close the browser and terminate the Chrome process. */
@@ -1032,7 +1056,7 @@ export class GlubeanPage {
         | "networkidle2";
     },
   ): Promise<void> {
-    const resolvedUrl = this._resolveUrl(url);
+    const resolvedUrl = resolveNavigationUrl(url, this._baseUrl);
     const start = Date.now();
 
     let response;
@@ -2357,14 +2381,20 @@ export class GlubeanPage {
     }
   }
 
-  private _resolveUrl(url: string): string {
-    if (!this._baseUrl) return url;
-    if (url.startsWith("http://") || url.startsWith("https://")) return url;
+}
 
-    const base = this._baseUrl.endsWith("/")
-      ? this._baseUrl.slice(0, -1)
-      : this._baseUrl;
-    const path = url.startsWith("/") ? url : `/${url}`;
-    return `${base}${path}`;
-  }
+/** @internal Resolve app-relative and supported absolute browser URLs. */
+export function resolveNavigationUrl(
+  url: string,
+  baseUrl: string | undefined,
+): string {
+  if (!baseUrl) return url;
+  // Browser tests commonly mix app-relative navigation with extension-origin
+  // pages. Preserve the prior HTTP(S) behavior plus Chrome extension URLs;
+  // do not broaden relative-path semantics for unrelated schemes.
+  if (/^(?:https?|chrome-extension):\/\//i.test(url)) return url;
+
+  const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+  const path = url.startsWith("/") ? url : `/${url}`;
+  return `${base}${path}`;
 }

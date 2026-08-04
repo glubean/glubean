@@ -75,7 +75,7 @@ Same TypeScript file works as both API collection entry and CI regression test. 
 | Plugin | Protocol |
 |--------|----------|
 | [@glubean/auth](packages/auth) | Bearer, API key, OAuth 2.0 |
-| [@glubean/browser](packages/browser) | Browser automation (Puppeteer) |
+| [@glubean/browser](packages/browser) | Browser and Chrome extension automation (Puppeteer) |
 | [@glubean/graphql](packages/graphql) | GraphQL queries and mutations |
 | [@glubean/grpc](packages/grpc) | gRPC unary calls |
 | [@glubean/oauth-code](packages/oauth-code) | OAuth Authorization Code flow for explore mode |
