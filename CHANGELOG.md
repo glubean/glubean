@@ -9,12 +9,19 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-04
+
 ### Added
-- **Unpacked Chrome extension testing in `@glubean/browser`** (#19) — launch one or more extension directories with `browser({ launch: true, extensions })`; discover loaded extensions, workers, pages, and targets through `@glubean/browser/chrome-extension`; trigger real toolbar actions; verify native Side Panel open/close behavior; and test options pages and content scripts with dedicated guides and a real-Chrome smoke test. Extension-origin absolute URLs now remain intact when an application `baseUrl` is configured. Native Side Panel closing requires Chrome 141+.
+- **Unpacked Chrome extension testing in `@glubean/browser`** (#20) — launch one or more extension directories with `browser({ launch: true, extensions })`; discover loaded extensions, workers, pages, and targets through `@glubean/browser/chrome-extension`; trigger real toolbar actions; verify native Side Panel open/close behavior; and test options pages and content scripts with dedicated guides and a real-Chrome smoke test. Extension-origin absolute URLs now remain intact when an application `baseUrl` is configured. Native Side Panel closing requires Chrome 141+.
 - **Pipe-transport attach failures are explicit in `@glubean/browser`** — `GlubeanBrowser.wsEndpoint()` now throws a descriptive error when Chrome has no CDP WebSocket endpoint, including extension-enabled sessions, instead of returning an unusable empty string.
 
 ### Changed
+- **All Core packages now publish under Apache-2.0** (#14) — root and per-package license metadata are explicit, and npm tarballs include each package's `LICENSE` and `NOTICE` files.
 - **BREAKING: `@glubean/browser` now requires `puppeteer-core >=24.41.0 <26`** — Chrome extension discovery and toolbar actions use Puppeteer's high-level `Extension` API introduced in 24.41. Existing browser-plugin users on Puppeteer 22 or 23 must upgrade before installing this release.
+
+### Fixed
+- **Contract case templates now resolve in headers and nested JSON bodies** (#18) — `{{KEY}}` placeholders use runtime vars consistently across path, query, headers, objects, and arrays in standalone and workflow execution; opaque body values retain their identity, `\{{KEY}}` remains a literal placeholder, and secret-backed replacements stay masked in trace evidence.
+- **Browser base URLs now support literal URLs, `{{KEY}}` templates, and bare runtime-var keys** (#17) — browser journeys preserve automatic contract-entry navigation while authored steps can navigate to their own targets; scanner and CLI guidance also recognizes the required `*.browser.ts` journey suffix.
 
 ## [0.10.3] — 2026-07-11
 
@@ -245,7 +252,8 @@ Changes prior to `v0.7.0` are not captured in this CHANGELOG. Use `git log v0.2.
 - `v0.3.x`–`v0.5.x` — config profiles, multi-suite, `--ci` flag, demo template, per-profile multi-project upload.
 - `v0.2.x` — initial Node.js port from Deno; `@glubean/engine` spike, inbound contract receivers, workflow vNext (S2 series).
 
-[Unreleased]: https://github.com/glubean/glubean/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/glubean/glubean/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/glubean/glubean/compare/v0.10.8...v0.11.0
 [0.9.5]: https://github.com/glubean/glubean/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/glubean/glubean/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/glubean/glubean/compare/v0.9.2...v0.9.3

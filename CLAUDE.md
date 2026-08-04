@@ -11,7 +11,7 @@
 
 ### Lockstep — every package shares ONE version (owner 2026-06-18)
 ALL 14 published packages (core + clients + plugins + `glubean` meta) carry the **same version** and
-are bumped **together** on every release — even packages that didn't change. Currently `0.10.3`.
+are bumped **together** on every release — even packages that didn't change. Currently `0.11.0`.
 
 - **Why lockstep (not per-package semver):** these are one product split into modules with
   hard internal coupling — e.g. the runner's workflow executor imports `@glubean/sdk/internal`,
