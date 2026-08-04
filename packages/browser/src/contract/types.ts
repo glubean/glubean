@@ -27,7 +27,7 @@
  *     `url` / `dom` (visible/absent) / `calls` (references a contract.http
  *     case — the killer feature) / `console`. Richer matchers are deferred.
  *
- * The Mode A executor is the resolved `GlubeanBrowser` client
+ * The Mode A executor is a resolved browser page client
  * (`configure({ plugins: { chrome: browser({...}) } })`), supplied via
  * `contract.browser.with({ client })` — same "client injection through a
  * scoped instance" pattern as HTTP / GraphQL / gRPC.
@@ -41,7 +41,10 @@ import type {
   SchemaLike,
   TestContext,
 } from "@glubean/sdk";
-import type { GlubeanBrowser, InstrumentedPage } from "../page.js";
+import type {
+  BrowserPageClient,
+  InstrumentedPage,
+} from "../page.js";
 
 // =============================================================================
 // Instance defaults (contract.browser.with)
@@ -52,14 +55,17 @@ import type { GlubeanBrowser, InstrumentedPage } from "../page.js";
  * (`contract.browser.with("name", {...})`).
  *
  * The `client` binding is the primary reason to use `.with`: supplying a
- * pre-configured `GlubeanBrowser` lets the adapter drive it without rebuilding
- * per contract. The client owns the real navigation base URL (it was fixed at
- * `browser({ baseUrl })` construction time); the contract-level `baseUrl` here
- * is **projection / display only** (mirrors GraphQL `endpoint`).
+ * pre-configured `GlubeanBrowser` or `ExtensionBrowser` lets the adapter drive
+ * it without rebuilding per contract. The client owns the real navigation
+ * base URL (it was fixed at `browser({ baseUrl })` construction time); the
+ * contract-level `baseUrl` here is **projection / display only** (mirrors
+ * GraphQL `endpoint`).
  */
-export interface BrowserContractDefaults {
+export interface BrowserContractDefaults<
+  PageType extends InstrumentedPage = InstrumentedPage,
+> {
   /** Default browser client for all contracts in this instance. */
-  client?: GlubeanBrowser;
+  client?: BrowserPageClient<PageType>;
   /**
    * Base URL **for projection / display only.** Travels on `meta.baseUrl` so
    * the scanner / `glubean contracts` markdown / MCP / Cloud can show which
@@ -181,7 +187,10 @@ export type BrowserExpect = { id: string } & (
  * execution directive AND the spec anchor an author/agent uses to repair
  * `action` when a replay drifts). `action` is the Mode A executable replay.
  */
-export interface BrowserStep<Input = void> {
+export interface BrowserStep<
+  Input = void,
+  PageType extends InstrumentedPage = InstrumentedPage,
+> {
   id: string;
   /** Structured instruction. Part of the canonical hash (journey semantics). */
   intent: string;
@@ -191,7 +200,7 @@ export interface BrowserStep<Input = void> {
    * `ctx.secrets`, etc.). NOT part of the hash. Absent → Mode A marks the
    * case unimplemented and skips (Mode B unaffected — `intent` is enough).
    */
-  action?: (page: InstrumentedPage, input: Input, ctx: TestContext) => Promise<void>;
+  action?: (page: PageType, input: Input, ctx: TestContext) => Promise<void>;
 }
 
 // =============================================================================
@@ -244,7 +253,10 @@ export type BrowserScreenshotStrategy = "final" | "each-step" | "on-failure";
  * `needs`), NOT setup state — v10 has no per-case lifecycle; setup-style work
  * belongs to a `contract.bootstrap()` overlay.
  */
-export interface BrowserContractCase<Input = void> extends BaseCaseSpec {
+export interface BrowserContractCase<
+  Input = void,
+  PageType extends InstrumentedPage = InstrumentedPage,
+> extends BaseCaseSpec {
   /** Per-case logical input schema (redeclares `BaseCaseSpec.needs`). */
   needs?: SchemaLike<Input>;
 
@@ -258,7 +270,7 @@ export interface BrowserContractCase<Input = void> extends BaseCaseSpec {
   agentNotes?: string[];
 
   /** Ordered journey steps. */
-  steps: BrowserStep<Input>[];
+  steps: BrowserStep<Input, PageType>[];
 
   /** Fixed-questionnaire expectations (stable ids). */
   expect?: BrowserExpect[];
@@ -267,7 +279,7 @@ export interface BrowserContractCase<Input = void> extends BaseCaseSpec {
   screenshot?: BrowserScreenshotStrategy;
 
   /** Per-case client override. */
-  client?: GlubeanBrowser;
+  client?: BrowserPageClient<PageType>;
 
   /**
    * Escape hatch: custom assertions over the frozen evidence bundle. Mode A
@@ -289,9 +301,12 @@ export interface BrowserContractCase<Input = void> extends BaseCaseSpec {
  * declared logical input instead of drifting from the `needs` schema (mirrors
  * `defineHttpCase` / `defineGraphqlCase`).
  */
-export function defineBrowserCase<Input = void>(
-  c: BrowserContractCase<Input>,
-): BrowserContractCase<Input> {
+export function defineBrowserCase<
+  Input = void,
+  PageType extends InstrumentedPage = InstrumentedPage,
+>(
+  c: BrowserContractCase<Input, PageType>,
+): BrowserContractCase<Input, PageType> {
   return c;
 }
 
@@ -309,13 +324,14 @@ export interface BrowserContractSpec<
   // rather than a single shared `Input` — otherwise a contract mixing cases with
   // different `needs` (or any input-bearing case) fails to type-check. Same shape
   // as GraphQL/gRPC (`GraphqlContractCase<Vars, Res, any>`).
-  Cases extends Record<string, BrowserContractCase<any>> = Record<
+  Cases extends Record<string, BrowserContractCase<any, any>> = Record<
     string,
     BrowserContractCase<any>
   >,
+  PageType extends InstrumentedPage = InstrumentedPage,
 > {
-  /** Browser client (resolved `GlubeanBrowser`) for all cases. */
-  client?: GlubeanBrowser;
+  /** Browser page client for all cases, preserving its instrumented page type. */
+  client?: BrowserPageClient<PageType>;
 
   /** Default entry path (relative to the client baseUrl) for cases. */
   entry?: string;
@@ -431,19 +447,21 @@ export type BrowserFlowCaseOutput = BrowserEvidence;
  * instance is the canonical pattern — same as HTTP / GraphQL / gRPC).
  */
 export type BrowserContractRoot = {
-  with: (
+  with: <PageType extends InstrumentedPage = InstrumentedPage>(
     instanceName: string,
-    defaults?: BrowserContractDefaults,
-  ) => BrowserContractFactory;
+    defaults?: BrowserContractDefaults<PageType>,
+  ) => BrowserContractFactory<PageType>;
 };
 
-export type BrowserContractFactory = <
-  Cases extends Record<string, BrowserContractCase<any>>,
+export type BrowserContractFactory<
+  PageType extends InstrumentedPage = InstrumentedPage,
+> = <
+  Cases extends Record<string, BrowserContractCase<any, PageType>>,
 >(
   id: string,
-  spec: BrowserContractSpec<Cases>,
+  spec: BrowserContractSpec<Cases, PageType>,
 ) => ProtocolContract<
-  BrowserContractSpec<Cases>,
+  BrowserContractSpec<Cases, PageType>,
   BrowserSafeSchemas,
   BrowserContractMeta,
   Cases

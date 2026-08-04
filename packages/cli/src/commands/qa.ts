@@ -31,10 +31,15 @@ import {
   type AgentQaReport,
   type BrowserContractCase,
   type BrowserEvidence,
+  type BrowserPageClient,
   type BrowserTraceRecord,
-  type GlubeanBrowser,
-  type InstrumentedPage,
 } from "@glubean/browser";
+
+type QaManagedBrowserClient = BrowserPageClient & {
+  readonly isLaunched: boolean;
+  wsEndpoint(): Promise<string>;
+  close(): Promise<void>;
+};
 
 /**
  * Build a minimal runtime carrying env vars/secrets so importing a `.browser.ts`
@@ -127,12 +132,12 @@ async function loadBrowserCase(
   file: string,
   caseKey: string,
   contractId?: string,
-): Promise<{ contractId: string; caseSpec: BrowserContractCase; client?: GlubeanBrowser; revision: string }> {
+): Promise<{ contractId: string; caseSpec: BrowserContractCase; client?: BrowserPageClient; revision: string }> {
   const abs = resolve(file);
   await bootstrap(dirname(abs)); // installs the browser plugin via glubean.setup.ts
   const mod = (await import(pathToFileURL(abs).href)) as Record<string, unknown>;
   type PC = {
-    _spec?: { cases?: Record<string, unknown>; client?: GlubeanBrowser };
+    _spec?: { cases?: Record<string, unknown>; client?: BrowserPageClient };
     _extracted?: { id?: string; protocol?: string; cases?: Array<{ key: string; schemas?: unknown }> };
   };
   // Collect ALL browser contracts carrying the case key — do not silently pick
@@ -183,6 +188,18 @@ async function loadBrowserCase(
   // Mode A resolves the client case > spec.
   const client = caseSpec.client ?? pc._spec!.client;
   return { contractId: pc._extracted!.id ?? "unknown", caseSpec, client, revision };
+}
+
+/** @internal Return whether a contract client supports `qa open` lifecycle control. */
+export function isQaManagedBrowserClient(
+  client: BrowserPageClient,
+): client is QaManagedBrowserClient {
+  const candidate = client as Partial<QaManagedBrowserClient>;
+  return (
+    typeof candidate.isLaunched === "boolean" &&
+    typeof candidate.wsEndpoint === "function" &&
+    typeof candidate.close === "function"
+  );
 }
 
 /** Wait until the trace buffer stops growing (bounded) before sealing. */
@@ -273,6 +290,12 @@ export async function qaOpenCommand(opts: { file: string; case: string; report?:
   await runWithRuntime(buildRuntime(), async () => {
     const { contractId, caseSpec, client, revision } = await loadBrowserCase(opts.file, opts.case, opts.contract);
     if (!client) throw new Error("qa open: the contract has no browser client to launch.");
+    if (!isQaManagedBrowserClient(client)) {
+      throw new Error(
+        "qa open: the contract client does not expose managed-browser lifecycle methods; " +
+          "use the client returned by browser({ launch: true }).",
+      );
+    }
     if (!client.isLaunched) {
       throw new Error(
         "qa open: the contract's client is endpoint-backed (browser({ endpoint })), whose Chrome is owned by " +

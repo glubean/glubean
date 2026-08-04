@@ -1,6 +1,7 @@
 import { configure, test as baseTest, type ExtensionFn } from "@glubean/sdk";
-import type { BrowserOptions, BrowserTestContext, InstrumentedPage } from "../page.js";
+import type { BrowserOptions, BrowserTestContext } from "../page.js";
 import { browser } from "../plugin.js";
+import type { ExtensionPage } from "./page.js";
 
 export type ChromeExtensionTestOptions = Omit<
   Extract<BrowserOptions, { launch: true }>,
@@ -16,7 +17,7 @@ export function createExtensionTest(options: ChromeExtensionTestOptions) {
       chrome: browser({ ...options, launch: true }),
     },
   });
-  const pageFixture: ExtensionFn<InstrumentedPage> = async (ctx, use) => {
+  const pageFixture: ExtensionFn<ExtensionPage> = async (ctx, use) => {
     const page = await chrome.newPage(ctx as unknown as BrowserTestContext);
     try {
       await use(page);

@@ -61,6 +61,7 @@ Chrome-specific helpers are exported from `@glubean/browser/chrome-extension`:
 - content-script ready-message watchers;
 - toolbar-action triggering through Puppeteer's `Extension` API;
 - native side-panel open/close verification;
+- typed `page.extension.sidePanel` capabilities for tests and browser contracts;
 - a `createExtensionTest()` convenience fixture.
 
 See Puppeteer's [Chrome extension guide](https://pptr.dev/guides/chrome-extensions)

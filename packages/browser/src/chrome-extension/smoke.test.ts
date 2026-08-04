@@ -4,15 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolveTemplate, type GlubeanRuntime } from "@glubean/sdk";
 import type { BrowserTestContext } from "../page.js";
 import { browser } from "../plugin.js";
-import {
-  closeExtensionSidePanel,
-  getInstalledExtension,
-  triggerExtensionAction,
-  waitForExtensionOwnedPage,
-  waitForExtensionPageClosed,
-} from "./actions.js";
+import { getInstalledExtension } from "./actions.js";
 import { installExtensionReadyWatcher } from "./ready.js";
-import { extensionPageUrl, waitForExtensionWorker } from "./targets.js";
+import { extensionPageUrl } from "./targets.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/extension", import.meta.url));
 const runSmoke =
@@ -95,14 +89,25 @@ describe.skipIf(!runSmoke)("real Chrome extension smoke", () => {
       )).toBe("true");
       await ready.dispose();
 
-      await triggerExtensionAction(page.raw, extension.id);
-      const sidePanel = await waitForExtensionOwnedPage(extension, "sidepanel.html");
-      await sidePanel.waitForSelector("[data-testid=sidepanel-root]");
-      expect(await sidePanel.title()).toBe("Fixture Side Panel");
+      await expect(page.extension.sidePanel.current({
+        extension: extension.id,
+      })).resolves.toBeNull();
 
-      const worker = await waitForExtensionWorker(page.raw.browser(), extension.id);
-      await closeExtensionSidePanel(worker.worker);
-      await waitForExtensionPageClosed(extension, sidePanel);
+      const sidePanel = await page.extension.sidePanel.open({
+        extension: extension.id,
+      });
+      await sidePanel.page.waitForSelector("[data-testid=sidepanel-root]");
+      expect(await sidePanel.page.title()).toBe("Fixture Side Panel");
+      await sidePanel.close();
+
+      await expect(page.extension.sidePanel.current({
+        extension: extension.id,
+      })).resolves.toBeNull();
+      const reopened = await page.extension.sidePanel.open({
+        extension: extension.id,
+      });
+      expect(await reopened.page.title()).toBe("Fixture Side Panel");
+      await reopened.close();
     } finally {
       await page.close();
       await chrome.close();

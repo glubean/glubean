@@ -1,7 +1,12 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { resolveTemplate, type GlubeanRuntime } from "@glubean/sdk";
 import { browser, resolveBrowserLaunchOptions } from "./plugin.js";
+import {
+  ExtensionBrowser,
+  type ExtensionBrowserOptions,
+  type ExtensionPage,
+} from "./index.js";
 
 const fixture = fileURLToPath(new URL("./chrome-extension/fixtures/extension", import.meta.url));
 
@@ -27,6 +32,32 @@ function makeRuntime(vars: Record<string, string>): GlubeanRuntime {
 }
 
 describe("browser extension launch configuration", () => {
+  it("returns an extension-aware browser client when extensions are configured", () => {
+    const options: ExtensionBrowserOptions = {
+      launch: true,
+      extensions: fixture,
+    };
+    const client = browser(options).create(makeRuntime({}));
+
+    expect(client).toBeInstanceOf(ExtensionBrowser);
+    expectTypeOf(client).toEqualTypeOf<ExtensionBrowser>();
+    expectTypeOf<Awaited<ReturnType<ExtensionBrowser["newPage"]>>>()
+      .toEqualTypeOf<ExtensionPage>();
+  });
+
+  it("keeps unpacked-extension validation lazy until Chrome is requested", async () => {
+    const missing = "/definitely-not-a-real-glubean-extension";
+    const client = browser({
+      launch: true,
+      extensions: missing,
+    }).create(makeRuntime({}));
+
+    expect(client.isLaunched).toBe(true);
+    await expect(client.newPage({} as never)).rejects.toThrow(
+      `Chrome extension directory does not exist: ${missing}`,
+    );
+  });
+
   it("resolves extension path templates and composes Puppeteer launch options", () => {
     const options = resolveBrowserLaunchOptions({
       launch: true,

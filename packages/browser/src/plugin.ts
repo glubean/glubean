@@ -2,8 +2,9 @@
  * Glubean browser plugin factory.
  *
  * Uses `defineClientFactory()` from the SDK to create a lazily-initialized
- * browser connection. Returns a `GlubeanBrowser` with a `newPage(ctx)` method
- * that creates fully instrumented pages wired to the test context.
+ * browser connection. Returns a `GlubeanBrowser`, or an `ExtensionBrowser`
+ * when unpacked extensions are configured, whose `newPage(ctx)` method creates
+ * fully instrumented pages wired to the test context.
  *
  * Supports three connection modes:
  * - `launch: true` — auto-detect and start local Chrome headless
@@ -14,14 +15,24 @@
  */
 
 import { defineClientFactory } from "@glubean/sdk";
-import type { GlubeanRuntime } from "@glubean/sdk";
+import type { ClientFactory, GlubeanRuntime } from "@glubean/sdk";
 import type { Browser } from "puppeteer-core";
 import { type BrowserOptions, GlubeanBrowser } from "./page.js";
 import { connectChrome, launchChrome } from "./chrome.js";
 import {
   extensionLaunchOptions,
+  extensionLaunchOptionsFromResolved,
   type ExtensionLaunchOverrides,
 } from "./chrome-extension/launch.js";
+import {
+  resolveUnpackedExtensions,
+  type UnpackedExtension,
+} from "./chrome-extension/manifest.js";
+import { ExtensionBrowser } from "./chrome-extension/page.js";
+
+export type ExtensionBrowserOptions = Extract<BrowserOptions, { launch: true }> & {
+  extensions: string | readonly string[];
+};
 
 /**
  * Create a Glubean browser plugin.
@@ -117,8 +128,15 @@ function resolveExtensionPaths(
 export function resolveBrowserLaunchOptions(
   options: Extract<BrowserOptions, { launch: true }>,
   runtime: GlubeanRuntime,
+  resolvedExtensions?: readonly UnpackedExtension[],
 ): Record<string, unknown> | undefined {
   const resolvedLaunchOptions = resolveLaunchOptions(options.launchOptions, runtime);
+  if (resolvedExtensions !== undefined) {
+    return extensionLaunchOptionsFromResolved(
+      resolvedExtensions,
+      resolvedLaunchOptions as ExtensionLaunchOverrides | undefined,
+    ) as unknown as Record<string, unknown>;
+  }
   const extensionPaths = resolveExtensionPaths(options.extensions, runtime);
   if (extensionPaths === undefined) return resolvedLaunchOptions;
   return extensionLaunchOptions(
@@ -149,19 +167,52 @@ function resolveBaseUrl(
   return runtime.requireVar(configured);
 }
 
-export function browser(options: BrowserOptions): { __type: GlubeanBrowser; create: (runtime: GlubeanRuntime) => GlubeanBrowser } {
+export function browser(options: ExtensionBrowserOptions): ClientFactory<ExtensionBrowser>;
+export function browser(options: BrowserOptions): ClientFactory<GlubeanBrowser>;
+export function browser(options: BrowserOptions): ClientFactory<GlubeanBrowser> {
   return defineClientFactory((runtime: GlubeanRuntime): GlubeanBrowser => {
     const baseUrl = resolveBaseUrl(options.baseUrl, runtime);
-
     let browserPromise: Promise<Browser> | null = null;
+    let launchConfiguration: {
+      extensions?: readonly UnpackedExtension[];
+      options?: Record<string, unknown>;
+    } | undefined;
 
     const pptr = options.puppeteer;
+
+    function getLaunchConfiguration(): NonNullable<typeof launchConfiguration> {
+      if (launchConfiguration) return launchConfiguration;
+      if (!("launch" in options) || !options.launch) {
+        launchConfiguration = {};
+        return launchConfiguration;
+      }
+      const extensionPaths = resolveExtensionPaths(options.extensions, runtime);
+      const extensions = extensionPaths === undefined
+        ? undefined
+        : resolveUnpackedExtensions(extensionPaths);
+      launchConfiguration = {
+        extensions,
+        options: resolveBrowserLaunchOptions(options, runtime, extensions),
+      };
+      return launchConfiguration;
+    }
+
+    function getConfiguredExtensions(): readonly UnpackedExtension[] {
+      const extensions = getLaunchConfiguration().extensions;
+      if (!extensions) {
+        throw new Error("ExtensionBrowser requires at least one configured unpacked extension.");
+      }
+      return extensions;
+    }
 
     function getBrowser(): Promise<Browser> {
       if (!browserPromise) {
         if ("launch" in options && options.launch) {
-          const resolvedLaunchOptions = resolveBrowserLaunchOptions(options, runtime);
-          browserPromise = launchChrome(options.executablePath, pptr, resolvedLaunchOptions);
+          browserPromise = launchChrome(
+            options.executablePath,
+            pptr,
+            getLaunchConfiguration().options,
+          );
         } else if ("endpoint" in options && options.endpoint) {
           if ((options as { extensions?: unknown }).extensions !== undefined) {
             throw new Error(
@@ -179,6 +230,10 @@ export function browser(options: BrowserOptions): { __type: GlubeanBrowser; crea
       return browserPromise;
     }
 
-    return new GlubeanBrowser(getBrowser, baseUrl, options);
+    const extensionMode = "launch" in options && options.launch &&
+      options.extensions !== undefined;
+    return extensionMode
+      ? new ExtensionBrowser(getBrowser, baseUrl, options, getConfiguredExtensions)
+      : new GlubeanBrowser(getBrowser, baseUrl, options);
   });
 }

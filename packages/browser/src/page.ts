@@ -41,6 +41,20 @@ import { getRuntime } from "@glubean/sdk/internal";
  */
 export type InstrumentedPage = GlubeanPage & Page;
 
+/**
+ * Minimal browser-client shape consumed by `contract.browser`.
+ *
+ * The page type is generic so a browser launched with additional capabilities
+ * (for example a loaded Chrome extension) can expose those capabilities to
+ * contract step actions without adding invalid methods to every
+ * `InstrumentedPage`.
+ */
+export interface BrowserPageClient<
+  PageType extends InstrumentedPage = InstrumentedPage,
+> {
+  newPage(ctx: BrowserTestContext): Promise<PageType>;
+}
+
 /** Per-action options for interaction methods. */
 export interface ActionOptions {
   /** Timeout in ms (overrides the global `actionTimeout`). */
@@ -371,6 +385,7 @@ export class GlubeanBrowser {
   private readonly _baseUrl: string | undefined;
   private readonly _options: BrowserOptions;
   private _openPages = 0;
+  private readonly _trackedPages = new WeakSet<Page>();
   private _closeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** @internal — created by the plugin factory. */
@@ -430,6 +445,8 @@ export class GlubeanBrowser {
    * real pages that must keep the browser open too).
    */
   _track(rawPage: Page): void {
+    if (this._trackedPages.has(rawPage)) return;
+    this._trackedPages.add(rawPage);
     if (this._closeTimer) {
       clearTimeout(this._closeTimer);
       this._closeTimer = null;

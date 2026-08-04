@@ -38,8 +38,8 @@ import type {
 import { Expectation, genericMarkdownPart } from "@glubean/sdk";
 
 import type {
+  BrowserPageClient,
   BrowserTestContext,
-  GlubeanBrowser,
   InstrumentedPage,
 } from "../page.js";
 import {
@@ -121,7 +121,7 @@ function mergeNotes(base: string[] | undefined, more: string[] | undefined): str
 function resolveClient(
   caseSpec: BrowserContractCase,
   spec: BrowserContractSpec,
-): GlubeanBrowser {
+): BrowserPageClient {
   const client = caseSpec.client ?? spec.client;
   if (!client) {
     throw new Error(

@@ -16,6 +16,7 @@
  */
 
 import type { Extensions, ProtocolContract } from "@glubean/sdk";
+import type { InstrumentedPage } from "../page.js";
 import type {
   BrowserContractCase,
   BrowserContractDefaults,
@@ -26,15 +27,18 @@ import type {
   BrowserSafeSchemas,
 } from "./types.js";
 
-type InternalDefaults = BrowserContractDefaults & { _name?: string };
+type InternalDefaults<PageType extends InstrumentedPage> =
+  & BrowserContractDefaults<PageType>
+  & { _name?: string };
 
 type BrowserDispatch = <
-  Cases extends Record<string, BrowserContractCase<any>>,
+  PageType extends InstrumentedPage,
+  Cases extends Record<string, BrowserContractCase<any, PageType>>,
 >(
   id: string,
-  spec: BrowserContractSpec<Cases>,
+  spec: BrowserContractSpec<Cases, PageType>,
 ) => ProtocolContract<
-  BrowserContractSpec<Cases>,
+  BrowserContractSpec<Cases, PageType>,
   BrowserSafeSchemas,
   BrowserContractMeta,
   Cases
@@ -57,13 +61,16 @@ function mergeNotes(
   return all.length > 0 ? all : undefined;
 }
 
-function mergeBrowserDefaults(
-  defaults: InternalDefaults | undefined,
-  spec: BrowserContractSpec,
-): BrowserContractSpec {
+function mergeBrowserDefaults<
+  PageType extends InstrumentedPage,
+  Cases extends Record<string, BrowserContractCase<any, PageType>>,
+>(
+  defaults: InternalDefaults<PageType> | undefined,
+  spec: BrowserContractSpec<Cases, PageType>,
+): BrowserContractSpec<Cases, PageType> {
   if (!defaults) return spec;
   const mergedTags = [...(defaults.tags ?? []), ...(spec.tags ?? [])];
-  const baseMerged: BrowserContractSpec = {
+  const baseMerged: BrowserContractSpec<Cases, PageType> = {
     ...spec,
     client: spec.client ?? defaults.client,
     entry: spec.entry ?? defaults.entry,
@@ -87,17 +94,19 @@ function mergeBrowserDefaults(
  * Build a scoped browser factory. `dispatch` is `contract.browser` attached by
  * the core's register() call — we wrap it to inject instance defaults.
  */
-export function createBrowserFactory(
+export function createBrowserFactory<
+  PageType extends InstrumentedPage = InstrumentedPage,
+>(
   dispatch: BrowserDispatch,
-  defaults?: InternalDefaults,
-): BrowserContractFactory {
+  defaults?: InternalDefaults<PageType>,
+): BrowserContractFactory<PageType> {
   const factory = <
-    Cases extends Record<string, BrowserContractCase<any>>,
+    Cases extends Record<string, BrowserContractCase<any, PageType>>,
   >(
     id: string,
-    spec: BrowserContractSpec<Cases>,
+    spec: BrowserContractSpec<Cases, PageType>,
   ): ProtocolContract<
-    BrowserContractSpec<Cases>,
+    BrowserContractSpec<Cases, PageType>,
     BrowserSafeSchemas,
     BrowserContractMeta,
     Cases
@@ -109,14 +118,19 @@ export function createBrowserFactory(
           `then call instance("${id}", spec).`,
       );
     }
-    const merged = mergeBrowserDefaults(defaults, spec as unknown as BrowserContractSpec);
-    return dispatch(id, merged as unknown as BrowserContractSpec<Cases>);
+    const merged = mergeBrowserDefaults(defaults, spec);
+    return dispatch(id, merged);
   };
 
-  (factory as unknown as { with: BrowserContractRoot["with"] }).with = (
+  (factory as unknown as {
+    with: (
+      name: string,
+      more?: BrowserContractDefaults<PageType>,
+    ) => BrowserContractFactory<PageType>;
+  }).with = (
     name: string,
-    more: BrowserContractDefaults = {},
-  ): BrowserContractFactory => {
+    more: BrowserContractDefaults<PageType> = {},
+  ): BrowserContractFactory<PageType> => {
     const mergedTags = [...(defaults?.tags ?? []), ...(more.tags ?? [])];
     return createBrowserFactory(dispatch, {
       ...defaults,
@@ -128,7 +142,7 @@ export function createBrowserFactory(
     });
   };
 
-  return factory as BrowserContractFactory;
+  return factory as BrowserContractFactory<PageType>;
 }
 
 /**
