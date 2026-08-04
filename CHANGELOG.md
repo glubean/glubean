@@ -9,6 +9,11 @@ Versions follow [lockstep semver](./CLAUDE.md#version-policy) — all packages s
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-04
+
+### Added
+- **Typed Chrome Side Panel capabilities in `@glubean/browser`** (#25) — extension-backed pages now expose instance-scoped `page.extension.sidePanel` lifecycle controls through `ExtensionBrowser` and `ExtensionPage`; `createExtensionTest()` and extension contract steps infer the typed page, panel pages participate in browser lifecycle accounting, close is idempotent, and ambiguous or timed-out panel discovery fails explicitly.
+
 ## [0.11.0] — 2026-08-04
 
 ### Added
@@ -252,7 +257,8 @@ Changes prior to `v0.7.0` are not captured in this CHANGELOG. Use `git log v0.2.
 - `v0.3.x`–`v0.5.x` — config profiles, multi-suite, `--ci` flag, demo template, per-profile multi-project upload.
 - `v0.2.x` — initial Node.js port from Deno; `@glubean/engine` spike, inbound contract receivers, workflow vNext (S2 series).
 
-[Unreleased]: https://github.com/glubean/glubean/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/glubean/glubean/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/glubean/glubean/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/glubean/glubean/compare/v0.10.8...v0.11.0
 [0.9.5]: https://github.com/glubean/glubean/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/glubean/glubean/compare/v0.9.3...v0.9.4

@@ -26,7 +26,7 @@ body:
     attributes:
       label: Glubean version
       description: Output of `npx glubean --version` (all @glubean/* packages share one version)
-      placeholder: 0.11.0
+      placeholder: 0.12.0
     validations:
       required: true
   - type: input
