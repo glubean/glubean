@@ -93,11 +93,31 @@ function resolveLaunchOptions(
   return resolved;
 }
 
+/**
+ * Resolve the base URL while preserving the original bare-var-key contract.
+ *
+ * Unlike connection endpoints, a base URL is commonly a stable literal in a
+ * checked-in surface definition. Accepting all three authoring forms keeps
+ * relative `page.goto()` calls usable without forcing an otherwise-unneeded
+ * configure vars alias:
+ *
+ * - `"APP_URL"` — runtime var key (legacy form)
+ * - `"{{APP_URL}}"` — runtime template
+ * - `"https://app.example.com"` — literal absolute URL
+ */
+function resolveBaseUrl(
+  configured: string | undefined,
+  runtime: GlubeanRuntime,
+): string | undefined {
+  if (!configured) return undefined;
+  if (configured.includes("{{")) return runtime.resolveTemplate(configured);
+  if (/^https?:\/\//i.test(configured)) return configured;
+  return runtime.requireVar(configured);
+}
+
 export function browser(options: BrowserOptions): { __type: GlubeanBrowser; create: (runtime: GlubeanRuntime) => GlubeanBrowser } {
   return defineClientFactory((runtime: GlubeanRuntime): GlubeanBrowser => {
-    const baseUrl = options.baseUrl
-      ? runtime.vars[options.baseUrl] ?? undefined
-      : undefined;
+    const baseUrl = resolveBaseUrl(options.baseUrl, runtime);
 
     let browserPromise: Promise<Browser> | null = null;
 

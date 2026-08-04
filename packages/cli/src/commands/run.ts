@@ -887,7 +887,7 @@ export async function runCommand(
       }${colors.reset}`,
     );
     console.error(
-      `${colors.dim}Glubean looks for files matching *.test.ts, *.contract.ts, *.workflow.ts, or *.flow.ts in the target directory.${colors.reset}`,
+      `${colors.dim}Glubean looks for files matching *.test.ts, *.contract.ts, *.browser.ts, *.workflow.ts, or *.flow.ts in the target directory.${colors.reset}`,
     );
     console.error(
       `${colors.dim}Run "glubean run tests/" or "glubean run path/to/file.test.ts".${colors.reset}\n`,
@@ -1412,6 +1412,16 @@ export async function runCommand(
         isMultiFile ? ` in ${testFiles.length} file(s)` : " in file"
       }${colors.reset}`,
     );
+    const unclassifiedTargets = testFiles.filter(
+      (file) => classifyGlubeanFile(file) === undefined,
+    );
+    if (unclassifiedTargets.length > 0) {
+      console.error(
+        `${colors.dim}Glubean classifies runnable files by suffix. ` +
+          `Name browser journeys *.browser.ts or *.contract.ts; files such as ` +
+          `login.journey.ts are not imported as contracts.${colors.reset}`,
+      );
+    }
     if (discoveryFailedFiles.length > 0) {
       console.error(
         `${colors.dim}${discoveryFailedFiles.length} file(s) failed to import (see errors above) — ` +

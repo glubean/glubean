@@ -45,7 +45,7 @@ export async function scanCommand(
   if (scanResult.fileCount === 0 && !hasContracts && !hasWorkflows) {
     console.log(`${colors.yellow}⚠️  No test, contract, or workflow files found.${colors.reset}`);
     console.log(
-      `${colors.dim}   Expected exported test()/contract declarations, or workflow() in *.workflow.ts (legacy: *.flow.ts).${colors.reset}\n`,
+      `${colors.dim}   Expected exported test(), contract declarations in *.contract.ts or *.browser.ts, or workflow() in *.workflow.ts (legacy: *.flow.ts).${colors.reset}\n`,
     );
     process.exit(1);
   }

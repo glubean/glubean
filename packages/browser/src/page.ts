@@ -140,8 +140,11 @@ interface BrowserOptionsBase {
    */
   puppeteer?: PuppeteerLike;
   /**
-   * Optional var key whose runtime value is prepended to relative URLs in `goto()`.
+   * Optional base URL prepended to relative URLs in `goto()`.
+   * Accepts a runtime var key, a `{{KEY}}` template, or a literal absolute URL.
    * @example "APP_URL"
+   * @example "{{APP_URL}}"
+   * @example "https://app.example.com"
    */
   baseUrl?: string;
   /**

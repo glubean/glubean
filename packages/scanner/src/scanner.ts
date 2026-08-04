@@ -195,7 +195,7 @@ export class Scanner {
     if (!foundTestFile && !foundContractFile && !foundFlowFile) {
       errors.push(
         "No test, contract, or flow files found. " +
-          "Ensure your files are named *.test.ts, *.contract.ts, *.workflow.ts, or *.flow.ts.",
+          "Ensure your files are named *.test.ts, *.contract.ts, *.browser.ts, *.workflow.ts, or *.flow.ts.",
       );
     }
 
@@ -452,7 +452,7 @@ export class Scanner {
     ) {
       warnings.push(
         "No Glubean test, contract, or flow files found. " +
-          "Ensure your files are named *.test.ts, *.contract.ts, *.workflow.ts, or *.flow.ts.",
+          "Ensure your files are named *.test.ts, *.contract.ts, *.browser.ts, *.workflow.ts, or *.flow.ts.",
       );
     }
 
