@@ -56,7 +56,8 @@ import { genericMarkdownPart } from "../contract-artifacts.js";
 import { matchInboundCaseHttp, preflightInboundCaseHttp } from "./inbound-match.js";
 import { createRequire } from "node:module";
 import { getRuntime } from "../configure/runtime.js";
-import { resolveTemplate } from "../configure/template.js";
+import { resolveTemplate, TEMPLATE_RE } from "../configure/template.js";
+import { REQUEST_SENSITIVE_VALUES } from "../request-trace-security.js";
 
 // =============================================================================
 // Helpers — endpoint, params, request body, response headers
@@ -77,41 +78,250 @@ export function parseEndpoint(endpoint: string): { method: string; path: string 
  *  (GLU-148) read `context.glubeanRoute` in their ky `afterResponse` hook and stamp
  *  `trace.routeKey` from it, so a dashboard's endpoint-coverage join gets an exact
  *  routeKey match instead of falling back to heuristic URL inference. */
-function routeContext(method: string, path: string): { glubeanRoute: string } {
-  return { glubeanRoute: `${method} ${path}` };
+function routeContext(
+  method: string,
+  path: string,
+  sensitiveValues?: ReadonlySet<string>,
+): {
+  glubeanRoute: string;
+  [REQUEST_SENSITIVE_VALUES]?: string[];
+} {
+  return {
+    glubeanRoute: `${method} ${path}`,
+    ...(sensitiveValues && sensitiveValues.size > 0
+      ? { [REQUEST_SENSITIVE_VALUES]: [...sensitiveValues] }
+      : {}),
+  };
+}
+
+const RUNTIME_TEMPLATE_RE = new RegExp(TEMPLATE_RE.source);
+const RUNTIME_TEMPLATE_GLOBAL_RE = new RegExp(TEMPLATE_RE.source, "g");
+const ESCAPED_RUNTIME_TEMPLATE_RE = /\\(\{\{[\w-]+\}\})/g;
+
+function protectEscapedRuntimeTemplates(value: string): {
+  protectedValue: string;
+  restore: (resolved: string) => string;
+} {
+  const escapedTemplates: string[] = [];
+  let markerPrefix = "\uE000GLUBEAN_ESCAPED_TEMPLATE_";
+  while (value.includes(markerPrefix)) markerPrefix = `\uE000${markerPrefix}`;
+  const protectedValue = value.replace(
+    ESCAPED_RUNTIME_TEMPLATE_RE,
+    (_match, template: string) => {
+      const index = escapedTemplates.push(template) - 1;
+      return `${markerPrefix}${index}\uE001`;
+    },
+  );
+  return {
+    protectedValue,
+    restore: (resolved) => escapedTemplates.reduce(
+      (current, template, index) => current.replaceAll(
+        `${markerPrefix}${index}\uE001`,
+        template,
+      ),
+      resolved,
+    ),
+  };
 }
 
 /**
- * Resolve `{{KEY}}` env placeholders inside a path/query param value —
- * the SAME `{{KEY}}` syntax `configure()` resolves for vars/secrets/http
- * headers (GLU-156: a literal `params: { id: { value: "{{PROJECT_ID}}" } }`
- * was previously URL-encoded VERBATIM — `%7B%7BPROJECT_ID%7D%7D` — instead
- * of being resolved first). Fast-path on the common case (no braces) so
- * ordinary literal param values never need an active runtime.
+ * Resolve one runtime `{{KEY}}` template string. This is also the GLU-156
+ * path/query fix: encoding an unresolved `{{PROJECT_ID}}` produced
+ * `%7B%7BPROJECT_ID%7D%7D`. The fast path is load-bearing because literal
+ * contract values must remain usable without an installed execution runtime.
  */
-function resolveParamTemplate(value: string): string {
-  if (!value.includes("{{")) return value;
+function resolveRuntimeTemplateString(
+  value: string,
+  sensitiveValues?: Set<string>,
+): string {
+  const { protectedValue, restore } = protectEscapedRuntimeTemplates(value);
+  if (!RUNTIME_TEMPLATE_RE.test(protectedValue)) return restore(protectedValue);
   const runtime = getRuntime();
-  return resolveTemplate(value, runtime.vars, runtime.secrets, runtime.session);
+  if (sensitiveValues) {
+    for (const match of protectedValue.matchAll(RUNTIME_TEMPLATE_GLOBAL_RE)) {
+      const key = match[1];
+      const sessionValue = runtime.session?.[key];
+      const declaredSecret = runtime.secrets[key];
+      const sensitiveValue = declaredSecret
+        ? (typeof sessionValue === "string" ? sessionValue : declaredSecret)
+        : undefined;
+      if (sensitiveValue) sensitiveValues.add(sensitiveValue);
+    }
+  }
+  return restore(
+    resolveTemplate(
+      protectedValue,
+      runtime.vars,
+      runtime.secrets,
+      runtime.session,
+    ),
+  );
 }
 
-function extractParamValue(v: unknown): string {
-  if (typeof v === "string") return resolveParamTemplate(v);
+function extractParamValue(v: unknown, sensitiveValues?: Set<string>): string {
+  if (typeof v === "string") {
+    return resolveRuntimeTemplateString(v, sensitiveValues);
+  }
   if (v && typeof v === "object" && "value" in v) {
-    return resolveParamTemplate(String((v as { value: string }).value));
+    return resolveRuntimeTemplateString(
+      String((v as { value: string }).value),
+      sensitiveValues,
+    );
   }
   return String(v);
 }
 
 export function flattenParamValues(
   params: Record<string, unknown> | undefined,
+  sensitiveValues?: Set<string>,
 ): Record<string, string> | undefined {
   if (!params) return undefined;
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(params)) {
-    result[key] = extractParamValue(value);
+    result[key] = extractParamValue(value, sensitiveValues);
   }
   return result;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function preserveObjectIntegrity<T extends object>(source: object, clone: T): T {
+  if (!Object.isExtensible(source)) Object.preventExtensions(clone);
+  return clone;
+}
+
+type DescriptorMap = Record<PropertyKey, PropertyDescriptor>;
+
+function getDescriptorMap(value: object): DescriptorMap {
+  return Object.getOwnPropertyDescriptors(value) as unknown as DescriptorMap;
+}
+
+function cloneWithDescriptors(source: object, descriptors: DescriptorMap): object {
+  if (Array.isArray(source)) {
+    const lengthDescriptor = descriptors.length;
+    const clone = new Array(source.length);
+    Object.setPrototypeOf(clone, Object.getPrototypeOf(source));
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (key !== "length") Object.defineProperty(clone, key, descriptors[key]);
+    }
+    if (lengthDescriptor) Object.defineProperty(clone, "length", lengthDescriptor);
+    return preserveObjectIntegrity(source, clone);
+  }
+
+  const clone = Object.create(Object.getPrototypeOf(source), descriptors) as object;
+  return preserveObjectIntegrity(source, clone);
+}
+
+function assertNoEnumerableAccessors(source: object, descriptors: DescriptorMap): void {
+  for (const key of Object.keys(source)) {
+    const descriptor = descriptors[key];
+    if (descriptor && !("value" in descriptor)) {
+      throw new TypeError(
+        "Accessor properties are not supported in contract request data; " +
+          "use plain data properties or return them from a case body/headers function",
+      );
+    }
+  }
+}
+
+/**
+ * Resolve string leaves in JSON-shaped case bodies while preserving opaque
+ * body values (FormData, URLSearchParams, Blob, typed arrays, class instances,
+ * etc.). Uses structural sharing so a literal-only data body is returned
+ * unchanged. Enumerable accessors are rejected before the HTTP client runs;
+ * their timing and recursive-template semantics are not a stable data model.
+ */
+function resolveBodyTemplates(
+  value: unknown,
+  sensitiveValues: Set<string>,
+  ancestors: WeakSet<object> = new WeakSet<object>(),
+): unknown {
+  if (typeof value === "string") {
+    return resolveRuntimeTemplateString(value, sensitiveValues);
+  }
+
+  if (Array.isArray(value)) {
+    // Array subclasses may carry private constructor state that cannot be
+    // reproduced by descriptor cloning. They are opaque body values.
+    if (Object.getPrototypeOf(value) !== Array.prototype) return value;
+    if (ancestors.has(value)) {
+      throw new TypeError("Circular references are not supported in contract case bodies");
+    }
+    ancestors.add(value);
+    const descriptors = getDescriptorMap(value);
+    assertNoEnumerableAccessors(value, descriptors);
+    let changed = false;
+    try {
+      for (const key of Reflect.ownKeys(descriptors)) {
+        const descriptor = descriptors[key];
+        if (!("value" in descriptor)) continue;
+        const current = descriptor.value;
+        const next = resolveBodyTemplates(current, sensitiveValues, ancestors);
+        if (next !== current) {
+          descriptor.value = next;
+          changed = true;
+        }
+      }
+    } finally {
+      ancestors.delete(value);
+    }
+    if (!changed) return value;
+    return cloneWithDescriptors(value, descriptors);
+  }
+
+  if (!isPlainObject(value)) return value;
+  if (ancestors.has(value)) {
+    throw new TypeError("Circular references are not supported in contract case bodies");
+  }
+  ancestors.add(value);
+
+  const descriptors = getDescriptorMap(value);
+  assertNoEnumerableAccessors(value, descriptors);
+  let changed = false;
+  try {
+    for (const key of Reflect.ownKeys(descriptors)) {
+      const descriptor = descriptors[key];
+      if (!("value" in descriptor)) continue;
+      const current = descriptor.value;
+      const next = resolveBodyTemplates(current, sensitiveValues, ancestors);
+      if (next !== current) {
+        descriptor.value = next;
+        changed = true;
+      }
+    }
+  } finally {
+    ancestors.delete(value);
+  }
+  if (!changed) return value;
+  return cloneWithDescriptors(value, descriptors) as Record<string, unknown>;
+}
+
+/** Resolve every case-level header value with the same runtime priority. */
+function resolveHeaderTemplates(
+  headers: Record<string, string> | undefined,
+  sensitiveValues: Set<string>,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+
+  const descriptors = getDescriptorMap(headers);
+  assertNoEnumerableAccessors(headers, descriptors);
+  let changed = false;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key];
+    if (!("value" in descriptor) || typeof descriptor.value !== "string") continue;
+    const current = descriptor.value;
+    const next = resolveRuntimeTemplateString(current, sensitiveValues);
+    if (next !== current) {
+      descriptor.value = next;
+      changed = true;
+    }
+  }
+  if (!changed) return headers;
+  return cloneWithDescriptors(headers, descriptors) as Record<string, string>;
 }
 
 /**
@@ -546,17 +756,22 @@ async function executeStandaloneCase(
 
   // Resolve pathParams/query/body/headers using resolvedInput (not setup
   // state). Function-valued fields receive the logical input directly.
+  const sensitiveValues = new Set<string>();
   const pathParamsSlot = casePathParams(caseSpec, `case (${spec.endpoint})`);
   const rawParams = typeof pathParamsSlot === "function"
     ? pathParamsSlot(resolvedInput)
     : pathParamsSlot;
-  const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
+  const params = flattenParamValues(
+    rawParams as Record<string, unknown> | undefined,
+    sensitiveValues,
+  );
   const resolvedPath = resolveParams(path, params);
 
   const requestOptions: Record<string, unknown> = {};
-  const body = typeof caseSpec.body === "function"
+  const rawBody = typeof caseSpec.body === "function"
     ? (caseSpec.body as (input: unknown) => unknown)(resolvedInput)
     : caseSpec.body;
+  const body = resolveBodyTemplates(rawBody, sensitiveValues);
 
   const normalizedReq = normalizeRequest(spec.request);
   const effectiveContentType =
@@ -566,11 +781,11 @@ async function executeStandaloneCase(
     Object.assign(requestOptions, buildRequestBodyOptions(body, effectiveContentType));
   }
 
-  const headers = typeof caseSpec.headers === "function"
+  const rawHeaders = typeof caseSpec.headers === "function"
     ? (caseSpec.headers as (input: unknown) => Record<string, string>)(resolvedInput)
     : caseSpec.headers;
+  const headers = resolveHeaderTemplates(rawHeaders, sensitiveValues);
   if (headers) requestOptions.headers = headers;
-  requestOptions.context = routeContext(method, path);
 
   if (caseSpec.query) {
     const rawQuery = typeof caseSpec.query === "function"
@@ -578,8 +793,10 @@ async function executeStandaloneCase(
       : caseSpec.query;
     requestOptions.searchParams = flattenParamValues(
       rawQuery as Record<string, unknown> | undefined,
+      sensitiveValues,
     );
   }
+  requestOptions.context = routeContext(method, path, sensitiveValues);
 
   requestOptions.throwHttpErrors = false;
 
@@ -1018,6 +1235,7 @@ async function executeCaseInFlowHttp(input: {
   }
 
   // Resolve action fields using resolvedInputs for function-valued slots.
+  const sensitiveValues = new Set<string>();
   const pathParamsSlot = casePathParams(
     caseSpec,
     `case "${caseKey}" in contract "${contract._projection.id}"`,
@@ -1025,16 +1243,21 @@ async function executeCaseInFlowHttp(input: {
   const rawParams = typeof pathParamsSlot === "function"
     ? pathParamsSlot(resolvedInputs)
     : pathParamsSlot;
-  const params = flattenParamValues(rawParams as Record<string, unknown> | undefined);
+  const params = flattenParamValues(
+    rawParams as Record<string, unknown> | undefined,
+    sensitiveValues,
+  );
   const resolvedPath = resolveParams(path, params);
 
-  const body = typeof caseSpec.body === "function"
+  const rawBody = typeof caseSpec.body === "function"
     ? (caseSpec.body as (input: unknown) => unknown)(resolvedInputs)
     : caseSpec.body;
+  const body = resolveBodyTemplates(rawBody, sensitiveValues);
 
-  const headers = typeof caseSpec.headers === "function"
+  const rawHeaders = typeof caseSpec.headers === "function"
     ? (caseSpec.headers as (input: unknown) => Record<string, string>)(resolvedInputs)
     : caseSpec.headers;
+  const headers = resolveHeaderTemplates(rawHeaders, sensitiveValues);
 
   const normalizedReq = normalizeRequest(spec.request);
   const effectiveContentType =
@@ -1051,7 +1274,6 @@ async function executeCaseInFlowHttp(input: {
     );
   }
   if (headers) requestOptions.headers = headers;
-  requestOptions.context = routeContext(method, path);
 
   if (caseSpec.query) {
     const rawQuery = typeof caseSpec.query === "function"
@@ -1059,8 +1281,10 @@ async function executeCaseInFlowHttp(input: {
       : caseSpec.query;
     requestOptions.searchParams = flattenParamValues(
       rawQuery as Record<string, unknown>,
+      sensitiveValues,
     );
   }
+  requestOptions.context = routeContext(method, path, sensitiveValues);
 
   const methodLower = method.toLowerCase() as keyof HttpClient;
   let res;

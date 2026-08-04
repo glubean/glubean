@@ -22,6 +22,11 @@ export {
   type RuntimeCarrier,
   type InternalRuntime,
 } from "./runtime-carrier.js";
+export {
+  getRequestSensitiveValues,
+  maskRequestSensitiveValues,
+  REQUEST_SENSITIVE_VALUES,
+} from "./request-trace-security.js";
 
 // Internal-only test hook for plugin install state. Public callers use
 // `installPlugin` / `listInstalledPlugins` from the main export. The matching

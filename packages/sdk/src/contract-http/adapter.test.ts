@@ -13,6 +13,7 @@ import { z } from "zod";
 // Import from main index so the HTTP adapter side-effect registration fires.
 import { contract } from "../index.js";
 import { readJsonBody } from "./adapter.js";
+import { REQUEST_SENSITIVE_VALUES } from "../request-trace-security.js";
 import type {
   ProtocolContract,
 } from "../contract-types.js";
@@ -422,6 +423,594 @@ test("GLU-156: multiple `{{KEY}}` placeholders in one path param segment all res
 
     await c[0].fn!(makeCtx());
     expect(client._calls[0].url).toBe("/v1/scoped/acme--widgets");
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #15: case-level headers/body resolve runtime templates
+// ---------------------------------------------------------------------------
+
+test("case headers and nested JSON body resolve vars, secrets, and session templates", async () => {
+  const cleanup = installRuntime(
+    { PROJECT_ID: "project-from-vars", REGION: "us-east-1" },
+    { API_TOKEN: "secret-token" },
+    {
+      API_TOKEN: "session-token",
+      PROJECT_ID: "project-from-session",
+    },
+  );
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("create-project-resource", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "create a resource with environment-backed request data",
+          headers: {
+            Authorization: "Bearer {{API_TOKEN}}",
+            "X-Project-Id": "{{PROJECT_ID}}",
+          },
+          body: {
+            projectId: "{{PROJECT_ID}}",
+            metadata: {
+              regions: ["primary-{{REGION}}", "literal"],
+              targets: [{ id: "{{PROJECT_ID}}" }],
+              enabled: true,
+              attempts: 2,
+              nullable: null,
+            },
+          },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+
+    expect(client._calls[0].options.headers).toEqual({
+      Authorization: "Bearer session-token",
+      "X-Project-Id": "project-from-session",
+    });
+    expect(client._calls[0].options.json).toEqual({
+      projectId: "project-from-session",
+      metadata: {
+        regions: ["primary-us-east-1", "literal"],
+        targets: [{ id: "project-from-session" }],
+        enabled: true,
+        attempts: 2,
+        nullable: null,
+      },
+    });
+    const context = client._calls[0].options.context as {
+      [REQUEST_SENSITIVE_VALUES]: string[];
+    };
+    expect(context[REQUEST_SENSITIVE_VALUES]).toEqual(["session-token"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("literal case headers and body keep their identity without an execution runtime", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const headers = { "X-Mode": "literal {{not a placeholder}}" };
+  const body = { nested: ["literal {{not a placeholder}}", { enabled: true }] };
+  const c = api("literal-request", {
+    endpoint: "POST /resources",
+    cases: {
+      ok: {
+        description: "send a request containing only literal values",
+        headers,
+        body,
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await c[0].fn!(makeCtx());
+
+  expect(client._calls[0].options.headers).toBe(headers);
+  expect(client._calls[0].options.json).toBe(body);
+});
+
+test("escaped valid placeholders are sent literally without an execution runtime", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const c = api("escaped-template-request", {
+    endpoint: "POST /resources",
+    cases: {
+      ok: {
+        description: "send literal template syntax in request data",
+        headers: { "X-Template": "\\{{PROJECT_ID}}" },
+        body: { nested: ["\\{{PROJECT_ID}}"] },
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await c[0].fn!(makeCtx());
+
+  expect(client._calls[0].options.headers).toEqual({
+    "X-Template": "{{PROJECT_ID}}",
+  });
+  expect(client._calls[0].options.json).toEqual({
+    nested: ["{{PROJECT_ID}}"],
+  });
+});
+
+test("body resolution preserves descriptors, custom JSON serialization, and nested opaque values", async () => {
+  const cleanup = installRuntime({}, { API_TOKEN: "secret-token" });
+  try {
+    const symbolToken = Symbol("token");
+    const opaque = new (class OpaqueValue {
+      readonly value = "{{API_TOKEN}}";
+    })();
+    const toJSON = function (this: Record<PropertyKey, unknown>) {
+      return {
+        derived: `${String(this.token)}:${String(this.hiddenToken)}:${String(this[symbolToken])}`,
+        token: this.token,
+        opaque: this.opaque,
+      };
+    };
+    const body = Object.create(Object.prototype, {
+      token: {
+        configurable: false,
+        enumerable: true,
+        value: "{{API_TOKEN}}",
+        writable: false,
+      },
+      hiddenToken: {
+        configurable: false,
+        enumerable: false,
+        value: "{{API_TOKEN}}",
+        writable: false,
+      },
+      [symbolToken]: {
+        configurable: false,
+        enumerable: false,
+        value: "{{API_TOKEN}}",
+        writable: false,
+      },
+      opaque: {
+        configurable: true,
+        enumerable: true,
+        value: opaque,
+        writable: true,
+      },
+      toJSON: {
+        configurable: true,
+        enumerable: false,
+        value: toJSON,
+        writable: true,
+      },
+    }) as Record<string, unknown>;
+    Object.preventExtensions(body);
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("descriptor-safe-request", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "resolve data properties without changing object semantics",
+          body,
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+
+    const resolved = client._calls[0].options.json as Record<string, unknown>;
+    expect(resolved === body).toBe(false);
+    expect(Object.isExtensible(resolved)).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(resolved, "token")).toMatchObject({
+      configurable: false,
+      enumerable: true,
+      value: "secret-token",
+      writable: false,
+    });
+    expect(Object.getOwnPropertyDescriptor(resolved, "toJSON")?.value).toBe(toJSON);
+    expect(Object.getOwnPropertyDescriptor(resolved, "hiddenToken")?.value).toBe("secret-token");
+    expect(Object.getOwnPropertyDescriptor(resolved, symbolToken)?.value).toBe("secret-token");
+    expect(resolved.opaque).toBe(opaque);
+    expect(opaque.value).toBe("{{API_TOKEN}}");
+    expect(JSON.parse(JSON.stringify(resolved))).toEqual({
+      derived: "secret-token:secret-token:secret-token",
+      token: "secret-token",
+      opaque: { value: "{{API_TOKEN}}" },
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("opaque body values pass through unchanged instead of being traversed", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const body = new URLSearchParams({ projectId: "{{PROJECT_ID}}" });
+  const c = api("opaque-request", {
+    endpoint: "POST /resources",
+    cases: {
+      ok: {
+        description: "send an opaque URL-encoded body without implicit traversal",
+        contentType: "application/x-www-form-urlencoded",
+        body,
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await c[0].fn!(makeCtx());
+
+  expect(client._calls[0].options.body).toBe(body);
+  expect(body.get("projectId")).toBe("{{PROJECT_ID}}");
+});
+
+test("typed-array static bodies pass through unchanged", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const body = new Uint8Array([1, 2, 3]);
+  const c = api("binary-request", {
+    endpoint: "POST /resources",
+    cases: {
+      ok: {
+        description: "send an opaque binary request body",
+        contentType: "application/octet-stream",
+        body,
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await c[0].fn!(makeCtx());
+
+  expect(client._calls[0].options.body).toBe(body);
+});
+
+test("a top-level string body resolves templates", async () => {
+  const cleanup = installRuntime({}, { API_TOKEN: "secret-token" });
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("string-request", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "resolve a template in a top-level JSON string body",
+          body: "prefix-{{API_TOKEN}}",
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+
+    expect(client._calls[0].options.json).toBe("prefix-secret-token");
+    const context = client._calls[0].options.context as {
+      glubeanRoute: string;
+      [REQUEST_SENSITIVE_VALUES]: string[];
+    };
+    expect(context.glubeanRoute).toBe("POST /resources");
+    expect(context[REQUEST_SENSITIVE_VALUES]).toEqual(["secret-token"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("runtime replacement values remain terminal even when they contain template syntax", async () => {
+  const cleanup = installRuntime({}, { API_TOKEN: "value-{{NOT_RECURSIVE}}" });
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("terminal-template-request", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "treat resolved runtime values as terminal data",
+          headers: { "X-Token": "{{API_TOKEN}}" },
+          body: { token: "{{API_TOKEN}}" },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+
+    expect(client._calls[0].options.headers).toEqual({
+      "X-Token": "value-{{NOT_RECURSIVE}}",
+    });
+    expect(client._calls[0].options.json).toEqual({
+      token: "value-{{NOT_RECURSIVE}}",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("path and query secret templates join the non-wire trace masking context", async () => {
+  const cleanup = installRuntime(
+    {},
+    { PATH_SECRET: "path-secret", QUERY_SECRET: "query-secret" },
+  );
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("secret-url-request", {
+      endpoint: "GET /tenants/:tenantId/resources",
+      cases: {
+        ok: {
+          description: "mask secret-backed path and query values in traces",
+          pathParams: { tenantId: "{{PATH_SECRET}}" },
+          query: { cursor: "{{QUERY_SECRET}}" },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+
+    expect(client._calls[0].url).toBe("/tenants/path-secret/resources");
+    expect(client._calls[0].options.searchParams).toEqual({
+      cursor: "query-secret",
+    });
+    const context = client._calls[0].options.context as {
+      [REQUEST_SENSITIVE_VALUES]: string[];
+    };
+    expect(context[REQUEST_SENSITIVE_VALUES]).toEqual([
+      "path-secret",
+      "query-secret",
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("array subclasses remain opaque and retain private instance state", async () => {
+  class StatefulArray extends Array<string> {
+    readonly #marker = "state-intact";
+
+    marker(): string {
+      return this.#marker;
+    }
+  }
+
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const body = new StatefulArray("{{API_TOKEN}}");
+  const c = api("array-subclass-request", {
+    endpoint: "POST /resources",
+    cases: {
+      ok: {
+        description: "preserve an opaque Array subclass body",
+        body,
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await c[0].fn!(makeCtx());
+
+  const sent = client._calls[0].options.json as StatefulArray;
+  expect(sent).toBe(body);
+  expect(sent[0]).toBe("{{API_TOKEN}}");
+  expect(sent.marker()).toBe("state-intact");
+});
+
+test("frozen nested bodies and headers keep integrity while resolving templates", async () => {
+  const cleanup = installRuntime(
+    { PROJECT_ID: "project-from-vars" },
+    { API_TOKEN: "secret-token" },
+  );
+  try {
+    const headers = {
+      Authorization: "Bearer {{API_TOKEN}}",
+      "X-Project-Id": "{{PROJECT_ID}}",
+    } as Record<string, string>;
+    Object.defineProperties(headers, {
+      hiddenProjectId: {
+        configurable: true,
+        enumerable: false,
+        value: "{{PROJECT_ID}}",
+        writable: true,
+      },
+    });
+    Object.freeze(headers);
+    const body = Object.freeze({
+      nested: Object.freeze({ projectId: "{{PROJECT_ID}}" }),
+    });
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("frozen-request", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "resolve a frozen request snapshot without making it mutable",
+          headers,
+          body,
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await c[0].fn!(makeCtx());
+
+    const sentHeaders = client._calls[0].options.headers as Record<string, string>;
+    const sentBody = client._calls[0].options.json as {
+      nested: { projectId: string };
+    };
+    expect(sentHeaders).toEqual({
+      Authorization: "Bearer secret-token",
+      "X-Project-Id": "project-from-vars",
+    });
+    expect(Object.isFrozen(sentHeaders)).toBe(true);
+    expect(sentBody).toEqual({ nested: { projectId: "project-from-vars" } });
+    expect(Object.isFrozen(sentBody)).toBe(true);
+    expect(Object.isFrozen(sentBody.nested)).toBe(true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("enumerable request accessors fail before the request is sent", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const body = Object.defineProperty({}, "value", {
+    enumerable: true,
+    get: () => "literal",
+  });
+  const c = api("accessor-request", {
+    endpoint: "POST /resources",
+    cases: {
+      ok: {
+        description: "require stable data properties in request snapshots",
+        body,
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await expect(c[0].fn!(makeCtx())).rejects.toThrow(
+    "Accessor properties are not supported in contract request data",
+  );
+  expect(client._calls).toHaveLength(0);
+
+  const headers = Object.defineProperty({}, "X-Mode", {
+    enumerable: true,
+    get: () => "literal",
+  }) as Record<string, string>;
+  const headerCase = api("accessor-header-request", {
+    endpoint: "GET /resources",
+    cases: {
+      ok: {
+        description: "require stable header data properties",
+        headers,
+        expect: { status: 200 },
+      },
+    },
+  });
+  await expect(headerCase[0].fn!(makeCtx())).rejects.toThrow(
+    "Accessor properties are not supported in contract request data",
+  );
+  expect(client._calls).toHaveLength(0);
+});
+
+test("circular JSON-shaped bodies fail before the request is sent", async () => {
+  const client = makeMockClient({ status: 200, body: {} });
+  const api = contract.http.with("api", { client });
+  const body: Record<string, unknown> = { projectId: "literal" };
+  body.self = body;
+  const c = api("circular-request", {
+    endpoint: "POST /resources",
+    cases: {
+      ok: {
+        description: "reject a body graph that cannot be serialized as JSON",
+        body,
+        expect: { status: 200 },
+      },
+    },
+  });
+
+  await expect(c[0].fn!(makeCtx())).rejects.toThrow(
+    "Circular references are not supported in contract case bodies",
+  );
+  expect(client._calls).toHaveLength(0);
+});
+
+test("a missing body template fails before the request is sent", async () => {
+  const cleanup = installRuntime();
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("missing-body-template", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "require every body template before sending the request",
+          body: { nested: { projectId: "{{MISSING_PROJECT_ID}}" } },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await expect(c[0].fn!(makeCtx())).rejects.toThrow(
+      'Missing value for template placeholder "{{MISSING_PROJECT_ID}}"',
+    );
+    expect(client._calls).toHaveLength(0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a missing header template fails before the request is sent", async () => {
+  const cleanup = installRuntime();
+  try {
+    const client = makeMockClient({ status: 200, body: {} });
+    const api = contract.http.with("api", { client });
+    const c = api("missing-header-template", {
+      endpoint: "GET /resources",
+      cases: {
+        ok: {
+          description: "require every header template before sending the request",
+          headers: { Authorization: "Bearer {{MISSING_TOKEN}}" },
+          expect: { status: 200 },
+        },
+      },
+    });
+
+    await expect(c[0].fn!(makeCtx())).rejects.toThrow(
+      'Missing value for template placeholder "{{MISSING_TOKEN}}"',
+    );
+    expect(client._calls).toHaveLength(0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("workflow case execution resolves templates returned by body and header input functions", async () => {
+  const cleanup = installRuntime(
+    { PROJECT_ID: "project-from-vars" },
+    { API_TOKEN: "secret-token" },
+  );
+  try {
+    const client = makeMockClient({ status: 200, body: { ok: true } });
+    const api = contract.http.with("api", { client });
+    const c = api("workflow-request", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "resolve workflow-provided request templates at execution time",
+          headers: ({ authorization }: any) => ({ Authorization: authorization }),
+          body: ({ projectId }: any) => ({ projectId, nested: ["{{PROJECT_ID}}"] }),
+          expect: { status: 200 },
+        },
+      },
+    });
+    const { httpAdapter } = await import("./adapter.js");
+
+    await httpAdapter.executeCaseInFlow!({
+      ctx: makeCtx(),
+      contract: c,
+      caseKey: "ok",
+      resolvedInputs: {
+        authorization: "Bearer {{API_TOKEN}}",
+        projectId: "{{PROJECT_ID}}",
+      },
+    });
+
+    expect(client._calls[0].options.headers).toEqual({
+      Authorization: "Bearer secret-token",
+    });
+    expect(client._calls[0].options.json).toEqual({
+      projectId: "project-from-vars",
+      nested: ["project-from-vars"],
+    });
+    const context = client._calls[0].options.context as {
+      [REQUEST_SENSITIVE_VALUES]: string[];
+    };
+    expect(context[REQUEST_SENSITIVE_VALUES]).toEqual(["secret-token"]);
   } finally {
     cleanup();
   }

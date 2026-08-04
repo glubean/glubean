@@ -40,6 +40,15 @@ beforeAll(async () => {
   await mkdir(TMP_DIR, { recursive: true });
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname.startsWith("/echo/")) {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(Buffer.concat(chunks));
+      });
+      return;
+    }
     if (url.pathname === "/json") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, items: [1, 2, 3] }));
@@ -172,7 +181,7 @@ async function assertParity(content: string, testId: string, ctx: RunCtx = {}, e
 const ptest = (name: string, fn: () => Promise<void>) => test(name, fn);
 
 const MODULE = `
-import { test, configure, defineClientFactory } from "@glubean/sdk";
+import { test, configure, contract, defineClientFactory } from "@glubean/sdk";
 export const passingTest = test(
   { id: "passingTest", name: "Passing Test", tags: ["unit"] },
   async (ctx) => { ctx.log("Hello from test"); ctx.assert(true, "Should pass"); }
@@ -499,6 +508,27 @@ export const httpFullTracePostTest = test(
     ctx.assert(res.status === 200, "200");
   }
 );
+export const httpSensitiveTraceTest = test(
+  { id: "httpSensitiveTraceTest", name: "full-trace masks contract request secrets" },
+  async (ctx) => {
+    const base = ctx.vars.require("BASE_URL");
+    const api = contract.http.with("trace-secret-api", { client: ctx.http });
+    const request = api("trace-secret-request", {
+      endpoint: "POST " + base + "/echo/:tenantId",
+      cases: {
+        ok: {
+          description: "send secret-backed request fields",
+          pathParams: { tenantId: "{{TRACE_SECRET}}" },
+          query: { tenant: "{{TRACE_SECRET}}" },
+          headers: { "X-Tenant": "{{TRACE_SECRET}}" },
+          body: { tenantRef: "prefix-{{TRACE_SECRET}}-suffix" },
+          expect: { status: 200 },
+        },
+      },
+    });
+    await request[0].fn(ctx);
+  }
+);
 export const httpTruncateBodyTest = test(
   { id: "httpTruncateBodyTest", name: "full-trace + truncateArrays truncates response body" },
   async (ctx) => {
@@ -812,6 +842,36 @@ ptest("engine parity: emitFullTrace GET (request/response headers + response bod
 
 ptest("engine parity: emitFullTrace POST captures request body", async () => {
   await assertParity(MODULE, "httpFullTracePostTest", { vars: { BASE_URL: baseUrl } }, { emitFullTrace: true });
+});
+
+ptest("engine parity: contract request secrets are masked before full-trace emission", async () => {
+  const file = await makeTempFile(MODULE);
+  const ctx = {
+    vars: { BASE_URL: baseUrl },
+    secrets: { TRACE_SECRET: "sk+live/abc=" + "x".repeat(96) },
+  };
+  const legacy = normalize(await rawEvents(
+    file,
+    "httpSensitiveTraceTest",
+    false,
+    ctx,
+    { emitFullTrace: true, truncateArrays: true },
+  ));
+  const engine = normalize(await rawEvents(
+    file,
+    "httpSensitiveTraceTest",
+    true,
+    ctx,
+    { emitFullTrace: true, truncateArrays: true },
+  ));
+
+  expect(engine).toEqual(legacy);
+  const serialized = JSON.stringify(legacy);
+  const secret = ctx.secrets.TRACE_SECRET;
+  expect(serialized).not.toContain(secret);
+  expect(serialized).not.toContain(secret.slice(0, 40));
+  expect(serialized).not.toContain(encodeURIComponent(secret));
+  expect(serialized).toContain("[REDACTED]");
 });
 
 ptest("engine parity: emitFullTrace + inferSchema → responseSchema on trace", async () => {

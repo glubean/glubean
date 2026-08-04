@@ -9,12 +9,16 @@ import type {
   CheckNode,
   WorkflowNode,
   WorkflowTeardown,
+  HttpClient,
+  HttpResponsePromise,
 } from "@glubean/sdk";
 import { GlubeanSkipError, contract, workflow, projectWorkflow } from "@glubean/sdk";
 import {
   __unregisterProtocolForTesting,
   getRegistry as getRegistryForEach,
   PollExhaustedError,
+  setRuntime,
+  type InternalRuntime,
 } from "@glubean/sdk/internal";
 import {
   makeNodeScope,
@@ -744,6 +748,61 @@ describe("runWorkflow — contract-call dispatch", () => {
     __unregisterProtocolForTesting("wf-fake");
     __unregisterProtocolForTesting("wf-needs");
     __unregisterProtocolForTesting("wf-veto");
+    setRuntime(undefined);
+  });
+
+  it("resolves case header and nested body templates through the full workflow executor", async () => {
+    const calls: Array<{ url: string; options: Record<string, unknown> }> = [];
+    const post = (url: string | URL | Request, options?: Record<string, unknown>) => {
+      calls.push({ url: String(url), options: options ?? {} });
+      const json = async () => ({});
+      const response = Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers(),
+        json,
+      });
+      return Object.assign(response, { json }) as unknown as HttpResponsePromise;
+    };
+    const client = Object.assign(post, { post }) as unknown as HttpClient;
+    const runtime: InternalRuntime = {
+      vars: { PROJECT_ID: "project-from-vars" },
+      secrets: { API_TOKEN: "secret-token" },
+      session: {},
+      http: client,
+    };
+    setRuntime(runtime);
+
+    const api = contract.http.with("workflow-template-api", { client });
+    const c = api("workflow-template-request", {
+      endpoint: "POST /resources",
+      cases: {
+        ok: {
+          description: "send environment-backed request data from a workflow call",
+          headers: { Authorization: "Bearer {{API_TOKEN}}" },
+          body: {
+            projectId: "{{PROJECT_ID}}",
+            nested: [{ projectId: "{{PROJECT_ID}}" }],
+          },
+          expect: { status: 200 },
+        },
+      },
+    });
+    const { ctx } = fakeBase();
+    const wf = workflow("http-template-workflow").call("send", c.case("ok")).build();
+
+    const result = await runWorkflow(wf, ctx);
+
+    expect(result.status).toBe("passed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].options.headers).toEqual({
+      Authorization: "Bearer secret-token",
+    });
+    expect(calls[0].options.json).toEqual({
+      projectId: "project-from-vars",
+      nested: [{ projectId: "project-from-vars" }],
+    });
   });
 
   it("honors a third-party adapter's validateCaseForFlow veto (§17 #8)", async () => {
