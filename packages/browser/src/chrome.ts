@@ -10,7 +10,7 @@
  */
 
 import { statSync } from "node:fs";
-import puppeteerDefault, { type Browser } from "puppeteer-core";
+import puppeteerDefault, { type Browser, type LaunchOptions } from "puppeteer-core";
 import type { PuppeteerLike } from "./page.js";
 
 const WELL_KNOWN_PATHS: Record<string, string[]> = {
@@ -85,7 +85,7 @@ export async function launchChrome(
   }
 
   const pptr = puppeteerInstance ?? puppeteerDefault;
-  return await pptr.launch({
+  const mergedOptions = {
     headless: true,
     args: [
       "--no-sandbox",
@@ -95,7 +95,62 @@ export async function launchChrome(
     ],
     ...launchOptions,
     executablePath: chromePath,
-  });
+  } as LaunchOptions;
+  let extensionPaths: string[] | undefined;
+  if (Array.isArray(mergedOptions.enableExtensions)) {
+    if (!mergedOptions.enableExtensions.every(
+      (extensionPath): extensionPath is string => typeof extensionPath === "string",
+    )) {
+      throw new Error("enableExtensions must contain only extension directory paths.");
+    }
+    extensionPaths = mergedOptions.enableExtensions;
+  }
+
+  if (extensionPaths && mergedOptions.pipe !== true) {
+    throw new Error(
+      "Loading unpacked Chrome extensions requires launchOptions.pipe to be true.",
+    );
+  }
+  if (
+    extensionPaths &&
+    mergedOptions.args?.some((arg) => arg.startsWith("--remote-debugging-"))
+  ) {
+    throw new Error(
+      "Do not set --remote-debugging-port or --remote-debugging-pipe when loading extensions; Puppeteer owns the required pipe transport.",
+    );
+  }
+
+  // Puppeteer 24.43.1 starts loadUnpacked calls without correctly awaiting
+  // them when enableExtensions is an array. Enable extension debugging at
+  // launch, then install each validated path ourselves so launch resolves only
+  // after Chrome has accepted every extension.
+  if (extensionPaths) mergedOptions.enableExtensions = true;
+  const browser = await pptr.launch(mergedOptions);
+  if (!extensionPaths) return browser;
+
+  if (typeof browser.installExtension !== "function") {
+    await browser.close();
+    throw new Error(
+      "This Puppeteer runtime cannot install unpacked extensions; use puppeteer-core >= 24.41.0.",
+    );
+  }
+
+  try {
+    await Promise.all(extensionPaths.map(async (extensionPath) => {
+      try {
+        await browser.installExtension(extensionPath);
+      } catch (error) {
+        throw new Error(
+          `Failed to load unpacked Chrome extension at ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+    }));
+    return browser;
+  } catch (error) {
+    try { await browser.close(); } catch { /* preserve the install error */ }
+    throw error;
+  }
 }
 
 /**

@@ -9,29 +9,37 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./chrome-extension": {
+      "types": "./dist/chrome-extension/index.d.ts",
+      "import": "./dist/chrome-extension/index.js",
+      "default": "./dist/chrome-extension/index.js"
     }
   },
   "files": [
     "NOTICE",
-    "dist"
+    "dist",
+    "guides",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:chrome-extension:smoke": "vitest run src/chrome-extension/smoke.test.ts"
   },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
     "@glubean/sdk": "workspace:*",
-    "puppeteer-core": "^24.0.0"
+    "puppeteer-core": "^24.41.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"
   },
   "peerDependencies": {
-    "puppeteer-core": ">=22"
+    "puppeteer-core": ">=24.41.0 <26"
   },
   "peerDependenciesMeta": {
     "puppeteer-core": {

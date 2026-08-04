@@ -18,6 +18,10 @@ import type { GlubeanRuntime } from "@glubean/sdk";
 import type { Browser } from "puppeteer-core";
 import { type BrowserOptions, GlubeanBrowser } from "./page.js";
 import { connectChrome, launchChrome } from "./chrome.js";
+import {
+  extensionLaunchOptions,
+  type ExtensionLaunchOverrides,
+} from "./chrome-extension/launch.js";
 
 /**
  * Create a Glubean browser plugin.
@@ -93,6 +97,36 @@ function resolveLaunchOptions(
   return resolved;
 }
 
+function resolveExtensionPaths(
+  configured: string | readonly string[] | undefined,
+  runtime: GlubeanRuntime,
+): string | readonly string[] | undefined {
+  if (configured === undefined) return undefined;
+  const resolvePath = (extensionPath: string): string => {
+    if (extensionPath.includes("{{")) return runtime.resolveTemplate(extensionPath);
+    if (Object.prototype.hasOwnProperty.call(runtime.vars, extensionPath)) {
+      return runtime.requireVar(extensionPath);
+    }
+    return extensionPath;
+  };
+  if (typeof configured === "string") return resolvePath(configured);
+  return configured.map(resolvePath);
+}
+
+/** @internal Exported for focused launch-configuration tests. */
+export function resolveBrowserLaunchOptions(
+  options: Extract<BrowserOptions, { launch: true }>,
+  runtime: GlubeanRuntime,
+): Record<string, unknown> | undefined {
+  const resolvedLaunchOptions = resolveLaunchOptions(options.launchOptions, runtime);
+  const extensionPaths = resolveExtensionPaths(options.extensions, runtime);
+  if (extensionPaths === undefined) return resolvedLaunchOptions;
+  return extensionLaunchOptions(
+    extensionPaths,
+    resolvedLaunchOptions as ExtensionLaunchOverrides | undefined,
+  ) as unknown as Record<string, unknown>;
+}
+
 /**
  * Resolve the base URL while preserving the original bare-var-key contract.
  *
@@ -126,9 +160,14 @@ export function browser(options: BrowserOptions): { __type: GlubeanBrowser; crea
     function getBrowser(): Promise<Browser> {
       if (!browserPromise) {
         if ("launch" in options && options.launch) {
-          const resolvedLaunchOptions = resolveLaunchOptions(options.launchOptions, runtime);
+          const resolvedLaunchOptions = resolveBrowserLaunchOptions(options, runtime);
           browserPromise = launchChrome(options.executablePath, pptr, resolvedLaunchOptions);
         } else if ("endpoint" in options && options.endpoint) {
+          if ((options as { extensions?: unknown }).extensions !== undefined) {
+            throw new Error(
+              "browser() cannot load local extensions in endpoint mode; use { launch: true, extensions }.",
+            );
+          }
           const endpoint = runtime.requireVar(options.endpoint);
           browserPromise = connectChrome(endpoint, pptr);
         } else {
