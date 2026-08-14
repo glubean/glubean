@@ -13,8 +13,9 @@
 export { graphqlAdapter } from "./adapter.js";
 export { createGraphqlFactory, createGraphqlRoot } from "./factory.js";
 export { graphqlMatchers } from "./matchers.js";
-export { defineGraphqlCase } from "./types.js";
+export { defineGraphqlCase, graphqlCase } from "./types.js";
 export type {
+  GraphqlCaseBody,
   GraphqlContractCase,
   GraphqlContractDefaults,
   GraphqlContractExample,

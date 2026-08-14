@@ -247,6 +247,12 @@ export interface GraphqlContractCase<
  * Captures `Needs` at the case's own const site so function-valued
  * `variables` and `headers` fields are checked against the declared logical
  * input instead of drifting independently from the `needs` schema.
+ *
+ * @deprecated Use {@link graphqlCase} — same drift guard with zero explicit
+ * generics, and it keeps the case's literal type (so `InferGraphqlResponse` /
+ * `InferGraphqlVariables` resolve instead of degrading). Before:
+ * `defineGraphqlCase<{ userId: string }>({ needs: Schema, variables: ({ userId }) => ({ id: userId }) })`;
+ * after: `graphqlCase(Schema)({ variables: ({ userId }) => ({ id: userId }) })`.
  */
 export function defineGraphqlCase<
   Needs = void,
@@ -256,6 +262,147 @@ export function defineGraphqlCase<
   c: GraphqlContractCase<Vars, Res, Needs>,
 ): GraphqlContractCase<Vars, Res, Needs> {
   return c;
+}
+
+/**
+ * Case body for {@link graphqlCase} — `GraphqlContractCase` WITHOUT `needs`;
+ * the factory owns that field.
+ *
+ * `needs` is pinned to `never` rather than merely omitted: TypeScript runs no
+ * excess-property check against a type parameter's CONSTRAINT, so a bare
+ * `Omit<...>` would silently absorb a stray `needs` key into the inferred case
+ * type and leave two competing declarations of the same schema. The `never`
+ * makes writing a schema there a compile error at the offending property. An
+ * explicit `needs: undefined` still passes — `exactOptionalPropertyTypes` is
+ * off in this repo and it declares nothing anyway.
+ *
+ * The `Vars` slot is the concrete `Record<string, unknown>` default, NOT `any`:
+ * `variables?: Vars | ((input: Needs) => Vars)` is a union whose static branch
+ * would SWALLOW the function branch if it were `any` (`any | F` collapses to
+ * `any`), and the drift guard would silently evaporate — the parameter of
+ * `variables: ({ userId }) => ...` would go implicitly `any`. It is also the
+ * shape `GraphqlContractSpec` already requires (`Vars extends Record<string,
+ * unknown>`), so a variables value that this rejects would be rejected at the
+ * contract call anyway — here it fails at the offending case instead.
+ *
+ * The `Res` slot IS `any` (same as HTTP's `HttpCaseBody`): it only reaches
+ * `expect` and `verify`, never a union with a function, so it cannot swallow
+ * anything.
+ */
+export type GraphqlCaseBody<N> = Omit<
+  GraphqlContractCase<Record<string, unknown>, any, N>,
+  "needs"
+> & { needs?: never };
+
+/**
+ * Curried GraphQL case factory — {@link defineGraphqlCase}'s needs-drift guard
+ * with zero explicit generics, and without its type-erasing trade. Prefer this.
+ *
+ * **Why curried.** TypeScript can't correlate sibling fields of one object
+ * literal, so `needs: SchemaLike<X>` never types the `variables: (input) => ...`
+ * written beside it — a factory has to capture `Needs` first. But TS also has
+ * no PARTIAL type-argument inference: the moment an author writes
+ * `defineGraphqlCase<Needs>(...)`, every remaining type parameter falls back to
+ * its default and the case widens to the nominal `GraphqlContractCase<Vars, Res,
+ * Needs>`. Splitting the call in two leaves nothing to default — `N` is inferred
+ * from the schema VALUE in the first call, `C` from the case literal in the
+ * second (contextually typed by `GraphqlCaseBody<N>`, which is what still
+ * threads `N` into the action fields).
+ *
+ * What that buys over `defineGraphqlCase`:
+ * - **No explicit generics.** The schema is written once, as a value, and the
+ *   whole case is checked against it.
+ * - **Drift guard on both action fields** — `variables` / `headers` take
+ *   `(input: N) => ...`, so destructuring a key that isn't on `N` is a compile
+ *   error instead of a silently `undefined` field in the outgoing operation.
+ * - **The case keeps its LITERAL type**, so `InferGraphqlResponse` /
+ *   `InferGraphqlVariables` resolve the real `expect.schema` / `variables`
+ *   types; the nominal return of `defineGraphqlCase` erases both to their
+ *   defaults unless the author also spells out `Vars` and `Res` by hand.
+ * - **One declaration site.** A `needs` SCHEMA inside the case literal is both a
+ *   compile error (see {@link GraphqlCaseBody}) and a runtime `Error`. The one
+ *   tolerated form is an explicit `needs: undefined`, which declares nothing:
+ *   `exactOptionalPropertyTypes` is off here, so `needs?: never` admits it, and
+ *   every runtime reader already treats undefined as "no needs" — rejecting it
+ *   would make the type layer and the runtime promise different things.
+ *
+ * Runtime output is VALUE-IDENTICAL to the pre-migration shape — a case that
+ * declared `needs` inline — because the factory only spreads the schema back
+ * in. Migrating an existing case moves neither its projection nor its
+ * `canonicalHash`.
+ *
+ * `verify(ctx, res)`'s `res` is `GraphqlCaseResult<any>`, not inferred from
+ * `expect.schema` — that would need a second inference pass over the same
+ * literal. Do NOT annotate the parameter with a concrete result type: GraphQL's
+ * `Res` is CONTRACT-level (`GraphqlContractSpec<Vars, Res, Cases>`) and infers
+ * `unknown` when the spec declares no `responseSchema`, so a narrowed `verify`
+ * parameter makes the case unassignable to the contract's `cases` (a
+ * pre-existing constraint — `defineGraphqlCase<Needs, Vars, Res>` with an
+ * explicit `Res` hits the same wall). Narrow `res.data` inside the body instead;
+ * the schema still validates the response at runtime.
+ *
+ * @example
+ * ```ts
+ * import { contract } from "@glubean/sdk";
+ * import { graphqlCase } from "@glubean/graphql";
+ * import { z } from "zod";
+ *
+ * const fetchUser = graphqlCase(z.object({ userId: z.string(), token: z.string() }))({
+ *   description: "fetches a user by id",
+ *   query: "query User($id: ID!) { user(id: $id) { id name } }",
+ *   // `input` is { userId: string; token: string } — inferred, never annotated.
+ *   variables: ({ userId }) => ({ id: userId }),
+ *   headers: ({ token }) => ({ authorization: `Bearer ${token}` }),
+ *   expect: { schema: z.object({ user: z.object({ id: z.string() }) }) },
+ * });
+ *
+ * const api = contract.graphql.with("users", { client });
+ * export const users = api("user.fetch", { cases: { fetchUser } });
+ * ```
+ *
+ * @param needs The case's logical input schema — declared here, exactly once.
+ *   Omit the argument entirely for a case with no logical input; that form
+ *   returns the case unchanged and still rejects a literal `needs`.
+ * @returns A function taking the case literal, returning it with `needs` attached.
+ */
+export function graphqlCase<N>(
+  needs: SchemaLike<N>,
+): <const C extends GraphqlCaseBody<N>>(
+  c: C,
+  // `Omit<C, "needs">` before the intersection, never a bare `C & {...}`: a case
+  // written against the exported `GraphqlCaseBody<X>` annotation carries the
+  // `needs?: never` guard INTO `C`, and intersecting that with the required
+  // `needs: SchemaLike<N>` collapses the property (and with it core's
+  // `InferCaseInput`, and with THAT the whole `.case()` I/O chain) to `never`.
+  // Dropping the guarded key first keeps every other property's literal type
+  // intact.
+) => Omit<C, "needs"> & { needs: SchemaLike<N> };
+export function graphqlCase(): <const C extends GraphqlCaseBody<void>>(c: C) => C;
+export function graphqlCase(needs?: SchemaLike<unknown>) {
+  // Keep JS consumers aligned with the type-level `needs?: never` — a literal
+  // `needs` SCHEMA is a hard error in BOTH forms, so it always has exactly one
+  // declaration site. The zero-arg form returns the case unchanged.
+  //
+  // The two overloads above are the checked authoring surface; this
+  // implementation is untyped glue (a concrete param type is not compatible
+  // with both of them).
+  return (c: any) => {
+    // Value check, NOT hasOwnProperty: `exactOptionalPropertyTypes` is off in
+    // this repo, so `needs?: never` accepts an explicit `needs: undefined` and
+    // the runtime must accept it too, or the two layers promise different
+    // things. Tolerating it is safe because every runtime reader treats
+    // undefined as "no needs declared" (core's §5.1 branches are falsy checks;
+    // the projection records `hasNeeds: c.needs !== undefined`). In the schema
+    // form the spread below overwrites the key anyway.
+    if (c.needs !== undefined) {
+      throw new Error(
+        "graphqlCase: do not declare `needs` inside the case literal — the factory " +
+          "owns that field. Declare it once as `graphqlCase(schema)({ ... })` and " +
+          "remove `needs` from the case object.",
+      );
+    }
+    return needs === undefined ? c : { ...c, needs };
+  };
 }
 
 // =============================================================================

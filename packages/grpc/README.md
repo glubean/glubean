@@ -31,7 +31,7 @@ await installPlugin(grpcPlugin);
 
 ```ts
 import { contract, configure } from "@glubean/sdk";
-import { grpc } from "@glubean/grpc";
+import { grpc, grpcCase } from "@glubean/grpc";
 import { z } from "zod";
 
 const { payment } = configure({
@@ -49,27 +49,33 @@ const paymentContracts = contract.grpc.with("payment-api", {
   client: payment,
 });
 
+// A case's logical input is declared ONCE — as the schema argument to
+// `grpcCase`. TypeScript then types `request` / `metadata` from it, so a key
+// that isn't on the schema is a compile error instead of an `undefined`
+// silently sent in the outgoing message.
+const happy = grpcCase(z.object({ orderId: z.string(), amount: z.number() }))({
+  description: "order with valid payment method completes successfully",
+  // `orderId` / `amount` are inferred from the schema above, never annotated.
+  request: ({ orderId, amount }) => ({ orderId, amount, currency: "USD" }),
+  expect: {
+    statusCode: 0, // OK
+    message: { status: "completed" },
+  },
+});
+
+// A case with no logical input uses the zero-argument form.
+const notFound = grpcCase()({
+  description: "unknown order id returns NOT_FOUND",
+  request: { orderId: "does-not-exist" },
+  expect: {
+    statusCode: 5, // NOT_FOUND
+  },
+});
+
 export const completePayment = paymentContracts("complete-payment", {
   target: "PaymentService/Complete",
   description: "Complete a pending payment by order id + amount",
-  cases: {
-    happy: {
-      description: "order with valid payment method completes successfully",
-      needs: z.object({ orderId: z.string(), amount: z.number() }),
-      request: ({ orderId, amount }) => ({ orderId, amount, currency: "USD" }),
-      expect: {
-        statusCode: 0, // OK
-        message: { status: "completed" },
-      },
-    },
-    notFound: {
-      description: "unknown order id returns NOT_FOUND",
-      request: { orderId: "does-not-exist" },
-      expect: {
-        statusCode: 5, // NOT_FOUND
-      },
-    },
-  },
+  cases: { happy, notFound },
 });
 ```
 

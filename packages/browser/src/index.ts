@@ -80,7 +80,7 @@ const browserPlugin: PluginManifest = definePlugin({
 
 export default browserPlugin;
 
-// Contract authoring surface (types, defineBrowserCase, matchers, adapter).
+// Contract authoring surface (types, browserCase, matchers, adapter).
 export * from "./contract/index.js";
 export type {
   ActionOptions,

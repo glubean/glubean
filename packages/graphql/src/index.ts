@@ -536,9 +536,11 @@ export {
   createGraphqlFactory,
   createGraphqlRoot,
   defineGraphqlCase,
+  graphqlCase,
   graphqlMatchers,
 } from "./contract/index.js";
 export type {
+  GraphqlCaseBody,
   GraphqlContractCase,
   GraphqlContractDefaults,
   GraphqlContractExample,

@@ -1,0 +1,19 @@
+{
+  // Type-assertion gate: production `src` PLUS the `*.test-d.ts` files, which
+  // `tsconfig.build.json` excludes and therefore never checks. Wired into the
+  // package's `test` script so `pnpm -r test` enforces it with no CI workflow
+  // changes.
+  //
+  // `*.test.ts` is excluded deliberately: those files carry pre-existing type
+  // errors (8 at the time of writing, in configure/index/load/workflow tests)
+  // that have nothing to do with the type assertions this gate protects.
+  // Including them would make the gate red on day one and force it to be
+  // ignored. Vitest still runs them; only `tsc` skips them.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "./src"
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}
