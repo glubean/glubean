@@ -504,6 +504,34 @@ export interface TestContext {
   warn(condition: boolean, message: string): void;
 
   /**
+   * Validate data against a schema with `severity: "fatal"` — returns `T`, not
+   * `T | undefined`.
+   *
+   * A fatal failure emits the failed assertion and then **throws** to abort the
+   * test, so the call only ever returns on success. The narrowed return type
+   * makes that truthful in the type system: no `!` or `as T` ceremony after the
+   * call.
+   *
+   * @param data The data to validate
+   * @param schema A schema implementing `safeParse` or `parse`
+   * @param label Human-readable label (pass `undefined` to omit)
+   * @param options Must include `severity: "fatal"` to select this overload
+   * @returns Parsed value (the failure path throws)
+   *
+   * @example Fatal — abort test on invalid response
+   * ```ts
+   * const user = ctx.validate(body, UserSchema, "response body", { severity: "fatal" });
+   * user.id; // typed as User — no non-null assertion needed
+   * ```
+   */
+  validate<T>(
+    data: unknown,
+    schema: SchemaLike<T>,
+    label: string | undefined,
+    options: ValidateOptions & { severity: "fatal" },
+  ): T;
+
+  /**
    * Validate data against a schema (Zod, Valibot, or any `SchemaLike<T>`).
    *
    * The runner prefers `safeParse` (no-throw) and falls back to `parse` (try/catch).
@@ -535,7 +563,8 @@ export interface TestContext {
    * @example Fatal — abort test on invalid response
    * ```ts
    * const user = ctx.validate(body, UserSchema, "response body", { severity: "fatal" });
-   * // Only reached if validation passed
+   * // Only reached if validation passed — the fatal overload returns `T`,
+   * // so `user` needs no non-null assertion.
    * ```
    */
   validate<T>(
