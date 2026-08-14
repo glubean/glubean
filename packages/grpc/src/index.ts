@@ -561,9 +561,11 @@ export {
   createGrpcFactory,
   createGrpcRoot,
   defineGrpcCase,
+  grpcCase,
   grpcMatchers,
 } from "./contract/index.js";
 export type {
+  GrpcCaseBody,
   GrpcContractCase,
   GrpcContractDefaults,
   GrpcContractExample,

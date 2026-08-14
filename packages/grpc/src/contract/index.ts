@@ -14,8 +14,9 @@
 export { grpcAdapter } from "./adapter.js";
 export { createGrpcFactory, createGrpcRoot } from "./factory.js";
 export { grpcMatchers } from "./matchers.js";
-export { defineGrpcCase } from "./types.js";
+export { defineGrpcCase, grpcCase } from "./types.js";
 export type {
+  GrpcCaseBody,
   GrpcContractCase,
   GrpcContractDefaults,
   GrpcContractExample,
