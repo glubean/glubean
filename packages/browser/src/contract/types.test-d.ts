@@ -188,8 +188,10 @@ const ext = contract.browser.with("ext", { client: chrome });
             intent: "open the native side panel",
             action: async (page) => {
               // @ts-expect-error - KNOWN GAP: spec.client does not drive
-              // PageType, so `page` is still InstrumentedPage here. Supported
-              // alternatives: `.with("x", { client })`, or a case-level client.
+              // PageType, so `page` is still InstrumentedPage here. The
+              // supported alternative is `.with("x", { client })`. A case-level
+              // client does NOT substitute — it types the case but cannot widen
+              // the contract it goes into (pinned below).
               await page.extension.sidePanel.open();
             },
           },
@@ -199,8 +201,8 @@ const ext = contract.browser.with("ext", { client: chrome });
   });
   void _specLevelClientGap;
 
-  // The two SUPPORTED alternatives for that same intent, pinned as the
-  // recommendation the docs point at (route 2 and route 1 respectively).
+  // The ONE supported alternative for that same intent (route 2), pinned as the
+  // recommendation the docs point at.
   const _specClientAlternativeWith = ext("spec-level-client.with", {
     cases: {
       ok: browserCase()({
