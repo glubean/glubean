@@ -31,7 +31,7 @@ await installPlugin(graphqlPlugin);
 
 ```ts
 import { contract, configure } from "@glubean/sdk";
-import { graphql, gql } from "@glubean/graphql";
+import { graphql, gql, graphqlCase } from "@glubean/graphql";
 import { z } from "zod";
 
 const { api } = configure({
@@ -47,40 +47,47 @@ const userContracts = contract.graphql.with("user-api", {
   client: api,
 });
 
+// A case's logical input is declared ONCE — as the schema argument to
+// `graphqlCase`. TypeScript then types `variables` / `headers` from it, so a
+// key that isn't on the schema is a compile error instead of an `undefined`
+// silently sent on the wire.
+const happy = graphqlCase(z.object({ id: z.string() }))({
+  description: "existing user returns name + email",
+  query: gql`
+    query GetUser($id: ID!) {
+      user(id: $id) { id name email }
+    }
+  `,
+  // `id` is `string` — inferred from the schema above, never annotated.
+  variables: ({ id }) => ({ id }),
+  expect: {
+    httpStatus: 200,
+    data: { user: { id: "u_123", name: "Alice" } },
+    errors: "absent",
+  },
+});
+
+// A case with no logical input uses the zero-argument form.
+const unauth = graphqlCase()({
+  description: "missing token yields 401",
+  query: `query Me { me { id } }`,
+  headers: {},
+  expect: { httpStatus: 401, errors: "any" },
+});
+
+const forbidden = graphqlCase()({
+  description: "server returns FORBIDDEN on scope mismatch",
+  query: `query AdminOnly { admin { key } }`,
+  expect: {
+    httpStatus: 200,
+    errors: [{ extensions: { code: "FORBIDDEN" } }],
+  },
+});
+
 export const getUser = userContracts("get-user", {
   endpoint: "/graphql",
   description: "Fetch a user by id",
-  cases: {
-    happy: {
-      description: "existing user returns name + email",
-      needs: z.object({ id: z.string() }),
-      query: gql`
-        query GetUser($id: ID!) {
-          user(id: $id) { id name email }
-        }
-      `,
-      variables: ({ id }) => ({ id }),
-      expect: {
-        httpStatus: 200,
-        data: { user: { id: "u_123", name: "Alice" } },
-        errors: "absent",
-      },
-    },
-    unauth: {
-      description: "missing token yields 401",
-      query: `query Me { me { id } }`,
-      headers: {},
-      expect: { httpStatus: 401, errors: "any" },
-    },
-    forbidden: {
-      description: "server returns FORBIDDEN on scope mismatch",
-      query: `query AdminOnly { admin { key } }`,
-      expect: {
-        httpStatus: 200,
-        errors: [{ extensions: { code: "FORBIDDEN" } }],
-      },
-    },
-  },
+  cases: { happy, unauth, forbidden },
 });
 ```
 
