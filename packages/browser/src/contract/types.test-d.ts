@@ -165,6 +165,90 @@ const ext = contract.browser.with("ext", { client: chrome });
   void _defaultInExt;
 
   // ---------------------------------------------------------------------
+  // 3b. KNOWN GAP, pinned deliberately: a client passed as the contract SPEC's
+  // `client` does NOT reach `PageType`. The route works at runtime, but
+  // `BrowserContractFactory` binds its page type at `.with(...)` time, so the
+  // spec literal is checked against an already-fixed type. Both attempted
+  // fixes (a per-call type parameter; an overload pair) demoted the page type
+  // to an unresolved type variable during contextual typing of `cases` and
+  // regressed the `.with({ client })` route above, so the gap stands.
+  //
+  // This assertion exists so that a future change CANNOT close (or further
+  // break) this silently — if the gap closes, the @ts-expect-error goes unused
+  // and this file fails to compile, forcing the docs to be updated with it.
+  // ---------------------------------------------------------------------
+  const _specLevelClientGap = app("spec-level-client", {
+    client: chrome,
+    cases: {
+      ok: browserCase()({
+        description: "spec-level client does not reach PageType",
+        steps: [
+          {
+            id: "open",
+            intent: "open the native side panel",
+            action: async (page) => {
+              // @ts-expect-error - KNOWN GAP: spec.client does not drive
+              // PageType, so `page` is still InstrumentedPage here. Supported
+              // alternatives: `.with("x", { client })`, or a case-level client.
+              await page.extension.sidePanel.open();
+            },
+          },
+        ],
+      }),
+    },
+  });
+  void _specLevelClientGap;
+
+  // The two SUPPORTED alternatives for that same intent, pinned as the
+  // recommendation the docs point at (route 2 and route 1 respectively).
+  const _specClientAlternativeWith = ext("spec-level-client.with", {
+    cases: {
+      ok: browserCase()({
+        description: "client on .with(...) — supported",
+        steps: [
+          {
+            id: "open",
+            intent: "open the native side panel",
+            action: async (page) => {
+              await page.extension.sidePanel.open();
+            },
+          },
+        ],
+      }),
+    },
+  });
+  void _specClientAlternativeWith;
+
+  // ...and the boundary of route 1, pinned: a case-level client types the case
+  // itself (see the standalone `_extStandalone` above), but it cannot UPGRADE
+  // the page type of the contract it is placed in — the contract's `Cases`
+  // constraint wants an action accepting the WIDER `InstrumentedPage`, and an
+  // `ExtensionPage`-accepting action is narrower (parameter contravariance).
+  // So for a spec-level client the only alternative is `.with(...)` above.
+  const caseLevelClientCase = browserCase()({
+    description: "client on the case",
+    client: chrome,
+    steps: [
+      {
+        id: "open",
+        intent: "open the native side panel",
+        action: async (page) => {
+          await page.extension.sidePanel.open();
+        },
+      },
+    ],
+  });
+  const _caseClientCannotUpgradeContract = app("spec-level-client.case", {
+    cases: {
+      // @ts-expect-error - a case-level ExtensionPage client does not widen the
+      // contract: `app` was created by `.with("app", { client })` on an
+      // InstrumentedPage client, so its cases must accept that wider page.
+      ok: caseLevelClientCase,
+    },
+  });
+  void _caseClientCannotUpgradeContract;
+
+  // ---------------------------------------------------------------------
   // 4. Single declaration site: `needs` belongs to the factory call, never
   // to the case literal (runtime throws on it too).
   // ---------------------------------------------------------------------

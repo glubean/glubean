@@ -165,6 +165,43 @@ export function defineGrpcCase<
 }
 
 /**
+ * A gRPC request MESSAGE value — any object that is neither callable nor
+ * thenable. This is the static branch of {@link GrpcCaseBody}'s `request`
+ * union, and (because `GrpcContractCase` uses one parameter for both) also the
+ * return type its function branch must produce.
+ *
+ * **Why the `never` guards.** `request?: Req | ((input) => Req)` is a union, so
+ * a plain `object` static branch ACCEPTS function values — TypeScript treats
+ * every function as an `object` — and three real authoring mistakes slip
+ * through it with zero errors, each producing a corrupt request at runtime
+ * (`resolveRequest` calls anything `typeof === "function"` and hands the result
+ * to `deepMerge`):
+ *
+ * 1. A pre-declared builder whose ANNOTATED parameter drifts from the schema.
+ *    The function branch rejects it (parameter contravariance), the `object`
+ *    branch silently re-accepts it, and the needs-drift guard is bypassed.
+ * 2. An `async` builder. Its `Promise` is not a valid message; `deepMerge`
+ *    iterates `Object.entries(promise)` and sends `{}` — an empty request.
+ * 3. A builder returning a primitive. `deepMerge` spreads a string into
+ *    `{0: "a", 1: "b", ...}`.
+ *
+ * `apply` / `call` / `bind` are present on every function type, so pinning them
+ * to `never` excludes callables while a protobuf message (an interface with no
+ * such fields) passes the optional-property check untouched. `then` excludes
+ * the `Promise` from case 2 — and a thenable message is hazardous regardless.
+ *
+ * The cost: a message with a literal `apply` / `call` / `bind` / `then` FIELD
+ * cannot go through {@link grpcCase}. That shape keeps using the deprecated
+ * `defineGrpcCase<Needs, Req, Res>`, which takes `Req` explicitly.
+ */
+export type GrpcRequestMessage = object & {
+  apply?: never;
+  call?: never;
+  bind?: never;
+  then?: never;
+};
+
+/**
  * Case body for {@link grpcCase} — `GrpcContractCase` WITHOUT `needs`; the
  * factory owns that field.
  *
@@ -176,21 +213,25 @@ export function defineGrpcCase<
  * explicit `needs: undefined` still passes — `exactOptionalPropertyTypes` is
  * off in this repo and it declares nothing anyway.
  *
- * The `Req` slot is `object`, NOT `any`: `request?: Req | ((input: Needs) =>
- * Req)` is a union whose static branch would SWALLOW the function branch if it
- * were `any` (`any | F` collapses to `any`), and the drift guard would silently
- * evaporate — the parameter of `request: ({ userId }) => ...` would go
- * implicitly `any`. `object` is the widest static branch that still leaves the
- * function branch visible, and unlike `defineGrpcCase`'s `Record<string,
- * unknown>` default it accepts an INTERFACE-typed message (protobuf codegen
- * emits interfaces, which have no implicit index signature and are therefore
- * not assignable to `Record<string, unknown>`).
+ * The `Req` slot is {@link GrpcRequestMessage}, NOT `any`: `request?: Req |
+ * ((input: Needs) => Req)` is a union whose static branch would SWALLOW the
+ * function branch if it were `any` (`any | F` collapses to `any`), and the
+ * drift guard would silently evaporate — the parameter of `request: ({ userId
+ * }) => ...` would go implicitly `any`. It is not a bare `object` either: that
+ * accepts function VALUES and re-admits three drift-bypassing forms through the
+ * static branch (see {@link GrpcRequestMessage}). Unlike `defineGrpcCase`'s
+ * `Record<string, unknown>` default it still accepts an INTERFACE-typed message
+ * (protobuf codegen emits interfaces, which have no implicit index signature
+ * and are therefore not assignable to `Record<string, unknown>`).
  *
  * The `Res` slot IS `any` (same as HTTP's `HttpCaseBody`): it only reaches
  * `expect` and `verify`, never a union with a function, so it cannot swallow
  * anything.
  */
-export type GrpcCaseBody<N> = Omit<GrpcContractCase<object, any, N>, "needs"> & {
+export type GrpcCaseBody<N> = Omit<
+  GrpcContractCase<GrpcRequestMessage, any, N>,
+  "needs"
+> & {
   needs?: never;
 };
 

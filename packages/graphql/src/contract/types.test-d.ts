@@ -154,6 +154,45 @@ const api = contract.graphql.with("api", { client });
   void _nominalIsUnknown;
 
   // ---------------------------------------------------------------------
+  // 3b. The static branch must REJECT function values. `variables?: Vars |
+  // ((input) => Vars)` is a union, so a permissive static slot (a bare
+  // `object`, say) would accept every function — TS treats functions as
+  // objects — and silently re-admit three drift-bypassing forms, each
+  // corrupting the operation at runtime. `Vars` is `Record<string, unknown>`,
+  // which has no such leak; these pin that (gRPC needs an explicit guard for
+  // the same three forms because its `Req` slot must also admit protobuf
+  // INTERFACES, which a record rejects — see `GrpcRequestMessage`).
+  // ---------------------------------------------------------------------
+
+  // (i) A pre-declared builder whose ANNOTATED parameter drifts from the schema.
+  const driftingBuilder = (i: { wrongKey: string }) => ({ id: i.wrongKey });
+  const _staticDrift = graphqlCase(s<{ userId: string }>())({
+    description: "pre-declared builder with a drifting annotated param",
+    query: "q",
+    // @ts-expect-error -- neither branch may accept it.
+    variables: driftingBuilder,
+  });
+  void _staticDrift;
+
+  // (ii) An `async` builder — its Promise is not a variables object.
+  const _asyncBuilder = graphqlCase(s<{ userId: string }>())({
+    description: "async variables builder",
+    query: "q",
+    // @ts-expect-error -- a Promise is not a variables record.
+    variables: async ({ userId }) => ({ id: userId }),
+  });
+  void _asyncBuilder;
+
+  // (iii) A builder returning a PRIMITIVE.
+  const _primitiveBuilder = graphqlCase(s<{ userId: string }>())({
+    description: "variables builder returning a primitive",
+    query: "q",
+    // @ts-expect-error -- a string is not a variables record.
+    variables: ({ userId }) => userId,
+  });
+  void _primitiveBuilder;
+
+  // ---------------------------------------------------------------------
   // 4. Single declaration site: `needs` belongs to the factory call, never
   // to the case literal (runtime throws on it too).
   // ---------------------------------------------------------------------

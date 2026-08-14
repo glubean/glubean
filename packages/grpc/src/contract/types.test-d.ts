@@ -155,6 +155,78 @@ const api = contract.grpc.with("api", { client });
   });
   void ifaceCase;
 
+  // An interface-typed VALUE is accepted in the static branch too, and so is a
+  // plain object literal — the `never` guards below must not cost either.
+  const ifaceValue = {} as GetUserRequest;
+  const ifaceStatic = grpcCase()({
+    description: "interface-typed static request",
+    request: ifaceValue,
+  });
+  const literalStatic = grpcCase()({
+    description: "object-literal static request",
+    request: { userId: "u1" },
+  });
+  void ifaceStatic;
+  void literalStatic;
+
+  // ---------------------------------------------------------------------
+  // 3c. The static branch must REJECT function values. A bare `object` static
+  // slot accepts every function (TS treats functions as objects), which
+  // re-admits three drift-bypassing forms — each corrupting the request at
+  // runtime, because `resolveRequest` calls anything `typeof === "function"`
+  // and deep-merges the result. See `GrpcRequestMessage`.
+  // ---------------------------------------------------------------------
+
+  // (i) A pre-declared builder whose ANNOTATED parameter drifts from the
+  // schema. The function branch rejects it on parameter contravariance; a
+  // permissive static branch would silently re-accept it and void the guard.
+  const driftingBuilder = (i: { wrongKey: string }) => ({ userId: i.wrongKey });
+  const _staticDrift = grpcCase(s<{ userId: string }>())({
+    description: "pre-declared builder with a drifting annotated param",
+    // @ts-expect-error -- neither branch may accept it: the function branch
+    // rejects the param, the static branch rejects callables.
+    request: driftingBuilder,
+  });
+  void _staticDrift;
+
+  // (ii) An `async` builder. Its Promise is not a message: deepMerge iterates
+  // `Object.entries(promise)` and sends `{}`.
+  const _asyncBuilder = grpcCase(s<{ userId: string }>())({
+    description: "async request builder",
+    // @ts-expect-error -- a Promise is not a request message (`then?: never`).
+    request: async ({ userId }) => ({ userId }),
+  });
+  void _asyncBuilder;
+
+  // (iii) A builder returning a PRIMITIVE. deepMerge would spread a string
+  // into `{0: "u", 1: "1", ...}`.
+  const _primitiveBuilder = grpcCase(s<{ userId: string }>())({
+    description: "request builder returning a primitive",
+    // @ts-expect-error -- a string is not a request message.
+    request: ({ userId }) => userId,
+  });
+  void _primitiveBuilder;
+
+  // ...and the union still does NOT collapse: a correctly shaped builder keeps
+  // full contextual typing (proved by the `string` annotation, which would fail
+  // on an implicit `any`) while a drifting key is still an error.
+  const _guardStillLive = grpcCase(s<{ userId: string; amount: number }>())({
+    description: "union did not collapse",
+    request: (input) => {
+      const userId: string = input.userId;
+      const amount: number = input.amount;
+      return { userId, amount };
+    },
+  });
+  void _guardStillLive;
+
+  const _guardStillLiveNegative = grpcCase(s<{ userId: string }>())({
+    description: "union did not collapse — negative",
+    // @ts-expect-error -- `nope` is not on Needs `{userId: string}`.
+    request: ({ nope }) => ({ nope }),
+  });
+  void _guardStillLiveNegative;
+
   // ---------------------------------------------------------------------
   // 4. Single declaration site: `needs` belongs to the factory call, never
   // to the case literal (runtime throws on it too).

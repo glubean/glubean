@@ -29,6 +29,7 @@ export type {
   GrpcCaseResult,
   GrpcFlowCaseOutput,
   GrpcPayloadSchemas,
+  GrpcRequestMessage,
   GrpcSafeSchemas,
   InferGrpcRequest,
   InferGrpcResponse,

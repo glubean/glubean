@@ -334,6 +334,12 @@ export function defineBrowserCase<
  * makes writing a schema there a compile error at the offending property. An
  * explicit `needs: undefined` still passes — `exactOptionalPropertyTypes` is
  * off in this repo and it declares nothing anyway.
+ *
+ * `PageType` defaults to `InstrumentedPage`. {@link browserCase} infers it from
+ * the case's own `client` or from the enclosing contract's `.with(...)` client;
+ * a client passed as the contract SPEC's `client` does NOT reach it (see
+ * {@link browserCase} for why, and for the two supported alternatives). Pass the
+ * parameter explicitly when annotating a case body for a non-default page.
  */
 export type BrowserCaseBody<
   N,
@@ -377,11 +383,29 @@ export type BrowserCaseBody<
  *    fixes the factory's page type, which contextually types this call's return
  *    and pins `P` before the `action` bodies are checked.
  *
- * Neither route applies to a standalone, client-less case, which falls back to
+ * Restating `steps` costs the step literals' types, which nothing consumes —
+ * core reads only `needs`.
+ *
+ * **Two shapes those routes do NOT cover** (both fall back to
  * `InstrumentedPage`; annotating an `action`'s `page` parameter more narrowly
- * cannot recover it (parameter contravariance rejects it), so that one shape
- * keeps using `defineBrowserCase<Input, PageType>`. Restating `steps` costs the
- * step literals' types, which nothing consumes — core reads only `needs`.
+ * cannot recover either, because parameter contravariance rejects it):
+ * - A standalone, client-less case. Give the case a `client`, declare it inline
+ *   in its contract, or keep `defineBrowserCase<Input, PageType>`.
+ * - A client supplied as the CONTRACT SPEC's `client` — `journeys("id", {
+ *   client: chrome, cases: { ... } })` — rather than on `.with(...)` or on the
+ *   case. This route is fully supported at runtime, but `BrowserContractFactory`
+ *   binds its page type when `.with(...)` is called, so by the time the spec
+ *   literal is checked the type is already fixed and the spec's own `client` has
+ *   no say. Making it an inference site requires a per-call type parameter on
+ *   the factory, and that DEMOTES the page type to an unresolved type variable
+ *   while `cases` is being contextually typed — which breaks route 2, the common
+ *   one (measured: both a per-call parameter and an overload pair regressed
+ *   `.with({ client })`). Until that is solved, pass the client to `.with(...)`.
+ *   The case route does NOT substitute here: a case-level client types the case
+ *   itself, but cannot widen the contract it is placed in — that contract's
+ *   `cases` constraint wants an action accepting its own, wider page.
+ *   `types.test-d.ts` pins all three behaviors so a future change cannot land
+ *   silently.
  *
  * Runtime output is VALUE-IDENTICAL to the pre-migration shape — a case that
  * declared `needs` inline — because the factory only spreads the schema back
