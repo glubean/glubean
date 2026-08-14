@@ -338,8 +338,10 @@ export function defineBrowserCase<
  * `PageType` defaults to `InstrumentedPage`. {@link browserCase} infers it from
  * the case's own `client` or from the enclosing contract's `.with(...)` client;
  * a client passed as the contract SPEC's `client` does NOT reach it (see
- * {@link browserCase} for why, and for the two supported alternatives). Pass the
- * parameter explicitly when annotating a case body for a non-default page.
+ * {@link browserCase} for why). The supported alternative there is `.with(...)`
+ * — a case-level client does NOT substitute, since it cannot widen the contract
+ * the case is placed in. Pass the parameter explicitly when annotating a case
+ * body for a non-default page.
  */
 export type BrowserCaseBody<
   N,
