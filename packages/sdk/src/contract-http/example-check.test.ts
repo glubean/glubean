@@ -411,6 +411,76 @@ test("a nested class instance also disqualifies the site", () => {
   expect(warnings()).toEqual([]);
 });
 
+test("a null-prototype example is skipped, not falsely reported as drift", () => {
+  const seen: unknown[] = [];
+  // Node's structuredClone hands back an object with `Object.prototype`, so a
+  // prototype-sensitive schema accepts the author's value and rejects our copy.
+  const nullProtoSchema: SchemaLike<unknown> = {
+    safeParse(data: unknown) {
+      seen.push(data);
+      return Object.getPrototypeOf(data as object) === null
+        ? { success: true as const, data }
+        : {
+            success: false as const,
+            error: { issues: [{ message: "Expected a null-prototype object" }] },
+          };
+    },
+  };
+
+  const bare = Object.create(null) as Record<string, unknown>;
+  bare["name"] = "Alice";
+
+  const api = contract.http.with("api", { client });
+  api("users.create.null-proto", {
+    endpoint: "POST /users",
+    request: { body: nullProtoSchema, example: bare },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  expect(warnings()).toEqual([]);
+  expect(seen).toEqual([]); // never handed the lossy copy
+});
+
+test("an example with an accessor or frozen property is skipped", () => {
+  let sawValue = false;
+  const spy: SchemaLike<unknown> = {
+    safeParse() {
+      sawValue = true;
+      return { success: false as const, error: { issues: [{ message: "nope" }] } };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+  api("users.create.getter", {
+    endpoint: "POST /users",
+    // The clone materialises the getter into a plain data property.
+    request: { body: spy, example: { get name() { return "Alice"; } } },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+  expect(sawValue).toBe(false);
+  expect(warnings()).toEqual([]);
+
+  api("users.create.frozen", {
+    endpoint: "POST /users",
+    // `Object.freeze` clears writable/configurable; the clone is mutable again.
+    request: { body: spy, example: Object.freeze({ name: 42 }) },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+  expect(sawValue).toBe(false);
+  expect(warnings()).toEqual([]);
+
+  api("users.create.nested-getter", {
+    endpoint: "POST /users",
+    request: {
+      body: spy,
+      example: { meta: { get id() { return "x"; } } },
+    },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+  expect(sawValue).toBe(false);
+  expect(warnings()).toEqual([]);
+});
+
 test("plain JSON examples (objects, arrays, cycles) are still checked", () => {
   const api = contract.http.with("api", { client });
   const cyclic: Record<string, unknown> = { name: 42, items: [1, 2, { deep: true }] };

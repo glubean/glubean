@@ -88,13 +88,24 @@ function summarizeThrown(err: unknown): string {
  * Is `value` a plain JSON shape, i.e. one that `structuredClone` reproduces
  * INDISTINGUISHABLY as far as a schema can tell?
  *
- * Only primitives, plain objects (`Object.prototype` or null prototype) and
- * plain arrays qualify. Everything else is rejected:
+ * Qualifying shapes: primitives, objects whose prototype is exactly
+ * `Object.prototype`, and arrays whose prototype is exactly `Array.prototype` —
+ * in both cases carrying ONLY default data properties (enumerable + writable +
+ * configurable). Everything else is rejected:
  *
  * - **Class instances** — `structuredClone` returns a plain object, so a schema
  *   doing `instanceof Foo` (or reading a prototype method) rejects the clone
  *   while the author's real example would pass. That is a FALSE drift warning,
  *   the one failure mode this check must never produce.
+ * - **`Object.create(null)` objects** — same class of loss in the other
+ *   direction: Node's `structuredClone` hands back an object with
+ *   `Object.prototype`, so a schema asserting a null prototype (or relying on
+ *   the absence of inherited keys) accepts the author's value and rejects ours.
+ * - **Accessor properties, and data properties with non-default flags**
+ *   (a getter/setter, `Object.freeze`, `writable: false`, …) — the clone
+ *   materialises every accessor into a plain data property and drops the flags,
+ *   so a schema that reads a getter twice, or checks `Object.isFrozen`, sees a
+ *   different object than the author wrote.
  * - **`Date` / `RegExp`** — `structuredClone` *does* preserve these two, so
  *   allowing them would be sound. They are excluded anyway to keep ONE rule
  *   ("the example is a JSON document") that matches what an example actually
@@ -136,18 +147,43 @@ function isPlainJsonShape(value: unknown, seen: WeakSet<object>): boolean {
     // An Array SUBCLASS clones down to a plain array — same identity loss as a
     // class instance.
     if (prototype !== Array.prototype) return false;
-    // Own props beyond the indices + `length` (an "expando" array) are dropped
-    // or reshaped by the clone.
+    // Own props beyond the indices + `length` (an "expando" or sparse array)
+    // are dropped or reshaped by the clone.
     if (Object.getOwnPropertyNames(object).length !== object.length + 1) return false;
+    // `length` itself is non-enumerable/non-configurable by spec on EVERY
+    // array, so it is not evidence of tampering — check the indices only.
+    for (let index = 0; index < object.length; index += 1) {
+      if (!isDefaultDataProperty(object, String(index))) return false;
+    }
     return object.every((item) => isPlainJsonShape(item, seen));
   }
 
-  if (prototype !== Object.prototype && prototype !== null) return false;
+  // `Object.create(null)` is NOT allowed: the clone comes back with
+  // `Object.prototype`, which a prototype-sensitive schema can tell apart.
+  if (prototype !== Object.prototype) return false;
   // Non-enumerable own properties don't survive the clone.
-  if (Object.getOwnPropertyNames(object).length !== Object.keys(object).length) {
-    return false;
+  const names = Object.getOwnPropertyNames(object);
+  if (names.length !== Object.keys(object).length) return false;
+  for (const name of names) {
+    if (!isDefaultDataProperty(object, name)) return false;
   }
   return Object.values(object).every((item) => isPlainJsonShape(item, seen));
+}
+
+/**
+ * Is `key` an own property the clone reproduces exactly — a data property with
+ * the three default flags? An accessor is materialised into a data property by
+ * the clone, and a non-writable / non-configurable flag is simply dropped.
+ */
+function isDefaultDataProperty(object: object, key: string): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (!descriptor) return false;
+  if (!("value" in descriptor)) return false; // getter / setter
+  return (
+    descriptor.enumerable === true &&
+    descriptor.writable === true &&
+    descriptor.configurable === true
+  );
 }
 
 /**
