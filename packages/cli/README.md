@@ -140,7 +140,7 @@ Current automatic changes:
 | `contract.http("id", spec)` | Adds a scoped `contract.http.with(...)` instance and calls it |
 | `import "@glubean/grpc"` / `import "@glubean/graphql"` | Moves plugin installation into `glubean.setup.ts` |
 
-Manual review items are reported for removed case-level `setup` / `teardown`, legacy `definePlugin((runtime) => ...)`, and cases with `needs` that should be wrapped in `defineHttpCase<Needs>(...)`.
+Manual review items are reported for removed case-level `setup` / `teardown`, legacy `definePlugin((runtime) => ...)`, and cases with `needs` that should be wrapped in `httpCase(schema)({ ... })`.
 
 ### `validate-metadata`
 

@@ -56,7 +56,7 @@ export const createUser = contract.http("create-user", {
     expect(stdout).toContain('Rewrite contract.http("id", spec)');
     expect(stdout).toContain("Move @glubean/graphql side-effect plugin import");
     expect(stdout).toContain("Case-level setup was removed");
-    expect(stdout).toContain("defineHttpCase<Needs>");
+    expect(stdout).toContain("httpCase(schema)({ ... })");
     expect(stdout).toContain("+++ glubean.setup.ts");
 
     await expect(readFile(contractPath, "utf-8")).resolves.toBe(original);
