@@ -26,10 +26,11 @@ export type {
   SignatureVerifyResult,
 } from "./inbound-verify.js";
 export { createHttpFactory, createHttpRoot } from "./factory.js";
-export { defineHttpCase } from "./types.js";
+export { defineHttpCase, httpCase } from "./types.js";
 
 export type {
   // User-facing authoring types
+  HttpCaseBody,
   HttpContractSpec,
   HttpContractDefaults,
   HttpSecurityScheme,

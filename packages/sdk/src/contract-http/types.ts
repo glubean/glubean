@@ -154,8 +154,15 @@ export type HttpStaticBody =
  * `defineHttpCase(...)` returns the nominal `ContractCase<T, Needs>` (which erases
  * schema presence for drift-locking), so a case routed through it leaves flow
  * `res.body` as `unknown` — that's the trade for its compile-time case-shape +
- * needs-drift checks. Use inline cases for typed flow lenses; use `defineHttpCase`
- * when you want the action-field drift guard.
+ * needs-drift checks. {@link httpCase} resolves the trade: because its curried
+ * shape lets TS INFER every type parameter, the case keeps its literal type
+ * (`expect.schema` presence included) AND the drift guard. Prefer it; reach for
+ * inline cases only when you don't need the guard.
+ *
+ * @deprecated Use {@link httpCase} — same drift guard with zero explicit
+ * generics, and it preserves typed flow `res.body`. Before:
+ * `defineHttpCase<{ email: string }>({ needs: Schema, body: ({ email }) => ... })`;
+ * after: `httpCase(Schema)({ body: ({ email }) => ... })`.
  *
  * @example
  * ```ts
@@ -184,6 +191,112 @@ export function defineHttpCase<Needs = void, T = unknown>(
   c: ContractCase<T, Needs>,
 ): ContractCase<T, Needs> {
   return c;
+}
+
+/**
+ * Case body for {@link httpCase} — `ContractCase` WITHOUT `needs`; the factory
+ * owns that field.
+ *
+ * `needs` is pinned to `never` rather than merely omitted: TypeScript runs no
+ * excess-property check against a type parameter's CONSTRAINT, so a bare
+ * `Omit<...>` would silently absorb a stray `needs` key into the inferred case
+ * type and leave two competing declarations of the same schema. The `never`
+ * makes writing it a compile error at the offending property.
+ */
+export type HttpCaseBody<N> = Omit<ContractCase<any, N>, "needs"> & {
+  needs?: never;
+};
+
+/**
+ * Curried HTTP case factory — {@link defineHttpCase}'s needs-drift guard with
+ * zero explicit generics, and without its typed-response trade. Prefer this.
+ *
+ * **Why curried.** TypeScript can't correlate sibling fields of one object
+ * literal, so `needs: SchemaLike<X>` never types the `body: (input) => ...`
+ * written beside it — a factory has to capture `Needs` first. But TS also has
+ * no PARTIAL type-argument inference: the moment an author writes
+ * `defineHttpCase<Needs>(...)`, every remaining type parameter falls back to
+ * its default and the case widens to the nominal `ContractCase<T, Needs>`.
+ * Splitting the call in two leaves nothing to default — `N` is inferred from
+ * the schema VALUE in the first call, `C` from the case literal in the second
+ * (contextually typed by `HttpCaseBody<N>`, which is what still threads `N`
+ * into the action fields).
+ *
+ * What that buys over `defineHttpCase`:
+ * - **No explicit generics.** The schema is written once, as a value, and the
+ *   whole case is checked against it.
+ * - **Drift guard on all four action fields** — `body` / `pathParams` / `query`
+ *   / `headers` (plus the deprecated `params` alias) take `(input: N) => ...`,
+ *   so destructuring a key that isn't on `N` is a compile error instead of a
+ *   silently `undefined` field in the outgoing request.
+ * - **Typed flow `res.body`.** The case keeps its LITERAL type — including the
+ *   presence of `expect.schema` — so core's `ExtractCaseResponse` /
+ *   `ApplyCaseOutput` type a `.call`/`.poll` lens's `res.body` from that schema
+ *   instead of degrading it to `unknown`.
+ * - **One declaration site.** A `needs` key inside the case literal is both a
+ *   compile error (see {@link HttpCaseBody}) and a runtime `Error`.
+ *
+ * Runtime output is VALUE-IDENTICAL to writing `needs` in the case literal (the
+ * factory only spreads the schema in), so migrating an existing case moves
+ * neither its projection nor its `canonicalHash`.
+ *
+ * `verify(ctx, res)`'s `res` is not inferred from `expect.schema` — that would
+ * need a second inference pass over the same literal. Annotate the parameter
+ * when you want it typed; the schema still validates the response at runtime.
+ *
+ * @example
+ * ```ts
+ * import { contract, httpCase, workflow } from "@glubean/sdk";
+ * import { z } from "zod";
+ *
+ * const createUser = httpCase(z.object({ email: z.string(), token: z.string() }))({
+ *   description: "creates a user",
+ *   // `input` is { email: string; token: string } — inferred, never annotated.
+ *   body: ({ email }) => ({ email }),
+ *   headers: ({ token }) => ({ authorization: `Bearer ${token}` }),
+ *   expect: { status: 201, schema: z.object({ id: z.string() }) },
+ * });
+ *
+ * const api = contract.http.with("users", { client });
+ * export const users = api("user.create", {
+ *   endpoint: "POST /users",
+ *   cases: { createUser },
+ * });
+ *
+ * // ...and the flow lens sees the schema: `res.body` is { id: string }.
+ * workflow("signup").call("create", users.case("createUser"), {
+ *   in: () => ({ email: "a@b.c", token: "t" }),
+ *   out: (state, res) => ({ ...state, userId: res.body.id }),
+ * });
+ * ```
+ *
+ * @param needs The case's logical input schema — declared here, exactly once.
+ *   Omit the argument entirely for a case with no logical input; that form
+ *   returns the case unchanged and still rejects a literal `needs`.
+ * @returns A function taking the case literal, returning it with `needs` attached.
+ */
+export function httpCase<N>(
+  needs: SchemaLike<N>,
+): <const C extends HttpCaseBody<N>>(c: C) => C & { needs: SchemaLike<N> };
+export function httpCase(): <const C extends HttpCaseBody<void>>(c: C) => C;
+export function httpCase(needs?: SchemaLike<unknown>) {
+  // Keep JS consumers aligned with the type-level `needs?: never` — a literal
+  // `needs` key is a hard error in BOTH forms, so the schema always has exactly
+  // one declaration site. The zero-arg form returns the case unchanged.
+  //
+  // The two overloads above are the checked authoring surface; this
+  // implementation is untyped glue (a concrete param type is not compatible
+  // with both of them).
+  return (c: any) => {
+    if (Object.prototype.hasOwnProperty.call(c, "needs")) {
+      throw new Error(
+        "httpCase: do not declare `needs` inside the case literal — the factory " +
+          "owns that field. Declare it once as `httpCase(schema)({ ... })` and " +
+          "remove `needs` from the case object.",
+      );
+    }
+    return needs === undefined ? c : { ...c, needs };
+  };
 }
 
 export interface ContractCase<T = unknown, Needs = void> extends BaseCaseSpec {
