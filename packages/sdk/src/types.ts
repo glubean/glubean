@@ -1246,9 +1246,11 @@ export interface ConfigureResult<
    * Pre-configured HTTP client. Lazily constructed from `ctx.http.extend()`
    * on first use during test execution. Inherits auto-tracing and auto-metrics.
    *
-   * Supports further `.extend()` for per-test customization.
+   * Supports further `.extend()` for per-test customization, and a schema-aware
+   * `.json(schema)` that returns the validated value
+   * ({@link ValidatingHttpResponsePromise}).
    */
-  http: HttpClient;
+  http: ConfiguredHttpClient;
 }
 
 // =============================================================================
@@ -1775,6 +1777,91 @@ export interface HttpClient {
    * ```
    */
   extend(options: HttpRequestOptions): HttpClient;
+}
+
+/**
+ * Response promise returned by the `configure()` HTTP client. Same surface as
+ * {@link HttpResponsePromise} plus a schema-aware `.json(schema)` shortcut.
+ *
+ * `.json(schema)` decodes the body and hands it to the schema, returning the
+ * VALIDATED value typed from the schema — the runtime owns the recurring
+ * `const raw = await http.get(url).json<unknown>(); const x = S.parse(raw);`
+ * two-liner. Failure throws whatever the schema throws (`parse`), or an `Error`
+ * carrying the issue summary for a `safeParse`-only schema.
+ *
+ * Only the `configure()` client implements this — `ctx.http` is provided by the
+ * runner/engine and keeps the plain {@link HttpResponsePromise} surface.
+ *
+ * @example Validate in one step
+ * ```ts
+ * const { http } = configure({ http: { prefixUrl: "{{BASE_URL}}" } });
+ * const user = await http.get("users/1").json(UserSchema); // typed as User
+ * ```
+ *
+ * @example Chained after `.track()`
+ * ```ts
+ * const user = await http.get(`users/${id}`).track("GET /users/:id").json(UserSchema);
+ * ```
+ */
+export interface ValidatingHttpResponsePromise extends HttpResponsePromise {
+  /** Parse response body as JSON (unvalidated — `T` is an author assertion). */
+  json<T = unknown>(): Promise<T>;
+  /** Parse response body as JSON, then validate it with `schema`. */
+  json<T>(schema: SchemaLike<T>): Promise<T>;
+  /** Declare the canonical endpoint this request maps to (chainable). */
+  track(pattern: string): ValidatingHttpResponsePromise;
+}
+
+/**
+ * The HTTP client returned by `configure()`. A regular {@link HttpClient} whose
+ * response promises additionally accept a schema in `.json(schema)`
+ * ({@link ValidatingHttpResponsePromise}). `.extend()` preserves the capability.
+ */
+export interface ConfiguredHttpClient extends HttpClient {
+  /** Make a request (generic). Same as ky(url, options). */
+  (
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP GET request */
+  get(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP POST request */
+  post(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP PUT request */
+  put(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP PATCH request */
+  patch(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP DELETE request */
+  delete(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP HEAD request */
+  head(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** Create a new client with merged defaults — still schema-aware. */
+  extend(options: HttpRequestOptions): ConfiguredHttpClient;
 }
 
 // =============================================================================

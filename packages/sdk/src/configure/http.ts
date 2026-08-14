@@ -9,8 +9,9 @@
  *   http options are declared in configure().
  */
 
-import type { ConfigureHttpOptions, HttpClient } from "../types.js";
+import type { ConfigureHttpOptions, ConfiguredHttpClient, HttpClient } from "../types.js";
 import { getRuntime, type InternalRuntime } from "./runtime.js";
+import { makeSchemaAwareClient } from "./schema-json.js";
 import { resolveTemplate } from "./template.js";
 
 /**
@@ -19,7 +20,7 @@ import { resolveTemplate } from "./template.js";
  * Result is cached per runtime identity via WeakMap.
  * @internal
  */
-export function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
+export function buildLazyHttp(httpOptions: ConfigureHttpOptions): ConfiguredHttpClient {
   const cache = new WeakMap<InternalRuntime, HttpClient>();
 
   function getClient(): HttpClient {
@@ -79,20 +80,13 @@ export function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
     return client;
   }
 
-  const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head"] as const;
-
-  const proxy: any = function (url: string | URL | Request, options?: any) {
-    return getClient()(url, options);
-  };
-
-  for (const method of HTTP_METHODS) {
-    proxy[method] = (url: string | URL | Request, options?: any) => getClient()[method](url, options);
-  }
-
-  proxy.extend = (options: any) => getClient().extend(options);
+  // The wrapper decorates every response promise with the schema-aware
+  // `.json(schema)` form (issue #32); dispatch stays lazy — `getClient()` is
+  // still resolved per call, exactly as before.
+  const proxy = makeSchemaAwareClient(getClient);
   (proxy as any)._configuredTimeout = httpOptions.timeout;
 
-  return proxy as HttpClient;
+  return proxy;
 }
 
 /**
@@ -100,18 +94,8 @@ export function buildLazyHttp(httpOptions: ConfigureHttpOptions): HttpClient {
  * Used when configure() is called without http options.
  * @internal
  */
-export function buildPassthroughHttp(): HttpClient {
-  const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head"] as const;
-
-  const proxy: any = function (url: string | URL | Request, options?: any) {
-    return getRuntime().http(url, options);
-  };
-
-  for (const method of HTTP_METHODS) {
-    proxy[method] = (url: string | URL | Request, options?: any) => getRuntime().http[method](url, options);
-  }
-
-  proxy.extend = (options: any) => getRuntime().http.extend(options);
-
-  return proxy as HttpClient;
+export function buildPassthroughHttp(): ConfiguredHttpClient {
+  // Same lazy delegation as before (the runtime is resolved per call, so a
+  // missing runtime still throws at call time), plus `.json(schema)`.
+  return makeSchemaAwareClient(() => getRuntime().http);
 }
