@@ -291,7 +291,7 @@ import { defineHttpCase } from "./index.js";
 // =============================================================================
 
 import { httpCase } from "./index.js";
-import type { ContractCase } from "./index.js";
+import type { ContractCase, HttpCaseBody } from "./index.js";
 import type { ExtractCaseResponse } from "./contract-types.js";
 
 {
@@ -407,6 +407,18 @@ import type { ExtractCaseResponse } from "./contract-types.js";
   });
   void _zeroArgDoubleDeclared;
 
+  // ...but an explicit `needs: undefined` DECLARES NOTHING and compiles:
+  // `exactOptionalPropertyTypes` is off, so `needs?: never` admits undefined.
+  // The runtime tolerates it for exactly this reason (see http-case.test.ts) —
+  // the two layers must promise the same thing.
+  const _explicitUndefined = httpCase(s<{ email: string }>())({
+    description: "explicit undefined declares nothing",
+    needs: undefined,
+    body: ({ email }) => ({ email }),
+    expect: { status: 200 },
+  });
+  void _explicitUndefined;
+
   // ---------------------------------------------------------------------
   // 5.6 The returned case is accepted by the real contract factory, and the
   // resulting `.case()` ref carries the schema-typed body.
@@ -430,4 +442,72 @@ import type { ExtractCaseResponse } from "./contract-types.js";
   type OkOutput = typeof okRef extends { __phantom_output?: infer O } ? O : never;
   const _okBodyName: string = ({} as OkOutput).body.name;
   void _okBodyName;
+}
+
+// =============================================================================
+// Test 5.7 (regression): a case body written against the EXPORTED
+// `HttpCaseBody<N>` annotation must survive the factory.
+//
+// `HttpCaseBody` carries the `needs?: never` single-declaration guard, so a
+// bare `C & { needs: SchemaLike<N> }` return type intersects `never` with a
+// required property and collapses `needs` — taking `InferCaseInput` (and with
+// it the whole `.case()` I/O chain) down to `never`. The return type drops the
+// guarded key first (`Omit<C, "needs"> & ...`), which is what these assert.
+// =============================================================================
+
+{
+  type Needs = { email: string };
+
+  const preAnnotated: HttpCaseBody<Needs> = {
+    description: "pre-annotated case body",
+    body: ({ email }) => ({ email }),
+    expect: { status: 200, schema: s<{ name: string }>() },
+  };
+
+  const built = httpCase(s<Needs>())(preAnnotated);
+
+  // `needs` must be the schema, NOT `never`.
+  const _needsUsable: SchemaLike<Needs> = built.needs;
+  const _needsNotNever: [(typeof built)["needs"]] extends [never] ? true : false = false;
+  // Other fields stay reachable (a collapsed intersection makes the whole
+  // object unusable, not just its `needs`).
+  const _descReachable: string = built.description;
+  void _needsUsable;
+  void _needsNotNever;
+  void _descReachable;
+
+  // InferCaseInput must be EXACTLY Needs — asserted both ways, since a
+  // one-way `extends` also holds for `never`.
+  type CaseInput = InferCaseInput<typeof built>;
+  const _inputIsExactlyNeeds: [CaseInput] extends [Needs]
+    ? [Needs] extends [CaseInput]
+      ? true
+      : false
+    : false = true;
+  void _inputIsExactlyNeeds;
+
+  // The whole `.case()` I/O chain still works off the built case.
+  const preContract = api("user.create.preannotated", {
+    endpoint: "POST /users",
+    cases: { ok: built },
+  });
+  const preRef = preContract.case("ok");
+  type PreRefInput = typeof preRef extends { __phantom_inputs?: infer I } ? I : never;
+  const _preRefInput: PreRefInput = { email: "a@b.c" };
+  // @ts-expect-error — the ref input is Needs, not `any`/`never`.
+  const _preRefInputNotAny: PreRefInput = { completelyWrongField: "x" };
+  void _preRefInput;
+  void _preRefInputNotAny;
+
+  // NOTE the deliberate non-assertion: annotating the body as
+  // `HttpCaseBody<Needs>` WIDENS the literal, so `expect.schema` presence is
+  // erased and `ExtractCaseResponse` is `unknown` on this path. That is the
+  // cost of pre-annotating, not a regression — the inline-literal path (5.3)
+  // is what keeps the typed response.
+  const _preAnnotatedResponseIsUnknown: [unknown] extends [
+    ExtractCaseResponse<typeof built>,
+  ]
+    ? true
+    : false = true;
+  void _preAnnotatedResponseIsUnknown;
 }

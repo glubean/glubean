@@ -86,6 +86,29 @@ test("literal `needs` in the case throws — zero-arg form", () => {
   ).toThrow(/do not declare `needs` inside the case literal/);
 });
 
+// An explicit `needs: undefined` declares nothing, and the type layer admits it
+// (`needs?: never` + no `exactOptionalPropertyTypes`). The runtime must agree —
+// every reader of the field treats undefined as "no needs declared".
+test("`needs: undefined` is tolerated — schema form overwrites it", () => {
+  const built = httpCase(needsSchema)({
+    description: "explicit undefined",
+    needs: undefined,
+    expect: { status: 200 },
+  });
+
+  expect(built.needs).toBe(needsSchema);
+});
+
+test("`needs: undefined` is tolerated — zero-arg form leaves it undefined", () => {
+  const built = httpCase()({
+    description: "explicit undefined, no factory schema",
+    needs: undefined,
+    expect: { status: 204 },
+  });
+
+  expect(built.needs).toBeUndefined();
+});
+
 test("the throw names the one supported declaration site", () => {
   const build = httpCase(needsSchema) as unknown as UntypedCaseFactory;
 

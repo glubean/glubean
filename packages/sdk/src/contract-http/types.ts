@@ -201,7 +201,9 @@ export function defineHttpCase<Needs = void, T = unknown>(
  * excess-property check against a type parameter's CONSTRAINT, so a bare
  * `Omit<...>` would silently absorb a stray `needs` key into the inferred case
  * type and leave two competing declarations of the same schema. The `never`
- * makes writing it a compile error at the offending property.
+ * makes writing a schema there a compile error at the offending property. An
+ * explicit `needs: undefined` still passes — `exactOptionalPropertyTypes` is
+ * off in this repo and it declares nothing anyway.
  */
 export type HttpCaseBody<N> = Omit<ContractCase<any, N>, "needs"> & {
   needs?: never;
@@ -233,12 +235,17 @@ export type HttpCaseBody<N> = Omit<ContractCase<any, N>, "needs"> & {
  *   presence of `expect.schema` — so core's `ExtractCaseResponse` /
  *   `ApplyCaseOutput` type a `.call`/`.poll` lens's `res.body` from that schema
  *   instead of degrading it to `unknown`.
- * - **One declaration site.** A `needs` key inside the case literal is both a
- *   compile error (see {@link HttpCaseBody}) and a runtime `Error`.
+ * - **One declaration site.** A `needs` SCHEMA inside the case literal is both a
+ *   compile error (see {@link HttpCaseBody}) and a runtime `Error`. The one
+ *   tolerated form is an explicit `needs: undefined`, which declares nothing:
+ *   `exactOptionalPropertyTypes` is off here, so `needs?: never` admits it, and
+ *   every runtime reader already treats undefined as "no needs" — rejecting it
+ *   would make the type layer and the runtime promise different things.
  *
- * Runtime output is VALUE-IDENTICAL to writing `needs` in the case literal (the
- * factory only spreads the schema in), so migrating an existing case moves
- * neither its projection nor its `canonicalHash`.
+ * Runtime output is VALUE-IDENTICAL to the pre-migration shape — a case that
+ * declared `needs` inline — because the factory only spreads the schema back
+ * in. Migrating an existing case moves neither its projection nor its
+ * `canonicalHash`.
  *
  * `verify(ctx, res)`'s `res` is not inferred from `expect.schema` — that would
  * need a second inference pass over the same literal. Annotate the parameter
@@ -277,18 +284,35 @@ export type HttpCaseBody<N> = Omit<ContractCase<any, N>, "needs"> & {
  */
 export function httpCase<N>(
   needs: SchemaLike<N>,
-): <const C extends HttpCaseBody<N>>(c: C) => C & { needs: SchemaLike<N> };
+): <const C extends HttpCaseBody<N>>(
+  c: C,
+  // `Omit<C, "needs">` before the intersection, never a bare `C & {...}`: a case
+  // written against the exported `HttpCaseBody<X>` annotation carries the
+  // `needs?: never` guard INTO `C`, and intersecting that with the required
+  // `needs: SchemaLike<N>` collapses the property (and with it `InferCaseInput`)
+  // to `never`. Dropping the guarded key first keeps every other property's
+  // literal type intact, so `expect.schema` still types flow `res.body`.
+) => Omit<C, "needs"> & { needs: SchemaLike<N> };
 export function httpCase(): <const C extends HttpCaseBody<void>>(c: C) => C;
 export function httpCase(needs?: SchemaLike<unknown>) {
   // Keep JS consumers aligned with the type-level `needs?: never` — a literal
-  // `needs` key is a hard error in BOTH forms, so the schema always has exactly
-  // one declaration site. The zero-arg form returns the case unchanged.
+  // `needs` SCHEMA is a hard error in BOTH forms, so it always has exactly one
+  // declaration site. The zero-arg form returns the case unchanged.
   //
   // The two overloads above are the checked authoring surface; this
   // implementation is untyped glue (a concrete param type is not compatible
   // with both of them).
   return (c: any) => {
-    if (Object.prototype.hasOwnProperty.call(c, "needs")) {
+    // Value check, NOT hasOwnProperty: `exactOptionalPropertyTypes` is off in
+    // this repo, so `needs?: never` accepts an explicit `needs: undefined` and
+    // the runtime must accept it too, or the two layers promise different
+    // things. Tolerating it is safe because every runtime reader treats
+    // undefined as "no needs declared": core's §5.1 branches are falsy checks
+    // (`contract-core.ts` `if (!needsSchema)` / `if (needsSchema)`), the
+    // projection records `hasNeeds: c.needs !== undefined`, and the inbound
+    // field guard also compares `!== undefined`. In the schema form the spread
+    // below overwrites the key anyway.
+    if (c.needs !== undefined) {
       throw new Error(
         "httpCase: do not declare `needs` inside the case literal — the factory " +
           "owns that field. Declare it once as `httpCase(schema)({ ... })` and " +

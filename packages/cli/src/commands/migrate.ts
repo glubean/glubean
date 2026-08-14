@@ -374,7 +374,8 @@ function collectCaseFindings(
             file,
             line: lineOf(ts, sourceFile, field),
             code: "needs-factory",
-            message: "Case has needs; wrap the case in httpCase(schema)({ ... }) to preserve body/input typing.",
+            message:
+              "Case has needs; move the schema into httpCase(<schema>)({ ... }) and remove `needs` from the case literal to preserve body/input typing.",
           });
         }
       }
