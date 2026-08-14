@@ -405,6 +405,41 @@ describe("makeNodeScope — seal drops late evidence; flags track failure/struct
     expect(rec.logs).toHaveLength(0); // dropped
   });
 
+  it("fatal validation aborts control flow even after seal(); non-fatal stays silent", () => {
+    const { ctx, rec } = fakeBase();
+    const ac = new AbortController();
+    const scope = makeNodeScope(ctx, ac.signal);
+    const failing = { safeParse: () => ({ success: false }) };
+
+    // Live baseline: throws AND records the failure.
+    expect(() =>
+      scope.ctx.validate({}, failing as never, "live", { severity: "fatal" }),
+    ).toThrow(/fatal validation/);
+    expect(rec.validations).toBe(1);
+    expect(scope.hasFailure()).toBe(true);
+
+    const { ctx: ctx2, rec: rec2 } = fakeBase();
+    const scope2 = makeNodeScope(ctx2, new AbortController().signal);
+    scope2.seal();
+
+    // Non-fatal after seal: silent — no delegated evidence, verdict untouched.
+    expect(scope2.ctx.validate({}, failing as never, "soft")).toBeUndefined();
+    expect(rec2.validations).toBe(0);
+    expect(scope2.hasFailure()).toBe(false);
+
+    // Fatal after seal: the THROW is control flow, not evidence (same split as
+    // `fail`/`skip`), so it must still abort the orphaned body — otherwise the
+    // body sails past a failed fatal validation and keeps running side effects,
+    // and `ctx.validate(..., { severity: "fatal" })` returns `undefined` despite
+    // its narrowed `T` return type.
+    expect(() =>
+      scope2.ctx.validate({}, failing as never, "hard", { severity: "fatal" }),
+    ).toThrow(/fatal validation/);
+    // …while STILL leaking no late evidence and not rewriting the verdict.
+    expect(rec2.validations).toBe(0);
+    expect(scope2.hasFailure()).toBe(false);
+  });
+
   it("promoteGrade only lifts opaque, and only with structured evidence", () => {
     const { ctx } = fakeBase();
     const ac = new AbortController();

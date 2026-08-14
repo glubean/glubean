@@ -504,6 +504,34 @@ export interface TestContext {
   warn(condition: boolean, message: string): void;
 
   /**
+   * Validate data against a schema with `severity: "fatal"` — returns `T`, not
+   * `T | undefined`.
+   *
+   * A fatal failure emits the failed assertion and then **throws** to abort the
+   * test, so the call only ever returns on success. The narrowed return type
+   * makes that truthful in the type system: no `!` or `as T` ceremony after the
+   * call.
+   *
+   * @param data The data to validate
+   * @param schema A schema implementing `safeParse` or `parse`
+   * @param label Human-readable label (pass `undefined` to omit)
+   * @param options Must include `severity: "fatal"` to select this overload
+   * @returns Parsed value (the failure path throws)
+   *
+   * @example Fatal — abort test on invalid response
+   * ```ts
+   * const user = ctx.validate(body, UserSchema, "response body", { severity: "fatal" });
+   * user.id; // typed as User — no non-null assertion needed
+   * ```
+   */
+  validate<T>(
+    data: unknown,
+    schema: SchemaLike<T>,
+    label: string | undefined,
+    options: ValidateOptions & { severity: "fatal" },
+  ): T;
+
+  /**
    * Validate data against a schema (Zod, Valibot, or any `SchemaLike<T>`).
    *
    * The runner prefers `safeParse` (no-throw) and falls back to `parse` (try/catch).
@@ -535,7 +563,8 @@ export interface TestContext {
    * @example Fatal — abort test on invalid response
    * ```ts
    * const user = ctx.validate(body, UserSchema, "response body", { severity: "fatal" });
-   * // Only reached if validation passed
+   * // Only reached if validation passed — the fatal overload returns `T`,
+   * // so `user` needs no non-null assertion.
    * ```
    */
   validate<T>(
@@ -1217,9 +1246,11 @@ export interface ConfigureResult<
    * Pre-configured HTTP client. Lazily constructed from `ctx.http.extend()`
    * on first use during test execution. Inherits auto-tracing and auto-metrics.
    *
-   * Supports further `.extend()` for per-test customization.
+   * Supports further `.extend()` for per-test customization, and a schema-aware
+   * `.json(schema)` that returns the validated value
+   * ({@link ValidatingHttpResponsePromise}).
    */
-  http: HttpClient;
+  http: ConfiguredHttpClient;
 }
 
 // =============================================================================
@@ -1746,6 +1777,127 @@ export interface HttpClient {
    * ```
    */
   extend(options: HttpRequestOptions): HttpClient;
+}
+
+/**
+ * Runtime brand stamped on a response promise whose `.json()` accepts a schema.
+ *
+ * Both a type-level brand and a real property: `.json<T>()` (no arg) is
+ * STRUCTURALLY compatible with `.json<T>(schema)`, so without a nominal marker
+ * any plain {@link HttpResponsePromise} — e.g. `ctx.http.get(url)`, whose
+ * `.json(schema)` falls through to ky's Standard-Schema path and throws for a
+ * hand-rolled `SchemaLike` — would silently satisfy
+ * {@link ValidatingHttpResponsePromise}.
+ */
+export const SCHEMA_JSON_ATTACHED: unique symbol = Symbol.for(
+  "glubean.schemaJsonAttached",
+);
+
+/**
+ * Runtime brand stamped on the `configure()` HTTP client, for the same reason
+ * as {@link SCHEMA_JSON_ATTACHED}: it makes {@link ConfiguredHttpClient}
+ * nominal, so a bare {@link HttpClient} (`ctx.http`) cannot be assigned to it.
+ */
+export const CONFIGURED_HTTP_CLIENT: unique symbol = Symbol.for(
+  "glubean.configuredHttpClient",
+);
+
+/**
+ * Response promise returned by the `configure()` HTTP client. Same surface as
+ * {@link HttpResponsePromise} plus a schema-aware `.json(schema)` shortcut.
+ *
+ * `.json(schema)` decodes the body and hands it to the schema, returning the
+ * VALIDATED value typed from the schema — the runtime owns the recurring
+ * `const raw = await http.get(url).json<unknown>(); const x = S.parse(raw);`
+ * two-liner. Failure throws whatever the schema throws (`parse`), or an `Error`
+ * carrying the issue summary for a `safeParse`-only schema.
+ *
+ * Only the `configure()` client implements this — `ctx.http` is provided by the
+ * runner/engine and keeps the plain {@link HttpResponsePromise} surface.
+ *
+ * @example Validate in one step
+ * ```ts
+ * const { http } = configure({ http: { prefixUrl: "{{BASE_URL}}" } });
+ * const user = await http.get("users/1").json(UserSchema); // typed as User
+ * ```
+ *
+ * @example Chained after `.track()`
+ * ```ts
+ * const user = await http.get(`users/${id}`).track("GET /users/:id").json(UserSchema);
+ * ```
+ */
+export interface ValidatingHttpResponsePromise extends HttpResponsePromise {
+  /**
+   * Nominal brand — set at runtime by the `configure()` client's decorator.
+   * Keeps a plain response promise from structurally satisfying this type.
+   */
+  readonly [SCHEMA_JSON_ATTACHED]: true;
+  /** Parse response body as JSON (unvalidated — `T` is an author assertion). */
+  json<T = unknown>(): Promise<T>;
+  /** Parse response body as JSON, then validate it with `schema`. */
+  json<T>(schema: SchemaLike<T>): Promise<T>;
+  /** Declare the canonical endpoint this request maps to (chainable). */
+  track(pattern: string): ValidatingHttpResponsePromise;
+}
+
+/**
+ * The HTTP client returned by `configure()`. A regular {@link HttpClient} whose
+ * response promises additionally accept a schema in `.json(schema)`
+ * ({@link ValidatingHttpResponsePromise}). `.extend()` preserves the capability.
+ */
+export interface ConfiguredHttpClient extends HttpClient {
+  /**
+   * Nominal brand — set at runtime by `configure()`. Without it a bare
+   * {@link HttpClient} would be assignable here (the no-arg `json<T>()` is
+   * structurally compatible with the schema overload) and its `.json(schema)`
+   * would blow up inside ky at run time.
+   */
+  readonly [CONFIGURED_HTTP_CLIENT]: true;
+
+  /** Make a request (generic). Same as ky(url, options). */
+  (
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP GET request */
+  get(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP POST request */
+  post(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP PUT request */
+  put(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP PATCH request */
+  patch(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP DELETE request */
+  delete(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** HTTP HEAD request */
+  head(
+    url: string | URL | Request,
+    options?: HttpRequestOptions,
+  ): ValidatingHttpResponsePromise;
+
+  /** Create a new client with merged defaults — still schema-aware. */
+  extend(options: HttpRequestOptions): ConfiguredHttpClient;
 }
 
 // =============================================================================

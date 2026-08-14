@@ -352,9 +352,13 @@ export function makeNodeScope(base: TestContext, signal: AbortSignal): NodeScope
       onEvidence({ failed: !ok && severity !== "warn", structured: true }, () =>
         (base.validate as (...args: unknown[]) => unknown)(data, schema, label, options),
       );
-      // `severity: "fatal"` aborts the body at the validation point — preserve
-      // that control flow, but only while live (a sealed node is already done).
-      if (live && !ok && severity === "fatal") {
+      // `severity: "fatal"` aborts the body at the validation point. The throw is
+      // CONTROL FLOW, not evidence, so it fires regardless of liveness — same
+      // split as `fail` below (emit gated, throw always) and `skip`. Gating it on
+      // `live` used to let an orphaned body sail past a failed fatal validation
+      // and keep running its side effects, and made `ctx.validate(..., {severity:
+      // "fatal"})` return `undefined` even though its type says it returns `T`.
+      if (!ok && severity === "fatal") {
         throw new Error(`fatal validation failed: ${label ?? "data"}`);
       }
       return value;

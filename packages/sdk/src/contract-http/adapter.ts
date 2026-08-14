@@ -51,6 +51,7 @@ import type {
   RequestSpec,
 } from "./types.js";
 import { isInboundCase } from "./types.js";
+import { warnOnExampleSchemaDrift } from "./example-check.js";
 import { buildOpenApiPartForHttp } from "./openapi.js";
 import { genericMarkdownPart } from "../contract-artifacts.js";
 import { matchInboundCaseHttp, preflightInboundCaseHttp } from "./inbound-match.js";
@@ -1059,6 +1060,13 @@ function projectHttp(
 function normalizeHttp(
   projection: ContractProjection<HttpPayloadSchemas, HttpContractMeta> & { id: string },
 ): ExtractedContractProjection<HttpSafeSchemas, HttpContractMeta> {
+  // Issue #31: hand-written examples are docs-only — nothing validates them at
+  // run time, so they rot as the schema evolves. `normalize` is the one place
+  // that runs exactly once per contract construction WITH the contract id and
+  // the live (merged) SchemaLike references, so the drift check hangs here.
+  // Advisory only: it warns, never throws, and touches nothing below.
+  warnOnExampleSchemaDrift(projection);
+
   // Record schemas that were DECLARED but failed to project.
   // `schemaToJsonSchema` returns null for BOTH "absent" and "failed", so we
   // disambiguate via the input: a non-null input that yields null means a real

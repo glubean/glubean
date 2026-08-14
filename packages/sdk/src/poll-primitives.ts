@@ -139,6 +139,15 @@ export function quarantinedCtx(real: TestContext): QuarantinedContext {
         } catch {
           ok = false;
         }
+      } else {
+        // Neither safeParse nor parse (a `jsonSchema`-only SchemaLike, GLU-90):
+        // nothing can prove the data valid, so this is a FAILED validation —
+        // exactly what the real ctx records ("Schema has neither safeParse nor
+        // parse method", harness.ts / engine.ts / workflow execute.ts all route
+        // it through the failure branch). Leaving `ok = true` here made a
+        // `severity: "fatal"` call return `undefined` without aborting, which
+        // the narrowed `T` return type promises can never happen.
+        ok = false;
       }
       recordAssert(ok);
       buffer.push((t) =>
