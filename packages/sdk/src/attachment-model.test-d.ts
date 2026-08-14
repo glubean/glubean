@@ -281,3 +281,233 @@ import { defineHttpCase } from "./index.js";
   });
   void _drift2;
 }
+
+// =============================================================================
+// Test 5: httpCase(schema)(case) — the curried factory. Same drift guard as
+// defineHttpCase, but with NOTHING defaulted: `N` is inferred from the schema
+// VALUE (first call) and `C` from the case literal (second call). So the case
+// keeps its literal type — `expect.schema` presence included — and flow
+// `res.body` stays typed, which defineHttpCase's nominal return erases.
+// =============================================================================
+
+import { httpCase } from "./index.js";
+import type { ContractCase, HttpCaseBody } from "./index.js";
+import type { ExtractCaseResponse } from "./contract-types.js";
+
+{
+  // ---------------------------------------------------------------------
+  // 5.1 Positive contextual typing: the action-field param IS the schema's
+  // output type — inferred, never annotated.
+  // ---------------------------------------------------------------------
+  const _typedInput = httpCase(s<{ email: string; token: string }>())({
+    description: "creates user",
+    body: (input) => {
+      // Proves `input` is `{email, token}` and NOT implicitly `any` (which
+      // would make the 5.2 drift assertions vacuous).
+      const email: string = input.email;
+      return { email };
+    },
+    headers: ({ token }) => ({ authorization: `Bearer ${token}` }),
+    pathParams: ({ email }) => ({ email }),
+    query: ({ token }) => ({ token }),
+    // `verify`'s `res` is not inferred from expect.schema — annotate to type it.
+    verify: async (_ctx, res: { name: string }) => {
+      void res.name;
+    },
+    expect: { status: 201, schema: s<{ name: string }>() },
+  });
+  void _typedInput;
+
+  // ---------------------------------------------------------------------
+  // 5.2 Drift guard: a key that is not on the schema is a compile error on
+  // every action field (body / pathParams shown).
+  // ---------------------------------------------------------------------
+  const _driftBody = httpCase(s<{ email: string }>())({
+    description: "body drift",
+    // @ts-expect-error — `wrongKey` is not on Needs `{email: string}`.
+    body: ({ wrongKey }) => ({ wrongKey }),
+    expect: { status: 200 },
+  });
+  void _driftBody;
+
+  const _driftPathParams = httpCase(s<{ userId: string }>())({
+    description: "pathParams drift",
+    // @ts-expect-error — `wrongKey` is not on Needs `{userId: string}`.
+    pathParams: ({ wrongKey }) => ({ wrongKey }),
+    expect: { status: 200 },
+  });
+  void _driftPathParams;
+
+  // ---------------------------------------------------------------------
+  // 5.3 Typed response preserved: `expect.schema` survives into the case's
+  // type, so core's ExtractCaseResponse resolves the body — the motivation
+  // for the curried shape.
+  // ---------------------------------------------------------------------
+  const schemaCase = httpCase(s<{ email: string }>())({
+    description: "returns a named thing",
+    body: ({ email }) => ({ email }),
+    expect: { status: 200, schema: s<{ name: string }>() },
+  });
+
+  type CurriedResponse = ExtractCaseResponse<typeof schemaCase>;
+  const _responseIsTyped: CurriedResponse = { name: "n" };
+  // @ts-expect-error — response is `{name: string}`, so a wrong shape fails.
+  const _responseNotAny: CurriedResponse = { wrong: 1 };
+  // `unknown` is only assignable TO `unknown` — false here proves it resolved.
+  const _responseNotUnknown: [unknown] extends [CurriedResponse] ? true : false = false;
+  void _responseIsTyped;
+  void _responseNotAny;
+  void _responseNotUnknown;
+
+  // Contrast — the same case through defineHttpCase degrades to `unknown`,
+  // because its nominal `ContractCase<T, Needs>` return has `expect.schema?:`
+  // OPTIONAL while ExtractCaseResponse matches `schema` as REQUIRED.
+  const nominalCase = defineHttpCase<{ email: string }, { name: string }>({
+    description: "returns a named thing",
+    needs: s<{ email: string }>(),
+    body: ({ email }) => ({ email }),
+    expect: { status: 200, schema: s<{ name: string }>() },
+  });
+  const _nominalIsUnknown: [unknown] extends [
+    ExtractCaseResponse<typeof nominalCase>,
+  ]
+    ? true
+    : false = true;
+  void _nominalIsUnknown;
+
+  // ---------------------------------------------------------------------
+  // 5.4 Single declaration site: `needs` belongs to the factory call, never
+  // to the case literal (runtime throws on it too).
+  // ---------------------------------------------------------------------
+  const _doubleDeclared = httpCase(s<{ email: string }>())({
+    description: "declares needs twice",
+    // @ts-expect-error — `needs` is owned by the factory; HttpCaseBody pins
+    // the field to `never` so writing it here cannot compile.
+    needs: s<{ email: string }>(),
+    expect: { status: 200 },
+  });
+  void _doubleDeclared;
+
+  // ---------------------------------------------------------------------
+  // 5.5 Zero-arg form for cases with no logical input.
+  // ---------------------------------------------------------------------
+  const noNeedsCase = httpCase()({
+    description: "no content",
+    expect: { status: 204 },
+  });
+  const _assignableAsCase: ContractCase = noNeedsCase;
+  void _assignableAsCase;
+
+  // Still one declaration site in the zero-arg form.
+  const _zeroArgDoubleDeclared = httpCase()({
+    description: "declares needs without a factory schema",
+    // @ts-expect-error — `needs` is owned by the factory in BOTH forms.
+    needs: s<{ email: string }>(),
+    expect: { status: 204 },
+  });
+  void _zeroArgDoubleDeclared;
+
+  // ...but an explicit `needs: undefined` DECLARES NOTHING and compiles:
+  // `exactOptionalPropertyTypes` is off, so `needs?: never` admits undefined.
+  // The runtime tolerates it for exactly this reason (see http-case.test.ts) —
+  // the two layers must promise the same thing.
+  const _explicitUndefined = httpCase(s<{ email: string }>())({
+    description: "explicit undefined declares nothing",
+    needs: undefined,
+    body: ({ email }) => ({ email }),
+    expect: { status: 200 },
+  });
+  void _explicitUndefined;
+
+  // ---------------------------------------------------------------------
+  // 5.6 The returned case is accepted by the real contract factory, and the
+  // resulting `.case()` ref carries the schema-typed body.
+  // ---------------------------------------------------------------------
+  const users = api("user.create", {
+    endpoint: "POST /users",
+    cases: { ok: schemaCase, noContent: noNeedsCase },
+  });
+
+  const okRef = users.case("ok");
+
+  // Needs threads through to the ref's phantom input.
+  type OkInput = typeof okRef extends { __phantom_inputs?: infer I } ? I : never;
+  const _okInput: OkInput = { email: "a@b.c" };
+  // @ts-expect-error — proves the ref input is Needs, not `any`.
+  const _okInputNotAny: OkInput = { completelyWrongField: "x" };
+  void _okInput;
+  void _okInputNotAny;
+
+  // Flow lens output: `res.body` is typed from the case's `expect.schema`.
+  type OkOutput = typeof okRef extends { __phantom_output?: infer O } ? O : never;
+  const _okBodyName: string = ({} as OkOutput).body.name;
+  void _okBodyName;
+}
+
+// =============================================================================
+// Test 5.7 (regression): a case body written against the EXPORTED
+// `HttpCaseBody<N>` annotation must survive the factory.
+//
+// `HttpCaseBody` carries the `needs?: never` single-declaration guard, so a
+// bare `C & { needs: SchemaLike<N> }` return type intersects `never` with a
+// required property and collapses `needs` — taking `InferCaseInput` (and with
+// it the whole `.case()` I/O chain) down to `never`. The return type drops the
+// guarded key first (`Omit<C, "needs"> & ...`), which is what these assert.
+// =============================================================================
+
+{
+  type Needs = { email: string };
+
+  const preAnnotated: HttpCaseBody<Needs> = {
+    description: "pre-annotated case body",
+    body: ({ email }) => ({ email }),
+    expect: { status: 200, schema: s<{ name: string }>() },
+  };
+
+  const built = httpCase(s<Needs>())(preAnnotated);
+
+  // `needs` must be the schema, NOT `never`.
+  const _needsUsable: SchemaLike<Needs> = built.needs;
+  const _needsNotNever: [(typeof built)["needs"]] extends [never] ? true : false = false;
+  // Other fields stay reachable (a collapsed intersection makes the whole
+  // object unusable, not just its `needs`).
+  const _descReachable: string = built.description;
+  void _needsUsable;
+  void _needsNotNever;
+  void _descReachable;
+
+  // InferCaseInput must be EXACTLY Needs — asserted both ways, since a
+  // one-way `extends` also holds for `never`.
+  type CaseInput = InferCaseInput<typeof built>;
+  const _inputIsExactlyNeeds: [CaseInput] extends [Needs]
+    ? [Needs] extends [CaseInput]
+      ? true
+      : false
+    : false = true;
+  void _inputIsExactlyNeeds;
+
+  // The whole `.case()` I/O chain still works off the built case.
+  const preContract = api("user.create.preannotated", {
+    endpoint: "POST /users",
+    cases: { ok: built },
+  });
+  const preRef = preContract.case("ok");
+  type PreRefInput = typeof preRef extends { __phantom_inputs?: infer I } ? I : never;
+  const _preRefInput: PreRefInput = { email: "a@b.c" };
+  // @ts-expect-error — the ref input is Needs, not `any`/`never`.
+  const _preRefInputNotAny: PreRefInput = { completelyWrongField: "x" };
+  void _preRefInput;
+  void _preRefInputNotAny;
+
+  // NOTE the deliberate non-assertion: annotating the body as
+  // `HttpCaseBody<Needs>` WIDENS the literal, so `expect.schema` presence is
+  // erased and `ExtractCaseResponse` is `unknown` on this path. That is the
+  // cost of pre-annotating, not a regression — the inline-literal path (5.3)
+  // is what keeps the typed response.
+  const _preAnnotatedResponseIsUnknown: [unknown] extends [
+    ExtractCaseResponse<typeof built>,
+  ]
+    ? true
+    : false = true;
+  void _preAnnotatedResponseIsUnknown;
+}

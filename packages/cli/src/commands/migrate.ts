@@ -350,7 +350,10 @@ function collectCaseFindings(
     for (const caseProp of property.initializer.properties) {
       if (!ts.isPropertyAssignment(caseProp)) continue;
       const value = caseProp.initializer;
-      if (ts.isCallExpression(value) && ts.isIdentifier(value.expression) && value.expression.text === "defineHttpCase") {
+      // Already routed through a case factory — `httpCase(schema)({ ... })`
+      // (curried, so the outer callee is itself a call) or the deprecated
+      // `defineHttpCase(...)`. Nothing to report either way.
+      if (ts.isCallExpression(value) && isCaseFactoryCallee(ts, value.expression)) {
         continue;
       }
       if (!ts.isObjectLiteralExpression(value)) continue;
@@ -371,12 +374,23 @@ function collectCaseFindings(
             file,
             line: lineOf(ts, sourceFile, field),
             code: "needs-factory",
-            message: "Case has needs; wrap the case in defineHttpCase<Needs>(...) to preserve body/input typing.",
+            message:
+              "Case has needs; move the schema into httpCase(<schema>)({ ... }) and remove `needs` from the case literal to preserve body/input typing.",
           });
         }
       }
     }
   }
+}
+
+/**
+ * Callee of a case-factory call. `httpCase(schema)({ ... })` is curried, so its
+ * callee is the `httpCase(schema)` call itself; the deprecated
+ * `defineHttpCase(...)` takes the case in one call.
+ */
+function isCaseFactoryCallee(ts: TS, callee: import("typescript").Expression): boolean {
+  if (ts.isIdentifier(callee)) return callee.text === "defineHttpCase";
+  return ts.isCallExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "httpCase";
 }
 
 function isLegacyHttpCall(ts: TS, node: import("typescript").CallExpression): boolean {
