@@ -355,6 +355,108 @@ test("a schema that mutates its input cannot touch the published example", () =>
   });
 });
 
+test("a class-instance example is skipped, not falsely reported as drift", () => {
+  class Money {
+    constructor(readonly amount: number) {}
+    isMoney(): boolean {
+      return true;
+    }
+  }
+  const seen: unknown[] = [];
+  // A schema that accepts the AUTHOR's value: `structuredClone` would hand it a
+  // prototype-less copy, which fails `instanceof` — a warning would be purely an
+  // artifact of our own cloning.
+  const instanceSchema: SchemaLike<Money> = {
+    safeParse(data: unknown) {
+      seen.push(data);
+      return data instanceof Money
+        ? { success: true as const, data: data }
+        : {
+            success: false as const,
+            error: { issues: [{ message: "Expected a Money instance" }] },
+          };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+  api("payments.create.class-example", {
+    endpoint: "POST /payments",
+    request: { body: instanceSchema, example: new Money(42) },
+    cases: { ok: { description: "pays", expect: { status: 201 } } },
+  });
+
+  expect(warnings()).toEqual([]);
+  // The schema was never handed the lossy copy in the first place.
+  expect(seen).toEqual([]);
+});
+
+test("a nested class instance also disqualifies the site", () => {
+  class Tag {}
+  let sawValue = false;
+  const spy: SchemaLike<unknown> = {
+    safeParse() {
+      sawValue = true;
+      return { success: false as const, error: { issues: [{ message: "nope" }] } };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+  api("payments.create.nested-class", {
+    endpoint: "POST /payments",
+    request: { body: spy, example: { meta: { tags: [new Tag()] } } },
+    cases: { ok: { description: "pays", expect: { status: 201 } } },
+  });
+
+  expect(sawValue).toBe(false);
+  expect(warnings()).toEqual([]);
+});
+
+test("plain JSON examples (objects, arrays, cycles) are still checked", () => {
+  const api = contract.http.with("api", { client });
+  const cyclic: Record<string, unknown> = { name: 42, items: [1, 2, { deep: true }] };
+  cyclic["self"] = cyclic; // structuredClone preserves cycles
+
+  api("users.create.plain-shapes", {
+    endpoint: "POST /users",
+    request: { body: CreateUser, example: cyclic },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  expect(warnings()).toHaveLength(1);
+  expect(warnings()[0]).toContain("request.example");
+});
+
+test("dotted case keys and example names can't collide into one site", () => {
+  // Rendered dotted paths collide:
+  //   cases["x"].expect.examples["y.expect.example"]
+  //   cases["x.expect.examples.y"].expect.example
+  // both render `cases.x.expect.examples.y.expect.example`. Keying the guard on
+  // that string made the second site inherit the first's mark and go silent.
+  const api = contract.http.with("api", { client });
+  api("users.get.collision", {
+    endpoint: "GET /users/:id",
+    cases: {
+      x: {
+        description: "named examples",
+        expect: {
+          status: 200,
+          schema: UserSchema,
+          examples: { "y.expect.example": { value: { id: 1 } } },
+        },
+      },
+      "x.expect.examples.y": {
+        description: "single example under a dotted case key",
+        expect: { status: 200, schema: UserSchema, example: { id: 2 } },
+      },
+    },
+  });
+
+  const messages = warnings();
+  expect(messages).toHaveLength(2);
+  expect(messages.filter((m) => m.includes(`case "x"`))).toHaveLength(1);
+  expect(messages.filter((m) => m.includes(`case "x.expect.examples.y"`))).toHaveLength(1);
+});
+
 test("an un-cloneable example is skipped rather than exposed to the schema", () => {
   let sawValue = false;
   const spy: SchemaLike<unknown> = {

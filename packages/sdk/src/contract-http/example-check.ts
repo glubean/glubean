@@ -85,6 +85,72 @@ function summarizeThrown(err: unknown): string {
 }
 
 /**
+ * Is `value` a plain JSON shape, i.e. one that `structuredClone` reproduces
+ * INDISTINGUISHABLY as far as a schema can tell?
+ *
+ * Only primitives, plain objects (`Object.prototype` or null prototype) and
+ * plain arrays qualify. Everything else is rejected:
+ *
+ * - **Class instances** — `structuredClone` returns a plain object, so a schema
+ *   doing `instanceof Foo` (or reading a prototype method) rejects the clone
+ *   while the author's real example would pass. That is a FALSE drift warning,
+ *   the one failure mode this check must never produce.
+ * - **`Date` / `RegExp`** — `structuredClone` *does* preserve these two, so
+ *   allowing them would be sound. They are excluded anyway to keep ONE rule
+ *   ("the example is a JSON document") that matches what an example actually
+ *   is: a payload the projection publishes as JSON, where a `Date` cannot
+ *   survive serialization. Relaxing this later is a one-line change.
+ * - **`Map` / `Set` / typed arrays** — cloneable, but outside that same JSON
+ *   vocabulary.
+ * - **Functions / symbols** — not cloneable at all.
+ * - **Symbol-keyed or non-enumerable own properties** — silently dropped by
+ *   `structuredClone`, so a schema reading them would see a different value.
+ *
+ * Skipping is always safe: this whole module is advisory, and a missed warning
+ * costs far less than a wrong one.
+ */
+function isPlainJsonShape(value: unknown, seen: WeakSet<object>): boolean {
+  if (value === null) return true;
+  const kind = typeof value;
+  if (
+    kind === "string" ||
+    kind === "number" ||
+    kind === "boolean" ||
+    kind === "undefined" ||
+    kind === "bigint"
+  ) {
+    return true;
+  }
+  if (kind !== "object") return false; // function, symbol
+
+  const object = value as object;
+  // A cycle is fine — `structuredClone` preserves cycles, and the node itself
+  // was already checked on the way down.
+  if (seen.has(object)) return true;
+  seen.add(object);
+
+  if (Object.getOwnPropertySymbols(object).length > 0) return false;
+
+  const prototype = Object.getPrototypeOf(object) as unknown;
+  if (Array.isArray(object)) {
+    // An Array SUBCLASS clones down to a plain array — same identity loss as a
+    // class instance.
+    if (prototype !== Array.prototype) return false;
+    // Own props beyond the indices + `length` (an "expando" array) are dropped
+    // or reshaped by the clone.
+    if (Object.getOwnPropertyNames(object).length !== object.length + 1) return false;
+    return object.every((item) => isPlainJsonShape(item, seen));
+  }
+
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  // Non-enumerable own properties don't survive the clone.
+  if (Object.getOwnPropertyNames(object).length !== Object.keys(object).length) {
+    return false;
+  }
+  return Object.values(object).every((item) => isPlainJsonShape(item, seen));
+}
+
+/**
  * Run the schema against the example. `safeParse` is preferred, `parse` is the
  * fallback; a schema exposing neither (e.g. a hand-rolled `jsonSchema`-only
  * `SchemaLike`) is skipped silently, as is any schema that blows up on its own.
@@ -92,15 +158,18 @@ function summarizeThrown(err: unknown): string {
  * The example is deep-cloned first: the value handed to the schema is the SAME
  * object the projection publishes (and `canonicalHash` covers), and a schema
  * that normalizes in place (or a `parse` that mutates its input) would rewrite
- * the author's artifact from inside an advisory check. A value that can't be
- * cloned (functions, class instances, streams) is skipped rather than exposed.
+ * the author's artifact from inside an advisory check. A value the clone can't
+ * reproduce faithfully ({@link isPlainJsonShape}) is skipped rather than either
+ * exposed live or misjudged through a lossy copy.
  */
 function checkExample(schema: SchemaLike<unknown>, value: unknown): ExampleCheck {
   let isolated: unknown;
   try {
+    if (!isPlainJsonShape(value, new WeakSet<object>())) return { status: "ok" };
     isolated = structuredClone(value);
   } catch {
-    // Not cloneable — refuse to hand the live reference to a user schema.
+    // Not cloneable, or a getter/proxy threw while we inspected the shape —
+    // refuse to hand the live reference to a user schema.
     return { status: "ok" };
   }
 
@@ -139,10 +208,37 @@ interface ContractSite {
   instanceName: string | undefined;
 }
 
+/**
+ * Structured identity of one checkable site.
+ *
+ * Each authored name (case key, named-example key) is its OWN tuple element, so
+ * the identity is injective by construction. The rendered dotted path is not:
+ * a case key or example name may itself contain dots, and then e.g.
+ * `cases["x"].expect.examples["y.expect.example"]` and
+ * `cases["x.expect.examples.y"].expect.example` render the SAME string —
+ * keying on that string made the second site inherit the first one's
+ * "already warned" mark and vanish. The dotted form is now display-only.
+ */
+type SiteId =
+  | readonly ["request", "example"]
+  | readonly ["request", "examples", string]
+  | readonly ["case", string, "example"]
+  | readonly ["case", string, "examples", string];
+
+/** The author-facing dotted path for a site — for the warning text only. */
+function renderSitePath(siteId: SiteId): string {
+  if (siteId[0] === "request") {
+    return siteId.length === 2 ? "request.example" : `request.examples.${siteId[2]}`;
+  }
+  const caseKey = siteId[1];
+  return siteId.length === 3
+    ? `cases.${caseKey}.expect.example`
+    : `cases.${caseKey}.expect.examples.${siteId[3]}`;
+}
+
 function checkSite(
   site: ContractSite,
-  caseKey: string | undefined,
-  sitePath: string,
+  siteId: SiteId,
   schema: SchemaLike<unknown> | undefined,
   value: unknown,
 ): void {
@@ -153,8 +249,9 @@ function checkSite(
   if (typeof schema !== "object" && typeof schema !== "function") return;
   if (value === undefined) return;
 
-  // JSON array key: injective, so no instance/id/path triple can collide.
-  const guardKey = JSON.stringify([site.instanceName ?? "", site.contractId, sitePath]);
+  // JSON array key over the STRUCTURED parts: injective, so no
+  // instance/id/case/example combination can collide with another.
+  const guardKey = JSON.stringify([site.instanceName ?? "", site.contractId, ...siteId]);
   if (warnedSites.has(guardKey)) return;
 
   const result = checkExample(schema, value);
@@ -163,25 +260,28 @@ function checkSite(
   warnedSites.add(guardKey);
   const instance =
     site.instanceName === undefined ? "" : ` (instance "${site.instanceName}")`;
-  const where = caseKey === undefined ? "" : ` case "${caseKey}"`;
+  const where = siteId[0] === "case" ? ` case "${siteId[1]}"` : "";
   console.warn(
-    `[glubean] contract "${site.contractId}"${instance}${where}: ${sitePath} does ` +
-      `not match its schema — ${result.summary} (examples are documentation-only; ` +
-      `update the example or the schema)`,
+    `[glubean] contract "${site.contractId}"${instance}${where}: ` +
+      `${renderSitePath(siteId)} does not match its schema — ${result.summary} ` +
+      `(examples are documentation-only; update the example or the schema)`,
   );
 }
 
 function checkExamplesMap(
   site: ContractSite,
   caseKey: string | undefined,
-  basePath: string,
   schema: SchemaLike<unknown> | undefined,
   examples: Record<string, ContractExample<unknown>> | undefined,
 ): void {
   if (!examples || typeof examples !== "object") return;
   for (const [name, example] of Object.entries(examples)) {
     if (!example || typeof example !== "object") continue;
-    checkSite(site, caseKey, `${basePath}.${name}`, schema, example.value);
+    const siteId: SiteId =
+      caseKey === undefined
+        ? (["request", "examples", name] as const)
+        : (["case", caseKey, "examples", name] as const);
+    checkSite(site, siteId, schema, example.value);
   }
 }
 
@@ -207,14 +307,8 @@ export function warnOnExampleSchemaDrift(
 
     const request = projection.schemas?.request;
     if (request) {
-      checkSite(site, undefined, "request.example", request.body, request.example);
-      checkExamplesMap(
-        site,
-        undefined,
-        "request.examples",
-        request.body,
-        request.examples,
-      );
+      checkSite(site, ["request", "example"], request.body, request.example);
+      checkExamplesMap(site, undefined, request.body, request.examples);
     }
 
     for (const projCase of projection.cases ?? []) {
@@ -222,18 +316,11 @@ export function warnOnExampleSchemaDrift(
       if (!response) continue;
       checkSite(
         site,
-        projCase.key,
-        `cases.${projCase.key}.expect.example`,
+        ["case", projCase.key, "example"],
         response.body,
         response.example,
       );
-      checkExamplesMap(
-        site,
-        projCase.key,
-        `cases.${projCase.key}.expect.examples`,
-        response.body,
-        response.examples,
-      );
+      checkExamplesMap(site, projCase.key, response.body, response.examples);
     }
   } catch {
     // A docs-quality hint must never break contract construction.
