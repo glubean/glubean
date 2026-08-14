@@ -60,7 +60,13 @@ interface SchemaIssueLike {
 
 function summarizeIssues(issues: ReadonlyArray<SchemaIssueLike>): string {
   const quoted = issues.slice(0, MAX_QUOTED_ISSUES).map((issue) => {
-    const path = issue.path && issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
+    // `Array#join` throws a TypeError on a symbol segment (a schema keyed by a
+    // symbol property reports one). The outer catch would swallow that and the
+    // drift warning would vanish — stringify each segment first.
+    const path =
+      issue.path && issue.path.length > 0
+        ? `${issue.path.map((segment) => String(segment)).join(".")}: `
+        : "";
     return `${path}${issue.message ?? "invalid"}`;
   });
   const rest = issues.length - quoted.length;
@@ -82,17 +88,31 @@ function summarizeThrown(err: unknown): string {
  * Run the schema against the example. `safeParse` is preferred, `parse` is the
  * fallback; a schema exposing neither (e.g. a hand-rolled `jsonSchema`-only
  * `SchemaLike`) is skipped silently, as is any schema that blows up on its own.
+ *
+ * The example is deep-cloned first: the value handed to the schema is the SAME
+ * object the projection publishes (and `canonicalHash` covers), and a schema
+ * that normalizes in place (or a `parse` that mutates its input) would rewrite
+ * the author's artifact from inside an advisory check. A value that can't be
+ * cloned (functions, class instances, streams) is skipped rather than exposed.
  */
 function checkExample(schema: SchemaLike<unknown>, value: unknown): ExampleCheck {
+  let isolated: unknown;
+  try {
+    isolated = structuredClone(value);
+  } catch {
+    // Not cloneable — refuse to hand the live reference to a user schema.
+    return { status: "ok" };
+  }
+
   try {
     if (typeof schema.safeParse === "function") {
-      const result = schema.safeParse(value);
+      const result = schema.safeParse(isolated);
       if (result.success) return { status: "ok" };
       return { status: "mismatch", summary: summarizeIssues(result.error?.issues ?? []) };
     }
     if (typeof schema.parse === "function") {
       try {
-        schema.parse(value);
+        schema.parse(isolated);
         return { status: "ok" };
       } catch (err) {
         return { status: "mismatch", summary: summarizeThrown(err) };
@@ -108,8 +128,19 @@ function checkExample(schema: SchemaLike<unknown>, value: unknown): ExampleCheck
   return { status: "ok" };
 }
 
+/**
+ * Identity of the contract a site belongs to. The id ALONE is not unique: the
+ * same id may legally be authored on two scoped surfaces
+ * (`contract.http.with("api-a")` / `.with("api-b")`), and they are different
+ * contracts with different schemas — so the once-per-site guard keys on both.
+ */
+interface ContractSite {
+  contractId: string;
+  instanceName: string | undefined;
+}
+
 function checkSite(
-  contractId: string,
+  site: ContractSite,
   caseKey: string | undefined,
   sitePath: string,
   schema: SchemaLike<unknown> | undefined,
@@ -122,24 +153,26 @@ function checkSite(
   if (typeof schema !== "object" && typeof schema !== "function") return;
   if (value === undefined) return;
 
-  // NUL separator so no id/path pair can collide with another.
-  const guardKey = `${contractId}\u0000${sitePath}`;
+  // JSON array key: injective, so no instance/id/path triple can collide.
+  const guardKey = JSON.stringify([site.instanceName ?? "", site.contractId, sitePath]);
   if (warnedSites.has(guardKey)) return;
 
   const result = checkExample(schema, value);
   if (result.status === "ok") return;
 
   warnedSites.add(guardKey);
+  const instance =
+    site.instanceName === undefined ? "" : ` (instance "${site.instanceName}")`;
   const where = caseKey === undefined ? "" : ` case "${caseKey}"`;
   console.warn(
-    `[glubean] contract "${contractId}"${where}: ${sitePath} does not match its ` +
-      `schema — ${result.summary} (examples are documentation-only; update the ` +
-      `example or the schema)`,
+    `[glubean] contract "${site.contractId}"${instance}${where}: ${sitePath} does ` +
+      `not match its schema — ${result.summary} (examples are documentation-only; ` +
+      `update the example or the schema)`,
   );
 }
 
 function checkExamplesMap(
-  contractId: string,
+  site: ContractSite,
   caseKey: string | undefined,
   basePath: string,
   schema: SchemaLike<unknown> | undefined,
@@ -148,7 +181,7 @@ function checkExamplesMap(
   if (!examples || typeof examples !== "object") return;
   for (const [name, example] of Object.entries(examples)) {
     if (!example || typeof example !== "object") continue;
-    checkSite(contractId, caseKey, `${basePath}.${name}`, schema, example.value);
+    checkSite(site, caseKey, `${basePath}.${name}`, schema, example.value);
   }
 }
 
@@ -167,13 +200,16 @@ export function warnOnExampleSchemaDrift(
   projection: ContractProjection<HttpPayloadSchemas, HttpContractMeta> & { id: string },
 ): void {
   try {
-    const contractId = projection.id;
+    const site: ContractSite = {
+      contractId: projection.id,
+      instanceName: projection.instanceName,
+    };
 
     const request = projection.schemas?.request;
     if (request) {
-      checkSite(contractId, undefined, "request.example", request.body, request.example);
+      checkSite(site, undefined, "request.example", request.body, request.example);
       checkExamplesMap(
-        contractId,
+        site,
         undefined,
         "request.examples",
         request.body,
@@ -185,14 +221,14 @@ export function warnOnExampleSchemaDrift(
       const response = projCase.schemas?.response;
       if (!response) continue;
       checkSite(
-        contractId,
+        site,
         projCase.key,
         `cases.${projCase.key}.expect.example`,
         response.body,
         response.example,
       );
       checkExamplesMap(
-        contractId,
+        site,
         projCase.key,
         `cases.${projCase.key}.expect.examples`,
         response.body,

@@ -122,4 +122,29 @@ describe("quarantinedCtx", () => {
     expect(() => q.validate({ a: 1 }, schema, "body", { severity: "fatal" })).toThrow(/fatal validation/);
     expect(q.hasFailure()).toBe(true);
   });
+
+  test("validate with severity:fatal throws for a schema with NO parser (can't prove success)", () => {
+    const real = { validate: () => {}, log: () => {} } as unknown as TestContext;
+    const q = quarantinedCtx(real);
+    // GLU-90 shape: a hand-rolled SchemaLike carrying only a `jsonSchema`
+    // companion — no safeParse, no parse. Nothing can validate the data, so a
+    // fatal validation must abort rather than return an unproven `undefined`
+    // (the fatal overload's narrowed `T` return type depends on it).
+    const jsonSchemaOnly = { jsonSchema: { type: "object" } } as any;
+    expect(() =>
+      q.validate({ a: 1 }, jsonSchemaOnly, "body", { severity: "fatal" }),
+    ).toThrow(/fatal validation/);
+    expect(q.hasFailure()).toBe(true);
+  });
+
+  test("validate with a NO-parser schema counts as a failed validation at non-fatal severity", () => {
+    const real = { validate: () => {}, log: () => {} } as unknown as TestContext;
+    const q = quarantinedCtx(real);
+    const jsonSchemaOnly = { jsonSchema: { type: "object" } } as any;
+    // Return value is unchanged (`undefined`, matching `T | undefined`), but the
+    // attempt must be recorded as failing — parity with the real ctx, which
+    // routes "Schema has neither safeParse nor parse method" to assert(false).
+    expect(q.validate({ a: 1 }, jsonSchemaOnly, "body")).toBeUndefined();
+    expect(q.hasFailure()).toBe(true);
+  });
 });

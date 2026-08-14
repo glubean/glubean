@@ -11,6 +11,7 @@
 import { test, expect, afterEach } from "vitest";
 import { z } from "zod";
 import { configure } from "../configure.js";
+import { CONFIGURED_HTTP_CLIENT, SCHEMA_JSON_ATTACHED } from "../types.js";
 import { parseWithSchema } from "./schema-json.js";
 import {
   setRuntime as carrierSetRuntime,
@@ -228,6 +229,31 @@ test("json(schema) survives .extend() on the configured client", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Nominal brands (the type-level guard has a runtime counterpart)
+// ---------------------------------------------------------------------------
+
+test("the configured client and its response promises carry the runtime brands", async () => {
+  const cleanup = installRuntime({ id: "u1", name: "Alice" });
+  try {
+    const { http } = configure({});
+    expect((http as unknown as Record<PropertyKey, unknown>)[CONFIGURED_HTTP_CLIENT]).toBe(true);
+
+    const extended = http.extend({ prefixUrl: "https://api.example.com" });
+    expect((extended as unknown as Record<PropertyKey, unknown>)[CONFIGURED_HTTP_CLIENT]).toBe(
+      true,
+    );
+
+    const promise = http.get("users/1");
+    expect((promise as unknown as Record<PropertyKey, unknown>)[SCHEMA_JSON_ATTACHED]).toBe(true);
+    const tracked = promise.track("GET /users/:id");
+    expect((tracked as unknown as Record<PropertyKey, unknown>)[SCHEMA_JSON_ATTACHED]).toBe(true);
+    await promise;
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // parseWithSchema unit behaviour
 // ---------------------------------------------------------------------------
 
@@ -241,6 +267,23 @@ test("parseWithSchema prefers parse so the schema's own error propagates", () =>
     }
   })();
   expect(zodError).toBeInstanceOf(z.ZodError);
+});
+
+test("parseWithSchema survives a symbol segment in an issue path", () => {
+  const symbolKey = Symbol("secret");
+  const symbolPath: SchemaLike<unknown> = {
+    safeParse() {
+      return {
+        success: false as const,
+        // `Array#join` throws a TypeError on a symbol segment; the summary must
+        // stringify each segment instead of blowing up the caller's error.
+        error: { issues: [{ message: "Expected string", path: [symbolKey] }] },
+      };
+    },
+  };
+  expect(() => parseWithSchema({}, symbolPath)).toThrow(
+    /Symbol\(secret\): Expected string/,
+  );
 });
 
 test("parseWithSchema summarizes at most 3 issues for a safeParse-only schema", () => {

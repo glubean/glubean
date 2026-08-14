@@ -21,15 +21,13 @@
  * existing behaviour (`text()`, `blob()`, `track()`, `await`) is preserved.
  */
 
+import { CONFIGURED_HTTP_CLIENT, SCHEMA_JSON_ATTACHED } from "../types.js";
 import type {
   ConfiguredHttpClient,
   HttpClient,
   HttpRequestOptions,
   SchemaLike,
 } from "../types.js";
-
-/** Marks a response promise whose `json` already accepts a schema. */
-const SCHEMA_JSON_ATTACHED = Symbol.for("glubean.schemaJsonAttached");
 
 /** Max issues quoted when a `safeParse`-only schema rejects the body. */
 const MAX_QUOTED_ISSUES = 3;
@@ -52,7 +50,12 @@ export function parseWithSchema<T>(data: unknown, schema: SchemaLike<T>): T {
     if (result.success) return result.data;
     const issues = result.error?.issues ?? [];
     const quoted = issues.slice(0, MAX_QUOTED_ISSUES).map((issue) => {
-      const path = issue.path && issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
+      // `Array#join` throws a TypeError on a symbol segment (a schema keyed by
+      // a symbol property reports one), so stringify each segment first.
+      const path =
+        issue.path && issue.path.length > 0
+          ? `${issue.path.map((segment) => String(segment)).join(".")}: `
+          : "";
       return `${path}${issue.message}`;
     });
     const rest = issues.length - quoted.length;
@@ -128,6 +131,14 @@ export function makeSchemaAwareClient(
     client[method] = (url: string | URL | Request, options?: HttpRequestOptions) =>
       attachSchemaJson(resolve()[method](url, options));
   }
+
+  // Stamp the nominal brand the type declares, so the runtime object really is
+  // what `ConfiguredHttpClient` claims (and a consumer can detect it).
+  Object.defineProperty(client, CONFIGURED_HTTP_CLIENT, {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  });
 
   client["extend"] = (options: HttpRequestOptions) => {
     // Resolve + extend eagerly (unchanged from the pre-wrapper behaviour: one

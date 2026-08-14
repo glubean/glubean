@@ -1658,6 +1658,20 @@ export const validateFatalTest = test(
   },
 );
 
+export const validateNoParserFatalTest = test(
+  { id: "validateNoParserFatalTest", name: "Validate No Parser Fatal" },
+  async (ctx) => {
+    // A GLU-90 SchemaLike carrying only a jsonSchema companion — no safeParse,
+    // no parse. Nothing can prove the data valid, so a fatal validation must
+    // abort (the fatal overload narrows the return type to T).
+    const jsonSchemaOnly = { jsonSchema: { type: "object" } };
+    ctx.validate({ anything: true }, jsonSchemaOnly, "no-parser", {
+      severity: "fatal",
+    });
+    ctx.log("after no-parser fatal — should never reach here");
+  },
+);
+
 export const validateParseFallbackTest = test(
   { id: "validateParseFallbackTest", name: "Validate Parse Fallback" },
   async (ctx) => {
@@ -1756,6 +1770,33 @@ test("ctx.validate - fatal severity aborts test", async () => {
 
   const logs = result.events.filter(
     (e) => e.type === "log" && "message" in e && e.message.includes("after fatal"),
+  );
+  expect(logs.length).toBe(0);
+});
+
+test("ctx.validate - fatal severity aborts when the schema has NO parser", async () => {
+  const testFile = await makeTempFile(VALIDATE_TEST_CONTENT);
+  const executor = new TestExecutor();
+
+  const result = await executor.execute(
+    `file://${testFile}`,
+    "validateNoParserFatalTest",
+    { vars: {}, secrets: {} },
+  );
+
+  expect(result.success).toBe(false);
+
+  const validations = getSchemaValidations(result.events);
+  expect(validations.length).toBe(1);
+  expect(validations[0].success).toBe(false);
+  expect(validations[0].severity).toBe("fatal");
+  expect(validations[0].issues?.[0]?.message).toMatch(/neither safeParse nor parse/);
+
+  // The call must NOT return — an unvalidatable schema can't produce the `T`
+  // the fatal overload promises.
+  const logs = result.events.filter(
+    (e) =>
+      e.type === "log" && "message" in e && e.message.includes("after no-parser fatal"),
   );
   expect(logs.length).toBe(0);
 });

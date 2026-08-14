@@ -337,6 +337,14 @@ export const validateFatalTest = test(
   { id: "validateFatalTest", name: "Validate Fatal" },
   async (ctx) => { ctx.validate({}, failSchema, "hard", { severity: "fatal" }); ctx.assert(true, "unreached"); }
 );
+// GLU-90 jsonSchema-only SchemaLike: no safeParse, no parse. Nothing can prove
+// the data valid, so fatal must abort on BOTH legs (the fatal overload narrows
+// the return type to T, so "returns undefined without throwing" would be a lie).
+const noParserSchema = { jsonSchema: { type: "object" } };
+export const validateNoParserFatalTest = test(
+  { id: "validateNoParserFatalTest", name: "Validate No Parser Fatal" },
+  async (ctx) => { ctx.validate({}, noParserSchema, "no-parser", { severity: "fatal" }); ctx.assert(true, "unreached"); }
+);
 const throwSchema = { parse: () => { const e = new Error("nope"); e.issues = [{ message: "p issue", path: ["x"] }]; throw e; } };
 export const validateParseFallbackTest = test(
   { id: "validateParseFallbackTest", name: "Validate parse fallback" },
@@ -754,6 +762,10 @@ ptest("engine parity: ctx.validate warn → schema_validation + warning (test pa
 
 ptest("engine parity: ctx.validate fatal → failed assertion + abort (failed + exit 1)", async () => {
   await assertParity(MODULE, "validateFatalTest");
+});
+
+ptest("engine parity: ctx.validate fatal with a NO-parser schema → failed assertion + abort", async () => {
+  await assertParity(MODULE, "validateNoParserFatalTest");
 });
 
 ptest("engine parity: ctx.validate parse() fallback path (throws → issues extracted)", async () => {

@@ -1780,6 +1780,29 @@ export interface HttpClient {
 }
 
 /**
+ * Runtime brand stamped on a response promise whose `.json()` accepts a schema.
+ *
+ * Both a type-level brand and a real property: `.json<T>()` (no arg) is
+ * STRUCTURALLY compatible with `.json<T>(schema)`, so without a nominal marker
+ * any plain {@link HttpResponsePromise} — e.g. `ctx.http.get(url)`, whose
+ * `.json(schema)` falls through to ky's Standard-Schema path and throws for a
+ * hand-rolled `SchemaLike` — would silently satisfy
+ * {@link ValidatingHttpResponsePromise}.
+ */
+export const SCHEMA_JSON_ATTACHED: unique symbol = Symbol.for(
+  "glubean.schemaJsonAttached",
+);
+
+/**
+ * Runtime brand stamped on the `configure()` HTTP client, for the same reason
+ * as {@link SCHEMA_JSON_ATTACHED}: it makes {@link ConfiguredHttpClient}
+ * nominal, so a bare {@link HttpClient} (`ctx.http`) cannot be assigned to it.
+ */
+export const CONFIGURED_HTTP_CLIENT: unique symbol = Symbol.for(
+  "glubean.configuredHttpClient",
+);
+
+/**
  * Response promise returned by the `configure()` HTTP client. Same surface as
  * {@link HttpResponsePromise} plus a schema-aware `.json(schema)` shortcut.
  *
@@ -1804,6 +1827,11 @@ export interface HttpClient {
  * ```
  */
 export interface ValidatingHttpResponsePromise extends HttpResponsePromise {
+  /**
+   * Nominal brand — set at runtime by the `configure()` client's decorator.
+   * Keeps a plain response promise from structurally satisfying this type.
+   */
+  readonly [SCHEMA_JSON_ATTACHED]: true;
   /** Parse response body as JSON (unvalidated — `T` is an author assertion). */
   json<T = unknown>(): Promise<T>;
   /** Parse response body as JSON, then validate it with `schema`. */
@@ -1818,6 +1846,14 @@ export interface ValidatingHttpResponsePromise extends HttpResponsePromise {
  * ({@link ValidatingHttpResponsePromise}). `.extend()` preserves the capability.
  */
 export interface ConfiguredHttpClient extends HttpClient {
+  /**
+   * Nominal brand — set at runtime by `configure()`. Without it a bare
+   * {@link HttpClient} would be assignable here (the no-arg `json<T>()` is
+   * structurally compatible with the schema overload) and its `.json(schema)`
+   * would blow up inside ky at run time.
+   */
+  readonly [CONFIGURED_HTTP_CLIENT]: true;
+
   /** Make a request (generic). Same as ky(url, options). */
   (
     url: string | URL | Request,

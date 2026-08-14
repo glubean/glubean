@@ -272,9 +272,111 @@ test("the same site never warns twice across repeated constructions", () => {
   expect(warnings()).toHaveLength(2); // unchanged — guard held
 });
 
+test("the same id on two scoped surfaces warns once per surface", () => {
+  // `contract.http.with("a")` and `.with("b")` are different surfaces; the same
+  // contract id on both is legal and they are different contracts. The
+  // once-per-site guard must key on the instance too, or the second surface's
+  // drift is silently swallowed.
+  const a = contract.http.with("api-a", { client });
+  const b = contract.http.with("api-b", { client });
+  const spec = {
+    endpoint: "POST /users",
+    request: { body: CreateUser, example: { name: 42 } },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  } as const;
+
+  a("users.create.shared-id", { ...spec });
+  b("users.create.shared-id", { ...spec });
+
+  const messages = warnings();
+  expect(messages).toHaveLength(2);
+  expect(messages.some((m) => m.includes(`instance "api-a"`))).toBe(true);
+  expect(messages.some((m) => m.includes(`instance "api-b"`))).toBe(true);
+});
+
+test("symbol segments in an issue path don't swallow the warning", () => {
+  const symbolKey = Symbol("secret");
+  const symbolPathSchema: SchemaLike<unknown> = {
+    safeParse() {
+      return {
+        success: false as const,
+        // `Array#join` throws a TypeError on a symbol segment — pre-fix this
+        // was caught by the outer guard and the warning vanished.
+        error: { issues: [{ message: "Expected string", path: [symbolKey] }] },
+      };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+  api("users.create.symbol-path", {
+    endpoint: "POST /users",
+    request: { body: symbolPathSchema, example: { name: 42 } },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  expect(warnings()).toHaveLength(1);
+  expect(warnings()[0]).toContain("Symbol(secret): Expected string");
+});
+
 // ---------------------------------------------------------------------------
 // The check is advisory: projection output is untouched
 // ---------------------------------------------------------------------------
+
+test("a schema that mutates its input cannot touch the published example", () => {
+  const original = { name: "Alice", nested: { keep: true } };
+  const mutating: SchemaLike<unknown> = {
+    safeParse(data: unknown) {
+      // Hostile (or merely normalizing-in-place) schema: rewrites what it was
+      // handed. If we passed the live reference, this would rewrite the
+      // projection AND the canonicalHash input from inside an advisory check.
+      const obj = data as Record<string, unknown>;
+      obj["injected"] = true;
+      delete obj["name"];
+      (obj["nested"] as Record<string, unknown>)["keep"] = false;
+      return { success: false as const, error: { issues: [{ message: "nope" }] } };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+  const c = api("users.create.mutating", {
+    endpoint: "POST /users",
+    request: { body: mutating, example: original },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  // The check ran (so the schema really did get a value)…
+  expect(warnings()).toHaveLength(1);
+  // …but the author's example is byte-for-byte intact, in the live spec and in
+  // the extracted projection that feeds canonicalHash.
+  expect(original).toEqual({ name: "Alice", nested: { keep: true } });
+  expect(c._extracted.schemas?.request?.example).toEqual({
+    name: "Alice",
+    nested: { keep: true },
+  });
+});
+
+test("an un-cloneable example is skipped rather than exposed to the schema", () => {
+  let sawValue = false;
+  const spy: SchemaLike<unknown> = {
+    safeParse() {
+      sawValue = true;
+      return { success: false as const, error: { issues: [{ message: "nope" }] } };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+  expect(() =>
+    api("users.create.uncloneable", {
+      endpoint: "POST /users",
+      // A function is not structured-cloneable.
+      request: { body: spy, example: { callback: () => "nope" } },
+      cases: { ok: { description: "creates", expect: { status: 201 } } },
+    }),
+  ).not.toThrow();
+
+  expect(sawValue).toBe(false);
+  expect(warnings()).toEqual([]);
+});
 
 test("a drifting example still lands verbatim in the extracted projection", () => {
   const api = contract.http.with("api", { client });
