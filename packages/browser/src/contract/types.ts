@@ -300,6 +300,19 @@ export interface BrowserContractCase<
  * case's own const site so `steps[].action` / `verify` are checked against the
  * declared logical input instead of drifting from the `needs` schema (mirrors
  * `defineHttpCase` / `defineGraphqlCase`).
+ *
+ * @deprecated Use {@link browserCase} — same drift guard with zero explicit
+ * generics. Before:
+ * `defineBrowserCase<{ email: string }>({ needs: Schema, steps: [...] })`;
+ * after: `browserCase(Schema)({ steps: [...] })`.
+ *
+ * One shape still needs this factory: a case declared OUTSIDE its contract, with
+ * no per-case `client`, whose `action` must reach a non-default page capability
+ * (e.g. `page.extension` on an `ExtensionPage`). `browserCase` infers `PageType`
+ * from a value — the case's own `client`, or the enclosing contract — and a
+ * standalone client-less case supplies neither, while `defineBrowserCase<Input,
+ * ExtensionPage>` can still spell it out. Declaring the case inline in its
+ * contract (the documented pattern) infers it and needs nothing explicit.
  */
 export function defineBrowserCase<
   Input = void,
@@ -308,6 +321,156 @@ export function defineBrowserCase<
   c: BrowserContractCase<Input, PageType>,
 ): BrowserContractCase<Input, PageType> {
   return c;
+}
+
+/**
+ * Case body for {@link browserCase} — `BrowserContractCase` WITHOUT `needs`;
+ * the factory owns that field.
+ *
+ * `needs` is pinned to `never` rather than merely omitted: TypeScript runs no
+ * excess-property check against a type parameter's CONSTRAINT, so a bare
+ * `Omit<...>` would silently absorb a stray `needs` key into the inferred case
+ * type and leave two competing declarations of the same schema. The `never`
+ * makes writing a schema there a compile error at the offending property. An
+ * explicit `needs: undefined` still passes — `exactOptionalPropertyTypes` is
+ * off in this repo and it declares nothing anyway.
+ */
+export type BrowserCaseBody<
+  N,
+  PageType extends InstrumentedPage = InstrumentedPage,
+> = Omit<BrowserContractCase<N, PageType>, "needs"> & { needs?: never };
+
+/**
+ * Curried browser case factory — {@link defineBrowserCase}'s needs-drift guard
+ * with zero explicit generics. Prefer this.
+ *
+ * **Why curried.** TypeScript can't correlate sibling fields of one object
+ * literal, so `needs: SchemaLike<X>` never types the `steps[].action` written
+ * beside it — a factory has to capture `Input` first. But TS also has no PARTIAL
+ * type-argument inference: the moment an author writes
+ * `defineBrowserCase<Input>(...)`, every remaining type parameter falls back to
+ * its default. Splitting the call in two leaves nothing to default — `N` is
+ * inferred from the schema VALUE in the first call, `C` from the case literal in
+ * the second (contextually typed by `BrowserCaseBody<N, P>`, which is what still
+ * threads `N` into `action` / `verify`).
+ *
+ * What that buys over `defineBrowserCase`:
+ * - **No explicit generics.** The schema is written once, as a value, and the
+ *   whole case is checked against it.
+ * - **Drift guard on the journey.** `steps[].action` and `verify` take the
+ *   case's logical input, so destructuring a key that isn't on `N` is a compile
+ *   error instead of an `undefined` typed into a form field at replay time.
+ * - **One declaration site.** A `needs` SCHEMA inside the case literal is both a
+ *   compile error (see {@link BrowserCaseBody}) and a runtime `Error`. The one
+ *   tolerated form is an explicit `needs: undefined`, which declares nothing:
+ *   `exactOptionalPropertyTypes` is off here, so `needs?: never` admits it, and
+ *   every runtime reader already treats undefined as "no needs" — rejecting it
+ *   would make the type layer and the runtime promise different things.
+ *
+ * **How `PageType` survives.** It is the one type parameter with no schema to
+ * infer from, so it rides two value-shaped routes instead, and the return type
+ * restates `steps` as `BrowserStep<N, P>[]` for exactly that reason — a `P` that
+ * appeared only in `C`'s constraint would be unreachable by inference:
+ * 1. the case's own `client` (hence the `& { client?: BrowserPageClient<P> }` on
+ *    the parameter — an inference site for a VALUE the author already writes), or
+ * 2. the enclosing contract: `contract.browser.with("x", { client: chrome })`
+ *    fixes the factory's page type, which contextually types this call's return
+ *    and pins `P` before the `action` bodies are checked.
+ *
+ * Neither route applies to a standalone, client-less case, which falls back to
+ * `InstrumentedPage`; annotating an `action`'s `page` parameter more narrowly
+ * cannot recover it (parameter contravariance rejects it), so that one shape
+ * keeps using `defineBrowserCase<Input, PageType>`. Restating `steps` costs the
+ * step literals' types, which nothing consumes — core reads only `needs`.
+ *
+ * Runtime output is VALUE-IDENTICAL to the pre-migration shape — a case that
+ * declared `needs` inline — because the factory only spreads the schema back
+ * in. Migrating an existing case moves neither its projection nor its
+ * `canonicalHash`.
+ *
+ * @example
+ * ```ts
+ * import { contract } from "@glubean/sdk";
+ * import { browserCase } from "@glubean/browser";
+ * import { z } from "zod";
+ *
+ * const signIn = browserCase(z.object({ email: z.string(), password: z.string() }))({
+ *   description: "a returning user signs in",
+ *   entry: "/login",
+ *   steps: [
+ *     {
+ *       id: "submit",
+ *       intent: "fill the credentials and submit the form",
+ *       // `input` is { email: string; password: string } — inferred.
+ *       action: async (page, { email, password }) => {
+ *         await page.fill(page.byLabel("Email"), email);
+ *         await page.fill(page.byLabel("Password"), password);
+ *         await page.click(page.byRole("button", { name: "Sign in" }));
+ *       },
+ *     },
+ *   ],
+ *   expect: [{ id: "lands-on-dashboard", url: { path: "/dashboard" } }],
+ * });
+ *
+ * const journeys = contract.browser.with("app", { client });
+ * export const auth = journeys("auth.signIn", { cases: { signIn } });
+ * ```
+ *
+ * @param needs The case's logical input schema — declared here, exactly once.
+ *   Omit the argument entirely for a case with no logical input; that form
+ *   returns the case unchanged and still rejects a literal `needs`.
+ * @returns A function taking the case literal, returning it with `needs` attached.
+ */
+export function browserCase<N>(
+  needs: SchemaLike<N>,
+): <
+  const C extends BrowserCaseBody<N, PageType>,
+  PageType extends InstrumentedPage = InstrumentedPage,
+>(
+  c: C & { client?: BrowserPageClient<PageType> },
+  // `Omit<C, "needs">` before the intersection, never a bare `C & {...}`: a case
+  // written against the exported `BrowserCaseBody<X>` annotation carries the
+  // `needs?: never` guard INTO `C`, and intersecting that with the required
+  // `needs: SchemaLike<N>` collapses the property (and with it core's
+  // `InferCaseInput`, and with THAT the whole `.case()` I/O chain) to `never`.
+  // Dropping the guarded key first keeps every other property's literal type
+  // intact. `steps` is restated for the `PageType` inference route documented
+  // above.
+) => Omit<C, "needs" | "steps"> & {
+  needs: SchemaLike<N>;
+  steps: BrowserStep<N, PageType>[];
+};
+export function browserCase(): <
+  const C extends BrowserCaseBody<void, PageType>,
+  PageType extends InstrumentedPage = InstrumentedPage,
+>(
+  c: C & { client?: BrowserPageClient<PageType> },
+) => Omit<C, "steps"> & { steps: BrowserStep<void, PageType>[] };
+export function browserCase(needs?: SchemaLike<unknown>) {
+  // Keep JS consumers aligned with the type-level `needs?: never` — a literal
+  // `needs` SCHEMA is a hard error in BOTH forms, so it always has exactly one
+  // declaration site. The zero-arg form returns the case unchanged.
+  //
+  // The two overloads above are the checked authoring surface; this
+  // implementation is untyped glue (a concrete param type is not compatible
+  // with both of them).
+  return (c: any) => {
+    // Value check, NOT hasOwnProperty: `exactOptionalPropertyTypes` is off in
+    // this repo, so `needs?: never` accepts an explicit `needs: undefined` and
+    // the runtime must accept it too, or the two layers promise different
+    // things. Tolerating it is safe because every runtime reader treats
+    // undefined as "no needs declared" (core's §5.1 branches are falsy checks;
+    // the projection records `hasNeeds: c.needs !== undefined`). In the schema
+    // form the spread below overwrites the key anyway.
+    if (c.needs !== undefined) {
+      throw new Error(
+        "browserCase: do not declare `needs` inside the case literal — the factory " +
+          "owns that field. Declare it once as `browserCase(schema)({ ... })` and " +
+          "remove `needs` from the case object.",
+      );
+    }
+    return needs === undefined ? c : { ...c, needs };
+  };
 }
 
 // =============================================================================

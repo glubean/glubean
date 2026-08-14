@@ -52,18 +52,23 @@ document. It is intentionally outside the host page's single-page evidence
 window; use imperative assertions inside the step action. Declarative
 multi-page `contract.browser expect[]` support is a separate concern.
 
-The same capability is inferred for extension-backed browser contracts:
+The same capability is inferred for extension-backed browser contracts — the
+scoped client fixes the page type, so `page.extension` is available inside a step
+action with no explicit generics:
 
 ```ts
 import { contract } from "@glubean/sdk";
-import { defineBrowserCase } from "@glubean/browser";
+import { browserCase } from "@glubean/browser";
 import { chrome } from "./setup.js";
 
 const extensionUI = contract.browser.with("extensionUI", { client: chrome });
 
 export const nativeSidePanelLifecycle = extensionUI("native-side-panel-lifecycle", {
   cases: {
-    openCloseReopen: defineBrowserCase({
+    // `browserCase()` — the zero-argument form, for a journey with no logical
+    // input. A journey that takes input declares its schema once, in that call:
+    // `browserCase(schema)({ ... })`.
+    openCloseReopen: browserCase()({
       description: "The toolbar action opens, closes, and reopens the native side panel.",
       steps: [{
         id: "open-close-reopen",
