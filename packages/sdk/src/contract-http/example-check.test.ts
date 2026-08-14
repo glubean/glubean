@@ -481,6 +481,97 @@ test("an example with an accessor or frozen property is skipped", () => {
   expect(warnings()).toEqual([]);
 });
 
+test("a non-extensible example is skipped, not falsely reported as drift", () => {
+  const seen: unknown[] = [];
+  // The clone is extensible again, so an extensibility-sensitive schema accepts
+  // the author's value and rejects our copy.
+  const extensibilitySchema: SchemaLike<unknown> = {
+    safeParse(data: unknown) {
+      seen.push(data);
+      return Object.isExtensible(data as object)
+        ? {
+            success: false as const,
+            error: { issues: [{ message: "Expected a sealed payload" }] },
+          }
+        : { success: true as const, data };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+
+  api("users.create.prevent-extensions", {
+    endpoint: "POST /users",
+    // preventExtensions leaves every existing property's flags at their
+    // defaults, so only the extensibility test catches it.
+    request: { body: extensibilitySchema, example: Object.preventExtensions({ name: 42 }) },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  api("users.create.empty-frozen", {
+    endpoint: "POST /users",
+    // An EMPTY frozen object has no property for the descriptor rule to catch.
+    request: { body: extensibilitySchema, example: Object.freeze({}) },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  api("users.create.sealed-nested", {
+    endpoint: "POST /users",
+    request: { body: extensibilitySchema, example: { meta: Object.seal({ id: "x" }) } },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  expect(warnings()).toEqual([]);
+  expect(seen).toEqual([]); // never handed the lossy copy
+});
+
+test("an array whose length was made non-writable is skipped", () => {
+  let sawValue = false;
+  const spy: SchemaLike<unknown> = {
+    safeParse() {
+      sawValue = true;
+      return { success: false as const, error: { issues: [{ message: "nope" }] } };
+    },
+  };
+
+  const fixedLength = [1, 2, 3];
+  // Spec fixes only enumerable/configurable on `length`; writable is authorable
+  // and the clone restores it to true.
+  Object.defineProperty(fixedLength, "length", { writable: false });
+
+  const api = contract.http.with("api", { client });
+  api("users.list.fixed-length", {
+    endpoint: "POST /users",
+    request: { body: spy, example: { ids: fixedLength } },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  expect(sawValue).toBe(false);
+  expect(warnings()).toEqual([]);
+});
+
+test("ordinary arrays and objects are still checked (guard against over-tightening)", () => {
+  const seen: unknown[] = [];
+  const spy: SchemaLike<unknown> = {
+    safeParse(data: unknown) {
+      seen.push(data);
+      return { success: false as const, error: { issues: [{ message: "nope" }] } };
+    },
+  };
+
+  const api = contract.http.with("api", { client });
+  api("users.list.plain-array", {
+    endpoint: "POST /users",
+    // Plain extensible array + nested plain object: default `length`, default
+    // descriptors, extensible — must still be checked.
+    request: { body: spy, example: { ids: [1, 2, 3], meta: { page: 1 } } },
+    cases: { ok: { description: "creates", expect: { status: 201 } } },
+  });
+
+  expect(warnings()).toHaveLength(1);
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).toEqual({ ids: [1, 2, 3], meta: { page: 1 } });
+});
+
 test("plain JSON examples (objects, arrays, cycles) are still checked", () => {
   const api = contract.http.with("api", { client });
   const cyclic: Record<string, unknown> = { name: 42, items: [1, 2, { deep: true }] };

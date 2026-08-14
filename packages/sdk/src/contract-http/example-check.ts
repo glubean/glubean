@@ -106,6 +106,13 @@ function summarizeThrown(err: unknown): string {
  *   materialises every accessor into a plain data property and drops the flags,
  *   so a schema that reads a getter twice, or checks `Object.isFrozen`, sees a
  *   different object than the author wrote.
+ * - **Non-extensible objects** (`Object.preventExtensions` / `seal` / `freeze`,
+ *   including an EMPTY frozen object that has no property for the descriptor
+ *   rule to catch) — the clone is extensible again, so an
+ *   `Object.isExtensible`-sensitive schema splits the two apart.
+ * - **Arrays whose `length` was made non-writable** — spec fixes only
+ *   `enumerable`/`configurable` on `length`; `writable: false` is authorable and
+ *   the clone restores it to `true`.
  * - **`Date` / `RegExp`** — `structuredClone` *does* preserve these two, so
  *   allowing them would be sound. They are excluded anyway to keep ONE rule
  *   ("the example is a JSON document") that matches what an example actually
@@ -140,6 +147,12 @@ function isPlainJsonShape(value: unknown, seen: WeakSet<object>): boolean {
   if (seen.has(object)) return true;
   seen.add(object);
 
+  // `Object.preventExtensions` / `seal` / `freeze` are all restored to a plain
+  // extensible object by the clone. `freeze`/`seal` usually trip the descriptor
+  // check below, but an EMPTY frozen object (or a merely non-extensible one)
+  // has no property to catch it — so test extensibility directly.
+  if (!Object.isExtensible(object)) return false;
+
   if (Object.getOwnPropertySymbols(object).length > 0) return false;
 
   const prototype = Object.getPrototypeOf(object) as unknown;
@@ -150,8 +163,13 @@ function isPlainJsonShape(value: unknown, seen: WeakSet<object>): boolean {
     // Own props beyond the indices + `length` (an "expando" or sparse array)
     // are dropped or reshaped by the clone.
     if (Object.getOwnPropertyNames(object).length !== object.length + 1) return false;
-    // `length` itself is non-enumerable/non-configurable by spec on EVERY
-    // array, so it is not evidence of tampering — check the indices only.
+    // Only `enumerable: false` + `configurable: false` are spec-fixed for EVERY
+    // array's `length`, so those two aren't evidence of tampering — but
+    // `writable` CAN be turned off (`Object.defineProperty(arr, "length",
+    // { writable: false })`), and the clone hands back a writable one. Demand
+    // the default there.
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(object, "length");
+    if (!lengthDescriptor || lengthDescriptor.writable !== true) return false;
     for (let index = 0; index < object.length; index += 1) {
       if (!isDefaultDataProperty(object, String(index))) return false;
     }
